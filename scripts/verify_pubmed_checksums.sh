@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 
 # ============================================================
-# Episteme - PubMed Checksum Verification Script
-# Verifies .xml.gz files against their .md5 checksums
-# Clear separation of Baseline vs Updates results
+# Episteme - PubMed Checksum Verification Script (Fixed)
+# Correctly parses NCBI-style MD5 files
 # ============================================================
 
 set -euo pipefail
 
-# Default paths (can be overridden by arguments)
 DATA_DIR="${1:-./01_raw/pubmed}"
 BASELINE_DIR="$DATA_DIR/baseline"
 UPDATES_DIR="$DATA_DIR/updates"
 MD5_DIR="$DATA_DIR/md5"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -27,11 +24,20 @@ echo "PubMed Checksum Verification"
 echo "Data directory: $DATA_DIR"
 echo "=================================================="
 
-# Global counters
 TOTAL_ALL=0
 PASSED_ALL=0
 FAILED_ALL=0
 MISSING_ALL=0
+
+# Extract the actual MD5 hash from NCBI-style .md5 files
+extract_md5() {
+    local md5_file="$1"
+    # Handles formats like:
+    #   MD5(filename)= hash
+    #   hash  filename
+    #   hash
+    grep -oE '[a-fA-F0-9]{32}' "$md5_file" | head -n1
+}
 
 verify_directory() {
     local dir="$1"
@@ -57,7 +63,7 @@ verify_directory() {
         filename=$(basename "$file")
         md5_file="$MD5_DIR/${filename}.md5"
 
-        # Fallback: md5 file sitting next to the data file
+        # Fallback: md5 next to the data file
         if [[ ! -f "$md5_file" ]]; then
             md5_file="${file}.md5"
         fi
@@ -68,8 +74,14 @@ verify_directory() {
             continue
         fi
 
-        expected=$(awk '{print $1}' "$md5_file")
+        expected=$(extract_md5 "$md5_file")
         actual=$(md5sum "$file" | awk '{print $1}')
+
+        if [[ -z "$expected" ]]; then
+            echo -e "  ${YELLOW}⚠  Could not parse MD5 file: $filename${NC}"
+            ((missing_md5++)) || true
+            continue
+        fi
 
         if [[ "$expected" == "$actual" ]]; then
             echo -e "  ${GREEN}✓${NC} $filename"
@@ -82,7 +94,6 @@ verify_directory() {
         fi
     done < <(find "$dir" -maxdepth 1 -name "pubmed26n*.xml.gz" -print0 | sort -z)
 
-    # Section summary
     echo ""
     echo -e "  ${BOLD}$label Summary:${NC}"
     echo "    Total files : $total"
@@ -90,18 +101,15 @@ verify_directory() {
     echo -e "    Failed      : ${RED}$failed${NC}"
     echo -e "    Missing MD5 : ${YELLOW}$missing_md5${NC}"
 
-    # Update global counters
     TOTAL_ALL=$((TOTAL_ALL + total))
     PASSED_ALL=$((PASSED_ALL + passed))
     FAILED_ALL=$((FAILED_ALL + failed))
     MISSING_ALL=$((MISSING_ALL + missing_md5))
 }
 
-# -------- Run verification --------
 verify_directory "$BASELINE_DIR" "Baseline"
 verify_directory "$UPDATES_DIR"  "Updates"
 
-# -------- Overall Summary --------
 echo ""
 echo "=================================================="
 echo -e "${BOLD}OVERALL SUMMARY${NC}"
