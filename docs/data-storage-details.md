@@ -1,3 +1,11 @@
+# Episteme Data Storage Layout
+
+**Root:** `/EpistemeData/`  
+**Last updated:** August 2026
+
+This document defines the canonical folder structure for all Phase 0 data assets.
+
+```bash
 /EpistemeData/                          # Root of the file storage
 │
 ├── 00_meta/                            # Tracking, licenses, inventories
@@ -11,16 +19,20 @@
 │   │   ├── baseline/
 │   │   └── updates/
 │   ├── pmc/
-│   │   ├── oa_comm/                    # Commercial-use only
+│   │   ├── oa_comm/                    # Commercial-use only (train on this)
 │   │   └── oa_noncomm/                 # Kept separate (do not train on)
 │   ├── europepmc/
 │   ├── multilingual/
 │   │   ├── mmedc/
+│   │   │   ├── raw/
+│   │   │   └── metadata/
 │   │   └── apollo/
+│   │       ├── raw/
+│   │       └── metadata/
 │   ├── guidelines/
 │   │   ├── meditron/
 │   │   └── who/
-│   └── keyvaluedatasets/                      # ChEMBL, UniProt, ClinVar, etc.
+│   └── keyvaluedatasets/               # Structured DBs (ChEMBL, UniProt, etc.)
 │       ├── chembl/
 │       ├── pubchem/
 │       ├── uniprot/
@@ -30,6 +42,9 @@
 │   ├── pubmed/
 │   ├── pmc_comm/
 │   ├── multilingual/
+│   │   ├── mmedc/
+│   │   ├── apollo/
+│   │   └── combined/                   # Optional merged view
 │   ├── guidelines/
 │   └── secondary_serialized/           # Text versions of structured DBs
 │
