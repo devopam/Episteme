@@ -13,17 +13,18 @@ echo "=================================================="
 
 mkdir -p "$OUTPUT_DIR"
 
-if ! command -v huggingface-cli >/dev/null 2>&1; then
-  echo "Error: huggingface-cli not found. Install with:"
-  echo "  pip install -U 'huggingface_hub[cli]'"
+if ! command -v hf >/dev/null 2>&1; then
+  echo "Error: 'hf' command not found."
+  echo "Install with one of:"
+  echo "  brew install huggingface-cli"
+  echo "  # or: pipx install 'huggingface_hub[cli]'"
   exit 1
 fi
 
-huggingface-cli download "$REPO_ID" \
+hf download "$REPO_ID" \
   --repo-type dataset \
-  --local-dir "$OUTPUT_DIR" \
-  --local-dir-use-symlinks False
+  --local-dir "$OUTPUT_DIR"
 
 echo ""
 echo "Download complete: $OUTPUT_DIR"
-echo "If ApolloCorpus.zip is present, unzip it before running extract."
+echo "Extract script will unzip automatically if needed."
