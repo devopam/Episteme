@@ -123,20 +123,28 @@ def download_pubmed(output_dir, num_threads=4, dry_run=False, sample_only=False)
 def download_pmc_oa(output_dir, num_threads=4, dry_run=False, sample_only=False):
     """Download PMC Open Access commercial subset."""
     print("=== Downloading PMC Open Access Commercial Subset ===")
-    os.makedirs(output_dir, exist_ok=True)
-    # The list of commercial use bulk files
-    bulk_url = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/"
     
-    # In a full run, we would parse the index.html or ftp to get all zip packages.
-    # For now, we fetch a few sample packages or document the bulk URLs.
-    packages = ["oa_comm_xml_metadata.csv.gz", "oa_comm_xml_pdf_01.tar.gz"]
-    if sample_only:
-        packages = ["oa_comm_xml_metadata.csv.gz"]
+    # Locate project root and scripts directory to import the new downloader
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    scripts_dir = os.path.join(project_root, "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
         
-    for pkg in packages:
-        url = f"{bulk_url}{pkg}"
-        out_path = os.path.join(output_dir, pkg)
-        download_file(url, out_path, dry_run)
+    try:
+        from download_pmc_oa_comm import download_pmc_commercial
+    except ImportError as e:
+        print(f"Error: Could not import download_pmc_commercial from scripts: {e}")
+        return
+        
+    limit = 10 if sample_only else 0
+    download_pmc_commercial(
+        output_dir=output_dir,
+        formats=["xml"],
+        limit=limit,
+        threads=num_threads,
+        dry_run=dry_run
+    )
+
 
 
 def download_europe_pmc(output_dir, dry_run=False, sample_only=False):
