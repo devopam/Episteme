@@ -24,3 +24,5 @@ env/
 # Local data & models (downloaded corpora & model weights)
 data/
 models/
+01_raw/
+
