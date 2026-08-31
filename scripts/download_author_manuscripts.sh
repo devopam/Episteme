@@ -2,7 +2,7 @@
 # ============================================================
 # Episteme – Author Manuscript Collection (Europe PMC)
 # Baseline + daily incrementals, XML (default), restartable
-# Portable: macOS + Linux (Bash 3.2+)
+# Portable: macOS Bash 3.2+ / Linux
 # ============================================================
 set -euo pipefail
 
@@ -34,19 +34,14 @@ if [[ "$MODE" != "all" && "$MODE" != "baseline" && "$MODE" != "incr" ]]; then
   exit 1
 fi
 
-for cmd in curl aria2c; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "ERROR: $cmd required" >&2
-    exit 1
-  fi
-done
+command -v aria2c >/dev/null 2>&1 || { echo "ERROR: aria2c required" >&2; exit 1; }
+command -v curl   >/dev/null 2>&1 || { echo "ERROR: curl required" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR/$FORMAT"
 ABS_OUT="$(cd "$OUTPUT_DIR" && pwd)"
 TARGET="$ABS_OUT/$FORMAT"
 mkdir -p "$TARGET"
 
-# ---- Discover file names from directory index ----
 TMP_HTML="$(mktemp)"
 if ! curl -sS --fail --connect-timeout 30 --max-time 180 "$BASE_URL/" -o "$TMP_HTML"; then
   echo "ERROR: could not list $BASE_URL/" >&2
@@ -54,7 +49,6 @@ if ! curl -sS --fail --connect-timeout 30 --max-time 180 "$BASE_URL/" -o "$TMP_H
   exit 1
 fi
 
-# Extract href filenames
 ALL_NAMES="$(
   grep -oE 'href="[^"]+"' "$TMP_HTML" \
     | sed -E 's/href="//; s/"$//' \
@@ -65,9 +59,8 @@ ALL_NAMES="$(
 rm -f "$TMP_HTML"
 
 PREFIX="author_manuscript_${FORMAT}"
-
-# Filter by format + mode
 CANDIDATES=""
+
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
   case "$name" in
@@ -75,15 +68,10 @@ while IFS= read -r name; do
     *) continue ;;
   esac
   case "$MODE" in
-    baseline)
-      [[ "$name" == *".baseline."* ]] || continue
-      ;;
-    incr)
-      [[ "$name" == *".incr."* ]] || continue
-      ;;
+    baseline) [[ "$name" == *".baseline."* ]] || continue ;;
+    incr)     [[ "$name" == *".incr."* ]] || continue ;;
     all) ;;
   esac
-  # Keep packages + filelists
   case "$name" in
     *.tar.gz|*.filelist.csv|*.filelist.txt) ;;
     *) continue ;;
@@ -97,15 +85,14 @@ if [[ -z "$CANDIDATES" ]]; then
   exit 1
 fi
 
-COUNT="$(echo "$CANDIDATES" | grep -c . || true)"
+COUNT="$(printf '%s\n' "$CANDIDATES" | grep -c . || true)"
 echo "→ Discovered $COUNT remote file(s)"
-echo "$CANDIDATES" > "$TARGET/remote_manifest.txt"
-echo "$CANDIDATES" | sed 's/^/   /' | head -n 30
+printf '%s\n' "$CANDIDATES" > "$TARGET/remote_manifest.txt"
+printf '%s\n' "$CANDIDATES" | sed 's/^/   /' | head -n 30
 if [[ "$COUNT" -gt 30 ]]; then
   echo "   ... ($((COUNT - 30)) more)"
 fi
 
-# ---- Queue downloads with size-aware skip ----
 URL_LIST="$TARGET/urls_to_download.txt"
 rm -f "$URL_LIST"
 need=0
@@ -155,13 +142,12 @@ if [[ -s "$URL_LIST" ]]; then
       --allow-overwrite=true \
       --file-allocation=none \
       -i "$URL_LIST"
-  )
+  ) || echo "WARN: aria2c reported some errors; check incomplete files" >&2
   rm -f "$URL_LIST"
 else
   echo "→ Nothing new to download."
 fi
 
-# State stamp for incremental re-runs
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$TARGET/last_sync_utc.txt"
 
 echo ""
