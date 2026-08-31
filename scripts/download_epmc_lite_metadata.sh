@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================
-# Episteme – Europe PMC full-text lite metadata (restartable)
+# Episteme – Europe PMC full-text lite metadata
 # Source: https://europepmc.org/ftp/pmclitemetadata/
-# Portable: macOS + Linux (Bash 3.2+)
+# Portable: macOS Bash 3.2+ / Linux
 # ============================================================
 set -euo pipefail
 
@@ -21,12 +21,8 @@ echo "Source : $BASE_URL"
 echo "Target : $OUTPUT_DIR"
 echo "=================================================="
 
-for cmd in curl aria2c; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "ERROR: $cmd required" >&2
-    exit 1
-  fi
-done
+command -v aria2c >/dev/null 2>&1 || { echo "ERROR: aria2c required" >&2; exit 1; }
+command -v curl   >/dev/null 2>&1 || { echo "ERROR: curl required" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
 ABS_OUT="$(cd "$OUTPUT_DIR" && pwd)"
@@ -38,32 +34,16 @@ if ! curl -sS --fail --connect-timeout 30 --max-time 180 "$BASE_URL/" -o "$TMP_H
   exit 1
 fi
 
-# Discover likely data files from HTML index
 CANDIDATES="$(
   grep -oE 'href="[^"]+"' "$TMP_HTML" \
     | sed -E 's/href="//; s/"$//' \
     | grep -vE '^\?|^/|^\.\./|^#' \
     | sed 's/[?].*$//' \
-    | grep -E '\.(xml|xml\.gz|tar\.gz|zip|csv|txt)(\?|$)|metadata|pmc' \
     | grep -viE 'privacy|readme|\.html?$' \
+    | grep -vE '/$' \
     | sort -u
 )"
 rm -f "$TMP_HTML"
-
-# If HTML filter was too strict, fall back to any non-directory-looking hrefs
-if [[ -z "$CANDIDATES" ]]; then
-  TMP_HTML="$(mktemp)"
-  curl -sS --fail --connect-timeout 30 --max-time 180 "$BASE_URL/" -o "$TMP_HTML"
-  CANDIDATES="$(
-    grep -oE 'href="[^"]+"' "$TMP_HTML" \
-      | sed -E 's/href="//; s/"$//' \
-      | grep -vE '^\?|^/|^\.\./|^#|/$' \
-      | sed 's/[?].*$//' \
-      | grep -viE 'privacy|readme' \
-      | sort -u
-  )"
-  rm -f "$TMP_HTML"
-fi
 
 if [[ -z "$CANDIDATES" ]]; then
   echo "ERROR: No files discovered under $BASE_URL" >&2
@@ -71,10 +51,10 @@ if [[ -z "$CANDIDATES" ]]; then
   exit 1
 fi
 
-COUNT="$(echo "$CANDIDATES" | grep -c . || true)"
+COUNT="$(printf '%s\n' "$CANDIDATES" | grep -c . || true)"
 echo "→ Discovered $COUNT remote file(s)"
-echo "$CANDIDATES" > "$ABS_OUT/remote_manifest.txt"
-echo "$CANDIDATES" | sed 's/^/   /'
+printf '%s\n' "$CANDIDATES" > "$ABS_OUT/remote_manifest.txt"
+printf '%s\n' "$CANDIDATES" | sed 's/^/   /'
 
 URL_LIST="$ABS_OUT/urls_to_download.txt"
 rm -f "$URL_LIST"
@@ -125,7 +105,7 @@ if [[ -s "$URL_LIST" ]]; then
       --allow-overwrite=true \
       --file-allocation=none \
       -i "$URL_LIST"
-  )
+  ) || echo "WARN: aria2c reported some errors" >&2
   rm -f "$URL_LIST"
 else
   echo "→ Nothing new to download."
