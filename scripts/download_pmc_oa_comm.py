@@ -1,264 +1,462 @@
 #!/usr/bin/env python3
 """
-Episteme – PMC Commercial OA (oa_comm) Downloader
-Uses NCBI ESearch to get commercial license PMCID list
-and downloads XML/TXT/metadata directly from pmc-oa-opendata S3 bucket via HTTPS.
+Episteme – PMC Commercial OA Downloader (post Aug 2026 layout)
+
+Source of truth for commercial reuse:
+  - Prefer official oa_comm filelist if present on the bucket
+  - Else NCBI ESearch with commercial license filters only
+  - Always verify license_code from metadata JSON before saving
+
+Live object layout (as of 2026-08):
+  https://pmc-oa-opendata.s3.amazonaws.com/metadata/PMC{id}.{ver}.json
+  https://pmc-oa-opendata.s3.amazonaws.com/PMC{id}.{ver}/PMC{id}.{ver}.xml
+  (xml_url / text_url inside metadata JSON)
+
+Commercial license_code values kept:
+  CC0, CC BY, CC BY-SA, CC BY-ND
 """
 
+from __future__ import annotations
+
+import argparse
+import csv
+import json
 import os
 import sys
-import argparse
-import urllib.parse
-import urllib.request
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urlencode
+
 import requests
 from tqdm import tqdm
 
-DEFAULT_QUERY = (
-    "((cc0_license[filter] OR cc_by_license[filter] OR cc_by-sa_license[filter] "
-    "OR cc_by-nd_license[filter]) OR author_manuscript[filter]) NOT pmc_embargo[filter]"
+S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
+
+# Documented (may return 404 after Aug 2026 cutover) — tried first
+FILELIST_CANDIDATES = [
+    f"{S3_HTTP}/oa_comm/xml/metadata/csv/oa_comm.filelist.csv",
+    f"{S3_HTTP}/oa_comm/xml/metadata/txt/oa_comm.filelist.txt",
+    f"{S3_HTTP}/oa_comm/xml/metadata/oa_comm.filelist.csv",
+]
+
+# Commercial-only: no author_manuscript, no NC licenses
+COMMERCIAL_ESEARCH = (
+    "(cc0_license[filter] OR cc_by_license[filter] OR "
+    "cc_by-sa_license[filter] OR cc_by-nd_license[filter]) "
+    "NOT pmc_embargo[filter]"
 )
 
-S3_BASE_URL = "https://pmc-oa-opendata.s3.amazonaws.com"
+COMMERCIAL_LICENSE_CODES = {
+    "CC0",
+    "CC BY",
+    "CC BY-SA",
+    "CC BY-ND",
+    "CC0 1.0",
+    "CC BY 4.0",
+    "CC BY-SA 4.0",
+    "CC BY-ND 4.0",
+}
 
 
-def query_esearch(query_str, limit=0):
-    """Query NCBI ESearch to get list of PMCIDs matching query."""
-    print(f"Querying NCBI ESearch for: {query_str}")
-    base_url = "https://eutils.ncbi.nlm.nih.gov/eutils/esearch.fcgi"
-    
-    # ESearch limit cap is 10,000 for standard queries.
-    # If limit is 0 (all), we fetch up to 10,000. If more is needed,
-    # we would need pagination, but 10,000 is a large baseline batch.
-    retmax = limit if (limit > 0 and limit <= 10000) else 10000
-    
-    params = {
+def http_get(
+    url: str,
+    *,
+    timeout: int = 60,
+    stream: bool = False,
+    retries: int = 3,
+) -> requests.Response | None:
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout, stream=stream)
+            if r.status_code == 200:
+                return r
+            if r.status_code == 404:
+                return None
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+        time.sleep(1.5 * (attempt + 1))
+    if last_err:
+        print(f"  warn: GET failed {url}: {last_err}", file=sys.stderr)
+    return None
+
+
+def try_download_filelist(dest_dir: Path) -> Path | None:
+    """Download oa_comm filelist if still published; else return None."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for url in FILELIST_CANDIDATES:
+        print(f"Probing filelist: {url}")
+        r = http_get(url, timeout=120)
+        if r is None:
+            continue
+        name = url.rsplit("/", 1)[-1]
+        out = dest_dir / name
+        out.write_bytes(r.content)
+        print(f"  saved filelist → {out} ({out.stat().st_size:,} bytes)")
+        return out
+    print("No oa_comm filelist found on bucket (expected after Aug 2026 layout change).")
+    return None
+
+
+def parse_filelist(path: Path) -> list[dict[str, str]]:
+    """Parse CSV or TSV filelist into row dicts."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    dialect = csv.Sniffer().sniff(text[:4096], delimiters=",\t")
+    reader = csv.DictReader(text.splitlines(), dialect=dialect)
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        # Normalise keys
+        norm = { (k or "").strip(): (v or "").strip() for k, v in row.items() }
+        rows.append(norm)
+    return rows
+
+
+def accession_from_filelist_row(row: dict[str, str]) -> str | None:
+    for key in ("AccessionID", "Accession ID", "pmcid", "PMCID"):
+        if key in row and row[key]:
+            acc = row[key].strip()
+            if not acc.upper().startswith("PMC"):
+                acc = f"PMC{acc}"
+            return acc
+    # Fallback: parse Key column e.g. oa_comm/xml/all/PMC1043859.xml
+    key = row.get("Key") or row.get("key") or ""
+    base = key.rsplit("/", 1)[-1]
+    if base.upper().startswith("PMC") and base.lower().endswith(".xml"):
+        return base[:-4]
+    return None
+
+
+def esearch_commercial_ids(limit: int, api_key: str | None = None) -> list[str]:
+    """
+    Paginate NCBI ESearch for commercial-license PMC articles.
+    Returns numeric id strings (no PMC prefix), as returned by ESearch.
+    """
+    base = "https://eutils.ncbi.nlm.nih.gov/eutils/esearch.fcgi"
+    page_size = 10000
+    ids: list[str] = []
+
+    # First call with history
+    params: dict[str, Any] = {
         "db": "pmc",
-        "term": query_str,
+        "term": COMMERCIAL_ESEARCH,
         "retmode": "json",
-        "retmax": retmax
+        "retmax": min(page_size, limit) if limit > 0 else page_size,
+        "usehistory": "y",
     }
-    
-    encoded_params = urllib.parse.urlencode(params)
-    url = f"{base_url}?{encoded_params}"
-    
-    # Retry on failures
-    for attempt in range(3):
-        try:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                id_list = data.get("esearchresult", {}).get("idlist", [])
-                print(f"Found {len(id_list)} matching articles.")
-                if limit > 0:
-                    id_list = id_list[:limit]
-                return id_list
-            else:
-                print(f"ESearch returned status code {response.status_code}")
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-        time.sleep(2)
-        
-    return []
+    if api_key:
+        params["api_key"] = api_key
+
+    print(f"ESearch commercial query:\n  {COMMERCIAL_ESEARCH}")
+    r = http_get(f"{base}?{urlencode(params)}", timeout=60)
+    if r is None:
+        print("ERROR: ESearch failed", file=sys.stderr)
+        return []
+
+    data = r.json().get("esearchresult", {})
+    total = int(data.get("count", 0))
+    webenv = data.get("webenv")
+    query_key = data.get("querykey")
+    batch = data.get("idlist") or []
+    ids.extend(batch)
+    print(f"  total matching (NCBI count): {total:,}")
+    print(f"  fetched so far: {len(ids):,}")
+
+    if limit > 0:
+        target = min(limit, total)
+    else:
+        target = total
+
+    retstart = len(ids)
+    while retstart < target and webenv and query_key:
+        time.sleep(0.34 if api_key else 0.4)  # be polite to NCBI
+        n = min(page_size, target - retstart)
+        params = {
+            "db": "pmc",
+            "query_key": query_key,
+            "WebEnv": webenv,
+            "retmode": "json",
+            "retstart": retstart,
+            "retmax": n,
+        }
+        if api_key:
+            params["api_key"] = api_key
+        r = http_get(f"{base}?{urlencode(params)}", timeout=60)
+        if r is None:
+            print(f"  warn: page at retstart={retstart} failed; stopping pagination")
+            break
+        batch = r.json().get("esearchresult", {}).get("idlist") or []
+        if not batch:
+            break
+        ids.extend(batch)
+        retstart = len(ids)
+        print(f"  fetched so far: {len(ids):,}")
+
+    if limit > 0:
+        ids = ids[:limit]
+    return ids
 
 
-def get_metadata(pmcid):
-    """
-    Find and download the metadata JSON for the given PMCID.
-    Tries version 1, then version 2.
-    """
-    for version in [1, 2, 3]:
-        meta_url = f"{S3_BASE_URL}/metadata/PMC{pmcid}.{version}.json"
-        try:
-            res = requests.get(meta_url, timeout=10)
-            if res.status_code == 200:
-                return res.json(), f"PMC{pmcid}.{version}"
-        except Exception:
-            pass
-    return None, None
-
-
-def download_url_to_file(url, out_path, dry_run=False):
-    """Download a single URL to a file path."""
-    if dry_run:
-        return True
-        
-    temp_path = out_path + ".tmp"
+def load_metadata(version_id: str) -> dict[str, Any] | None:
+    """Load metadata/PMC{id}.{ver}.json"""
+    url = f"{S3_HTTP}/metadata/{version_id}.json"
+    r = http_get(url, timeout=20)
+    if r is None:
+        return None
     try:
-        response = requests.get(url, stream=True, timeout=20)
-        if response.status_code == 200:
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            os.replace(temp_path, out_path)
-            return True
-    except Exception as e:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-        raise e
+        return r.json()
+    except Exception:
+        return None
+
+
+def resolve_version_id(pmcid: str) -> tuple[str, dict[str, Any]] | None:
+    """
+    pmcid may be 'PMC123' or '123'. Try version 1..3.
+    Returns (version_id, meta).
+    """
+    pmcid = pmcid.strip()
+    if not pmcid.upper().startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+    base = pmcid.upper() if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
+    # Keep original casing style PMC...
+    if not pmcid.startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+
+    for ver in (1, 2, 3):
+        version_id = f"{pmcid}.{ver}"
+        meta = load_metadata(version_id)
+        if meta:
+            return version_id, meta
+    return None
+
+
+def is_commercial_meta(meta: dict[str, Any]) -> bool:
+    code = (meta.get("license_code") or "").strip().upper()
+    # Normalise spacing
+    code_norm = " ".join(code.replace("_", " ").split())
+    allowed = {c.upper() for c in COMMERCIAL_LICENSE_CODES}
+    if code_norm in allowed:
+        return True
+    # Prefix match e.g. "CC BY 3.0"
+    if code_norm.startswith("CC0"):
+        return True
+    if code_norm.startswith("CC BY-SA") or code_norm.startswith("CC BY SA"):
+        return True
+    if code_norm.startswith("CC BY-ND") or code_norm.startswith("CC BY ND"):
+        return True
+    if code_norm.startswith("CC BY") and "NC" not in code_norm:
+        return True
     return False
 
 
-def process_article(pmcid, output_dir, formats, dry_run=False):
-    """Download formats and metadata for a single PMCID."""
-    meta, version_id = get_metadata(pmcid)
-    if not meta:
-        return pmcid, False, "Metadata not found on S3"
-        
-    # Create target directories
-    os.makedirs(os.path.join(output_dir, "metadata"), exist_ok=True)
-    for fmt in formats:
-        os.makedirs(os.path.join(output_dir, fmt), exist_ok=True)
-        
-    # Write metadata JSON
-    meta_path = os.path.join(output_dir, "metadata", f"{version_id}.json")
+def s3_to_http(s3_url: str) -> str:
+    path = s3_url.replace("s3://pmc-oa-opendata/", "").split("?")[0]
+    return f"{S3_HTTP}/{path}"
+
+
+def download_to_file(url: str, out_path: Path, dry_run: bool = False) -> bool:
+    if dry_run:
+        return True
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return True
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    r = http_get(url, timeout=120, stream=True)
+    if r is None:
+        return False
+    try:
+        with tmp.open("wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    f.write(chunk)
+        tmp.replace(out_path)
+        return True
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        return False
+
+
+def process_one(
+    pmcid: str,
+    output_dir: Path,
+    formats: list[str],
+    dry_run: bool,
+) -> tuple[str, bool, str | None]:
+    resolved = resolve_version_id(pmcid)
+    if not resolved:
+        return pmcid, False, "metadata not found"
+    version_id, meta = resolved
+
+    if not is_commercial_meta(meta):
+        return pmcid, False, f"non-commercial license_code={meta.get('license_code')!r}"
+
+    # Persist metadata
+    meta_dir = output_dir / "metadata"
+    meta_path = meta_dir / f"{version_id}.json"
     if not dry_run:
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-            
-    # Download formats
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    fmt_map = {
+        "xml": "xml_url",
+        "txt": "text_url",
+        "text": "text_url",
+        "pdf": "pdf_url",
+    }
+
     for fmt in formats:
-        url_key = f"{fmt}_url"
-        s3_url = meta.get(url_key)
+        key = fmt_map.get(fmt)
+        if not key:
+            continue
+        s3_url = meta.get(key)
         if not s3_url:
             continue
-            
-        # Convert S3 URL to HTTP URL
-        # s3://pmc-oa-opendata/PMC10000000.1/PMC10000000.1.xml?md5=...
-        # -> https://pmc-oa-opendata.s3.amazonaws.com/PMC10000000.1/PMC10000000.1.xml
-        path_part = s3_url.replace("s3://pmc-oa-opendata/", "").split("?")[0]
-        http_url = f"{S3_BASE_URL}/{path_part}"
-        
-        file_ext = "txt" if fmt == "text" else fmt
-        out_file = os.path.join(output_dir, fmt, f"{version_id}.{file_ext}")
-        
-        if os.path.exists(out_file):
-            continue  # Skip already downloaded files
-            
-        try:
-            download_url_to_file(http_url, out_file, dry_run)
-        except Exception as e:
-            return pmcid, False, f"Failed to download {fmt}: {e}"
-            
+        ext = "txt" if fmt in ("txt", "text") else fmt
+        out_file = output_dir / ("txt" if fmt == "text" else fmt) / f"{version_id}.{ext}"
+        ok = download_to_file(s3_to_http(s3_url), out_file, dry_run=dry_run)
+        if not ok:
+            return pmcid, False, f"failed download {fmt}"
+
     return pmcid, True, None
 
 
-def download_pmc_commercial(output_dir, formats=['xml'], limit=10, threads=4, dry_run=False, query=None):
-    """Interface function to download commercial OA articles."""
-    if query is None:
-        query = DEFAULT_QUERY
-        
-    # Normalize formats (legacy scripts passed 'xml txt')
-    normalized_formats = []
-    for f in formats:
-        # split in case space-separated string was passed
-        for part in f.split():
-            if part == "txt":
-                normalized_formats.append("text")
-            else:
-                normalized_formats.append(part)
-                
-    pmcids = query_esearch(query, limit)
-    if not pmcids:
-        print("No articles to download.")
-        return 0
-        
-    print(f"Starting download of {len(pmcids)} articles with {threads} threads...")
-    
-    success_count = 0
-    failures = []
-    
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {
-            executor.submit(process_article, pmcid, output_dir, normalized_formats, dry_run): pmcid
-            for pmcid in pmcids
-        }
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading PMC articles"):
-            pmcid = futures[future]
-            try:
-                pid, success, err = future.result()
-                if success:
-                    success_count += 1
-                else:
-                    failures.append((pid, err))
-            except Exception as e:
-                failures.append((pmcid, str(e)))
-                
-    print(f"\nDownload completed: {success_count} succeeded, {len(failures)} failed.")
-    if failures:
-        print("Failures:")
-        for pid, err in failures[:10]:
-            print(f"  PMC{pid}: {err}")
-        if len(failures) > 10:
-            print(f"  ... and {len(failures) - 10} more failures.")
-            
-    # Record metadata
-    if not dry_run:
-        meta_summary_path = os.path.join(output_dir, "sync_meta.txt")
-        os.makedirs(output_dir, exist_ok=True)
-        with open(meta_summary_path, "w") as f:
-            f.write("subset=oa_comm\n")
-            f.write(f"formats={' '.join(formats)}\n")
-            f.write(f"source={S3_BASE_URL}/\n")
-            f.write(f"synced_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
-            
-    return success_count
+def collect_ids_from_filelist(path: Path, limit: int) -> list[str]:
+    rows = parse_filelist(path)
+    ids: list[str] = []
+    for row in rows:
+        acc = accession_from_filelist_row(row)
+        if not acc:
+            continue
+        ids.append(acc)
+        if limit > 0 and len(ids) >= limit:
+            break
+    return ids
 
 
-def main():
-    parser = argparse.ArgumentParser(description="PMC Commercial OA Downloader")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="PMC Commercial OA downloader (filelist or ESearch + metadata verify)"
+    )
     parser.add_argument(
         "--output_dir",
-        type=str,
-        default="./01_raw/pmc/oa_comm",
-        help="Directory to save files"
+        type=Path,
+        default=Path("./01_raw/pmc/oa_comm"),
+        help="Output root",
     )
     parser.add_argument(
         "--formats",
-        type=str,
         nargs="+",
         default=["xml"],
-        help="Formats to download (xml and/or txt)"
+        help="Formats: xml and/or txt (pdf optional)",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=10,
-        help="Limit number of articles to download (0 = unlimited)"
+        help="Max articles (0 = all available via chosen ID source)",
     )
     parser.add_argument(
         "--threads",
         type=int,
-        default=4,
-        help="Number of download threads"
+        default=6,
+        help="Parallel download workers",
     )
     parser.add_argument(
         "--dry_run",
         action="store_true",
-        help="Dry run mode"
+        help="Resolve IDs / metadata only; do not write article files",
     )
     parser.add_argument(
-        "--query",
+        "--api_key",
         type=str,
-        default=DEFAULT_QUERY,
-        help="NCBI ESearch query"
+        default=os.environ.get("NCBI_API_KEY"),
+        help="NCBI API key (or env NCBI_API_KEY)",
     )
-    
+    parser.add_argument(
+        "--filelist",
+        type=Path,
+        default=None,
+        help="Use an existing local filelist CSV/TSV instead of downloading/ESearch",
+    )
     args = parser.parse_args()
-    
-    download_pmc_commercial(
-        output_dir=args.output_dir,
-        formats=args.formats,
-        limit=args.limit,
-        threads=args.threads,
-        dry_run=args.dry_run,
-        query=args.query
+
+    formats = []
+    for f in args.formats:
+        formats.extend(f.split())
+    formats = [f.lower() for f in formats]
+
+    out: Path = args.output_dir
+    out.mkdir(parents=True, exist_ok=True)
+
+    ids: list[str] = []
+
+    # 1) Explicit local filelist
+    if args.filelist and args.filelist.is_file():
+        print(f"Using local filelist: {args.filelist}")
+        ids = collect_ids_from_filelist(args.filelist, args.limit)
+    else:
+        # 2) Try bucket filelist
+        fl = try_download_filelist(out / "filelists")
+        if fl is not None:
+            ids = collect_ids_from_filelist(fl, args.limit)
+            print(f"IDs from filelist: {len(ids):,}")
+        else:
+            # 3) ESearch commercial-only
+            ids = esearch_commercial_ids(args.limit, api_key=args.api_key)
+            print(f"IDs from ESearch: {len(ids):,}")
+
+    if not ids:
+        print("No commercial IDs to download.")
+        sys.exit(1)
+
+    print(
+        f"Starting {'dry-run ' if args.dry_run else ''}download of "
+        f"{len(ids)} articles, formats={formats}, threads={args.threads}"
+    )
+
+    ok_n = 0
+    failures: list[tuple[str, str]] = []
+
+    with ThreadPoolExecutor(max_workers=args.threads) as ex:
+        futs = {
+            ex.submit(process_one, pmcid, out, formats, args.dry_run): pmcid
+            for pmcid in ids
+        }
+        for fut in tqdm(as_completed(futs), total=len(futs), desc="PMC commercial"):
+            pmcid = futs[fut]
+            try:
+                pid, success, err = fut.result()
+                if success:
+                    ok_n += 1
+                else:
+                    failures.append((pid, err or "unknown"))
+            except Exception as e:  # noqa: BLE001
+                failures.append((pmcid, str(e)))
+
+    print(f"\nDone: {ok_n} ok, {len(failures)} failed/skipped")
+    if failures:
+        print("First failures:")
+        for pid, err in failures[:15]:
+            print(f"  {pid}: {err}")
+
+    meta_summary = out / "sync_meta.txt"
+    meta_summary.write_text(
+        "\n".join(
+            [
+                "subset=oa_comm_commercial",
+                f"formats={' '.join(formats)}",
+                f"source={S3_HTTP}/",
+                "filter=commercial_license_only",
+                f"requested_ids={len(ids)}",
+                f"succeeded={ok_n}",
+                f"failed_or_skipped={len(failures)}",
+                f"synced_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
     )
 
 
