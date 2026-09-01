@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 class ConfigError(RuntimeError):
@@ -67,7 +67,7 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    load_dotenv(".env")  # reads ./.env if present; real env vars still win
+    load_dotenv(find_dotenv(usecwd=True))  # reads ./.env if present; real env vars still win
     return Settings(
         raw_root=Path(_get("EPISTEME_RAW_ROOT", "./01_raw")),
         processed_root=Path(_get("EPISTEME_PROCESSED_ROOT", "./02_processed")),
