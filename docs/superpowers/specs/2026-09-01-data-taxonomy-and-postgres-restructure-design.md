@@ -76,11 +76,12 @@ Optimise for **low rework later**. Ceremony now buys correctness during the sign
 - Smallest deviation from the binding docs: the Parquet corpus survives; only the "processed
   layer = Iceberg" clause is replaced.
 
-**Graph engine:** property tables queried with **SQL/PGQ** (SQL:2023) where the running server
-supports it, **recursive CTE fallback** over the same tables until then — no schema change when
-PGQ lands. `article_cites(src_pmid, dst_pmid, …)`, `article_mesh(pmid, descriptor_ui,
-descriptor_name, major_topic, qualifiers)`. A guarded `CREATE PROPERTY GRAPH` DDL lives in
-`db/schema.sql` behind a server-capability check.
+**Graph engine:** **SQL/PGQ** (SQL:2023 property-graph queries) is the committed primary path —
+`CREATE PROPERTY GRAPH` DDL is unconditional in `db/schema.sql`, and graph queries are written
+as `GRAPH_TABLE (…)` / `MATCH` against it. `article_cites(src_pmid, dst_pmid, …)`,
+`article_mesh(pmid, descriptor_ui, descriptor_name, major_topic, qualifiers)` are the underlying
+property tables. A recursive-CTE equivalent is kept only as a CI/degraded fallback for
+environments whose Postgres lacks PGQ; it is not the design target.
 
 **Extensions enabled from the start:** `vector` (pgvector, Stream 2 dense retrieval),
 `pg_search` (BM25 lexical retrieval). `db/extensions.sql`, each `CREATE EXTENSION IF NOT EXISTS`
@@ -259,10 +260,9 @@ scripts/data/
   (`*.sh text eol=lf`, `*.ps1 text eol=crlf`, `* text=auto`) — the repo is edited on Windows
   and the shell scripts must stay LF or the shebang breaks.
 - **`.gitignore`** gains: `.env`, `graphify-out/`, `02_processed/`, `03_corpus/`, `.entire/`.
-- **`LICENSE` reconciliation** — the `LICENSE` file (MIT) contradicts `pyproject.toml` /
-  `README.md` / baseline (Apache-2.0). **Operator decision required**: pick one; implementation
-  makes all four agree. Default if unspecified: keep Apache-2.0 (permissive + patent grant,
-  already in three of four places), replace the `LICENSE` file text.
+- **`LICENSE` reconciliation** — **Decision: MIT.** The `LICENSE` file (already MIT) is
+  authoritative; update `pyproject.toml`, `README.md`, and `docs/project-incubation-baseline.md`
+  from Apache-2.0 → MIT so all four agree.
 
 ### 3.6 Tests
 
@@ -303,7 +303,7 @@ tests/
   as catalog/lineage. SQL/PGQ + pgvector + pg_search noted. Keep the layered `01_raw → 02_processed
   → 03_corpus` model and the "raw is sacred" rule.
 - **`docs/07-knowledge-graph-lessons.md`** — §3.2 representation choice updated to Postgres
-  property tables + SQL/PGQ (recursive-CTE fallback); drop the "defer the graph DB" stance,
+  property tables + committed SQL/PGQ (`GRAPH_TABLE`/`MATCH`); drop the "defer the graph DB" stance,
   keep the "structured published metadata over LLM-extracted triples" thesis and the
   citation/MeSH edge priorities.
 - **`docs/09-extraction-contract.md`** — §4 (Iceberg → Postgres tables + idempotent
@@ -349,7 +349,7 @@ already added for manifest validation):
 |---|---|---|
 | `seq` | Consistent | monotonic per chain (`BIGSERIAL`) |
 | `recorded_at` | Contemporaneous | UTC `timestamptz`, written in the data change's own transaction |
-| `actor` | Attributable | `EPISTEME_ACTOR` env → OS login → `unknown` |
+| `actor` | Attributable | from `EPISTEME_ACTOR` — **required, no fallback**; any stage that writes audit records hard-fails if it is unset, so the field is never a meaningless placeholder like `system` or `unknown` |
 | `host`, `pid`, `run_id` | Attributable | `run_id` correlates with `episteme._runs` |
 | `code_version` | Original/Accurate | git SHA of the running tree |
 | `event_type` | — | enum: `run_start`, `run_end`, `extract_commit`, `load_commit`, `load_replace`, `graph_commit`, `corpus_materialize`, `schema_migration`, `force_override`, `integrity_check`, `manual_correction`, `config_change` |
@@ -368,16 +368,70 @@ already added for manifest validation):
 - `scripts/data/verify_audit_trail.sh` → `episteme.data`-level verifier walks the chain
   (`prev_hash` links, `record_hash` recomputation) across both the table and the mirror and
   reports the first divergence; a break is a hard failure, not a warning.
-- Retention: the pipeline never deletes audit records. Retention *period* is an
-  operator/QA decision recorded in `docs/11` (default posture: retain for the life of any
-  corpus or model derived from the data).
+- Retention: **infinite** — the pipeline never deletes audit records, from the `_audit` table
+  or the mirror. JSONL mirror files older than 30 days are gzip-compressed in place on a
+  rotating basis by `scripts/data/rotate_audit_logs.sh` (`audit-YYYYMMDD.jsonl` →
+  `audit-YYYYMMDD.jsonl.gz`); `verify_audit_trail.sh` reads `.jsonl` and `.jsonl.gz` alike.
+- Electronic signatures: **out of scope** for this phase (recorded as such in `docs/11`).
 - No silent drops — ties to extraction-contract §1; a `dropped` row still produces an audit
   event.
 
 **Wiring:** `postgres_loader.py`, `graph_builder.py`, `corpus_materializer.py`, and the
 `db/migrate_database.sh` runner each emit their audit events through `audit_trail.py` inside
 the transaction they commit. `run_pipeline.sh` emits `run_start` / `run_end`. `--force` on any
-stage emits `force_override` and refuses to proceed without `--reason`.
+stage emits `force_override` and refuses to proceed without `--reason`. `_lib/common.sh` runs
+`require_env EPISTEME_ACTOR` before any stage that can write audit records, so an unattributed
+run fails at the start rather than recording a placeholder.
+
+### 3.9 Architecture Decision Records
+
+Two ADRs authored under `docs/adr/` (template: `project-incubation/assets/adr-template.md` —
+Context / Decision / Consequences / Alternatives considered).
+
+**ADR-0001 — Hybrid storage architecture.** Records the choice made in this design: Postgres
+for structured `articles` + SQL/PGQ graph + `id_map` + pgvector/pg_search RAG store; Parquet
+for the `03_corpus/` training shards; Postgres-backed OpenMetadata for catalog/lineage.
+Explicitly supersedes the "processed layer = Apache Iceberg" clause of `docs/08`; states why
+(training-loader throughput, per-run snapshots, graph co-location, Stream 2 already named
+Postgres) and what was rejected (all-Iceberg, all-Postgres).
+
+**ADR-0002 — Data model, storage optimisation & partitioning.** Decided now, at table-creation
+time, not retrofitted. Binding on `db/schema.sql` and `corpus_materializer.py`.
+
+*Postgres:*
+- `episteme.articles` — **narrow hot table** (identifiers, `source`, `license`, `subset`,
+  `extract_status`, `year`, `retrieved_at`, `content_hash`, small scalars).
+  `PARTITION BY LIST (source)`, each source sub-partitioned `PARTITION BY RANGE (year)`
+  (`0`/unknown bucket, `<1990`, then 5-year ranges). Rationale: near-every query filters
+  `source` + `year`; per-partition vacuum; detach a source cheaply.
+- `episteme.article_body` — `article_id` PK/FK, `title`, `abstract`, `body_text`, `text`.
+  Split from `articles` so the hot table stays cache-resident; large columns are TOASTed and
+  rarely scanned. `toast_compression = zstd` on `body_text`/`text`. Mirrors `articles`
+  partitioning for partition-wise joins.
+- Indexes: partial btree on `pmid` / `pmcid` / `doi` (`WHERE … IS NOT NULL`); BRIN on
+  `retrieved_at` (append-ordered); GIN on `mesh` / `authors` / `publication_types`;
+  `pg_search` BM25 index on `article_body.text`. Nothing indexed on cold columns.
+- `episteme.article_cites` / `article_mesh` — `PARTITION BY HASH` on the anchor id (balanced,
+  no natural range key; keeps `MATCH` traversals partition-prunable on the anchor).
+- `episteme.chunks` (Phase 1 scaffold) — `PARTITION BY HASH (article_id)`; HNSW on `embedding`,
+  BM25 on `chunk_text`, per partition.
+- `episteme._audit` — `PARTITION BY RANGE (recorded_at)`, **monthly**. Lets the 30-day
+  compaction (§3.8) detach/compress read-only monthly partitions while the live partition
+  stays small. Never dropped.
+- `episteme._lineage` / `_runs` — unpartitioned (small). `fillfactor = 100` on all
+  append-only tables; per-big-partition autovacuum tuning; `pg_stat_statements` enabled.
+
+*Filesystem / Parquet:*
+- `01_raw/` — native, immutable, unpartitioned (unchanged).
+- `02_processed/staging/<source>/` — one Parquet shard per input file (the unit of work); no
+  further partitioning (transient, consumed by `load`).
+- `03_corpus/pretrain/` — Hive layout `source=<s>/year=<y>/part-*.parquet`; target
+  256–512 MB/file, 128 MB row groups, `zstd` level 3, dictionary encoding on low-cardinality
+  columns, rows sorted by `content_hash` within a shard (compression + dedup locality),
+  column order hot→cold.
+
+*Standing rule (in the ADR):* every new source or table declares its partition key and storage
+options in a one-paragraph addendum to ADR-0002 at creation, reviewed in the PR that adds it.
 
 ---
 
@@ -403,10 +457,14 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
 6. `git mv` `data/epmc/preprint_extract.py` →
    `data/europepmc/preprints/extract_europepmc_preprints.py`; rename `data/epmc/` →
    `data/europepmc/`; build the five feed sub-folders.
+6a. Write `docs/adr/0001-hybrid-storage-architecture.md` and
+   `docs/adr/0002-data-model-storage-and-partitioning.md` (§3.9) — **before** `db/schema.sql`
+   exists, so the DDL is written to the ADR, not the reverse.
 7. Fill `article_schema.py` (rename from `schema.py`, align `SOURCES`),
    `checkpoint_markers.py` (rename from `ops.py`), `staging_writer.py` (rename from
-   `writer.py`), `audit_trail.py`, `db/{schema.sql,extensions.sql,connection.py}` (incl.
-   `episteme._audit` + its `INSERT`/`SELECT`-only `GRANT`s), `postgres_loader.py`,
+   `writer.py`), `audit_trail.py`, `db/{schema.sql,extensions.sql,connection.py}` (partitioning
+   + storage options **exactly per ADR-0002**; incl. `episteme._audit` monthly range partitions
+   + its `INSERT`/`SELECT`-only `GRANT`s), `postgres_loader.py`,
    `load_articles.py`, `graph_builder.py`, `corpus_materializer.py`,
    `openmetadata_manifest.py`, `enrich_openmetadata.py`, `sample_audit.py`, and their tests
    (incl. `test_audit_trail.py`). `postgres_loader` / `graph_builder` / `corpus_materializer`
@@ -414,8 +472,8 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
 8. `scripts/data/` tree: `_lib/common.sh`, per-source stage scripts (consolidate the ~15 flat
    scripts — `git mv` where 1:1, rewrite where merging), `run_pipeline.sh` (emits
    `run_start` / `run_end`, enforces `--reason` with `--force`), `db/init_database.sh`,
-   `db/migrate_database.sh`, `verify_audit_trail.sh`, `materialize_corpus.sh`,
-   `run_sample_audit.sh`.
+   `db/migrate_database.sh`, `verify_audit_trail.sh`, `rotate_audit_logs.sh`,
+   `materialize_corpus.sh`, `run_sample_audit.sh`.
 9. `pyproject.toml` dependency groups + tooling config; `LICENSE` reconciliation; `README.md`.
 10. Rewrite docs 07 / 08 / 09 / 10; baseline Drift Log entry.
 11. **Green gates** (§5).
@@ -436,6 +494,9 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
   - `episteme.articles` has 2 rows with correct `source` / `subset` / `license` /
     `extract_status`,
   - `episteme._lineage` has a row for each input file,
+  - `episteme.articles` / `article_body` / `_audit` are partitioned exactly as ADR-0002
+    specifies (`\d+ episteme.articles` shows `LIST (source)` → `RANGE (year)`; `_audit` shows
+    monthly range partitions),
   - `episteme._audit` has `run_start` + `load_commit` (×2) + `run_end` events, each with a
     valid `prev_hash` / `record_hash` chain and a matching JSONL-mirror line,
   - `scripts/data/verify_audit_trail.sh` reports the chain intact,
@@ -451,14 +512,19 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
 
 ---
 
-## 6. Open items requiring an operator decision
+## 6. Operator decisions (resolved 2026-09-01)
 
-1. **`LICENSE`**: MIT (current file) or Apache-2.0 (everything else)? Default: Apache-2.0.
-2. **SQL/PGQ availability** in the PG 19 build in use — confirmed present, or design proceeds
-   with recursive-CTE queries and the PGQ DDL guarded/dormant? (No schema impact either way.)
-3. **`openmetadata-ingestion` version pin** — latest compatible with the OM server version you
-   intend to run.
-4. **Audit-trail retention period** and whether electronic signatures are in scope this phase
-   (assumed **no** for Phase 0) — QA/operator input, recorded in `docs/11`.
-5. **`EPISTEME_ACTOR` identity source** — CI/service-account name vs. individual operator login
-   for attributable audit records.
+1. **`LICENSE`: MIT.** The `LICENSE` file stands; `pyproject.toml`, `README.md`, and
+   `docs/project-incubation-baseline.md` change Apache-2.0 → MIT.
+2. **SQL/PGQ: committed, aggressively.** `CREATE PROPERTY GRAPH` DDL is unconditional; graph
+   queries use `GRAPH_TABLE`/`MATCH`. Recursive-CTE is a CI/degraded fallback only, not the
+   target.
+3. **`openmetadata-ingestion`: pinned**, to the latest release compatible with the OM server
+   version in use. Config-driven (`OM_HOST` / `OM_JWT` in `.env`): a local OM during build,
+   repointed to a hosted OM later with no code change.
+4. **Audit-trail retention: infinite.** `_audit` table and JSONL mirror are never pruned;
+   mirror files gzip-compress in place after 30 days (`rotate_audit_logs.sh`). Electronic
+   signatures **out of scope** this phase.
+5. **`EPISTEME_ACTOR`: required, no fallback.** Set to an individual operator identity (or a
+   named CI/service account); a run without it hard-fails before writing any audit record —
+   no `system` / `unknown` placeholder.
