@@ -26,3 +26,6 @@ data/
 models/
 01_raw/
 
+
+# SDD scratch (subagent-driven-development workspace)
+.superpowers/
