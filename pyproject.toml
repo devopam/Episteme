@@ -24,7 +24,8 @@ dependencies = [
     "datasketch>=1.5.0",
     "pyeuropepmc>=0.1.0",
     "datasets>=2.14.0",
-    
+    "python-dotenv>=1.0.0",
+
     # Model Training & Fine-Tuning
     "torch>=2.0.0",
     "transformers>=4.34.0",
