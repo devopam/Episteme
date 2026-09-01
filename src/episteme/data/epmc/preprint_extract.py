@@ -151,8 +151,23 @@ def parse_article(art: ET.Element, source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
+def is_valid_gzip(path: Path) -> bool:
+    """True if file starts with gzip magic bytes (1f 8b)."""
+    try:
+        with path.open("rb") as f:
+            magic = f.read(2)
+        return magic == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
 def iter_articles(path: Path) -> Iterator[dict[str, Any]]:
-    opener = gzip.open if path.name.endswith(".gz") else open
+    if path.name.endswith(".gz"):
+        if not is_valid_gzip(path):
+            raise OSError(f"corrupt_source: not a gzip file (bad magic): {path.name}")
+        opener = gzip.open
+    else:
+        opener = open
     with opener(path, "rb") as f:
         for _event, elem in ET.iterparse(f, events=("end",)):
             if _local(elem.tag) != "article":
@@ -179,6 +194,9 @@ def process_file(
     subset_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
+        if path.name.endswith(".gz") and not is_valid_gzip(path):
+            raise OSError(f"corrupt_source: not a gzip file (bad magic): {basename}")
+
         for row in iter_articles(path):
             status_counts[str(row.get("extract_status"))] += 1
             subset_counts[str(row.get("subset"))] += 1
@@ -202,16 +220,27 @@ def process_file(
         mark_success(processed_dir, SOURCE, basename, stats=stats)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
-        mark_failed(
-            processed_dir,
-            SOURCE,
-            basename,
-            error_class="parse_error",
-            message=str(e),
-            stats={"n_rows_partial": len(rows)},
-            exc=e,
-        )
-        return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
+        msg = str(e)
+        err_class = "corrupt_source" if "corrupt_source" in msg or "Not a gzipped" in msg or "BadGzipFile" in type(e).__name__ else "parse_error"
+        try:
+            mark_failed(
+                processed_dir,
+                SOURCE,
+                basename,
+                error_class=err_class,
+                message=msg,
+                stats={"n_rows_partial": len(rows)},
+                exc=e,
+            )
+        except Exception as mark_err:  # noqa: BLE001
+            print(f"  WARN: could not write failure marker: {mark_err}")
+        return {
+            "source_file": basename,
+            "skipped": False,
+            "ok": False,
+            "error": msg,
+            "error_class": err_class,
+        }
 
 
 def discover(raw_dir: Path) -> list[Path]:
