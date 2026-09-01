@@ -26,6 +26,16 @@ data/
 models/
 01_raw/
 
+# Environment
+.env
+
+# Local pipeline output
+02_processed/
+03_corpus/
+
+# Tooling scratch
+graphify-out/
+.entire/
 
 # SDD scratch (subagent-driven-development workspace)
 .superpowers/
