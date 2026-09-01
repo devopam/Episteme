@@ -13,8 +13,10 @@ Reorganise `src/` and `scripts/` into a uniform, subject-area taxonomy with spel
 nomenclature; finish the half-done `data_pipeline/ → data/` migration that arrived on `main`;
 replace the (unimplemented) Iceberg + filesystem-catalog storage target with a **Postgres
 hybrid**; scaffold every acquisition source and stage — including deferred ones — up front so
-later refactors are moves, not restructures; and pull all environment-varying configuration
-out of code into a single `.env` + `config.py`.
+later refactors are moves, not restructures; pull all environment-varying configuration
+out of code into a single `.env` + `config.py`; and stand up an **ALCOA+-aligned,
+tamper-evident audit trail** so the provenance of this medical/pharma-adjacent data is
+defensible in a later GxP context.
 
 Optimise for **low rework later**. Ceremony now buys correctness during the significant data
 + model work that follows.
@@ -60,7 +62,7 @@ Optimise for **low rework later**. Ceremony now buys correctness during the sign
 |---|---|---|---|
 | `01_raw/<source>/` | filesystem, immutable | native downloads (XML.gz, JSON, tarballs) | download stage |
 | `02_processed/staging/<source>/*.parquet` | filesystem | normalised `episteme.articles` rows, one Parquet shard per input file | extract stage |
-| **Postgres `episteme` schema** | PostgreSQL 19 | structured `articles` (incl. `title`/`abstract`/`body_text` for RAG + BM25 + vector), `id_map`, graph property tables (`article_cites`, `article_mesh`), `chunks` (Phase 1 scaffold), `_runs`, `_lineage` | load + graph stages |
+| **Postgres `episteme` schema** | PostgreSQL 19 | structured `articles` (incl. `title`/`abstract`/`body_text` for RAG + BM25 + vector), `id_map`, graph property tables (`article_cites`, `article_mesh`), `chunks` (Phase 1 scaffold), `_runs`, `_lineage`, `_audit` (append-only, hash-chained) | load + graph stages; audit trail |
 | `03_corpus/pretrain/*.parquet` | filesystem | materialised flat-`text` training shards, filtered (`subset='commercial' AND extract_status='ok'` …) | materialize stage |
 | **OpenMetadata** (Postgres-backed) | service | catalog + lineage over the `episteme` schema and the Parquet corpus | enrich stage → manifest; orchestrator → `metadata ingest` (opt-in) |
 
@@ -90,7 +92,8 @@ guarded so a missing extension degrades to a warning, not a hard failure, during
 src/episteme/
   __init__.py
   config.py                          # THE only reader of os.environ; loads .env via python-dotenv; typed settings
-  logging_setup.py                   # configure_logging(); modules use logging.getLogger(__name__)
+  logging_setup.py                   # configure_logging(); modules use logging.getLogger(__name__) — operational logs only
+  audit_trail.py                     # NEW — ALCOA+ tamper-evident audit trail; writes episteme._audit (txn-coupled) + JSONL mirror
   data/
     __init__.py                      # documents source-name <-> folder map
     article_schema.py                # was schema.py  — canonical episteme.articles row + license/status/text helpers
@@ -277,6 +280,7 @@ tests/
     test_graph_builder.py           # marked `pg`; edge population from fixture refs
     test_corpus_materializer.py     # filter correctness, parquet round-trip
     test_openmetadata_manifest.py   # manifest is jsonschema-valid
+    test_audit_trail.py             # hash-chain integrity, append-only, ALCOA+ fields present, tamper detection
   model/
     test_model_smoke.py             # from test_model_pipeline.py; imports episteme.model.*
 ```
@@ -304,7 +308,14 @@ tests/
   citation/MeSH edge priorities.
 - **`docs/09-extraction-contract.md`** — §4 (Iceberg → Postgres tables + idempotent
   delete-by-`source_file`), §10 entrypoints → final paths, resolve open question #3
-  (`source_file` = basename).
+  (`source_file` = basename). Add a cross-reference to `docs/11` for the audit-trail obligation
+  on every load/replace.
+- **`docs/11-gxp-data-integrity.md`** — NEW. Records the ALCOA+ posture (see §3.8), the
+  audit-record schema, the hash-chain scheme, retention expectations, and — explicitly — the
+  boundary between what this codebase automates (tamper-evident audit trail, provenance,
+  no-silent-drops) and what remains procedural for a real GxP qualification (CSV/validation,
+  RBAC, e-signatures, periodic review, SOPs). No compliance is *claimed*; the design is stated
+  as "GxP-ready," not "GxP-compliant."
 - **`docs/10-data-sources-runbook.md`** — rewritten as **the single operator runbook**: DB
   setup (`scripts/data/db/init_database.sh`, `PG*` / `OM_HOST` env), then per source a
   first-time block and an incremental block using the real `scripts/data/<source>/*.sh` paths
@@ -316,6 +327,58 @@ tests/
 - **`README.md`** — fix the broken `python -m …train_cpt.py` invocations; point the data
   section at `docs/10`.
 
+### 3.8 GxP data-integrity logging & audit trail
+
+The data is medical/pharma-adjacent (open literature, chemical/genomic databases). This phase
+builds a **GxP-ready** audit trail — ALCOA+-aligned, tamper-evident — so provenance is
+defensible if the model or its RAG layer is later used in a regulated context. **No regulatory
+compliance is claimed:** 21 CFR Part 11 / EU Annex 11 also require system validation, access
+control, and SOPs that are procedural, not code (see `docs/11`).
+
+**Two tiers, no new runtime dependency** (stdlib `hashlib` + canonical `json`; `jsonschema`
+already added for manifest validation):
+
+| Tier | Component | Mutability | Role |
+|---|---|---|---|
+| Operational logs | `logging_setup.py` → rotating JSON files / stderr | mutable | debugging, progress, ops signal — **not** the record |
+| Audit trail | `audit_trail.py` → Postgres `episteme._audit` (in the same transaction as the data change) **+** append-only JSONL mirror `02_processed/_ops/_audit/audit-YYYYMMDD.jsonl` | append-only | the GxP electronic record of every create / modify / delete of data |
+
+**Audit record schema (`episteme._audit`):**
+
+| Field | ALCOA+ | Notes |
+|---|---|---|
+| `seq` | Consistent | monotonic per chain (`BIGSERIAL`) |
+| `recorded_at` | Contemporaneous | UTC `timestamptz`, written in the data change's own transaction |
+| `actor` | Attributable | `EPISTEME_ACTOR` env → OS login → `unknown` |
+| `host`, `pid`, `run_id` | Attributable | `run_id` correlates with `episteme._runs` |
+| `code_version` | Original/Accurate | git SHA of the running tree |
+| `event_type` | — | enum: `run_start`, `run_end`, `extract_commit`, `load_commit`, `load_replace`, `graph_commit`, `corpus_materialize`, `schema_migration`, `force_override`, `integrity_check`, `manual_correction`, `config_change` |
+| `object` | — | e.g. `episteme.articles source_file=pubmed26n0001.xml.gz` |
+| `input_content_hash` | Original | SHA-256 of the raw input file, when applicable |
+| `rows_affected` | Accurate | inserted / deleted counts (`load_replace` records the delete count) |
+| `old_value`, `new_value` | Original/Accurate | JSON, for modifications and corrections |
+| `reason` | Attributable | **required** for `force_override`, `manual_correction`, `schema_migration` (operator passes `--reason "…"`); optional for routine automated events |
+| `prev_hash`, `record_hash` | — (integrity) | `record_hash` = SHA-256 over canonical-JSON of all other fields incl. `prev_hash`; chain is tamper-evident |
+
+**Integrity & retention:**
+- The application DB role is granted `INSERT` + `SELECT` on `episteme._audit` — **never
+  `UPDATE` / `DELETE`** (enforced by `GRANT`s in `db/schema.sql`).
+- JSONL mirror is documented append-only (`chattr +a` on Linux where available; the mirror
+  exists so the trail survives a DB restore/rebuild).
+- `scripts/data/verify_audit_trail.sh` → `episteme.data`-level verifier walks the chain
+  (`prev_hash` links, `record_hash` recomputation) across both the table and the mirror and
+  reports the first divergence; a break is a hard failure, not a warning.
+- Retention: the pipeline never deletes audit records. Retention *period* is an
+  operator/QA decision recorded in `docs/11` (default posture: retain for the life of any
+  corpus or model derived from the data).
+- No silent drops — ties to extraction-contract §1; a `dropped` row still produces an audit
+  event.
+
+**Wiring:** `postgres_loader.py`, `graph_builder.py`, `corpus_materializer.py`, and the
+`db/migrate_database.sh` runner each emit their audit events through `audit_trail.py` inside
+the transaction they commit. `run_pipeline.sh` emits `run_start` / `run_end`. `--force` on any
+stage emits `force_override` and refuses to proceed without `--reason`.
+
 ---
 
 ## 4. Migration order
@@ -324,9 +387,9 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
 `pytest -q` is green or explicitly `pg`-skipped between every step.
 
 1. **Scaffold** the full `data/` + `model/` + `db/` tree — every `__init__.py`, every stub
-   `.py` / `.sh`, `config.py`, `logging_setup.py`, `.env.example`, `.editorconfig`,
-   `.gitattributes`, `.pre-commit-config.yaml`, `.gitignore` additions. Nothing moved yet; old
-   tree intact; `pytest` still green.
+   `.py` / `.sh`, `config.py`, `logging_setup.py`, `audit_trail.py` (stub), `.env.example`,
+   `.editorconfig`, `.gitattributes`, `.pre-commit-config.yaml`, `.gitignore` additions.
+   Nothing moved yet; old tree intact; `pytest` still green.
 2. `git mv` `model_pipeline/` → `model/`; rename the four modules; fix imports; move
    `test_model_pipeline.py` → `tests/model/test_model_smoke.py`. Model tests green.
 3. `git mv` `data_pipeline/{dedup,decontaminate,preprocess}.py` →
@@ -342,12 +405,16 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
    `data/europepmc/`; build the five feed sub-folders.
 7. Fill `article_schema.py` (rename from `schema.py`, align `SOURCES`),
    `checkpoint_markers.py` (rename from `ops.py`), `staging_writer.py` (rename from
-   `writer.py`), `db/{schema.sql,extensions.sql,connection.py}`, `postgres_loader.py`,
+   `writer.py`), `audit_trail.py`, `db/{schema.sql,extensions.sql,connection.py}` (incl.
+   `episteme._audit` + its `INSERT`/`SELECT`-only `GRANT`s), `postgres_loader.py`,
    `load_articles.py`, `graph_builder.py`, `corpus_materializer.py`,
-   `openmetadata_manifest.py`, `enrich_openmetadata.py`, `sample_audit.py`, and their tests.
+   `openmetadata_manifest.py`, `enrich_openmetadata.py`, `sample_audit.py`, and their tests
+   (incl. `test_audit_trail.py`). `postgres_loader` / `graph_builder` / `corpus_materializer`
+   emit audit events inside their commit transactions.
 8. `scripts/data/` tree: `_lib/common.sh`, per-source stage scripts (consolidate the ~15 flat
-   scripts — `git mv` where 1:1, rewrite where merging), `run_pipeline.sh`,
-   `db/init_database.sh`, `db/migrate_database.sh`, `materialize_corpus.sh`,
+   scripts — `git mv` where 1:1, rewrite where merging), `run_pipeline.sh` (emits
+   `run_start` / `run_end`, enforces `--reason` with `--force`), `db/init_database.sh`,
+   `db/migrate_database.sh`, `verify_audit_trail.sh`, `materialize_corpus.sh`,
    `run_sample_audit.sh`.
 9. `pyproject.toml` dependency groups + tooling config; `LICENSE` reconciliation; `README.md`.
 10. Rewrite docs 07 / 08 / 09 / 10; baseline Drift Log entry.
@@ -369,6 +436,10 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
   - `episteme.articles` has 2 rows with correct `source` / `subset` / `license` /
     `extract_status`,
   - `episteme._lineage` has a row for each input file,
+  - `episteme._audit` has `run_start` + `load_commit` (×2) + `run_end` events, each with a
+    valid `prev_hash` / `record_hash` chain and a matching JSONL-mirror line,
+  - `scripts/data/verify_audit_trail.sh` reports the chain intact,
+  - the app DB role cannot `UPDATE` or `DELETE` `episteme._audit` (negative check),
   - `_ops/pmc/catalog/pmc.openmetadata.json` validates against the manifest schema,
   - `03_corpus/pretrain/*.parquet` shard materialised.
 - No module other than `config.py` references `os.environ`
@@ -387,3 +458,7 @@ Branch `refactor/data-taxonomy-and-postgres` (created). Each numbered step is it
    with recursive-CTE queries and the PGQ DDL guarded/dormant? (No schema impact either way.)
 3. **`openmetadata-ingestion` version pin** — latest compatible with the OM server version you
    intend to run.
+4. **Audit-trail retention period** and whether electronic signatures are in scope this phase
+   (assumed **no** for Phase 0) — QA/operator input, recorded in `docs/11`.
+5. **`EPISTEME_ACTOR` identity source** — CI/service-account name vs. individual operator login
+   for attributable audit records.
