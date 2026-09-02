@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # Episteme – PMC Commercial OA (oa_comm) Downloader
-# Wrapper → download_pmc_oa_comm.py
+# Wrapper → python -m episteme.data.pmc.download_pmc
 #
 # Commercial only (CC0 / CC BY / CC BY-SA / CC BY-ND).
 # Prefers oa_comm filelist if present; else ESearch + metadata verify.
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
 
 # venv (repo root or cwd)
 if [[ -f "$PROJECT_ROOT/.venv/bin/activate" ]]; then
@@ -26,21 +26,13 @@ fi
 PYTHON_EXE="python3"
 command -v python3 >/dev/null 2>&1 || PYTHON_EXE="python"
 
+# Make the episteme package importable when running from a source checkout
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
 OUTPUT_ROOT="${1:-./01_raw/pmc/oa_comm}"
 FORMATS="${2:-xml}"          # e.g. xml | "xml txt"
 DRY_RUN="${3:-false}"        # true | false
 LIMIT="${4:-10}"             # 0 = all (large!); default 10 for safe sample
-
-PY_SCRIPT="$SCRIPT_DIR/download_pmc_oa_comm.py"
-if [[ ! -f "$PY_SCRIPT" ]]; then
-  # allow sibling layout: scripts/data/*.sh + same dir .py
-  if [[ -f "$SCRIPT_DIR/../download_pmc_oa_comm.py" ]]; then
-    PY_SCRIPT="$SCRIPT_DIR/../download_pmc_oa_comm.py"
-  else
-    echo "ERROR: download_pmc_oa_comm.py not found next to wrapper" >&2
-    exit 1
-  fi
-fi
 
 ARGS=(--output_dir "$OUTPUT_ROOT" --limit "$LIMIT")
 
@@ -66,4 +58,4 @@ echo "Limit  : $LIMIT   (0 = full commercial set – very large)"
 echo "Filter : commercial licenses only (no NC, no author_manuscript mix)"
 echo "=================================================="
 
-"$PYTHON_EXE" "$PY_SCRIPT" "${ARGS[@]}"
+exec "$PYTHON_EXE" -m episteme.data.pmc.download_pmc "${ARGS[@]}"
