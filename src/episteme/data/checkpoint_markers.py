@@ -22,6 +22,14 @@ def failed_marker_path(processed_root: Path, source: str, input_basename: str) -
     return ops_root(processed_root, source) / "failed" / f"{input_basename}.json"
 
 
+def load_success_marker_path(processed_root: Path, source: str, input_basename: str) -> Path:
+    return ops_root(processed_root, source) / "load_success" / f"{input_basename}.ok"
+
+
+def graph_success_marker_path(processed_root: Path, source: str, input_basename: str) -> Path:
+    return ops_root(processed_root, source) / "graph_success" / f"{input_basename}.ok"
+
+
 def is_success(processed_root: Path, source: str, input_basename: str) -> bool:
     return success_marker_path(processed_root, source, input_basename).is_file()
 

@@ -27,7 +27,7 @@ _SRC = Path(__file__).resolve().parents[4]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from episteme.data.ops import (  # noqa: E402
+from episteme.data.checkpoint_markers import (  # noqa: E402
     is_success,
     mark_failed,
     mark_success,
