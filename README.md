@@ -26,29 +26,25 @@ python -m venv .venv
 # Upgrade pip
 python -m pip install --upgrade pip
 
-# Install in editable mode (installs all dependencies declared in pyproject.toml)
+# Install in editable mode (core only: python-dotenv + tqdm; feature deps are in optional groups below)
 pip install -e .
 ```
+
+To install optional feature groups:
+- Data pipeline: `pip install -e ".[data]"` — required by the data-acquisition scripts (e.g. `scripts/download_pmc_oa_comm.sh`), which import `requests`/`pandas`/etc.
+- Model training: `pip install -e ".[model]"`
+- Development & tests: `pip install -e ".[dev]"`
 
 ## Usage
 
 ### 1. Data Pipeline
 
-The data pipeline gathers literature, serializes structured databases into readable prose, and handles deduplication/decontamination.
-
-```bash
-# Step 1: Download raw datasets (run in sample mode to check setup)
-python -m episteme.data_pipeline.download --dataset all --output_dir ./data --sample_only
-
-# Step 2: Preprocess and serialize raw data into standard JSONL corpus
-python -m episteme.data_pipeline.preprocess --input_dir ./data --output_file ./data/pretrain_corpus.jsonl
-
-# Step 3: Run near-deduplication using MinHash LSH
-python -m episteme.data_pipeline.dedup --input_file ./data/pretrain_corpus.jsonl --output_file ./data/pretrain_corpus_dedup.jsonl --threshold 0.8
-
-# Step 4: Decontaminate training data against test benchmarks
-python -m episteme.data_pipeline.decontaminate --input_file ./data/pretrain_corpus_dedup.jsonl --output_file ./data/pretrain_corpus_clean.jsonl --sample_only
-```
+The data pipeline is driven by per-source scripts under `scripts/` (a
+per-source `scripts/data/` layout is coming in a later phase) and
+documented end-to-end (first-time and incremental) in
+[`docs/10-data-sources-runbook.md`](docs/10-data-sources-runbook.md).
+Corpus-level curation lives in `episteme.data.curate`
+(`serialize_structured_sources`, `deduplicate_corpus`, `decontaminate_benchmarks`).
 
 ### 2. Model Pipeline
 
@@ -56,16 +52,16 @@ The model pipeline supports model-switching (config-driven base checkpoints), pa
 
 ```bash
 # Stage 1: Continual Pre-training (CPT)
-python -m episteme.model_pipeline.train_cpt.py --model_name_or_path HuggingFaceM4/tiny-random-LlamaForCausalLM --medical_data_path ./data/pretrain_corpus_clean.jsonl --output_dir ./models/cpt_output --dry_run
+python -m episteme.model.train_continual_pretraining --model_name_or_path HuggingFaceM4/tiny-random-LlamaForCausalLM --medical_data_path ./data/pretrain_corpus_clean.jsonl --output_dir ./models/cpt_output --dry_run
 
 # Stage 2: Supervised Fine-Tuning (SFT) with LoRA
-python -m episteme.model_pipeline.train_sft.py --model_name_or_path ./models/cpt_output --output_dir ./models/sft_output --dry_run
+python -m episteme.model.train_supervised_finetuning --model_name_or_path ./models/cpt_output --output_dir ./models/sft_output --dry_run
 
 # Stage 3: Direct Preference Optimization (DPO) with LoRA
-python -m episteme.model_pipeline.train_preference.py --model_name_or_path ./models/sft_output --output_dir ./models/dpo_output --dry_run
+python -m episteme.model.train_preference_optimization --model_name_or_path ./models/sft_output --output_dir ./models/dpo_output --dry_run
 
 # Evaluation: Score accuracy on MedMCQA and PubMedQA
-python -m episteme.model_pipeline.evaluate --model_name_or_path ./models/dpo_output --output_file ./data/eval_report.json --sample_only
+python -m episteme.model.evaluate_benchmarks --model_name_or_path ./models/dpo_output --output_file ./data/eval_report.json --sample_only
 ```
 
 ### 3. Running Automated Tests
@@ -82,4 +78,4 @@ For coding conventions and style rules, please consult our `docs` and standard r
 
 ## License
 
-This project is licensed under the Apache-2.0 License.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
