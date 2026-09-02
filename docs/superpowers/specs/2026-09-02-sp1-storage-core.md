@@ -90,6 +90,14 @@ Import sites to update (`git grep 'episteme.data.\(schema\|ops\|writer\)'`):
 `data/apollo/extract.py`, `data/pmc/extract.py`, `data/pubmed/extract.py`,
 `data/europepmc/preprints/extract_europepmc_preprints.py`, `checkpoint_markers.py` itself.
 
+**`config.py` — single relocatable data root (SP1-α).** Add `EPISTEME_DATA_ROOT` (default
+`.`). `raw_root` / `processed_root` / `corpus_root` default to `<data_root>/01_raw` |
+`/02_processed` | `/03_corpus`; an explicit `EPISTEME_RAW_ROOT` / `_PROCESSED_ROOT` /
+`_CORPUS_ROOT` still wins if set. So relocating everything to an external disk is one line
+(`EPISTEME_DATA_ROOT=E:\EpistemeData`). `test_config.py` gains a case: `EPISTEME_DATA_ROOT`
+set, no per-dir overrides → the three roots derive; per-dir override set → it wins.
+`docs/09` §2 / `docs/10` (SP5) note the relocation knob.
+
 ### 4.2 PMC extract merge (SP1-α)
 
 `data/pmc/extract_pmc.py` (currently a `NotImplementedError` stub) receives the real logic
