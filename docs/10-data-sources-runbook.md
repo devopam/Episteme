@@ -17,7 +17,7 @@
 | EPMC ID mappings | **Corrupt file** | `download_epmc_id_mappings.sh` | **Re-download required** |
 | Author manuscripts | Partial / retry | `download_author_manuscripts.sh` | EPMC 503 intermittent |
 | EPMC lite metadata | Incomplete | `download_epmc_lite_metadata.sh` | Resume `PMCLiteMetadata.tgz` |
-| PMC commercial OA | Sample only | `download_pmc_oa_comm.sh` + `.py` | Full pull on SSD |
+| PMC commercial OA | Sample only | `download_pmc_oa_comm.sh` | Full pull on SSD |
 
 Storage root (typical): `EpistemeData/01_raw/...`
 

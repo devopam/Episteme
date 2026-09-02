@@ -1,7 +1,21 @@
 import json
 import logging
 
+import pytest
+
 from episteme.logging_setup import configure_logging
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging():
+    """Snapshot and restore root-logger state so configure_logging() calls here
+    don't leave a handler bound to a closed capture stream for later tests."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    yield
+    root.handlers[:] = saved_handlers
+    root.level = saved_level
 
 
 def test_configure_logging_plain(capsys):

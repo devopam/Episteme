@@ -11,7 +11,7 @@ from __future__ import annotations
 def main() -> None:
     raise NotImplementedError(
         "europepmc abstracts download is not implemented yet (Plan 3). "
-        "Use the shell script under scripts/ until then."
+        "This feed is deferred — see docs/10-data-sources-runbook.md; no downloader exists yet."
     )
 
 
