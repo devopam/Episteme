@@ -61,3 +61,29 @@ def test_require_actor_raises_when_unset(fresh_config):
 def test_require_actor_returns_value(fresh_config):
     cfg = fresh_config("EPISTEME_ACTOR=ci-bot\n")
     assert cfg.require_actor() == "ci-bot"
+
+
+def test_data_root_derives_the_three_roots(fresh_config):
+    cfg = fresh_config("EPISTEME_DATA_ROOT=/mnt/ssd\n")
+    s = cfg.get_settings()
+    assert s.data_root == Path("/mnt/ssd")
+    assert s.raw_root == Path("/mnt/ssd/01_raw")
+    assert s.processed_root == Path("/mnt/ssd/02_processed")
+    assert s.corpus_root == Path("/mnt/ssd/03_corpus")
+
+
+def test_explicit_root_overrides_data_root(fresh_config):
+    cfg = fresh_config(
+        "EPISTEME_DATA_ROOT=/mnt/ssd\n"
+        "EPISTEME_RAW_ROOT=/other/raw\n"
+    )
+    s = cfg.get_settings()
+    assert s.raw_root == Path("/other/raw")            # explicit wins
+    assert s.processed_root == Path("/mnt/ssd/02_processed")   # derived
+
+
+def test_data_root_defaults_to_dot(fresh_config):
+    cfg = fresh_config("")
+    s = cfg.get_settings()
+    assert s.data_root == Path(".")
+    assert s.raw_root == Path("01_raw")               # Path(".") / "01_raw"

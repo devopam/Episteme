@@ -55,6 +55,7 @@ def _find_project_dotenv() -> str | None:
 
 @dataclass(frozen=True)
 class Settings:
+    data_root: Path
     raw_root: Path
     processed_root: Path
     corpus_root: Path
@@ -87,10 +88,15 @@ def get_settings() -> Settings:
     dotenv_path = _find_project_dotenv()
     if dotenv_path:
         load_dotenv(dotenv_path)  # loads the project-root .env if present; real env vars still win
+    data_root = Path(_get("EPISTEME_DATA_ROOT", "."))
+    raw_root = Path(_get("EPISTEME_RAW_ROOT") or (data_root / "01_raw"))
+    processed_root = Path(_get("EPISTEME_PROCESSED_ROOT") or (data_root / "02_processed"))
+    corpus_root = Path(_get("EPISTEME_CORPUS_ROOT") or (data_root / "03_corpus"))
     return Settings(
-        raw_root=Path(_get("EPISTEME_RAW_ROOT", "./01_raw")),
-        processed_root=Path(_get("EPISTEME_PROCESSED_ROOT", "./02_processed")),
-        corpus_root=Path(_get("EPISTEME_CORPUS_ROOT", "./03_corpus")),
+        data_root=data_root,
+        raw_root=raw_root,
+        processed_root=processed_root,
+        corpus_root=corpus_root,
         pg_host=_get("PGHOST", "localhost"),
         pg_port=_get_int("PGPORT", 5432),
         pg_database=_get("PGDATABASE", "episteme"),
