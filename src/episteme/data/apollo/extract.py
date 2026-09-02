@@ -43,7 +43,7 @@ from episteme.data.article_schema import (  # noqa: E402
     finalize_row,
     utc_now_iso,
 )
-from episteme.data.writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import write_rows  # noqa: E402
 
 SOURCE = "apollo"
 
