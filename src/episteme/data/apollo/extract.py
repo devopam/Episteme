@@ -38,7 +38,7 @@ from episteme.data.ops import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
-from episteme.data.schema import (  # noqa: E402
+from episteme.data.article_schema import (  # noqa: E402
     SCHEMA_VERSION,
     finalize_row,
     utc_now_iso,
