@@ -34,13 +34,29 @@ creates it — **never** into `.env.example` or any committed file. **Environmen
 - **SQL/PGQ present** — `CREATE PROPERTY GRAPH` parses. `graph_builder` uses the PGQ path
   as primary; the recursive-CTE path is retained only for portability/CI (`init_database.sh`
   still probes and records the result).
-- **`vector` (pgvector) and `pg_search` NOT available** on this build. `extensions.sql`
-  emits a NOTICE and continues; the `chunks` table is created **without** the `embedding` /
-  `chunk_tsv` columns (Phase-1-dormant regardless). Add them via `migrate_database.sh` when
-  the extensions are installed.
 - **`pg_stat_statements` 1.13** available — enabled by `init_database.sh`.
 - Only the `postgres` database exists; `init_database.sh` (run as superuser `postgres`)
   creates `episteme`, `episteme_test`, and the `episteme_app` role.
+- **`vector` (pgvector) and `pg_search` are NOT yet available** on this build — SP1 installs
+  them (§3a).
+
+### 3a. Extension install step (SP1-β, first task)
+
+`scripts/data/db/install_extensions.sh` (run once, as the OS/DB admin) attempts to make
+`vector` and `pg_search` available to the 19beta3 server, then `extensions.sql` enables them:
+
+1. **`pgvector`** — install a build matching PG 19 (prebuilt Windows binary dropped into the
+   server's `lib/` + `share/extension/`, or `make`/MSVC build against the 19beta3 headers).
+2. **`pg_search`** (ParadeDB) — install from the ParadeDB distribution for this platform if
+   one exists for 19beta3.
+3. `psql -c "CREATE EXTENSION vector; CREATE EXTENSION pg_search;"` in `episteme` +
+   `episteme_test`.
+
+**If a build genuinely isn't available for 19beta3/Windows:** the task reports the exact
+`undefined_file` error, `extensions.sql` falls back to a `NOTICE`, the `chunks` table is
+created **without** `embedding` / `chunk_tsv`, and `migrate_database.sh` gets a queued,
+tested migration (`0001_add_chunk_vector_columns.sql`) to add them the moment the extensions
+land. This is a **soft block** — it does not stop SP1-β; `chunks` is Phase-1-dormant.
 
 ## 3. Internal phasing
 
@@ -111,8 +127,9 @@ scripts/data/
                           #   (fetch helpers discover_manifest/size_match_skip/aria2_fetch/aws_sync are SP3)
   run_pipeline.sh         # seed: dispatch <source> <stage|all> for pmc only; stop-on-first-failure; --reason gate on --force
   db/
-    init_database.sh      # psql -f schema.sql + extensions.sql against $PG*; probe SQL/PGQ; create the episteme schema
-    migrate_database.sh   # stub: numbered migration runner (real use in SP2+)
+    install_extensions.sh # §3a — make vector + pg_search available on the 19beta3 server (admin, run once)
+    init_database.sh      # createdb episteme/episteme_test; create episteme_app; psql -f schema.sql + extensions.sql; probe SQL/PGQ
+    migrate_database.sh    # numbered migration runner; ships 0001_add_chunk_vector_columns.sql (applied once the extensions exist)
   pmc/
     download_pmc.sh        # thin wrapper -> episteme.data.pmc.download_pmc  (module already in package)
     extract_pmc.sh         # -> python -m episteme.data.pmc.extract_pmc
@@ -189,10 +206,12 @@ also uses `episteme_app`.
   (19beta3), so this is expected to succeed; `init_database.sh` still wraps it so a parse
   failure on some other build is logged, not fatal.
 
-`extensions.sql`: `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` (available), and
-`vector` / `pg_search` each in a `DO $$ … EXCEPTION WHEN undefined_file THEN RAISE NOTICE
-… $$;` guard (both absent on 19beta3 → NOTICE, non-fatal). `chunks` (§ above) is created
-without `embedding` / `chunk_tsv` until those extensions land, via `migrate_database.sh`.
+`extensions.sql`: `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` (available). `vector`
+and `pg_search` are made available by `install_extensions.sh` (§3a) and then `CREATE
+EXTENSION`-ed here; each is wrapped in a `DO $$ … EXCEPTION WHEN undefined_file THEN RAISE
+NOTICE … $$;` guard so a missing 19beta3 build degrades to a NOTICE rather than aborting —
+in which case `chunks` is created without `embedding` / `chunk_tsv` and
+`migrate_database.sh 0001` adds them once the build exists.
 
 ---
 
@@ -230,9 +249,12 @@ without `embedding` / `chunk_tsv` until those extensions land, via `migrate_data
 2. Fresh venv: `pip install -e ".[data]"` (now also pulls `psycopg[binary]`, `pgvector`,
    `jsonschema`) + `python -c "import episteme.data.db.connection, episteme.data.load_articles,
    episteme.data.graph_builder, episteme.data.corpus_materializer"`.
-3. `scripts/data/db/init_database.sh` against the PG 19 instance → `episteme` schema present,
+3. `scripts/data/db/install_extensions.sh` run → `vector` + `pg_search` enabled in `episteme`
+   + `episteme_test` (or, if no 19beta3 build exists, the soft-block path: NOTICE logged,
+   `chunks` bare, `migrate_database.sh 0001` queued — recorded as a ruling, not a failure).
+4. `scripts/data/db/init_database.sh` against the PG 19 instance → `episteme` schema present,
    all tables + partitions per §5, `_audit` grants correct, SQL/PGQ status logged.
-4. `scripts/data/run_pipeline.sh pmc all --max-files 2 --reason "SP1 proving slice"` on the
+5. `scripts/data/run_pipeline.sh pmc all --max-files 2 --reason "SP1 proving slice"` on the
    on-disk `01_raw/pmc/oa_comm/` sample →
    - `02_processed/staging/pmc/*.parquet` written;
    - `episteme.articles` has 2 rows, correct `source`/`subset`/`license`/`extract_status`;
@@ -244,10 +266,10 @@ without `embedding` / `chunk_tsv` until those extensions land, via `migrate_data
    - `episteme.article_mesh` populated from the sample's MeSH headings;
    - `03_corpus/pretrain/source=pmc/year=*/part-*.parquet` shard exists and reads back;
    - `_ops/pmc/catalog/pmc.openmetadata.json` validates.
-5. **PMC field-shape report** (`_ops/pmc/field_shape_report.md`) produced; any
+6. **PMC field-shape report** (`_ops/pmc/field_shape_report.md`) produced; any
    `article_schema` deltas from it applied and `SCHEMA_VERSION` bumped; `docs/09` §3 table
    noted for SP5.
-6. `git log --follow` shows history preserved across the three renames + the PMC extract move.
+7. `git log --follow` shows history preserved across the three renames + the PMC extract move.
 
 ---
 
@@ -256,9 +278,10 @@ without `embedding` / `chunk_tsv` until those extensions land, via `migrate_data
 - **#3 PMC-as-slice** — confirmed viable iff `01_raw/pmc/oa_comm/` still has the 2 sample
   articles at SP1 kickoff (checked in task 1). If gone, re-fetch with
   `scripts/data/pmc/download_pmc.sh … --max-files 2` first.
-- SQL/PGQ presence on the installed PG 19 — determined by `init_database.sh`; no SP1 blocker.
-- `pgvector` / `pg_search` availability — `extensions.sql` degrades to a NOTICE; `chunks`
-  table still created (embedding/tsv columns conditional).
+- SQL/PGQ — confirmed present on 19beta3 (probe 2026-09-02); `graph_builder` PGQ path is primary.
+- `pgvector` / `pg_search` — `install_extensions.sh` (§3a) installs + enables them; if no
+  19beta3/Windows build exists, soft-block per §3a (NOTICE, bare `chunks`, `migrate 0001`
+  queued). Recorded as a ruling in the SDD ledger, not an SP1 failure.
 
 ## 9. Document control
 
