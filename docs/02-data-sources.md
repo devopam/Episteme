@@ -1,73 +1,234 @@
-# Data Sources for Phase 0 – Episteme LLM Architecture
+# Data Sources — Episteme (Full Catalog)
 
-**Last updated:** August 2026
+**Last updated:** 2026-09-02  
+**Purpose:** Exhaustive *working inventory* of sources for **Stream 1** (parametric / SFT) and **Stream 2** (RAG / structured / incremental). Used to plan induction pipelines, rights posture, and pre-SSD sample work.  
+**Related:** `09-extraction-contract.md` (articles schema), `10-data-sources-runbook.md` (ops for sources already wired), `11-data-roadmap.md` (sequencing — optional; this file is the master *list*).
+
+---
 
 ## Overview
-A generic, open medical Large Language Model demands a bimodal data strategy that strictly segregates stable foundational knowledge from dynamic, proprietary data[cite: 8]. This document outlines the distinct data pipelines for the LLM's parametric memory (Stream 1) and the relational database Retrieval-Augmented Generation layer (Stream 2). Datasets bearing Non-Commercial (NC) restrictions, requiring proprietary enterprise licensing, or containing real patient clinical records are systematically excluded or tightly access-controlled[cite: 8].
+
+Episteme uses a **bimodal** data strategy:
+
+| Stream | Role | Typical landing zone |
+|--------|------|----------------------|
+| **Stream 1** | Pre-training & SFT — open, redistributable, relatively stable text | `episteme.articles` / SFT shards / protein text tables |
+| **Stream 2** | RAG, SQL/KG, versioned vocabularies, volatile regulatory data | Postgres / Iceberg / vector index; **RBAC** where licensed |
+
+**Rules of thumb**
+
+- **NC (Non-Commercial)** → not in commercial parametric mixes; optional research track only.  
+- **Paid / affiliate licenses** (MedDRA, WHODrug, many SNOMED deployments) → **Stream 2 only**, and only when the *deployer* holds a license — not in public open-induction bulk by default.  
+- **Real patient notes** → red-list.  
+- Induction before SSD: build **download + sample extract** for each source; full volume after disk arrives (~2026-09-08).
 
 ---
 
-## Stream 1: LLM Pre-training & SFT (Parametric Memory)
-This stream is dedicated exclusively to open, commercially viable, and relatively stable foundational knowledge. The objective is to teach the model biomedical syntax, diagnostic reasoning pathways, fundamental chemistry concepts, and domain terminology without memorizing volatile specifics.
+## Stream 1 — Parametric memory & SFT
 
-### 1. Foundational Biomedical Literature
-*   **PubMed Baseline (Abstracts & Metadata):** Provides the core scientific language foundation[cite: 8]. Available via FTP (`ftp://ftp.ncbi.nlm.nih.gov/pubmed/baseline/`)[cite: 8].
-*   **PMC Open Access Subset (Commercial Use):** Full-text articles restricted strictly to CC0, CC BY, CC BY-SA, and CC BY-ND licenses[cite: 8]. Bulk retrieved via AWS RODA or PMC FTP (`https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/`)[cite: 8].
-*   **OpenAlex Biomedical Knowledge Graph:** Massive open knowledge graph of scholarly metadata and open-access links (CC0 license)[cite: 8]. Retrieve via Amazon S3 (`s3://openalex`)[cite: 8].
-*   **PubChem (Text Serialization):** Public domain chemical taxonomy[cite: 8]. Rather than injecting the raw databases, serialize PubChem's structured JSON/XML records into declarative natural language sentences to teach fundamental chemical constraints safely.
+### 1.1 Foundational biomedical literature
 
-### 2. Clinical Guidelines & Educational Pedagogy
-*   **EPFL Meditron Guidelines Corpus:** Over 35,000 cleaned clinical practice guidelines from major health organizations (WHO, CDC, NICE)[cite: 8]. Download via Hugging Face (`epfl-llm/guidelines`)[cite: 8].
-*   **OpenMedText:** 121,489 MDPI journal articles (CC BY 4.0) and 29 open-source textbooks[cite: 8]. *Note: Subdirectories with NC licenses must be programmatically excluded.*
+| Source | What it contributes | Rights posture (typical) | Bulk / access | Induction status (Episteme) |
+|--------|---------------------|--------------------------|---------------|-----------------------------|
+| **PubMed** (baseline + daily updates) | Abstracts, MeSH, citation language | NLM redistribution terms; treat as `open_metadata` | NCBI FTP | **In progress** — extractor proven |
+| **PMC OA Commercial (`oa_comm`)** | Full text CC0 / CC BY / BY-SA / BY-ND | Commercial-friendly OA only | AWS Open Data `pmc-oa-opendata` | **Sample done**; full on SSD |
+| **PMC OA non-commercial / other** | Extra full text | NC or mixed — **exclude from commercial train** | Same bucket families | Track separately if research-only |
+| **Europe PMC preprints** | Full-text preprints | Per-article CC; filter NC | EBI FTP | **Done** (5 archives) |
+| **Europe PMC author manuscripts** | Accepted manuscripts | Text-mining / copyright notices | EPMC FTP | Raw partial; extractor optional |
+| **Europe PMC OA journals** | Overlap with PMC; EU-weighted | License-filter | EPMC / NCBI | Prefer NCBI `oa_comm` to avoid dup |
+| **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Not started** — strong metadata/KG candidate |
+| **Semantic Scholar Open Research Corpus / abstracts** | Extra abstract coverage | Check current ToS/license | API / releases | Candidate |
+| **PubChem** (serialized to NL) | Chemistry taxonomy & structure–name language | Public domain (US gov) | PubChem FTP/API | **Not started** — serialize JSON→sentences |
+| **Europe PMC / PMC ID mappings** | PMID–PMCID–DOI joins | Open | EPMC FTP | **Re-download integrity**; load `id_map` |
 
-### 3. Multilingual & Synthetic Clinical Corpora
-*   **MMedC (Multilingual Medical Corpus):** ~25.5 billion tokens across English, French, Chinese, and Spanish[cite: 8]. Hosted on Hugging Face (`Henrychur/MMedC`)[cite: 8].
-*   **ApolloCorpora:** Multilingual books, papers, and QA datasets[cite: 8]. Hosted on Hugging Face (`FreedomIntelligence/ApolloCorpus`)[cite: 8].
-*   **PARHAF / PARCOMED:** Thousands of French clinical reports describing strictly fictitious, synthetic patients to bypass privacy regulations (CC BY 4.0 / Etalab 2.0).
+### 1.2 Guidelines & educational text
 
-### 4. Supervised Fine-Tuning (SFT) Datasets
-*   **MedMCQA:** 194,000 multiple-choice questions from medical entrance exams detailing the rationale of diagnostic deduction[cite: 8].
-*   **Medprompt (CoT and ToT):** Chain-of-Thought and Tree-of-Thoughts reasoning architectures designed to teach step-by-step logical evaluation[cite: 8].
-*   **PubMedQA:** Trains probabilistic reasoning by forcing binary or "maybe" responses to express clinical uncertainty[cite: 8].
-*   **mmlu-medical-MedGENIE:** Medical open-domain QA containing generated factual contexts[cite: 8].
+| Source | What it contributes | Rights posture | Bulk / access | Induction status |
+|--------|---------------------|----------------|---------------|------------------|
+| **EPFL Meditron guidelines** | Clinical practice guideline prose (WHO, CDC, NICE mixes — verify each) | Corpus license on HF; **per-source** restrictions may apply (e.g. NICE outside UK) | `epfl-llm/guidelines` | **Not started** — sample + license audit |
+| **OpenMedText** | MDPI CC BY articles + open textbooks | CC BY; **exclude NC subdirs** | Project release | **Not started** |
+| **WHO guidelines (where CC/open)** | Public health guidance | Mixed — only explicitly open items | WHO IR / publications | Selective |
+| **CDC / open government guidance (US)** | Public domain US federal text where applicable | Public domain (US) | cdc.gov / FTP | Selective |
+| **Open textbooks** (e.g. selected LibreTexts, NCBI Bookshelf OA) | Pedagogy, definitions | Per-book license | Various | Catalog per title |
+
+### 1.3 Multilingual & synthetic corpora
+
+| Source | What it contributes | Rights posture | Bulk / access | Induction status |
+|--------|---------------------|----------------|---------------|------------------|
+| **ApolloCorpus** | Multilingual medical books/papers/QA | Corpus license — **diligence before commercial** | HF `FreedomIntelligence/ApolloCorpus` | **Sample done** (~1M+ rows); more shards optional |
+| **MMedC** | Large multilingual medical tokens | **Often research/NC-leaning — audit before commercial** | HF `Henrychur/MMedC` | Deferred pending license |
+| **PARHAF / PARCOMED** | Synthetic French clinical narratives (fictitious patients) | CC BY / Etalab-class | Project releases | Candidate (privacy-safe synthetic) |
+| **Other synthetic clinical** (e.g. open synthetic EHR-style where truly non-PHI) | Instruction-style clinical language | Per dataset | HF / papers | Case-by-case |
+
+### 1.4 SFT / reasoning datasets
+
+| Source | What it contributes | Rights posture | Access | Induction status |
+|--------|---------------------|----------------|--------|------------------|
+| **MedMCQA** | Exam-style MCQ + rationales | Dataset license (check HF) | HF | **Not started** |
+| **PubMedQA** | Yes/no/maybe + context | Open research norms / license on release | HF / official | **Not started** |
+| **MedQA / USMLE-style open sets** | Clinical exam reasoning | Per release | HF | Candidate |
+| **mmlu / medical subsets / MedGENIE-style** | Broad + medical QA | Per release | HF | Candidate |
+| **Medprompt-style CoT/ToT collections** | Explicit reasoning chains | Depends on underlying items | Constructed | Build only from Stream-1-clean sources |
+| **BioASQ** (where redistributable) | Biomedical QA | Task licenses | BioASQ | Candidate |
+
+### 1.5 Molecular narrative (text for model, not only SQL)
+
+| Source | What it contributes | Rights posture | Access | Induction status |
+|--------|---------------------|----------------|--------|------------------|
+| **UniProtKB Swiss-Prot** | Curated protein function, names, annotation narrative | UniProt license — generally open with attribution | `ftp.uniprot.org` | **Next strong candidate** (still maintained 2026) |
+| **UniProtKB TrEMBL** (selective) | Broader sequences/annotation | Same family; prefer reference proteomes post-2026 reshaping | FTP | Later / selective |
+| **Gene Ontology** (annotations + definitions) | Function vocabulary in text form | CC BY 4.0 (GO) | geneontology.org | Candidate |
+| **Reactome** (pathway summaries) | Pathway biology language | CC0 / open (confirm current) | reactome.org | Candidate |
+| **Open Targets** (text fields) | Target–disease evidence narratives | Open / EMBL-EBI terms | Platform download | Candidate |
+| **GUIDE TO PHARMACOLOGY (IUPHAR/BPS)** | Receptor/drug class expert summaries | Check database terms | Keep as Stream 1 or 2 per license | Candidate |
 
 ---
 
-## Stream 2: RAG & Knowledge Layer (Incremental Ingestion Pipelines)
-This stream is strictly reserved for dynamic, highly specific, version-dependent, and heavily structured data. These sources are natively ingested into local relational databases (e.g., PostgreSQL / `MCPg`) and kept up-to-date via automated incremental pipelines.
+## Stream 2 — RAG, relational, versioned knowledge
 
-### 1. Pharmacological & Biochemical Databases
-These massive relational webs belong in the database, allowing the model to execute exact, deterministic SQL queries for binding affinities, targets, and molecular weights.
-*   **ChEMBL:** 2.9 million bioactive compounds and 24.5 million bioactivity measurements.
-    *   *Pipeline Strategy:* Periodic bulk PostgreSQL database dumps downloaded via the ChEMBL FTP site.
-*   **SureChEMBL:** Chemical entities extracted from patent literature with mechanism mappings.
-    *   *Pipeline Strategy:* Biweekly incremental Apache Parquet file updates.
-*   **UniProt:** Over 245 million protein sequences (Swiss-Prot / TrEMBL).
-    *   *Pipeline Strategy:* Full release updates occur roughly every eight weeks; fetch FASTA and XML subsets via `ftp.uniprot.org`.
-*   **ClinVar:** Millions of human genetic variants and phenotypes.
-    *   *Pipeline Strategy:* Regular XML and VCF updates via NCBI FTP.
+*Ingest to DB / Iceberg / indexes; incremental updates; not default full-weight pretrain.*
 
-### 2. Structured Clinical Trials & Regulatory Metadata
-Regulatory frameworks and trial protocols are highly volatile and must be dynamically retrieved to prevent hallucinating outdated dosages or side effects.
-*   **AACT (ClinicalTrials.gov Data):** A complete relational database of global clinical trials[cite: 8]. 
-    *   *Pipeline Strategy:* Utilize `pg_restore` on the monthly/daily PostgreSQL dump updates provided directly by AACT (`https://aact.ctti-clinicaltrials.org/downloads`)[cite: 8].
-*   **DailyMed (Structured Product Labeling - SPL):** The FDA's most recent labeling for prescription and non-prescription drugs.
-    *   *Pipeline Strategy:* Implement an automated pipeline to ingest the Daily, Weekly, or Monthly ZIP file updates containing XML indexing and SPL files from the NLM's Download Data endpoint.
-*   **openFDA:** Structured APIs for drug labeling, adverse events, product recalls, and the NDC Directory.
-    *   *Pipeline Strategy:* Query JSON incremental endpoints directly to maintain a real-time cache of adverse event reports and FDA enforcement actions.
+### 2.1 Pharmacology & biochemistry (structured)
 
-### 3. Proprietary Vocabularies & Ontologies (RBAC Protected)
-These terminologies carry severe legal restrictions, requiring multi-tenant Role-Based Access Control (RBAC) mechanisms within the enterprise RAG layer to ensure compliance.
-*   **SNOMED CT:** Requires specific affiliate licenses based on end-users.
-*   **MedDRA:** Highly proprietary, requiring paid subscriptions for commercial pharmaceutical application.
-*   **ICD / UCUM / RxNorm:** Managed dynamically for versioned clinical mapping.
+| Source | What it contributes | Update pattern | Access | Induction status |
+|--------|---------------------|----------------|--------|------------------|
+| **ChEMBL** | Bioactivities, structures, assays | Periodic Postgres dumps | EBI FTP | **Not started** — dump → Postgres/Parquet |
+| **SureChEMBL** | Patent chemistry | Parquet / periodic | EBI | Candidate |
+| **PubChem** (structured) | Compounds, assays, synonyms | Frequent | NCBI | API + bulk |
+| **UniProt** (structured cross-refs) | Accession graphs, features | ~8-week releases | FTP | Pair with Swiss-Prot text |
+| **PDB / RCSB** | Structures, metadata | Continuous | wwPDB | Metadata + optional text |
+| **BindingDB** (if license OK) | Binding affinities | Periodic | Site | Check terms |
+| **ClinVar** | Variant–phenotype | Regular | NCBI FTP | VCF/XML pipelines |
+| **dbSNP** (summary use) | Variant catalog | Periodic | NCBI | Selective |
+
+### 2.2 Trials, labels, regulatory (volatile)
+
+| Source | What it contributes | Update pattern | Access | Induction status |
+|--------|---------------------|----------------|--------|------------------|
+| **AACT** (ClinicalTrials.gov) | Full trials relational DB | Monthly / daily dumps | CTTI downloads | **High value** — `pg_restore` sample |
+| **ClinicalTrials.gov** API prose | Public study descriptions | Continuous | API | Complement AACT |
+| **DailyMed** (SPL XML) | US labeling | Daily/weekly/monthly zips | NLM | **High value** — sample ZIP parse |
+| **openFDA** | Labels, FAERS, recalls, NDC | API / bulk | open.fda.gov | Incremental JSON |
+| **Drugs@FDA / Orange Book** | Approval & exclusivity | Periodic | FDA | Structured RAG |
+| **EMA open data** (selected) | EU assessment / shortages where open | Varies | EMA | Jurisdiction-specific |
+| **FAERS** (public) | Adverse event reports | Quarterly / openFDA | FDA | RAG analytics |
+
+### 2.3 Open or semi-open terminologies & units
+
+| Source | What it contributes | License notes | Induction status |
+|--------|---------------------|---------------|------------------|
+| **UCUM** | Units of measure | UCUM license (typically free use with notice — confirm) | **List for Stream 2**; small artifact |
+| **MeSH** | Subject headings | NLM terms | Align with PubMed extract |
+| **RxNorm** | Drug names / normal forms | **UMLS license** required | Stream 2 if license held |
+| **LOINC** | Lab/observation codes | LOINC license (free but terms) | Stream 2 |
+| **HPO** | Phenotype terms | Open | Stream 2 / KG |
+| **MONDO** | Disease ontology | Open | Stream 2 / KG |
+| **ICD-10 / ICD-11** | Diagnosis coding | **WHO license terms** — not “public domain dump” everywhere | Stream 2 only with rights |
+| **ATC** (WHO) | Anat. therapeutic chemical class | WHO terms | Stream 2 with rights |
+| **ORDO / rare disease** | Rare disease ontology | Check | Candidate |
+| **NCIt** | NCI thesaurus | Open-ish NCI terms | Candidate |
+
+### 2.4 Licensed vocabularies (RBAC / customer-supplied only)
+
+*Do not put in public Episteme open-induction FTP scripts. Support as **optional connectors** when the customer provides licensed data.*
+
+| Source | Role | Notes |
+|--------|------|-------|
+| **MedDRA** | AE / safety coding | Paid MSSO license |
+| **WHODrug** / WHO DD | Drug dictionary for PV | UMC/WHO licensing |
+| **SNOMED CT** | Clinical terminology | Affiliate / national license |
+| **MedDRA IME list** | Important Medical Events | **Depends on MedDRA** |
+| **EMA DME / similar DME lists** | Designated Medical Events | Often MedDRA-coded; rights follow MedDRA + publisher |
+| **Country-specific drug dictionaries** | Local PV / claims | Per country |
+
+**DME / IME:** Treat as **Stream 2, license-bound** (usually MedDRA-linked), not Stream 1 tokens.
+
+### 2.5 Knowledge-graph & graph-adjacent open sets
+
+| Source | Role | Notes |
+|--------|------|-------|
+| **OpenAlex** | Works–authors–concepts graph | Also listed under Stream 1 metadata |
+| **SemMedDB** (if still available / license OK) | Predications from PubMed | Historical; verify redistribution |
+| **PrimeKG / open medical KGs** | Integrated disease–drug–gene graphs | Per project license on HF/Zenodo |
+| **Hetionet** | Integrated network | Open | Candidate |
+| **DrugBank open subsets** (if any remain open) | Drug targets | Much of DrugBank is licensed — audit |
 
 ---
 
-## 3. Explicit Exclusions (The Red-List)
-The following sources are **PROHIBITED** from both open streams due to insurmountable legal, privacy, or technical barriers[cite: 8]:
-*   **Real Patient Clinical Notes (e.g., MIMIC-IV, eICU):** Require credentialed access and risk severe HIPAA/privacy violations[cite: 8].
-*   **WHO ICTRP:** Prohibited due to explicit Non-Commercial clauses regarding data extraction[cite: 8].
-*   **EU CTR & CTRI:** Excluded due to the lack of reliable, automated bulk download infrastructure[cite: 8].
-*   **NICE Guidelines (Non-UK Use):** International commercial usage requires explicit licensing agreements and fees[cite: 8].
-*   **BiMediX & ArSyra:** Disqualified due to CC BY-NC-SA 4.0 restrictions and enterprise commercial license fees.
+## Red-list (prohibited / avoid for open Episteme)
+
+| Item | Reason |
+|------|--------|
+| **Real patient notes** (MIMIC, eICU, etc.) without full legal pathway | PHI / credentialed access |
+| **WHO ICTRP bulk scrape** against NC terms | NC / ToS |
+| **EU CTR / CTRI** without reliable open bulk rights & pipeline | Rights + engineering |
+| **NICE full commercial reuse outside allowed use** | Licensing |
+| **BiMediX / ArSyra-type NC corpora** for commercial weights | NC / paid |
+| **MedDRA / WHODrug / SNOMED dumps in public training corpus** | License |
+| **Any source with unclear commercial ML rights** | Until counsel/docs clear |
+
+---
+
+## Pre-SSD induction backlog (sample-first)
+
+Work that **does not need the full 8 TB** — build scripts + **small subset** extract now; full run after ~2026-09-08.
+
+| Priority | Source | Sample idea | Pipeline shape |
+|----------|--------|-------------|----------------|
+| P0 | PubMed scale | Already have pattern; more files | Existing extractor + workers |
+| P0 | PMC `oa_comm` | Already 20; keep tool hot | Existing |
+| P0 | Apollo remaining shards | 1–2 files already done | Existing |
+| P0 | ID mappings | Full file is small | Validate CSV → `id_map` |
+| P1 | **Swiss-Prot** | 1k entries or one taxon | New table `proteins` |
+| P1 | **AACT** | One Postgres dump subset / sample tables | `pg_restore` + document |
+| P1 | **DailyMed** | One daily ZIP | SPL XML → text + metadata |
+| P1 | **openFDA** drug labels | Paginated API sample | JSON → normalized table |
+| P1 | **ChEMBL** | SQLite/sample tables or subset dump | Relational Stream 2 |
+| P1 | **OpenAlex** biomed filter | S3 sample prefix | Metadata / graph edges |
+| P1 | **Meditron guidelines** | HF subset | License audit + text extract |
+| P1 | **PubChem** | Small compound batch | Serialize to NL sentences |
+| P2 | **UCUM** | Full (tiny) | Spec → table |
+| P2 | **GO / HPO / MONDO** | Full OBO/OWL | Ontology tables |
+| P2 | **ClinVar** | One VCF/XML slice | Stream 2 |
+| P2 | SFT packs (MedMCQA, PubMedQA, …) | Full (usually small) | JSONL → SFT store |
+| P2 | Author manuscripts | One baseline tar | JATS like preprints |
+| Later | MedDRA/WHODrug/SNOMED | **Only with customer license packs** | RBAC RAG connectors |
+
+---
+
+## Mapping to “what role in project success”
+
+| Capability | Primary sources |
+|------------|-----------------|
+| Biomedical language & argumentation | PubMed, PMC commercial, preprints, guidelines, Apollo |
+| Commercial full-text depth | PMC `oa_comm`, CC-clean guidelines/textbooks |
+| Multilingual | Apollo, MMedC *(if license OK)*, PARHAF/PARCOMED |
+| Chemistry language | PubChem serialized, ChEMBL (RAG/SQL), GtoPdb |
+| Protein function | Swiss-Prot (± GO/Reactome) |
+| Trials & protocols | AACT, CT.gov API |
+| Labels & safety signals (public) | DailyMed, openFDA, FAERS |
+| Precise coding (AE, drugs, clinical) | **Licensed** MedDRA / WHODrug / SNOMED via RAG — not open pretrain |
+| Units | UCUM |
+| Graph reasoning | OpenAlex, open KGs, internal joins via ID maps |
+
+---
+
+## Relationship to other docs
+
+| Doc | Role |
+|-----|------|
+| **This file (`02-data-sources.md`)** | **Master catalog** — what exists and why |
+| `10-data-sources-runbook.md` | How we download/operate sources already implemented |
+| `09-extraction-contract.md` | Schema/ops for literature-like extracts |
+| `11-data-roadmap.md` | Suggested sequencing; **subordinate** to this catalog |
+
+When a new source is added, update **this file first**, then runbook + extractor.
+
+---
+
+## Document control
+
+| Version | Date | Notes |
+|---------|------|-------|
+| Aug 2026 | Prior | Original Stream 1 / 2 architecture notes |
+| 2026-09-02 | Enrichment | Full catalog; induction status; DME/IME/UCUM; pre-SSD backlog; licensed vs open clarified; Swiss-Prot not sole focus |
