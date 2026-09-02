@@ -30,10 +30,17 @@ PostgreSQL **19** reachable via `PG*` env vars — the operator's local install 
 (`PGDATABASE=episteme`, create/drop tables freely) and a separate throwaway DB at
 `TEST_PG_DSN` (`dbname=episteme_test`) for `pg`-marked tests. The real `NCBI_API_KEY` and
 these connection values are written to the repo-root `./.env` (gitignored) when SP1-β
-creates it — **never** into `.env.example` or any committed file. `pgvector` + `pg_search` installed if available on this build; otherwise
-`extensions.sql` records them skipped (Phase-1-dormant regardless). `init_database.sh`
-probes for SQL/PGQ and configures `graph_builder`'s default query path accordingly
-(PGQ if present, recursive-CTE if not) — SP1 ships working either way.
+creates it — **never** into `.env.example` or any committed file. **Environment probed 2026-09-02:** PostgreSQL **19beta3** on `localhost:5433`.
+- **SQL/PGQ present** — `CREATE PROPERTY GRAPH` parses. `graph_builder` uses the PGQ path
+  as primary; the recursive-CTE path is retained only for portability/CI (`init_database.sh`
+  still probes and records the result).
+- **`vector` (pgvector) and `pg_search` NOT available** on this build. `extensions.sql`
+  emits a NOTICE and continues; the `chunks` table is created **without** the `embedding` /
+  `chunk_tsv` columns (Phase-1-dormant regardless). Add them via `migrate_database.sh` when
+  the extensions are installed.
+- **`pg_stat_statements` 1.13** available — enabled by `init_database.sh`.
+- Only the `postgres` database exists; `init_database.sh` (run as superuser `postgres`)
+  creates `episteme`, `episteme_test`, and the `episteme_app` role.
 
 ## 3. Internal phasing
 
@@ -178,11 +185,14 @@ on `_audit`. The pipeline connects as `episteme_app` (`.env` `PGUSER=episteme_ap
 append-only `_audit` guarantee is actually enforced (a superuser bypasses grants). `TEST_PG_DSN`
 also uses `episteme_app`.
 - **Property graph** — `CREATE PROPERTY GRAPH episteme_graph VERTEX TABLES (articles …)
-  EDGE TABLES (article_cites …, article_mesh …)` wrapped so a parse failure on a
-  non-PGQ build is caught by `init_database.sh` and logged, not fatal.
+  EDGE TABLES (article_cites …, article_mesh …)`. SQL/PGQ is present on the target
+  (19beta3), so this is expected to succeed; `init_database.sh` still wraps it so a parse
+  failure on some other build is logged, not fatal.
 
-`extensions.sql`: `CREATE EXTENSION IF NOT EXISTS vector;` / `pg_search;` each in its own
-`DO $$ … EXCEPTION WHEN undefined_file THEN RAISE NOTICE … $$;` guard.
+`extensions.sql`: `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` (available), and
+`vector` / `pg_search` each in a `DO $$ … EXCEPTION WHEN undefined_file THEN RAISE NOTICE
+… $$;` guard (both absent on 19beta3 → NOTICE, non-fatal). `chunks` (§ above) is created
+without `embedding` / `chunk_tsv` until those extensions land, via `migrate_database.sh`.
 
 ---
 
