@@ -5,7 +5,12 @@ import pytest
 import shutil
 import json
 from unittest.mock import patch
-from episteme.model_pipeline import train_cpt, train_sft, train_preference, evaluate
+from episteme.model import (
+    train_continual_pretraining as train_cpt,
+    train_supervised_finetuning as train_sft,
+    train_preference_optimization as train_preference,
+    evaluate_benchmarks as evaluate,
+)
 
 
 def test_cpt_dry_run():

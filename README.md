@@ -56,16 +56,16 @@ The model pipeline supports model-switching (config-driven base checkpoints), pa
 
 ```bash
 # Stage 1: Continual Pre-training (CPT)
-python -m episteme.model_pipeline.train_cpt.py --model_name_or_path HuggingFaceM4/tiny-random-LlamaForCausalLM --medical_data_path ./data/pretrain_corpus_clean.jsonl --output_dir ./models/cpt_output --dry_run
+python -m episteme.model.train_continual_pretraining --model_name_or_path HuggingFaceM4/tiny-random-LlamaForCausalLM --medical_data_path ./data/pretrain_corpus_clean.jsonl --output_dir ./models/cpt_output --dry_run
 
 # Stage 2: Supervised Fine-Tuning (SFT) with LoRA
-python -m episteme.model_pipeline.train_sft.py --model_name_or_path ./models/cpt_output --output_dir ./models/sft_output --dry_run
+python -m episteme.model.train_supervised_finetuning --model_name_or_path ./models/cpt_output --output_dir ./models/sft_output --dry_run
 
 # Stage 3: Direct Preference Optimization (DPO) with LoRA
-python -m episteme.model_pipeline.train_preference.py --model_name_or_path ./models/sft_output --output_dir ./models/dpo_output --dry_run
+python -m episteme.model.train_preference_optimization --model_name_or_path ./models/sft_output --output_dir ./models/dpo_output --dry_run
 
 # Evaluation: Score accuracy on MedMCQA and PubMedQA
-python -m episteme.model_pipeline.evaluate --model_name_or_path ./models/dpo_output --output_file ./data/eval_report.json --sample_only
+python -m episteme.model.evaluate_benchmarks --model_name_or_path ./models/dpo_output --output_file ./data/eval_report.json --sample_only
 ```
 
 ### 3. Running Automated Tests
