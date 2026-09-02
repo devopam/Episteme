@@ -26,12 +26,12 @@ python -m venv .venv
 # Upgrade pip
 python -m pip install --upgrade pip
 
-# Install in editable mode (installs all dependencies declared in pyproject.toml)
+# Install in editable mode (core only: python-dotenv + tqdm; feature deps are in optional groups below)
 pip install -e .
 ```
 
 To install optional feature groups:
-- Data pipeline: `pip install -e ".[data]"`
+- Data pipeline: `pip install -e ".[data]"` — required by the data-acquisition scripts (e.g. `scripts/download_pmc_oa_comm.sh`), which import `requests`/`pandas`/etc.
 - Model training: `pip install -e ".[model]"`
 - Development & tests: `pip install -e ".[dev]"`
 
@@ -39,7 +39,8 @@ To install optional feature groups:
 
 ### 1. Data Pipeline
 
-The data pipeline is driven by per-source scripts under `scripts/data/` and
+The data pipeline is driven by per-source scripts under `scripts/` (a
+per-source `scripts/data/` layout is coming in a later phase) and
 documented end-to-end (first-time and incremental) in
 [`docs/10-data-sources-runbook.md`](docs/10-data-sources-runbook.md).
 Corpus-level curation lives in `episteme.data.curate`

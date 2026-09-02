@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +30,8 @@ from urllib.parse import urlencode
 
 import requests
 from tqdm import tqdm
+
+from episteme.config import get_settings
 
 S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
 
@@ -371,7 +372,7 @@ def main() -> None:
     parser.add_argument(
         "--api_key",
         type=str,
-        default=os.environ.get("NCBI_API_KEY"),
+        default=get_settings().ncbi_api_key,
         help="NCBI API key (or env NCBI_API_KEY)",
     )
     parser.add_argument(

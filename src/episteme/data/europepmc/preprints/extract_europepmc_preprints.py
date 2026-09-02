@@ -4,7 +4,7 @@ Episteme – Europe PMC preprint full-text XML.gz → episteme.articles (v1.1).
 
 Unit of work: one range archive (e.g. PPR1080877_PPR1238855.xml.gz).
 
-  python -m episteme.data.epmc.preprint_extract \\
+  python -m episteme.data.europepmc.preprints.extract_europepmc_preprints \\
     --raw-dir ./01_raw/europepmc/preprints \\
     --processed-dir ./02_processed \\
     --max-files 1 --workers 1
@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from xml.etree import ElementTree as ET
 
-_SRC = Path(__file__).resolve().parents[3]
+# TODO(Plan 2): remove this sys.path bootstrap when the extract modules are reworked
+_SRC = Path(__file__).resolve().parents[4]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
