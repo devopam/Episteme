@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
+from dotenv import load_dotenv
 
 
 class ConfigError(RuntimeError):
@@ -34,6 +34,23 @@ def _get_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _find_project_dotenv() -> str | None:
+    """Path to the project-root .env, or None.
+
+    The project root is the nearest ancestor of the current working
+    directory that contains ``pyproject.toml``. The search is bounded:
+    it never looks above the project root, so a ``.env`` planted in an
+    unrelated ancestor directory cannot inject configuration into an
+    Episteme run.
+    """
+    here = Path.cwd()
+    for directory in (here, *here.parents):
+        if (directory / "pyproject.toml").is_file():
+            env_path = directory / ".env"
+            return str(env_path) if env_path.is_file() else None
+    return None
 
 
 @dataclass(frozen=True)
@@ -67,7 +84,9 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    load_dotenv(find_dotenv(usecwd=True))  # reads ./.env if present; real env vars still win
+    dotenv_path = _find_project_dotenv()
+    if dotenv_path:
+        load_dotenv(dotenv_path)  # loads the project-root .env if present; real env vars still win
     return Settings(
         raw_root=Path(_get("EPISTEME_RAW_ROOT", "./01_raw")),
         processed_root=Path(_get("EPISTEME_PROCESSED_ROOT", "./02_processed")),
