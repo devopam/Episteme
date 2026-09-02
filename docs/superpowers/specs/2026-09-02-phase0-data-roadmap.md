@@ -302,7 +302,24 @@ stages to `thread` once the free-threaded build + `lxml` / `pyarrow` / `psycopg`
 ship solid free-threading support is a one-line default change, not a rewrite. `requires-python`
 stays `>=3.10`; CI tests on 3.13 and 3.14 (GIL build).
 
-### 4.10 Idempotency & restart (frozen)
+### 4.10 Data-volume library choices (frozen)
+
+Default to **streaming / lazy / out-of-core** — never load a whole large file into RAM.
+
+| Job | Library |
+|---|---|
+| DataFrame ops, CSV/TSV/Parquet read+write at volume | **Polars** lazy (`scan_*`, `sink_parquet`) — already a `[data]` dep |
+| SQL-shaped transforms, cross-engine moves (Postgres → transform → partitioned Parquet), structured-dump joins | **DuckDB** (`postgres` + `parquet` + `sqlite` scanners) — used by `corpus_materializer` and SP4 serializers |
+| Low-level Parquet / Arrow (staging shards) | **pyarrow** |
+| Large XML (JATS, MEDLINE) | streaming — `lxml.iterparse` / `xml.sax`, never a DOM load |
+| Near-dup / n-gram scrub | `datasketch` MinHash + plain loops (library choice ~irrelevant) |
+
+**`pandas` only where an upstream library hands one back.** SP4 rewrites the current
+`data/curate/serialize_structured_sources.py::process_chembl_csv` (`pd.read_csv`) onto Polars;
+`pandas` is removed from `[data]` once nothing else imports it. `vaex` is **not** adopted
+(unmaintained since ~2023; Polars/DuckDB supersede its out-of-core niche).
+
+### 4.11 Idempotency & restart (frozen)
 
 Unit of work = one input file. Success = fully parsed **and** rows committed **and** success
 marker written. Retry replaces prior rows for that `source_file` (`DELETE WHERE source_file=$1`
