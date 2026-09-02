@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="research-article">
+  <front>
+    <journal-meta><journal-title-group><journal-title>Test Journal</journal-title></journal-title-group></journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmc">PMCFIX0001</article-id>
+      <article-id pub-id-type="pmid">40000001</article-id>
+      <article-id pub-id-type="doi">10.0000/fix.0001</article-id>
+      <article-categories>
+        <subj-group subj-group-type="heading"><subject>Research Article</subject></subj-group>
+      </article-categories>
+      <title-group><article-title>A fixture article about acetylcholinesterase</article-title></title-group>
+      <contrib-group>
+        <contrib contrib-type="author"><name><surname>Doe</surname><given-names>Jane</given-names></name></contrib>
+      </contrib-group>
+      <pub-date pub-type="epub"><year>2024</year></pub-date>
+      <permissions>
+        <license xlink:href="https://creativecommons.org/licenses/by/4.0/">
+          <license-p>This is an open access article under the CC BY 4.0 license.</license-p>
+        </license>
+      </permissions>
+      <abstract><p>This fixture abstract is long enough to exceed the minimum ok text length so that the extractor marks it ok rather than partial, and it mentions acetylcholinesterase inhibition for the decontamination path.</p></abstract>
+      <kwd-group><kwd>Acetylcholinesterase</kwd><kwd>Fixture</kwd></kwd-group>
+    </article-meta>
+  </front>
+  <body><sec><title>Introduction</title><p>Body text of the fixture article.</p></sec></body>
+</article>
