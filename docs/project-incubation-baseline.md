@@ -62,3 +62,5 @@
   Environment config centralised in `.env` + `episteme.config`. License standardised on MIT.
   Storage decision reversed (Iceberg/OpenMetadata-filesystem -> Postgres hybrid + Parquet
   corpus) — implemented in Plan 2; ADR-0001/0002 to be authored there.
+- 2026-09-03: SP1-α verification sweep (plan `docs/superpowers/plans/2026-09-02-sp1a-renames.md`, spec `docs/superpowers/specs/2026-09-02-sp1-storage-core.md`).
+  Tasks 1–5 landing: config EPISTEME_DATA_ROOT + Settings.{raw,processed,warehouse}_root added; module renames (schema→article_schema, ops→checkpoint_markers, writer→staging_writer) with pre-branch history verified; extract_pmc.py merged from upstream PMC extractor logic with importable core + guarded audit. All 36 tests pass; import sweep clean; no stale module references; ruff clean on modified source files.

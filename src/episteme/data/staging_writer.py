@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from episteme.data.article_schema import ARTICLE_COLUMNS
 
