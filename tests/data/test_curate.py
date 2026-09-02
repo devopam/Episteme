@@ -3,9 +3,13 @@ import sys
 import tempfile
 import pandas as pd
 import pytest
-from episteme.data_pipeline.preprocess import serialize_uniprot, process_chembl_csv, filter_and_process_openmedtext
-from episteme.data_pipeline.dedup import get_shingles
-from episteme.data_pipeline.decontaminate import normalize_text, get_ngrams
+from episteme.data.curate.serialize_structured_sources import (
+    serialize_uniprot,
+    process_chembl_csv,
+    filter_and_process_openmedtext,
+)
+from episteme.data.curate.deduplicate_corpus import get_shingles
+from episteme.data.curate.decontaminate_benchmarks import normalize_text, get_ngrams
 
 
 def test_serialize_uniprot():
