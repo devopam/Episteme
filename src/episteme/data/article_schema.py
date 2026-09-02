@@ -165,7 +165,8 @@ def finalize_row(row: dict[str, Any]) -> dict[str, Any]:
     out.update({k: v for k, v in row.items() if k in out})
 
     if not out.get("text"):
-        out["text"] = build_text(out.get("title"), out.get("abstract"), out.get("body_text")) or None
+        text = build_text(out.get("title"), out.get("abstract"), out.get("body_text"))
+        out["text"] = text or None
 
     has_id = bool(out.get("id") or out.get("pmid") or out.get("pmcid") or out.get("doi"))
     status, notes = decide_extract_status(
