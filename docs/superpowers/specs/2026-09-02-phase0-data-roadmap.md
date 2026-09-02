@@ -290,7 +290,19 @@ extract_commit serialize_commit load_commit load_replace graph_commit corpus_mat
 schema_migration force_override integrity_check manual_correction config_change`. ALCOA+
 fields per the 2026-09-01 spec §3.8.
 
-### 4.9 Idempotency & restart (frozen)
+### 4.9 Concurrency (frozen approach)
+
+Every `extract_` / `serialize_` module exposes `process_one(input_file, …) -> shard` (one
+input file → one staging shard, no shared state) and accepts `--workers N` +
+`--executor {process,thread}`. **CPU-bound stages default to `process`** (`ProcessPoolExecutor`
+on stock CPython — portable today, no C-extension free-threading dependency). **I/O-bound work**
+(downloads) uses threads / async / external tools (`aria2c`, `aws s3 sync`). The free-threaded
+build (`python3.14t`) is **not a requirement**: because the executor is swappable, flipping CPU
+stages to `thread` once the free-threaded build + `lxml` / `pyarrow` / `psycopg` / `pandas` all
+ship solid free-threading support is a one-line default change, not a rewrite. `requires-python`
+stays `>=3.10`; CI tests on 3.13 and 3.14 (GIL build).
+
+### 4.10 Idempotency & restart (frozen)
 
 Unit of work = one input file. Success = fully parsed **and** rows committed **and** success
 marker written. Retry replaces prior rows for that `source_file` (`DELETE WHERE source_file=$1`
