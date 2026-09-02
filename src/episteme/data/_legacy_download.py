@@ -1,3 +1,15 @@
+"""PARKED — pre-restructure multi-source downloader.
+
+Not imported anywhere. Its per-source functions are ported in Plan 3:
+    download_pubmed        -> data/pubmed/download_pubmed.py
+    download_pmc_oa        -> already superseded by data/pmc/download_pmc.py
+    download_europe_pmc    -> data/europepmc/preprints/download_europepmc_preprints.py
+    download_hf_datasets   -> data/apollo/download_apollo.py + eval-set fetch (TBD)
+    download_chembl,
+    download_uniprot       -> a future Stream 2 (RAG) ingestion module, not this tree
+Kept for reference + git history until each function has a real home.
+"""
+
 import os
 import sys
 import argparse
