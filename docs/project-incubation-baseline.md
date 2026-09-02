@@ -56,3 +56,9 @@
   - **Docs-vs-code drift:** `docs/07` and `docs/08` are marked *binding* (Parquet→Iceberg, `00_meta/…99_tmp/` layout, streaming `lxml.iterparse` PubMed→Parquet producing `articles`/`citations`/`mesh_assignments`, OpenMetadata catalog). None of this is implemented yet — `preprocess.py` buffers the whole corpus in memory and writes flat JSONL via `xml.etree`, extracts no MeSH or citation edges, and no `02_processed/` or `03_corpus/` tree exists.
   - **Correctness bug (cross-cutting):** every `--dry_run` / `--sample_only` flag is declared `action="store_true", default=True`, so it cannot be turned off from the CLI and there is no `--no-*` form. All README "real run" commands therefore still execute in mock mode (random-weight models, 30-string datasets, no-op decontamination). Fix before Phase 0 training work begins.
   - No fixes applied this pass — audit is report-only per skill Step 5; user to decide what to action.
+- 2026-09-01: Phase-1 restructure (spec `docs/superpowers/specs/2026-09-01-data-taxonomy-and-postgres-restructure-design.md`).
+  `src/episteme/{data_pipeline,model_pipeline}/` removed; subject-area taxonomy under
+  `data/<source>/` and `model/` with spelled-out `<stage>_<subjectarea>` module names.
+  Environment config centralised in `.env` + `episteme.config`. License standardised on MIT.
+  Storage decision reversed (Iceberg/OpenMetadata-filesystem -> Postgres hybrid + Parquet
+  corpus) — implemented in Plan 2; ADR-0001/0002 to be authored there.

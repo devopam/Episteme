@@ -30,25 +30,20 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
+To install optional feature groups:
+- Data pipeline: `pip install -e ".[data]"`
+- Model training: `pip install -e ".[model]"`
+- Development & tests: `pip install -e ".[dev]"`
+
 ## Usage
 
 ### 1. Data Pipeline
 
-The data pipeline gathers literature, serializes structured databases into readable prose, and handles deduplication/decontamination.
-
-```bash
-# Step 1: Download raw datasets (run in sample mode to check setup)
-python -m episteme.data_pipeline.download --dataset all --output_dir ./data --sample_only
-
-# Step 2: Preprocess and serialize raw data into standard JSONL corpus
-python -m episteme.data_pipeline.preprocess --input_dir ./data --output_file ./data/pretrain_corpus.jsonl
-
-# Step 3: Run near-deduplication using MinHash LSH
-python -m episteme.data_pipeline.dedup --input_file ./data/pretrain_corpus.jsonl --output_file ./data/pretrain_corpus_dedup.jsonl --threshold 0.8
-
-# Step 4: Decontaminate training data against test benchmarks
-python -m episteme.data_pipeline.decontaminate --input_file ./data/pretrain_corpus_dedup.jsonl --output_file ./data/pretrain_corpus_clean.jsonl --sample_only
-```
+The data pipeline is driven by per-source scripts under `scripts/data/` and
+documented end-to-end (first-time and incremental) in
+[`docs/10-data-sources-runbook.md`](docs/10-data-sources-runbook.md).
+Corpus-level curation lives in `episteme.data.curate`
+(`serialize_structured_sources`, `deduplicate_corpus`, `decontaminate_benchmarks`).
 
 ### 2. Model Pipeline
 

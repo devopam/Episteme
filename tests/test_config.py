@@ -14,7 +14,8 @@ def fresh_config(tmp_path, monkeypatch):
             monkeypatch.delenv(var, raising=False)
 
     def _load(text: str):
-        (tmp_path / "pyproject.toml").write_text("[project]\nname = \"episteme-test\"\n", encoding="utf-8")
+        toml_content = "[project]\nname = \"episteme-test\"\n"
+        (tmp_path / "pyproject.toml").write_text(toml_content, encoding="utf-8")
         env_file.write_text(text, encoding="utf-8")
         import episteme.config as cfg
         importlib.reload(cfg)
