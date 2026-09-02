@@ -34,8 +34,8 @@ def write_parquet_shard(
     source_file: str,
 ) -> list[Path]:
     """
-    Write one Parquet file per (source, year) group under:
-      warehouse/episteme/articles/data/source=.../year=.../<source_file>.parquet
+    Write one Parquet file for all rows under:
+      warehouse/staging/<source>/<stem>.parquet
     """
     if not rows:
         return []
@@ -48,13 +48,9 @@ def write_parquet_shard(
             "pyarrow is required for Parquet output. Install with: pip install pyarrow"
         ) from e
 
-    by_year: dict[int, list[dict[str, Any]]] = {}
-    for r in rows:
-        y = _year_partition(r.get("year"))
-        by_year.setdefault(y, []).append(r)
+    base = Path(warehouse_root) / "staging" / source
+    base.mkdir(parents=True, exist_ok=True)
 
-    written: list[Path] = []
-    base = Path(warehouse_root) / "episteme" / "articles" / "data"
     stem = Path(source_file).name
     # sanitize filename
     stem = stem.replace("/", "_")
@@ -63,34 +59,30 @@ def write_parquet_shard(
     if stem.endswith(".xml"):
         stem = stem[:-4]
 
-    for year, group in sorted(by_year.items()):
-        part_dir = base / f"source={source}" / f"year={year}"
-        part_dir.mkdir(parents=True, exist_ok=True)
-        out_path = part_dir / f"{stem}.parquet"
+    out_path = base / f"{stem}.parquet"
 
-        col_data = rows_to_columnar(group)
-        # list columns as list<string>
-        arrays = {}
-        for c, values in col_data.items():
-            if c in ("authors", "mesh", "publication_types"):
-                arrays[c] = pa.array(values, type=pa.list_(pa.string()))
-            elif c == "year":
-                arrays[c] = pa.array(
-                    [None if v is None else int(v) for v in values],
-                    type=pa.int32(),
-                )
-            elif c in ("is_retracted", "is_manuscript", "is_historical_ocr"):
-                arrays[c] = pa.array(values, type=pa.bool_())
-            else:
-                arrays[c] = pa.array(
-                    [None if v is None else str(v) if not isinstance(v, str) else v for v in values],
-                    type=pa.string(),
-                )
-        table = pa.table(arrays)
-        pq.write_table(table, out_path, compression="zstd")
-        written.append(out_path)
+    col_data = rows_to_columnar(rows)
+    # list columns as list<string>
+    arrays = {}
+    for c, values in col_data.items():
+        if c in ("authors", "mesh", "publication_types"):
+            arrays[c] = pa.array(values, type=pa.list_(pa.string()))
+        elif c == "year":
+            arrays[c] = pa.array(
+                [None if v is None else int(v) for v in values],
+                type=pa.int32(),
+            )
+        elif c in ("is_retracted", "is_manuscript", "is_historical_ocr"):
+            arrays[c] = pa.array(values, type=pa.bool_())
+        else:
+            arrays[c] = pa.array(
+                [None if v is None else str(v) if not isinstance(v, str) else v for v in values],
+                type=pa.string(),
+            )
+    table = pa.table(arrays)
+    pq.write_table(table, out_path, compression="zstd")
 
-    return written
+    return [out_path]
 
 
 def write_jsonl_shard(
@@ -101,9 +93,15 @@ def write_jsonl_shard(
     source_file: str,
 ) -> Path:
     """Fallback writer when pyarrow is unavailable."""
-    base = Path(warehouse_root) / "episteme" / "articles" / "jsonl" / f"source={source}"
+    base = Path(warehouse_root) / "staging" / source
     base.mkdir(parents=True, exist_ok=True)
-    stem = Path(source_file).name.replace("/", "_")
+    stem = Path(source_file).name
+    # sanitize filename
+    stem = stem.replace("/", "_")
+    if stem.endswith(".gz"):
+        stem = stem[:-3]
+    if stem.endswith(".xml"):
+        stem = stem[:-4]
     out_path = base / f"{stem}.jsonl"
     with out_path.open("w", encoding="utf-8") as f:
         for r in rows:

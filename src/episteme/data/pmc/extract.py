@@ -41,7 +41,7 @@ from episteme.data.article_schema import (  # noqa: E402
     subset_from_license,
     utc_now_iso,
 )
-from episteme.data.writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import write_rows  # noqa: E402
 
 SOURCE = "pmc_oa_comm"
 
