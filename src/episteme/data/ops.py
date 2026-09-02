@@ -7,7 +7,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from episteme.data.schema import SCHEMA_VERSION, utc_now_iso
+from episteme.data.article_schema import SCHEMA_VERSION, utc_now_iso
 
 
 def ops_root(processed_root: Path, source: str) -> Path:

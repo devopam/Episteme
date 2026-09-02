@@ -7,18 +7,21 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
+# Schema changelog:
+#   1.1  contract v1.1 (2026-08-31 sample audit): PMC provenance cols, license norm, status rules.
+#   1.2  (SP1-α, 2026-09-02): SOURCES extended to the full Phase-0 roadmap list.
+#        The row shape stays PROVISIONAL — refined per-source against real data before full load
+#        (roadmap §4.2). Bump this + append a line on every refinement.
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200
 
 SOURCES = (
-    "pubmed",
-    "pmc_oa_comm",
-    "epmc_preprint",
-    "epmc_manuscript",
-    "apollo",
-    "epmc_lite_metadata",
+    "pubmed", "pmc", "bookshelf",
+    "europepmc_preprint", "europepmc_manuscript", "europepmc_lite",
+    "apollo", "guidelines",
+    "chembl", "uniprot", "pubchem", "clinvar", "reactome", "mesh", "ontologies", "openalex",
 )
 
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")

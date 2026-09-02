@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from episteme.data.schema import ARTICLE_COLUMNS
+from episteme.data.article_schema import ARTICLE_COLUMNS
 
 
 def _year_partition(year: Any) -> int:
