@@ -17,7 +17,7 @@ PYTHON=python3
 command -v python3 >/dev/null 2>&1 || PYTHON=python
 
 # Expect PYTHONPATH to include .../src
-if ! "$PYTHON" -c "import episteme.data.pmc.extract" 2>/dev/null; then
+if ! "$PYTHON" -c "import episteme.data.pmc.extract_pmc" 2>/dev/null; then
   if [[ -d "./src" ]]; then
     export PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}"
   fi
@@ -31,7 +31,7 @@ echo "MAX_FILES : $MAX_FILES (0=all)"
 echo "WORKERS   : $WORKERS"
 echo "=================================================="
 
-exec "$PYTHON" -m episteme.data.pmc.extract \
+exec "$PYTHON" -m episteme.data.pmc.extract_pmc \
   --raw-dir "$RAW_DIR" \
   --processed-dir "$PROCESSED_DIR" \
   --max-files "$MAX_FILES" \
