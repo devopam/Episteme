@@ -1,1 +1,1 @@
-"""PubMed Central Open Access commercial subset (pmc_oa_comm)."""
+"""PubMed Central Open Access commercial subset (pmc)."""

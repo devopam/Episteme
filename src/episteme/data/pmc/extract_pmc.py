@@ -328,7 +328,7 @@ def process_one(
                 schema_version=SCHEMA_VERSION,
             )
         except NotImplementedError:
-            pass  # SP1-β: audit becomes mandatory
+            pass  # SP1-beta: audit becomes mandatory
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -451,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         workers=args.workers,
     )
+
+    if res["inputs"] == 0:
+        print(f"ERROR: no PMC*.json under {raw_dir}", file=sys.stderr)
+        return 1
 
     print(
         f"done inputs={res['inputs']} ok={res['ok']} "

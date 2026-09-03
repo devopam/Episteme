@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
 
     raw_dir = args.raw_dir
     processed_dir = args.processed_dir
-    warehouse = args.warehouse_dir or (processed_dir / "warehouse")
+    warehouse = args.warehouse_dir or processed_dir
     processed_dir.mkdir(parents=True, exist_ok=True)
     warehouse.mkdir(parents=True, exist_ok=True)
 
