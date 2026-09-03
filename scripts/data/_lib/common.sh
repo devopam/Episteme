@@ -52,6 +52,7 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
     [ -f "$env_file" ] || { log INFO "load_dotenv: no $env_file, skipping"; return 0; }
     local line key
     while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"                            # tolerate CRLF .env
         case "$line" in
             ''|'#'*) continue ;;
         esac
@@ -60,7 +61,12 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         key="${key#"${key%%[![:space:]]*}"}"            # ltrim
         key="${key%"${key##*[![:space:]]}"}"            # rtrim
         [ -n "${!key:-}" ] && continue                  # real env wins
-        export "$line"
+        val="${line#*=}"
+        case "$val" in                                  # strip one matching quote pair
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        export "$key=$val"
     done < "$env_file"
     log INFO "load_dotenv: loaded $env_file"
 }
