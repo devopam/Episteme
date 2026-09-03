@@ -29,6 +29,11 @@ data = [
     "pyeuropepmc>=0.1.0",
     "datasets>=2.14.0",
     "lxml>=5.0.0",
+    "psycopg[binary]>=3.2",
+    "psycopg_pool>=3.2",
+    "pgvector>=0.3",
+    "duckdb>=1.1",
+    "defusedxml>=0.7",
 ]
 model = [
     "torch>=2.0.0",
