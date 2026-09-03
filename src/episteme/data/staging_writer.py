@@ -9,15 +9,6 @@ from typing import Any
 from episteme.data.article_schema import ARTICLE_COLUMNS
 
 
-def _year_partition(year: Any) -> int:
-    try:
-        if year is None:
-            return 0
-        return int(year)
-    except (TypeError, ValueError):
-        return 0
-
-
 def rows_to_columnar(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
     cols: dict[str, list[Any]] = {c: [] for c in ARTICLE_COLUMNS}
     for r in rows:
@@ -28,14 +19,14 @@ def rows_to_columnar(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
 
 def write_parquet_shard(
     rows: list[dict[str, Any]],
-    warehouse_root: Path,
+    staging_root: Path,
     *,
     source: str,
     source_file: str,
 ) -> list[Path]:
     """
     Write one Parquet file for all rows under:
-      warehouse/staging/<source>/<stem>.parquet
+      staging_root/staging/<source>/<stem>.parquet
     """
     if not rows:
         return []
@@ -48,7 +39,7 @@ def write_parquet_shard(
             "pyarrow is required for Parquet output. Install with: pip install pyarrow"
         ) from e
 
-    base = Path(warehouse_root) / "staging" / source
+    base = Path(staging_root) / "staging" / source
     base.mkdir(parents=True, exist_ok=True)
 
     stem = Path(source_file).name
@@ -87,13 +78,13 @@ def write_parquet_shard(
 
 def write_jsonl_shard(
     rows: list[dict[str, Any]],
-    warehouse_root: Path,
+    staging_root: Path,
     *,
     source: str,
     source_file: str,
 ) -> Path:
     """Fallback writer when pyarrow is unavailable."""
-    base = Path(warehouse_root) / "staging" / source
+    base = Path(staging_root) / "staging" / source
     base.mkdir(parents=True, exist_ok=True)
     stem = Path(source_file).name
     # sanitize filename
@@ -111,7 +102,7 @@ def write_jsonl_shard(
 
 def write_rows(
     rows: list[dict[str, Any]],
-    warehouse_root: Path,
+    staging_root: Path,
     *,
     source: str,
     source_file: str,
@@ -120,12 +111,12 @@ def write_rows(
     if prefer_parquet:
         try:
             paths = write_parquet_shard(
-                rows, warehouse_root, source=source, source_file=source_file
+                rows, staging_root, source=source, source_file=source_file
             )
             return {"format": "parquet", "paths": [str(p) for p in paths], "n_rows": len(rows)}
         except RuntimeError:
             pass
     path = write_jsonl_shard(
-        rows, warehouse_root, source=source, source_file=source_file
+        rows, staging_root, source=source, source_file=source_file
     )
     return {"format": "jsonl", "paths": [str(path)], "n_rows": len(rows)}

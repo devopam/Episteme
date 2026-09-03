@@ -35,7 +35,7 @@ def test_extract_pmc_row_fields(tmp_path):
         rows = [json.loads(line) for line in shard.read_text().splitlines()]
     r = rows[0]
     assert r["source"] == "pmc"
-    assert r["pmcid"] in ("PMC13525906", "PMCFIX0001") or r["pmcid"].startswith("PMC")
+    assert r["pmcid"] == "PMCFIX0001"
     assert "acetylcholinesterase" in (r["text"] or "").lower()
     assert r["license"] == "CC BY"
     assert r["subset"] == "commercial"

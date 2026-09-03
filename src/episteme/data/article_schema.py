@@ -1,4 +1,4 @@
-"""Shared schema constants and row helpers (extraction contract v1.1)."""
+"""Shared schema constants and row helpers (extraction contract v1.2)."""
 
 from __future__ import annotations
 
@@ -194,6 +194,6 @@ def finalize_row(row: dict[str, Any]) -> dict[str, Any]:
 
     # year partition sentinel
     if out.get("year") is None:
-        pass  # leave null; writer maps to 0 for partition path
+        pass
 
     return out
