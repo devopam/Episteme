@@ -239,9 +239,9 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
         "license_raw": lic_raw,
         "subset": subset if subset == "commercial" else subset,
         "is_retracted": bool(meta.get("is_retracted", False)),
-        "pmc_version": str(meta.get("version")) if meta.get("version") is not None else (
-            version_id.split(".")[-1] if "." in version_id else None
-        ),
+        "pmc_version": str(meta.get("version"))
+        if meta.get("version") is not None
+        else (version_id.split(".")[-1] if "." in version_id else None),
         "is_manuscript": meta.get("is_manuscript"),
         "is_historical_ocr": meta.get("is_historical_ocr"),
         "pdf_url": None,
@@ -250,9 +250,10 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
     pdf = meta.get("pdf_url")
     if pdf:
         if str(pdf).startswith("s3://pmc-oa-opendata/"):
-            row["pdf_url"] = "https://pmc-oa-opendata.s3.amazonaws.com/" + str(pdf).split(
-                "s3://pmc-oa-opendata/", 1
-            )[-1].split("?")[0]
+            row["pdf_url"] = (
+                "https://pmc-oa-opendata.s3.amazonaws.com/"
+                + str(pdf).split("s3://pmc-oa-opendata/", 1)[-1].split("?")[0]
+            )
         else:
             row["pdf_url"] = str(pdf).split("?")[0]
 
@@ -327,8 +328,12 @@ def process_one(
                 subset=row.get("subset"),
                 schema_version=SCHEMA_VERSION,
             )
-        except NotImplementedError:
-            pass  # SP1-beta: audit becomes mandatory
+        except (NotImplementedError, TypeError):
+            # Task 4 made record() txn-coupled: record(event_type, *, conn, ...).
+            # Extract has no DB txn, so this call is a no-op until Task 8 (§8a)
+            # rewires it to a file-only best-effort audit. TypeError = the old
+            # **fields call shape hitting the new keyword-only signature.
+            pass
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -419,9 +424,7 @@ def extract_pmc(
 def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
-    p = argparse.ArgumentParser(
-        description="PMC JATS/metadata to episteme.articles staging shards"
-    )
+    p = argparse.ArgumentParser(description="PMC JATS/metadata to episteme.articles staging shards")
     p.add_argument("--raw-dir", type=Path, default=settings.raw_root / "pmc" / "oa_comm")
     p.add_argument("--processed-dir", type=Path, default=settings.processed_root)
     p.add_argument(
@@ -457,8 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        f"done inputs={res['inputs']} ok={res['ok']} "
-        f"failed={res['failed']} rows={res['rows']}"
+        f"done inputs={res['inputs']} ok={res['ok']} " f"failed={res['failed']} rows={res['rows']}"
     )
     return 1 if res["failed"] else 0
 
