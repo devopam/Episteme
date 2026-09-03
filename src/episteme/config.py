@@ -113,7 +113,9 @@ def get_settings() -> Settings:
         ncbi_ftp_host=_get("NCBI_FTP_HOST", "ftp.ncbi.nlm.nih.gov"),
         pmc_s3_bucket=_get("PMC_S3_BUCKET", "pmc-oa-opendata"),
         ebi_ftp_host=_get("EBI_FTP_HOST", "ftp.ebi.ac.uk"),
-        europepmc_base_url=_get("EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"),
+        europepmc_base_url=_get(
+            "EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"
+        ),
         apollo_hf_repo=_get("APOLLO_HF_REPO", "FreedomIntelligence/ApolloCorpus"),
     )
 

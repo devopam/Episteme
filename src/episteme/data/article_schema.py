@@ -18,10 +18,22 @@ SCHEMA_VERSION = "1.2"
 MIN_OK_TEXT_LEN = 200
 
 SOURCES = (
-    "pubmed", "pmc", "bookshelf",
-    "europepmc_preprint", "europepmc_manuscript", "europepmc_lite",
-    "apollo", "guidelines",
-    "chembl", "uniprot", "pubchem", "clinvar", "reactome", "mesh", "ontologies", "openalex",
+    "pubmed",
+    "pmc",
+    "bookshelf",
+    "europepmc_preprint",
+    "europepmc_manuscript",
+    "europepmc_lite",
+    "apollo",
+    "guidelines",
+    "chembl",
+    "uniprot",
+    "pubchem",
+    "clinvar",
+    "reactome",
+    "mesh",
+    "ontologies",
+    "openalex",
 )
 
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")

@@ -1,14 +1,13 @@
 import json
-from pathlib import Path
 
 from episteme.data.checkpoint_markers import (
-    is_success,
-    mark_success,
-    mark_failed,
-    success_marker_path,
     failed_marker_path,
-    load_success_marker_path,
     graph_success_marker_path,
+    is_success,
+    load_success_marker_path,
+    mark_failed,
+    mark_success,
+    success_marker_path,
 )
 
 

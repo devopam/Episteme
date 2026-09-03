@@ -48,7 +48,9 @@ dev = [
     "episteme[data,model]",
     "pytest>=7.0.0",
     "jsonschema>=4.0.0",
-    "ruff>=0.6.0",
+    "ruff>=0.6.0,<0.7",
+    "bandit>=1.7.8",
+    "pre-commit>=4.0.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -67,4 +69,18 @@ testpaths = ["tests"]
 markers = [
     "pg: test requires a PostgreSQL database (skipped unless TEST_PG_DSN is set)",
     "slow: test is slow (model downloads, large fixtures)",
+]
+
+# uv-native dev toolchain (PEP 735). `uv run <tool>` syncs this group by
+# default, so the pre-commit local hooks (`uv run ruff|bandit`) never drift
+# from these pins. Mirrors [project.optional-dependencies].dev for
+# plain-pip users. (Static typing / mypy deferred until the pipeline is
+# functionally complete — see .pre-commit-config.yaml.)
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "jsonschema>=4.0.0",
+    "ruff>=0.6.0,<0.7",
+    "bandit>=1.7.8",
+    "pre-commit>=4.0.0",
 ]

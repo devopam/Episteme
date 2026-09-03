@@ -16,10 +16,7 @@ from episteme.data.pmc.download_pmc import (
 
 def test_s3_to_http_strips_scheme_and_query():
     url = "s3://pmc-oa-opendata/PMC12345.1/PMC12345.1.xml?md5=abc"
-    assert (
-        s3_to_http(url)
-        == "https://pmc-oa-opendata.s3.amazonaws.com/PMC12345.1/PMC12345.1.xml"
-    )
+    assert s3_to_http(url) == "https://pmc-oa-opendata.s3.amazonaws.com/PMC12345.1/PMC12345.1.xml"
 
 
 def test_is_commercial_meta_accepts_cc_by():

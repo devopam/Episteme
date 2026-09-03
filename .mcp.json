@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mcpg": {
+      "command": "mcpg",
+      "args": [],
+      "env": {
+        "MCPG_DATABASE_URL": "postgresql://episteme_sys_admin:${EPISTEME_SYS_ADMIN_PASSWORD}@localhost:5433/episteme",
+        "MCPG_SECONDARY_DATABASE_URLS": "episteme_test=postgresql://episteme_sys_admin:${EPISTEME_SYS_ADMIN_PASSWORD}@localhost:5433/episteme_test",
+        "MCPG_ACCESS_MODE": "${MCPG_ACCESS_MODE:-unrestricted}",
+        "MCPG_ALLOW_DDL": "${MCPG_ALLOW_DDL:-true}",
+        "MCPG_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
