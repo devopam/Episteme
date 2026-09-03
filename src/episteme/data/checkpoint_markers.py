@@ -81,9 +81,7 @@ def mark_failed(
     if exc is not None:
         try:
             tb = getattr(exc, "__traceback__", None)
-            payload["traceback"] = "".join(
-                traceback.format_exception(type(exc), exc, tb)
-            )[-4000:]
+            payload["traceback"] = "".join(traceback.format_exception(type(exc), exc, tb))[-4000:]
         except Exception:
             payload["traceback"] = f"{type(exc).__name__}: {exc}"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

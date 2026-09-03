@@ -4,10 +4,11 @@ DSN is built from episteme.config.get_settings() — config.py stays the sole
 os.environ reader. The pipeline connects as the non-superuser episteme_app
 role (see scripts/data/db/init_database.sh).
 """
+
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 import psycopg
 from psycopg_pool import ConnectionPool

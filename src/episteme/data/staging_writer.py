@@ -110,13 +110,9 @@ def write_rows(
 ) -> dict[str, Any]:
     if prefer_parquet:
         try:
-            paths = write_parquet_shard(
-                rows, staging_root, source=source, source_file=source_file
-            )
+            paths = write_parquet_shard(rows, staging_root, source=source, source_file=source_file)
             return {"format": "parquet", "paths": [str(p) for p in paths], "n_rows": len(rows)}
         except RuntimeError:
             pass
-    path = write_jsonl_shard(
-        rows, staging_root, source=source, source_file=source_file
-    )
+    path = write_jsonl_shard(rows, staging_root, source=source, source_file=source_file)
     return {"format": "jsonl", "paths": [str(path)], "n_rows": len(rows)}
