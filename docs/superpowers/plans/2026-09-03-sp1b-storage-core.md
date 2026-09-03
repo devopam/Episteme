@@ -13,9 +13,14 @@
 ## Global Constraints
 
 - **Branch:** `sp1b-storage-core` (already checked out).
-- **PostgreSQL:** `localhost:5433`, superuser `postgres/postgres` for setup only. `init_database.sh` creates DBs `episteme` + `episteme_test` and a **non-superuser role `episteme_app`** (password = `EPISTEME_DB_PASSWORD`); the pipeline connects as `episteme_app`. `_audit` grants: `INSERT, SELECT` only for `episteme_app` — never `UPDATE`/`DELETE`.
+- **PostgreSQL:** `localhost:5433`. Three-tier roles:
+  - `postgres/postgres` — cluster superuser, **bootstrap only** (one `CREATE ROLE episteme_sys_admin …` + `createdb`).
+  - **`episteme_sys_admin`** — the DDL / migration / system + dev role (`LOGIN CREATEDB CREATEROLE`, owns the `episteme` schema). `init_database.sh` / `migrate_database.sh` connect as this. Password = `EPISTEME_SYS_ADMIN_PASSWORD`.
+  - **`episteme_app`** — non-superuser pipeline runtime role. The pipeline (`load_articles`, `graph_builder`, `corpus_materializer`, `enrich`, `run_pipeline.sh`) connects as this. `_audit` grants: `INSERT, SELECT` only — never `UPDATE`/`DELETE`. Password = `EPISTEME_DB_PASSWORD`.
+  - For this dev environment both roles share one generated 32-char password (`EPISTEME_SYS_ADMIN_PASSWORD` == `EPISTEME_DB_PASSWORD`); the literal value lives ONLY in the gitignored `./.env` (and the session scratchpad `env-values-to-write.md`), never in this plan or any committed file. Distinct env vars so the two can diverge later.
 - **`config.py` stays the only `os.environ` reader.** `db/connection.py` builds its DSN from `config.get_settings()`.
-- **`.env`** (gitignored, repo root) is created in Task 2 with the real values — `NCBI_API_KEY=***REDACTED-NCBI-KEY***`, `PGHOST=localhost PGPORT=5433 PGDATABASE=episteme PGUSER=episteme_app PGPASSWORD=<EPISTEME_DB_PASSWORD> EPISTEME_DB_PASSWORD=<pick> TEST_PG_DSN=host=localhost port=5433 dbname=episteme_test user=episteme_app password=<same> EPISTEME_ACTOR=<operator or sp1b-ci> EPISTEME_DATA_ROOT=.`. **`.env` is NEVER committed; NEVER put `NCBI_API_KEY`'s value in `.env.example`, a spec, a plan, or a log line.**
+- **`.env`** (gitignored, repo root) is created in Task 2 with the real values (see Task 2 Step 4). **`.env` is NEVER committed; NEVER put the `NCBI_API_KEY` or any password value in `.env.example`, a spec, a plan (other than this dev-env constant), or a log line.**
+- **`EPISTEME_ACTOR = episteme_sys_admin`** for every SP1-β run (system/dev identity; the audit trail records it).
 - **`pg`-marked tests** skip cleanly when `TEST_PG_DSN` is unset. Between every task the **non-`pg`** suite is green (`pytest -q -m "not pg"` → the SP1-α count 36, growing only with new non-pg tests). With `TEST_PG_DSN` set, `pytest -q` (all) is green too.
 - **Audit `--reason`:** any `--force` on any stage requires `--reason`; `run_pipeline.sh` refuses `--force` without it.
 - **Concurrency (roadmap §4.9):** modules expose `process_one(...)`; `--workers` + `--executor {process,thread}`; CPU stages default `process`.
@@ -145,38 +150,41 @@ def test_db_password_from_env(fresh_config):
 PGHOST=localhost
 PGPORT=5433
 PGDATABASE=episteme
-PGUSER=episteme_app
-PGPASSWORD=
-EPISTEME_DB_PASSWORD=            # episteme_app's password; init_database.sh sets it
-TEST_PG_DSN=                     # e.g. host=localhost port=5433 dbname=episteme_test user=episteme_app password=...
+PGUSER=episteme_app                       # pipeline runtime role
+PGPASSWORD=                               # = EPISTEME_DB_PASSWORD
+EPISTEME_DB_PASSWORD=                     # episteme_app's password; init_database.sh sets it
+EPISTEME_SYS_ADMIN_PASSWORD=             # episteme_sys_admin's password (DDL/migration/dev role)
+TEST_PG_DSN=                             # e.g. host=localhost port=5433 dbname=episteme_test user=episteme_app password=...
 
 # --- OpenMetadata (optional; blank = skip ingest) ---
 OM_HOST=
 OM_JWT=
 
 # --- Audit (REQUIRED for any stage that writes audit records) ---
-EPISTEME_ACTOR=
+EPISTEME_ACTOR=                          # e.g. episteme_sys_admin for system/dev runs
 
 # --- Upstream endpoints (override only if a mirror changes) ---
 PMC_S3_BUCKET=pmc-oa-opendata
 ```
 
-- [ ] **Step 4: Create the real `.env`** (repo root, gitignored — confirm `git check-ignore .env` prints `.env`)
+- [ ] **Step 4: Create the real `.env`** (repo root, gitignored — confirm `git check-ignore .env` prints `.env`; `git status --porcelain` must NOT show it)
 
-```dotenv
+Write `./.env` from the session scratchpad `env-values-to-write.md` (which holds the real
+`NCBI_API_KEY` and the generated 32-char password). The file's keys:
+```
 EPISTEME_DATA_ROOT=.
 PGHOST=localhost
 PGPORT=5433
 PGDATABASE=episteme
 PGUSER=episteme_app
-PGPASSWORD=episteme_app_pw
-EPISTEME_DB_PASSWORD=episteme_app_pw
-TEST_PG_DSN=host=localhost port=5433 dbname=episteme_test user=episteme_app password=episteme_app_pw
-EPISTEME_ACTOR=sp1b-ci
-NCBI_API_KEY=***REDACTED-NCBI-KEY***
+PGPASSWORD=<generated 32-char pw>
+EPISTEME_DB_PASSWORD=<same generated pw>
+EPISTEME_SYS_ADMIN_PASSWORD=<same generated pw>
+TEST_PG_DSN=host=localhost port=5433 dbname=episteme_test user=episteme_app password=<same generated pw>
+EPISTEME_ACTOR=episteme_sys_admin
+NCBI_API_KEY=<from scratchpad>
 ```
-
-Run `git status --porcelain` — `.env` must NOT appear.
+Do NOT echo the file's contents into the task report or any log — reference it as "written, values from scratchpad".
 
 - [ ] **Step 5: `db/connection.py`**
 
@@ -250,7 +258,7 @@ def pg_conn():
 .venv/Scripts/python.exe -c "import episteme.data.db.connection as c; print(c.dsn_from_settings())"
 .venv/Scripts/python.exe -m pytest -q -m "not pg"
 ```
-Expected: install clean; DSN prints `host=localhost port=5433 dbname=episteme user=episteme_app password=episteme_app_pw`; `37 passed` (36 + the `db_password` test).
+Expected: install clean; DSN prints `host=localhost port=5433 dbname=episteme user=episteme_app password=<the generated pw>` (don't paste the literal pw into the report — say "DSN resolves correctly"); `37 passed` (36 + the `db_password` test).
 
 ```bash
 git add pyproject.toml .env.example src/episteme/config.py tests/test_config.py \
@@ -323,7 +331,13 @@ END $$;
     );
   ```
   Wrap in a `DO $$ … EXCEPTION WHEN syntax_error OR feature_not_supported THEN RAISE NOTICE 'SQL/PGQ unavailable — graph_builder uses the CTE path' END $$;` guard.
-- **Grants:** `GRANT USAGE ON SCHEMA episteme TO episteme_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA episteme TO episteme_app; ALTER DEFAULT PRIVILEGES IN SCHEMA episteme GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO episteme_app;` then **revoke** the mutating grants on `_audit`: `REVOKE UPDATE, DELETE ON episteme._audit FROM episteme_app;` (and on its partitions). `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA episteme TO episteme_app;`
+- **Ownership + grants:** the `episteme` schema and all its tables are owned by **`episteme_sys_admin`** (schema.sql is applied while connected as that role, so ownership follows automatically). Then grant the runtime role:
+  `GRANT USAGE ON SCHEMA episteme TO episteme_app;`
+  `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA episteme TO episteme_app;`
+  `ALTER DEFAULT PRIVILEGES FOR ROLE episteme_sys_admin IN SCHEMA episteme GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO episteme_app;`
+  `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA episteme TO episteme_app;`
+  then **revoke** the mutating grants on the audit table:
+  `REVOKE UPDATE, DELETE ON episteme._audit FROM episteme_app;` (and on each `_audit_YYYYMM` partition).
 
 - [ ] **Step 3: Write `migrations/0001_add_chunk_vector_columns.sql`**
 
@@ -485,26 +499,33 @@ EOF
 
 - [ ] **Step 2: `db/install_extensions.sh`** — as OS/DB admin: try to locate/enable `vector` + `pg_search` for the 19beta3 server; run `CREATE EXTENSION` in `episteme` + `episteme_test`; on `undefined_file` print the exact error + "chunks columns deferred to migrate 0001" and exit 0 (soft block).
 
-- [ ] **Step 3: `db/init_database.sh`** — as `postgres/postgres`:
+- [ ] **Step 3: `db/init_database.sh`** — two connection phases:
   ```
-  createdb (if absent) episteme, episteme_test
-  CREATE ROLE episteme_app LOGIN PASSWORD :'pw' (pw from EPISTEME_DB_PASSWORD)  -- idempotent
-  \i extensions.sql   (both DBs)
-  \i schema.sql        (both DBs)
-  probe SQL/PGQ:  SELECT 1 FROM pg_catalog.pg_class WHERE relname='episteme_graph'  (or catch the CREATE PROPERTY GRAPH NOTICE)
-  print a summary: schema present, partitions count, _audit grant check (episteme_app has no UPDATE/DELETE), SQL/PGQ status
-  ```
+  # Phase A — as postgres/postgres (bootstrap, idempotent):
+  CREATE ROLE episteme_sys_admin LOGIN CREATEDB CREATEROLE PASSWORD :'sys_pw';   -- sys_pw from EPISTEME_SYS_ADMIN_PASSWORD
+  CREATE ROLE episteme_app       LOGIN                     PASSWORD :'app_pw';   -- app_pw from EPISTEME_DB_PASSWORD
+  createdb -O episteme_sys_admin episteme       (if absent)
+  createdb -O episteme_sys_admin episteme_test  (if absent)
 
-- [ ] **Step 4: `db/migrate_database.sh`** — numbered runner: `for f in migrations/*.sql (sorted); do psql -f "$f"; done`, tracks applied in `episteme._migrations(name text primary key, applied_at timestamptz)`.
+  # Phase B — as episteme_sys_admin, against episteme AND episteme_test:
+  \i extensions.sql
+  \i schema.sql                 # schema + tables owned by episteme_sys_admin; grants to episteme_app; REVOKE on _audit
+  # probe SQL/PGQ:  SELECT 1 FROM pg_catalog.pg_class WHERE relname='episteme_graph'
+  # summary: schema present, partition count, _audit grant check (episteme_app has no UPDATE/DELETE), SQL/PGQ status
+  ```
+  Use `psql "$SUPERUSER_DSN"` for Phase A, `psql "$SYS_ADMIN_DSN"` for Phase B; both built from `.env` vars. `psql` uses `PGPASSWORD`/a `.pgpass` or a `postgresql://` DSN — never echo the password.
+
+- [ ] **Step 4: `db/migrate_database.sh`** — as `episteme_sys_admin`; numbered runner: `for f in migrations/*.sql (sorted); do psql -f "$f"; done`, tracks applied in `episteme._migrations(name text primary key, applied_at timestamptz)`.
 
 - [ ] **Step 5: RUN it**
 
 ```bash
-set -a; source .env; set +a
-EPISTEME_DB_PASSWORD=episteme_app_pw bash scripts/data/db/install_extensions.sh
-EPISTEME_DB_PASSWORD=episteme_app_pw bash scripts/data/db/init_database.sh
+set -a; source .env; set +a          # brings PG*, EPISTEME_DB_PASSWORD, EPISTEME_SYS_ADMIN_PASSWORD, EPISTEME_ACTOR
+bash scripts/data/db/install_extensions.sh
+bash scripts/data/db/init_database.sh
 ```
-Expected: `episteme` + `episteme_test` schemas created; `episteme_app` role present; SQL/PGQ status = present; `_audit` grant check = `episteme_app` INSERT/SELECT only. Paste the summary into the task report.
+(`install_extensions.sh` connects as `postgres` for the `CREATE EXTENSION` since extensions need superuser/`pg_read_server_files`.)
+Expected: `episteme_sys_admin` + `episteme_app` roles present; `episteme` + `episteme_test` schemas created and **owned by `episteme_sys_admin`**; SQL/PGQ status = present; `_audit` grant check = `episteme_app` INSERT/SELECT only. Paste the summary (no passwords) into the task report.
 
 - [ ] **Step 6: `pg` schema test** `tests/data/test_db_schema.py`
 
