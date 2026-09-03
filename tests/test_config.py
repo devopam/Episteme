@@ -87,3 +87,8 @@ def test_data_root_defaults_to_dot(fresh_config):
     s = cfg.get_settings()
     assert s.data_root == Path(".")
     assert s.raw_root == Path("01_raw")               # Path(".") / "01_raw"
+
+
+def test_db_password_from_env(fresh_config):
+    cfg = fresh_config("EPISTEME_DB_PASSWORD=s3cr3t\n")
+    assert cfg.get_settings().db_password == "s3cr3t"

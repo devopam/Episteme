@@ -64,6 +64,7 @@ class Settings:
     pg_database: str
     pg_user: str
     pg_password: str
+    db_password: str
     om_host: str | None
     om_jwt: str | None
     ncbi_api_key: str | None
@@ -102,6 +103,7 @@ def get_settings() -> Settings:
         pg_database=_get("PGDATABASE", "episteme"),
         pg_user=_get("PGUSER", "episteme"),
         pg_password=_get("PGPASSWORD", ""),
+        db_password=_get("EPISTEME_DB_PASSWORD", "") or "",
         om_host=_get("OM_HOST"),
         om_jwt=_get("OM_JWT"),
         ncbi_api_key=_get("NCBI_API_KEY"),
