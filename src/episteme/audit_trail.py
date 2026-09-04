@@ -296,3 +296,82 @@ def verify(conn: psycopg.Connection) -> list[dict]:
         )
 
     return problems
+
+
+def mirror_only(event_type: str, **fields: Any) -> None:
+    """Best-effort, JSONL-only audit record: NO DB write, NO hash chain.
+
+    For callers with no open transaction to hand ``record()`` -- e.g.
+    ``extract_pmc``'s per-file audit call, which has no ``conn`` because
+    extraction has no DB txn. Same closed-set ``event_type`` check as
+    ``record()`` (raises ``ValueError`` before anything else). Unlike
+    ``record()``, a failure to write the mirror file is logged via
+    ``_LOG.exception`` and swallowed rather than re-raised -- this is already
+    the last-resort fallback, so there is nowhere further for it to escalate
+    to; ``record()``'s own mirror failure stays loud per its docstring.
+
+    The written line carries ``event_type``, a UTC ISO-8601 ``ts``, an
+    explicit ``"chained": False`` (so a reader can tell it apart from a real
+    hash-chained ``record()`` mirror line), and every kwarg the caller passed
+    -- all run through the same ``_canonical_json`` the rest of this module
+    uses.
+    """
+    if event_type not in EVENT_TYPES:
+        raise ValueError(
+            f"unknown audit event_type {event_type!r}; must be one of {sorted(EVENT_TYPES)}"
+        )
+
+    mirror_record: dict[str, Any] = {
+        "event_type": event_type,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "chained": False,
+        **fields,
+    }
+    try:
+        _mirror_dir().mkdir(parents=True, exist_ok=True)
+        with open(_mirror_path(), "a", encoding="utf-8") as fh:
+            fh.write(_canonical_json(mirror_record) + "\n")
+    except OSError:
+        _LOG.exception("mirror_only write failed for event_type=%s", event_type)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m episteme.audit_trail record EVENT_TYPE [--object O] [--run-id R] [--reason X]
+
+    Opens its own connection, calls record(), commits, prints the record_hash.
+    """
+    import argparse
+    import sys
+
+    from episteme.data.db.connection import connection
+
+    p = argparse.ArgumentParser(prog="python -m episteme.audit_trail")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    rec = sub.add_parser("record")
+    rec.add_argument("event_type")
+    rec.add_argument("--object", dest="object_", default=None)
+    rec.add_argument("--run-id", default=None)
+    rec.add_argument("--reason", default=None)
+    args = p.parse_args(argv)
+
+    if args.cmd == "record":
+        try:
+            with connection() as conn:
+                h = record(
+                    args.event_type,
+                    conn=conn,
+                    object=args.object_,
+                    run_id=args.run_id,
+                    reason=args.reason,
+                )
+                conn.commit()
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(h)
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

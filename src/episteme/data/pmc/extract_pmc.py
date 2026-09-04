@@ -8,7 +8,8 @@ row, then ``staging_writer.write_rows``, then
 ``checkpoint_markers.mark_success`` / ``mark_failed``.
 
 Importable core: ``extract_pmc(raw_dir, processed_dir, *, max_files=0,
-force=False, workers=1) -> dict``. ``main()`` is the thin CLI wrapper.
+force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
+wrapper.
 
 Roadmap CLI (§4.7):
   python -m episteme.data.pmc.extract_pmc \\
@@ -25,11 +26,13 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree as ET
+
+import defusedxml.ElementTree as ET
 
 _SRC = Path(__file__).resolve().parents[3]
 if str(_SRC) not in sys.path:
@@ -53,6 +56,13 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
 SOURCE = "pmc"
+
+# Serializes the per-file audit call below across worker threads. record()
+# does an unlocked "SELECT ... ORDER BY seq DESC LIMIT 1" then INSERT with no
+# row lock, so two threads racing it would both read the same prev_hash and
+# break the hash chain; mirror_only's file append needs the same protection.
+# extract() itself stays fully parallel -- only this block serializes.
+_AUDIT_LOCK = threading.Lock()
 
 
 def _local(tag: str) -> str:
@@ -318,22 +328,44 @@ def process_one(
             "write": write_info,
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        try:
-            _audit(
-                "extract_commit",
-                source=SOURCE,
-                source_file=basename,
-                n_rows=1,
-                extract_status=row.get("extract_status"),
-                subset=row.get("subset"),
-                schema_version=SCHEMA_VERSION,
-            )
-        except (NotImplementedError, TypeError):
-            # Task 4 made record() txn-coupled: record(event_type, *, conn, ...).
-            # Extract has no DB txn, so this call is a no-op until Task 8 (§8a)
-            # rewires it to a file-only best-effort audit. TypeError = the old
-            # **fields call shape hitting the new keyword-only signature.
-            pass
+        with _AUDIT_LOCK:
+            try:
+                # Extract has no long-lived DB txn of its own; open a fresh
+                # connection just for this one audit row and commit it
+                # immediately. Real chained audit is preferred over the
+                # file-only mirror whenever a DB is reachable (Task 10 ruling
+                # upgrades the earlier "file-only always" plan now that
+                # connection() works, per Task 6).
+                from episteme.data.db.connection import connection as _pg_connection
+
+                with _pg_connection() as _conn:
+                    _audit(
+                        "extract_commit",
+                        conn=_conn,
+                        object=f"{SOURCE} {basename}",
+                        rows_affected=1,
+                        reason=None,
+                    )
+                    _conn.commit()
+            except Exception:  # noqa: BLE001 - best-effort: DB unavailable or audit failed
+                # No DB reachable / audit failed for any other reason: fall
+                # back to a file-only mirror record so the trail still has
+                # *something* for this extraction event, even without the
+                # hash chain (Task 10 ruling). This inner try/except must
+                # never escape -- mark_success() already ran, so letting an
+                # exception through here would wrongly fall into the outer
+                # except Exception below and flip this file to mark_failed.
+                try:
+                    from episteme import audit_trail as _audit_trail
+
+                    _audit_trail.mirror_only(
+                        "extract_commit",
+                        object=f"{SOURCE} {basename}",
+                        rows_affected=1,
+                        note="db_unavailable_or_failed",
+                    )
+                except Exception:  # noqa: BLE001 - last-resort fallback must never escape
+                    pass
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -347,6 +379,17 @@ def process_one(
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
 
 
+def _print_verbose(result: dict[str, Any]) -> None:
+    """Print ``ok``/``skip``/``FAIL`` for one file's result to stderr."""
+    basename = result.get("source_file")
+    if result.get("skipped"):
+        print(f"skip {basename}", file=sys.stderr)
+    elif result.get("ok"):
+        print(f"ok {basename}", file=sys.stderr)
+    else:
+        print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
+
+
 def extract_pmc(
     raw_dir: Path,
     processed_dir: Path,
@@ -354,6 +397,7 @@ def extract_pmc(
     max_files: int = 0,
     force: bool = False,
     workers: int = 1,
+    verbose: bool = False,
 ) -> dict:
     """Importable core: parse PMC JATS/metadata under ``raw_dir`` into staging
     shards + ops markers under ``processed_dir``.
@@ -374,9 +418,10 @@ def extract_pmc(
 
     if workers == 1:
         for fp in files:
-            results.append(
-                process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
-            )
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
+            results.append(result)
+            if verbose:
+                _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
@@ -389,8 +434,13 @@ def extract_pmc(
                 ): fp
                 for fp in files
             }
+            # Completion order is non-deterministic above one worker, so
+            # verbose output above --workers 1 is per-file but unordered.
             for fut in as_completed(futs):
-                results.append(fut.result())
+                result = fut.result()
+                results.append(result)
+                if verbose:
+                    _print_verbose(result)
 
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
@@ -435,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--workers", type=int, default=1, help="Parallel file workers")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per file to stderr")
     args = p.parse_args(argv)
 
     raw_dir: Path = args.raw_dir
@@ -453,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         max_files=args.max_files,
         force=args.force,
         workers=args.workers,
+        verbose=args.verbose,
     )
 
     if res["inputs"] == 0:
