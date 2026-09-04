@@ -17,9 +17,10 @@ import gzip
 import sys
 import time
 from collections import Counter
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from xml.etree import ElementTree as ET
 
 # TODO(Plan 2): remove this sys.path bootstrap when the extract modules are reworked
@@ -27,12 +28,6 @@ _SRC = Path(__file__).resolve().parents[4]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from episteme.data.checkpoint_markers import (  # noqa: E402
-    is_success,
-    mark_failed,
-    mark_success,
-    write_run_manifest,
-)
 from episteme.data.article_schema import (  # noqa: E402
     SCHEMA_VERSION,
     finalize_row,
@@ -40,9 +35,15 @@ from episteme.data.article_schema import (  # noqa: E402
     subset_from_license,
     utc_now_iso,
 )
+from episteme.data.checkpoint_markers import (  # noqa: E402
+    is_success,
+    mark_failed,
+    mark_success,
+    write_run_manifest,
+)
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
-SOURCE = "epmc_preprint"
+SOURCE = "europepmc_preprint"
 
 
 def _local(tag: str) -> str:
@@ -120,7 +121,7 @@ def parse_article(art: ET.Element, source_file: str) -> dict[str, Any]:
     elif doi:
         cid = f"doi:{doi}"
     else:
-        cid = f"epmc_preprint:{source_file}:{hash(title) % 10**10}"
+        cid = f"europepmc_preprint:{source_file}:{hash(title) % 10**10}"
 
     row: dict[str, Any] = {
         "id": cid,
@@ -222,7 +223,10 @@ def process_file(
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         msg = str(e)
-        err_class = "corrupt_source" if "corrupt_source" in msg or "Not a gzipped" in msg or "BadGzipFile" in type(e).__name__ else "parse_error"
+        is_corrupt = (
+            "corrupt_source" in msg or "Not a gzipped" in msg or "BadGzipFile" in type(e).__name__
+        )
+        err_class = "corrupt_source" if is_corrupt else "parse_error"
         try:
             mark_failed(
                 processed_dir,

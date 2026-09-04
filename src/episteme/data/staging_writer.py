@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from episteme.data import article_schema
 from episteme.data.article_schema import ARTICLE_COLUMNS
 
 
@@ -108,6 +109,7 @@ def write_rows(
     source_file: str,
     prefer_parquet: bool = True,
 ) -> dict[str, Any]:
+    assert source in article_schema.SOURCES, f"unknown source {source!r}"
     if prefer_parquet:
         try:
             paths = write_parquet_shard(rows, staging_root, source=source, source_file=source_file)
