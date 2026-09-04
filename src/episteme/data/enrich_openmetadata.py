@@ -91,7 +91,7 @@ def _best_effort_audit(source: str) -> None:
                 "config_change",
                 conn=conn,
                 object=f"om-manifest {source}",
-                run_id=f"om-{source}",
+                run_id=get_settings().run_id or f"om-{source}",
             )
             conn.commit()
     except Exception as exc:  # noqa: BLE001 - the file write must not depend on the DB

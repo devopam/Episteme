@@ -176,7 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
 
-    run_id = f"materialize-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = (
+        settings.run_id or f"materialize-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
     with connection() as conn:
         res = materialize(
             conn,

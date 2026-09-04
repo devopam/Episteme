@@ -71,6 +71,7 @@ class Settings:
     download_threads: int
     sample_limit: int
     actor: str | None
+    run_id: str | None
     ncbi_ftp_host: str
     pmc_s3_bucket: str
     ebi_ftp_host: str
@@ -110,6 +111,10 @@ def get_settings() -> Settings:
         download_threads=_get_int("EPISTEME_DOWNLOAD_THREADS", 4),
         sample_limit=_get_int("EPISTEME_SAMPLE_LIMIT", 0),
         actor=_get("EPISTEME_ACTOR"),
+        # Set by scripts/data/run_pipeline.sh (export EPISTEME_RUN_ID) so every
+        # stage it execs shares one audit run_id; None for a standalone CLI
+        # invocation, where each module falls back to generating its own.
+        run_id=_get("EPISTEME_RUN_ID"),
         ncbi_ftp_host=_get("NCBI_FTP_HOST", "ftp.ncbi.nlm.nih.gov"),
         pmc_s3_bucket=_get("PMC_S3_BUCKET", "pmc-oa-opendata"),
         ebi_ftp_host=_get("EBI_FTP_HOST", "ftp.ebi.ac.uk"),
