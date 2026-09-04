@@ -31,6 +31,7 @@ via ``audit_trail``.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -306,3 +307,44 @@ def _neighbours_pgq(conn, pmid: str, hops: int) -> list[str]:
             return sorted({r[0] for r in cur.fetchall()})
     except psycopg.Error as exc:
         raise RuntimeError("SQL/PGQ neighbours query failed; use the CTE path") from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    from datetime import datetime, timezone
+
+    from episteme.config import get_settings
+    from episteme.data.db.connection import connection
+
+    settings = get_settings()
+    p = argparse.ArgumentParser(description="Build article_cites/article_mesh from raw JATS")
+    p.add_argument("--source", required=True)
+    p.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=None,
+        help="defaults to <raw_root>/pmc/oa_comm/xml for source=pmc",
+    )
+    args = p.parse_args(argv)
+
+    raw_dir = args.raw_dir
+    if raw_dir is None:
+        if args.source == "pmc":
+            raw_dir = settings.raw_root / "pmc" / "oa_comm" / "xml"
+        else:
+            print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
+            return 2
+
+    run_id = f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    with connection() as conn:
+        res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
+        conn.commit()
+    print(
+        f"done source_files={len(res['source_files'])} cites={res['cites']} "
+        f"mesh={res['mesh']} missing_xml={res['missing_xml']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

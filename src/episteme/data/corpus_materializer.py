@@ -155,3 +155,44 @@ def _write_shard(path: Path, survivors: list[tuple]) -> None:
 
     columns = {name: [row[i] for row in survivors] for i, name in enumerate(_COLUMNS)}
     pq.write_table(pa.table(columns), path, compression="zstd")
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    from datetime import datetime, timezone
+
+    from episteme.config import get_settings
+    from episteme.data.db.connection import connection
+
+    settings = get_settings()
+    p = argparse.ArgumentParser(description="Materialize the pretraining corpus from Postgres")
+    p.add_argument("--out-root", type=Path, default=settings.corpus_root)
+    p.add_argument("--pg-dsn", default=None, help="defaults to config.dsn_from_settings()")
+    p.add_argument(
+        "--sample-only",
+        action="store_true",
+        default=True,
+        help="decontamination uses the mock eval-question list (HF sets not downloaded)",
+    )
+    args = p.parse_args(argv)
+
+    run_id = f"materialize-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    with connection() as conn:
+        res = materialize(
+            conn,
+            out_root=args.out_root,
+            run_id=run_id,
+            pg_dsn=args.pg_dsn,
+            sample_only=args.sample_only,
+        )
+        conn.commit()
+    print(
+        f"done rows_in={res['rows_in']} rows_out={res['rows_out']} "
+        f"dropped_dup={res['dropped_dup']} dropped_contam={res['dropped_contam']} "
+        f"shards={len(res['shards'])}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
