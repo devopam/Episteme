@@ -335,7 +335,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
             return 2
 
-    run_id = f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = (
+        settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
     with connection() as conn:
         res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
         conn.commit()

@@ -141,10 +141,22 @@ def parse_jats_fields(xml_path: Path) -> dict[str, Any]:
             elif idt == "doi" and not out["doi"]:
                 out["doi"] = val
         elif t == "contrib" and (el.get("contrib-type") in (None, "author")):
-            last = _child_text(el, "surname")
-            fore = _child_text(el, "given-names")
-            if last or fore:
-                authors.append(f"{fore} {last}".strip() if fore else last)
+            # JATS nests the name one level down: <contrib><name><surname/>
+            # <given-names/></name></contrib> -- surname/given-names are
+            # grandchildren of contrib, not direct children, so _child_text
+            # must be called on the <name> element, not on <contrib> itself
+            # (field-shape report, Task 11: this bug made `authors` 100% null
+            # on real PMC JATS despite well-formed <contrib-group> data).
+            name_el = None
+            for c in el:
+                if _local(c.tag) == "name":
+                    name_el = c
+                    break
+            if name_el is not None:
+                last = _child_text(name_el, "surname")
+                fore = _child_text(name_el, "given-names")
+                if last or fore:
+                    authors.append(f"{fore} {last}".strip() if fore else last)
 
     if abstract_parts:
         # Prefer shortest unique abstract block (avoid body-sized duplicates)
@@ -345,6 +357,7 @@ def process_one(
                         object=f"{SOURCE} {basename}",
                         rows_affected=1,
                         reason=None,
+                        run_id=get_settings().run_id,
                     )
                     _conn.commit()
             except Exception:  # noqa: BLE001 - best-effort: DB unavailable or audit failed
@@ -363,6 +376,7 @@ def process_one(
                         object=f"{SOURCE} {basename}",
                         rows_affected=1,
                         note="db_unavailable_or_failed",
+                        run_id=get_settings().run_id,
                     )
                 except Exception:  # noqa: BLE001 - last-resort fallback must never escape
                     pass

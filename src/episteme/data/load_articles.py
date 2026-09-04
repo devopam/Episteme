@@ -86,7 +86,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no shards under {staging_dir}")
         return 0
 
-    run_id = f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = (
+        get_settings().run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
 
     if args.workers > 1:
         # TODO(SP3): parallel via ProcessPoolExecutor (process_one + --executor).

@@ -14,7 +14,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--force] [--reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--force] [--reason REASON] [--max-files N]" >&2
     exit 2
 }
 
@@ -25,10 +25,14 @@ shift 2 || true
 
 FORCE=0
 REASON=""
+MAX_FILES=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --force) FORCE=1; shift ;;
         --reason) REASON="${2:-}"; shift 2 ;;
+        # download_pmc.py's flag is --limit, extract_pmc.py's is --max-files --
+        # one orchestrator flag, translated per downstream script below.
+        --max-files) MAX_FILES="${2:-}"; shift 2 ;;
         *) log WARN "run_pipeline.sh: ignoring unknown arg $1"; shift ;;
     esac
 done
@@ -50,6 +54,11 @@ case "$STAGE" in
 esac
 
 RUN_ID="${SOURCE}-$(date -u +%Y%m%dT%H%M%SZ)"
+# Exported so every stage's `python -m episteme.data.*` subprocess (via
+# config.get_settings().run_id) shares this one run_id instead of each
+# generating its own -- otherwise the audit trail fragments one pipeline
+# invocation across N unrelated run_ids.
+export EPISTEME_RUN_ID="$RUN_ID"
 
 run_stage() {
     local name="$1"
@@ -66,6 +75,13 @@ run_stage() {
 load_args=()
 [ "$FORCE" = "1" ] && load_args=(--force --reason "$REASON")
 
+download_args=()
+extract_args=()
+if [ -n "$MAX_FILES" ]; then
+    download_args=(--limit "$MAX_FILES")
+    extract_args=(--max-files "$MAX_FILES")
+fi
+
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
 # the DB is unreachable (see extract_pmc.py), so the pipeline itself stays
@@ -74,15 +90,15 @@ load_args=()
     || log WARN "run_start audit failed; proceeding unaudited (is the DB up?)"
 
 case "$STAGE" in
-    download)    run_stage download "$HERE/pmc/download_pmc.sh" ;;
-    extract)     run_stage extract "$HERE/pmc/extract_pmc.sh" ;;
+    download)    run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}" ;;
+    extract)     run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}" ;;
     load)        run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}" ;;
     graph)       run_stage graph "$HERE/pmc/graph_pmc.sh" ;;
     materialize) run_stage materialize "$HERE/materialize_corpus.sh" ;;
     enrich)      run_stage enrich "$HERE/pmc/enrich_pmc.sh" ;;
     all)
-        run_stage download "$HERE/pmc/download_pmc.sh"
-        run_stage extract "$HERE/pmc/extract_pmc.sh"
+        run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}"
+        run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}"
         run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}"
         run_stage graph "$HERE/pmc/graph_pmc.sh"
         run_stage materialize "$HERE/materialize_corpus.sh"
