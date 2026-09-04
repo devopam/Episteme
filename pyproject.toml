@@ -34,6 +34,7 @@ data = [
     "pgvector>=0.3",
     "duckdb>=1.1",
     "defusedxml>=0.7",
+    "jsonschema>=4.0.0",
 ]
 model = [
     "torch>=2.0.0",
