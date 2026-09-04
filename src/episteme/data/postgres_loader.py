@@ -4,7 +4,8 @@
 owns the transaction boundary):
 
     1. read the staging shard (Polars) into a list of row dicts
-    2. DELETE FROM episteme.article_body  WHERE article_id = ANY(<shard ids>)
+    2. DELETE FROM episteme.article_body for every article of the replaced
+       source_file(s) (via the articles.id linkage, plus the shard's own ids)
     3. DELETE FROM episteme.articles      WHERE source_file = ANY(<file>)   (per file)
     4. COPY the 26 "hot" columns into episteme.articles
     5. COPY (article_id, source, year + 4 text cols) into episteme.article_body
@@ -133,10 +134,21 @@ def load_source_file(
     per_file_deleted: dict[str, int] = {}
 
     with conn.cursor() as cur:
-        # (c) article_body first -- keyed on the shard's `id` values.
+        # (c) article_body first. article_body has no source_file column, so
+        # target it by the linkage articles.id == article_body.article_id for
+        # the source_file(s) being replaced -- this also removes rows whose id
+        # is dropped by a shrinking re-load (which the articles delete below
+        # would otherwise orphan) -- OR-ed with the incoming shard's ids for
+        # the belt-and-braces case of a pre-existing body row for a new id.
         cur.execute(
-            "DELETE FROM episteme.article_body WHERE article_id = ANY(%s)",
-            (deleted_ids,),
+            """
+            DELETE FROM episteme.article_body
+             WHERE article_id IN (
+                     SELECT id FROM episteme.articles WHERE source_file = ANY(%s)
+                   )
+                OR article_id = ANY(%s)
+            """,
+            (source_files, deleted_ids),
         )
         body_deleted = cur.rowcount
 

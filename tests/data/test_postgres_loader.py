@@ -95,3 +95,17 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
         assert cur.fetchone()[0] >= 1
         cur.execute("SELECT count(*) FROM episteme._lineage WHERE source_file='B01.json'")
         assert cur.fetchone()[0] == 2
+
+    # shrinking re-load: the shard now carries only PMC1. PMC2's articles row
+    # (deleted by source_file) AND its article_body row (which a naive id-keyed
+    # delete would orphan) must both be gone.
+    shrunk = write_rows([rows[0]], tmp_path / "02_processed", source="pmc", source_file="B01.json")
+    postgres_loader.load_source_file(
+        pg_conn, source="pmc", staging_path=Path(shrunk["paths"][0]), run_id="r3"
+    )
+    pg_conn.commit()
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.articles WHERE source_file='B01.json'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM episteme.article_body WHERE article_id='pmcid:PMC2'")
+        assert cur.fetchone()[0] == 0  # no orphan
