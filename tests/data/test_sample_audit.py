@@ -1,22 +1,18 @@
-import importlib
 import json
 
 import pytest
 
 from episteme.data.article_schema import empty_article_row, finalize_row
 
+# build_report / write_rows both take explicit paths and never touch
+# episteme.config, so no env var / config reload is needed here.
+
 
 def _mk(**kw):
     return finalize_row({**empty_article_row(), "source": "pmc", **kw})
 
 
-def test_sample_audit_build_report(monkeypatch, tmp_path):
-    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
-    import episteme.config as cfg
-
-    importlib.reload(cfg)
-    cfg.get_settings.cache_clear()
-
+def test_sample_audit_build_report(tmp_path):
     from episteme.data import sample_audit
     from episteme.data.staging_writer import write_rows
 
