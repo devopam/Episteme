@@ -58,6 +58,16 @@ def _seed(pg_conn, tmp_path, monkeypatch):
 def test_build_and_neighbours(pg_conn, tmp_path, monkeypatch):
     raw = _seed(pg_conn, tmp_path, monkeypatch)
 
+    # a pmid-less article must be counted+skipped, not silently excluded.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO episteme.articles (id, source, source_file, pmid, pmcid, year)
+            VALUES ('pmcid:PMC2', 'pmc', 'B01.xml', NULL, 'PMC2', 2024)
+            """
+        )
+    pg_conn.commit()
+
     from episteme.data import graph_builder
 
     res = graph_builder.build(pg_conn, source="pmc", raw_dir=raw, run_id="g1")
@@ -66,10 +76,13 @@ def test_build_and_neighbours(pg_conn, tmp_path, monkeypatch):
     assert res["mesh"] == 2
     assert res["cites"] == 1
     assert res["missing_xml"] == 0
+    assert res["skipped_no_pmid"] == 1
 
     with pg_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM episteme.article_mesh WHERE pmid='111'")
         assert cur.fetchone()[0] == 2
+        cur.execute("SELECT descriptor_ui FROM episteme.article_mesh WHERE pmid='111' LIMIT 1")
+        assert cur.fetchone()[0] is None
         cur.execute(
             "SELECT count(*) FROM episteme.article_cites WHERE src_pmid='111' AND dst_pmid='222'"
         )

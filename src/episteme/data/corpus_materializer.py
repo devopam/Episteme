@@ -57,7 +57,9 @@ _SELECT = (
     "ORDER BY a.content_hash"
 )
 
-_COLUMNS = ("id", "source", "year", "pmid", "doi", "license", "content_hash", "text")
+# Column order per ADR-0002's Parquet section: hot->cold (frequently scanned
+# columns first -- text, source, year -- then the remaining metadata columns).
+_COLUMNS = ("text", "source", "year", "id", "pmid", "doi", "license", "content_hash")
 
 _NGRAM_SIZE = 13
 _NUM_PERM = 128
@@ -97,7 +99,17 @@ def materialize(
         d.execute("INSTALL postgres")
         d.execute("LOAD postgres")
         # pg_dsn is operator config, not user input -- safe to interpolate here.
-        d.execute(f"ATTACH '{pg_dsn}' AS pg (TYPE postgres, READ_ONLY)")  # nosec B608
+        try:
+            d.execute(f"ATTACH '{pg_dsn}' AS pg (TYPE postgres, READ_ONLY)")  # nosec B608
+        except Exception:
+            # DuckDB's own error message can echo the failing statement (DSN,
+            # password included) -- raise a clean error and suppress exception
+            # chaining (`from None`) so the original never reaches a traceback.
+            raise RuntimeError(
+                "DuckDB ATTACH to Postgres failed (connection string redacted from "
+                "this exception; check the target server, credentials, and that the "
+                "duckdb postgres extension can install)"
+            ) from None
         cur = d.execute(_SELECT)
         while batch := cur.fetchmany(_BATCH):
             for row in batch:
@@ -116,7 +128,7 @@ def materialize(
                     continue
 
                 groups.setdefault((source, year), []).append(
-                    (id_, source, year, pmid, doi, license_, content_hash, text)
+                    (text, source, year, id_, pmid, doi, license_, content_hash)
                 )
     finally:
         d.close()
@@ -150,11 +162,20 @@ def materialize(
 
 def _write_shard(path: Path, survivors: list[tuple]) -> None:
     """Write one ``(source, year)`` group to a zstd Parquet file, no pandas."""
+    # TODO(later SP): split into multiple part-NNN.parquet files at ADR-0002's
+    # 256-512MB target; single-file at SP1-beta's proving-slice scale.
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     columns = {name: [row[i] for row in survivors] for i, name in enumerate(_COLUMNS)}
-    pq.write_table(pa.table(columns), path, compression="zstd")
+    pq.write_table(
+        pa.table(columns),
+        path,
+        compression="zstd",
+        compression_level=3,
+        row_group_size=131072,  # ~128MB row groups at this row width per ADR-0002
+        use_dictionary=["source", "license"],  # low-cardinality cols present in _COLUMNS
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -169,10 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-root", type=Path, default=settings.corpus_root)
     p.add_argument("--pg-dsn", default=None, help="defaults to config.dsn_from_settings()")
     p.add_argument(
-        "--sample-only",
-        action="store_true",
+        "--no-sample-only",
+        dest="sample_only",
+        action="store_false",
         default=True,
-        help="decontamination uses the mock eval-question list (HF sets not downloaded)",
+        help="use the real HF eval sets for decontamination instead of the mock question list "
+        "(requires the datasets to be downloaded)",
     )
     args = p.parse_args(argv)
 

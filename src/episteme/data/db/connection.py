@@ -19,11 +19,7 @@ _POOL: ConnectionPool | None = None
 
 
 def dsn_from_settings() -> str:
-    s = get_settings()
-    return (
-        f"host={s.pg_host} port={s.pg_port} dbname={s.pg_database} "
-        f"user={s.pg_user} password={s.pg_password}"
-    )
+    return get_settings().pg_dsn()
 
 
 def get_pool() -> ConnectionPool:

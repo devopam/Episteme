@@ -45,7 +45,7 @@ sa_psql() { PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "$PSQL" -X -v ON_ERROR_STO
 log INFO "Phase A: roles + databases (as $SU_USER)"
 su_psql -d postgres \
     -v sys_pw="$EPISTEME_SYS_ADMIN_PASSWORD" \
-    -v app_pw="$EPISTEME_DB_PASSWORD" <<'SQL'
+    -v app_pw="$EPISTEME_DB_PASSWORD" <<'SQL' || die "Phase A (roles/databases) failed"
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'episteme_sys_admin') THEN
@@ -72,27 +72,28 @@ SQL
 log INFO "Phase B: extensions + schema (as episteme_sys_admin)"
 for db in episteme episteme_test; do
     log INFO "  $db: extensions.sql"
-    sa_psql -d "$db" -f "$EXT_SQL"
+    sa_psql -d "$db" -f "$EXT_SQL" || die "extensions.sql failed for $db"
 
     has_schema="$(sa_psql -At -d "$db" \
-        -c "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='episteme')")"
+        -c "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='episteme')")" \
+        || die "schema-presence check failed for $db"
     if [ "$has_schema" = "t" ]; then
         if [ "$FORCE" = "1" ]; then
             log WARN "  $db: episteme schema exists; EPISTEME_INIT_FORCE=1 -> DROP SCHEMA ... CASCADE and recreate"
-            sa_psql -d "$db" -c "DROP SCHEMA episteme CASCADE;"
-            sa_psql -d "$db" -f "$SCHEMA_SQL"
+            sa_psql -d "$db" -c "DROP SCHEMA episteme CASCADE;" || die "DROP SCHEMA episteme failed for $db"
+            sa_psql -d "$db" -f "$SCHEMA_SQL" || die "schema.sql failed for $db"
         else
             log INFO "  $db: episteme schema already present -> skipping schema.sql (EPISTEME_INIT_FORCE=1 to recreate)"
         fi
     else
         log INFO "  $db: schema.sql"
-        sa_psql -d "$db" -f "$SCHEMA_SQL"
+        sa_psql -d "$db" -f "$SCHEMA_SQL" || die "schema.sql failed for $db"
     fi
 done
 
 # ---------------------------------------------------------------------------
 log INFO "Summary (episteme)"
-sa_psql -At -d episteme <<'SQL'
+sa_psql -At -d episteme <<'SQL' || die "summary query failed"
 SELECT 'schema_present      = ' || EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='episteme')::text;
 SELECT 'tables             = ' || count(*)::text FROM pg_tables WHERE schemaname='episteme';
 SELECT 'partitioned_parents= ' || count(*)::text

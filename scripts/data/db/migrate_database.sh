@@ -31,15 +31,19 @@ sa_psql() { PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "$PSQL" -X -v ON_ERROR_STO
     -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$TARGET_DB" "$@"; }
 
 log INFO "migrate_database.sh: target=$TARGET_DB"
-sa_psql -c "CREATE SCHEMA IF NOT EXISTS episteme;"
+sa_psql -c "CREATE SCHEMA IF NOT EXISTS episteme;" || die "CREATE SCHEMA episteme failed"
 sa_psql -c "CREATE TABLE IF NOT EXISTS episteme._migrations (
               name       text PRIMARY KEY,
               applied_at timestamptz NOT NULL DEFAULT now()
-            );"
+            );" || die "CREATE TABLE episteme._migrations failed"
 
 applied=0
 shopt -s nullglob
 mapfile -t files < <(printf '%s\n' "$MIG_DIR"/*.sql | sort)
+# printf on a zero-match nullglob expansion still emits one empty line, so
+# `files` can hold a single "" entry even when nothing matched -- detect that
+# case explicitly rather than trusting `${#files[@]}` alone.
+[ ${#files[@]} -eq 0 ] || [ ! -f "${files[0]}" ] && { log INFO "no migrations to apply"; exit 0; }
 for f in "${files[@]}"; do
     name="$(basename "$f")"
     if [ "$(sa_psql -At -c "SELECT 1 FROM episteme._migrations WHERE name = '${name//\'/\'\'}'")" = "1" ]; then

@@ -250,8 +250,10 @@ CREATE TABLE episteme._lineage (
 -- -----------------------------------------------------------------------------
 -- episteme._audit -- append-only hash-chained audit trail, RANGE (recorded_at)
 --   with monthly partitions. episteme_app gets INSERT + SELECT only (grants
---   below). migrate_database.sh rolls the next month's partition; a DEFAULT
---   partition keeps inserts from failing before that job runs.
+--   below). episteme.create_audit_partition() / a rotation script is not yet
+--   built (ADR-0002 names it; tracked as a follow-up) -- the DEFAULT
+--   partition below absorbs inserts for any month that hasn't had its
+--   partition created yet.
 -- -----------------------------------------------------------------------------
 CREATE TABLE episteme._audit (
     seq                 bigserial,

@@ -7,14 +7,19 @@ raw JATS XML under ``raw_dir``, and derives two edge sets per ``source_file``:
     ``<pub-id pub-id-type="pmid">`` under ``<ref-list>``.
   * ``episteme.article_mesh`` -- one row per ``<kwd>`` under any ``<kwd-group>``.
     PMC OA JATS carries no MeSH descriptors (``extract_pmc`` sets
-    ``articles.mesh = None``), so the keyword group is the only signal; the
-    keyword string is used for BOTH ``descriptor_name`` and ``descriptor_ui``
-    (PMC has no UI) and ``major_topic`` / ``qualifiers`` are ``NULL``.
+    ``articles.mesh = None``), so the keyword group is the only signal;
+    ``descriptor_ui`` is left NULL for these keyword-derived (non-MeSH) rows,
+    and ``descriptor_name`` carries the keyword text; ``major_topic`` /
+    ``qualifiers`` are ``NULL``. ``neighbours(kind="mesh")`` falls back to
+    ``descriptor_name`` when ``descriptor_ui`` is absent.
 
 Idempotency is DELETE-by-``source_file`` + INSERT (neither table has a primary
 key). ``build`` runs inside the caller's transaction and never commits --
 matching ``postgres_loader``. Each processed ``source_file`` gets one
 ``audit_trail.record("graph_commit", ...)`` row.
+
+Articles with no ``pmid`` are counted and skipped (``skipped_no_pmid`` in the
+returned dict) rather than being silently excluded by the query.
 
 ``neighbours`` answers a hop-bounded reachability question with two back ends:
 a recursive-CTE walk (the DEFAULT and always-tested path) and a SQL/PGQ
@@ -116,7 +121,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     from both edge tables, re-derive them from the raw JATS under ``raw_dir``,
     ``executemany`` them back, and write one ``graph_commit`` audit row.
 
-    Returns ``{source_files, cites, mesh, missing_xml}``.
+    Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid}``.
     """
     if source != "pmc":
         raise NotImplementedError(f"{source} graph build is SP2+")
@@ -125,14 +130,16 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, pmid, pmcid, source_file "
-            "FROM episteme.articles "
-            "WHERE source = 'pmc' AND pmid IS NOT NULL"
+            "SELECT id, pmid, pmcid, source_file FROM episteme.articles WHERE source = 'pmc'"
         )
         article_rows = cur.fetchall()
 
+    skipped_no_pmid = 0
     by_file: dict[str, list[tuple[str, str | None]]] = {}
     for _id, pmid, pmcid, source_file in article_rows:
+        if not pmid:
+            skipped_no_pmid += 1
+            continue
         by_file.setdefault(source_file, []).append((pmid, pmcid))
 
     total_cites = 0
@@ -142,7 +149,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
 
     for source_file, articles in sorted(by_file.items()):
         cites_rows: list[tuple[str, str, str]] = []
-        mesh_rows: list[tuple[str, str, str, None, None, str]] = []
+        mesh_rows: list[tuple[str, None, str, None, None, str]] = []
         seen_cites: set[tuple[str, str]] = set()
         seen_mesh: set[tuple[str, str]] = set()
 
@@ -170,7 +177,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
                 if key in seen_mesh:
                     continue
                 seen_mesh.add(key)
-                mesh_rows.append((pmid, name, name, None, None, source_file))
+                mesh_rows.append((pmid, None, name, None, None, source_file))
 
         with conn.cursor() as cur:
             cur.execute("DELETE FROM episteme.article_cites WHERE source_file = %s", (source_file,))
@@ -197,15 +204,16 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "cites": total_cites,
         "mesh": total_mesh,
         "missing_xml": missing_xml,
+        "skipped_no_pmid": skipped_no_pmid,
     }
 
 
 def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
     """Hop-bounded neighbours of ``pmid``.
 
-    ``kind="mesh"``: sorted distinct ``descriptor_ui`` for ``article_mesh``
-    rows of ``pmid`` -- direct tags only; ``hops`` is IGNORED for mesh in
-    SP1-beta.
+    ``kind="mesh"``: sorted distinct ``COALESCE(descriptor_ui, descriptor_name)``
+    for ``article_mesh`` rows of ``pmid`` -- direct tags only; ``hops`` is
+    IGNORED for mesh in SP1-beta.
 
     ``kind="cites"``: sorted distinct ``dst_pmid`` reachable from ``pmid`` in
     ``article_cites`` within ``hops`` levels (``hops=1`` = direct citations),
@@ -227,9 +235,10 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
     if kind == "mesh":
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT descriptor_ui FROM episteme.article_mesh "
-                "WHERE pmid = %s AND descriptor_ui IS NOT NULL "
-                "ORDER BY descriptor_ui",
+                "SELECT DISTINCT COALESCE(descriptor_ui, descriptor_name) AS d "
+                "FROM episteme.article_mesh "
+                "WHERE pmid = %s AND COALESCE(descriptor_ui, descriptor_name) IS NOT NULL "
+                "ORDER BY d",
                 (pmid,),
             )
             return [r[0] for r in cur.fetchall()]
@@ -343,7 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         conn.commit()
     print(
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
-        f"mesh={res['mesh']} missing_xml={res['missing_xml']}"
+        f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
+        f"skipped_no_pmid={res['skipped_no_pmid']}"
     )
     return 0
 

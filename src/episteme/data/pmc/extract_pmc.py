@@ -57,11 +57,13 @@ from episteme.data.staging_writer import write_rows  # noqa: E402
 
 SOURCE = "pmc"
 
-# Serializes the per-file audit call below across worker threads. record()
-# does an unlocked "SELECT ... ORDER BY seq DESC LIMIT 1" then INSERT with no
-# row lock, so two threads racing it would both read the same prev_hash and
-# break the hash chain; mirror_only's file append needs the same protection.
-# extract() itself stays fully parallel -- only this block serializes.
+# audit_trail.record() now takes a Postgres transaction-scoped advisory lock
+# (pg_advisory_xact_lock) that serializes chain-appends across every process,
+# so this Python-level lock is no longer needed for that. It is retained
+# specifically to serialize the mirror_only fallback's file-append (a plain
+# file write that the DB-level lock does nothing for) across this process's
+# worker threads. extract() itself stays fully parallel -- only this block
+# serializes.
 _AUDIT_LOCK = threading.Lock()
 
 
@@ -116,10 +118,9 @@ def parse_jats_fields(xml_path: Path) -> dict[str, Any]:
             out["title"] = _itertext(el)
         elif t == "abstract":
             # take the full text of each abstract node once
-            if el.find(".//abstract") is None or True:
-                txt = _itertext(el)
-                if txt and txt not in abstract_parts:
-                    abstract_parts.append(txt)
+            txt = _itertext(el)
+            if txt and txt not in abstract_parts:
+                abstract_parts.append(txt)
         elif t == "body":
             txt = _itertext(el)
             if txt:
@@ -259,7 +260,7 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
         "license": lic,
         "license_url": lic_url,
         "license_raw": lic_raw,
-        "subset": subset if subset == "commercial" else subset,
+        "subset": subset,
         "is_retracted": bool(meta.get("is_retracted", False)),
         "pmc_version": str(meta.get("version"))
         if meta.get("version") is not None
@@ -461,7 +462,7 @@ def extract_pmc(
     rows = sum(int(r.get("n_rows") or 0) for r in results if r.get("ok"))
     summary = {"inputs": len(files), "ok": ok, "failed": failed, "rows": rows}
 
-    run_id = utc_now_iso().replace(":", "").replace("-", "")
+    run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
     try:
         write_run_manifest(
             processed_dir,

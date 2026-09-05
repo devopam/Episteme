@@ -140,23 +140,25 @@ def load_source_file(
         # is dropped by a shrinking re-load (which the articles delete below
         # would otherwise orphan) -- OR-ed with the incoming shard's ids for
         # the belt-and-braces case of a pre-existing body row for a new id.
+        # scoped by source: source_file basenames are not globally unique across sources
         cur.execute(
             """
             DELETE FROM episteme.article_body
              WHERE article_id IN (
-                     SELECT id FROM episteme.articles WHERE source_file = ANY(%s)
+                     SELECT id FROM episteme.articles WHERE source_file = ANY(%s) AND source = %s
                    )
-                OR article_id = ANY(%s)
+                OR (article_id = ANY(%s) AND source = %s)
             """,
-            (source_files, deleted_ids),
+            (source_files, source, deleted_ids, source),
         )
         body_deleted = cur.rowcount
 
         # (d) articles, per source_file, so _lineage gets per-file counts.
+        # scoped by source: source_file basenames are not globally unique across sources
         for sf in source_files:
             cur.execute(
-                "DELETE FROM episteme.articles WHERE source_file = ANY(%s)",
-                ([sf],),
+                "DELETE FROM episteme.articles WHERE source_file = ANY(%s) AND source = %s",
+                ([sf], source),
             )
             per_file_deleted[sf] = cur.rowcount
             deleted += cur.rowcount
