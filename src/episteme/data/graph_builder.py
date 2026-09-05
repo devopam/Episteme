@@ -117,9 +117,10 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     """Rebuild the citation + MeSH edge tables for ``source`` from raw JATS.
 
     One transaction; the caller commits. For every distinct ``source_file`` in
-    ``episteme.articles`` (source ``pmc``, ``pmid`` not null): DELETE its rows
-    from both edge tables, re-derive them from the raw JATS under ``raw_dir``,
-    ``executemany`` them back, and write one ``graph_commit`` audit row.
+    ``episteme.articles`` (source ``pmc``; rows with no ``pmid`` are counted in
+    ``skipped_no_pmid`` and excluded): DELETE its rows from both edge tables,
+    re-derive them from the raw JATS under ``raw_dir``, ``executemany`` them
+    back, and write one ``graph_commit`` audit row.
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid}``.
     """

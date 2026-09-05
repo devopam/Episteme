@@ -173,7 +173,12 @@ def _write_shard(path: Path, survivors: list[tuple]) -> None:
         path,
         compression="zstd",
         compression_level=3,
-        row_group_size=131072,  # ~128MB row groups at this row width per ADR-0002
+        # ADR-0002 targets ~128MB row groups by bytes, not row count -- 131072
+        # is a placeholder that overshoots badly once `text` carries full
+        # article bodies (tens of KB/row); revisit with a byte-aware group
+        # size (or rely on part-file rolling, see the TODO above) before a
+        # real Phase-0-scale materialize run.
+        row_group_size=131072,
         use_dictionary=["source", "license"],  # low-cardinality cols present in _COLUMNS
     )
 
