@@ -1,10 +1,42 @@
+# Local hooks run the tools from the project venv via `uv run --no-sync`.
+# --no-sync is deliberate: a plain `uv run` re-syncs .venv to the default
+# deps + dev group on every commit, which would prune the data/model extras
+# the test suite needs. Provision the venv once with:
+#   uv sync --all-extras            # or: pip install -e ".[dev]"
+#   uv run pre-commit install
+# Modelled on the MCPg project's pre-commit setup. MCPg also runs a strict
+# `mypy` hook here; Episteme defers static typing until the pipeline is
+# functionally complete, then re-adds it as its own pass.
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        name: ruff (lint)
+        entry: uv run --no-sync ruff check --fix
+        language: system
+        types: [python]
+        require_serial: true
       - id: ruff-format
+        name: ruff (format)
+        entry: uv run --no-sync ruff format
+        language: system
+        types: [python]
+        require_serial: true
+      - id: bandit
+        name: bandit (sast)
+        # B101 (assert), B608 (SQL string build — our loader uses
+        # parameterised COPY / psql.sql composition), B110 (try/except/pass)
+        # are the standard skips carried from MCPg. --baseline grandfathers
+        # the pre-existing findings in legacy acquisition/model modules
+        # (.bandit-baseline.json); NEW findings still fail the commit.
+        # Regenerate the baseline when a roadmap task clears real findings:
+        #   uv run --no-sync bandit -r src/episteme --skip B101,B608,B110 -ll -f json -o .bandit-baseline.json
+        entry: uv run --no-sync bandit -r src/episteme --skip B101,B608,B110 -ll --baseline .bandit-baseline.json
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episteme.local/schema/openmetadata-manifest-1.0.json",
+  "title": "Episteme OpenMetadata catalog manifest",
+  "type": "object",
+  "required": ["manifest_version", "service", "source", "tables", "lineage"],
+  "properties": {
+    "manifest_version": {"const": "1.0"},
+    "generated_by": {"type": "string"},
+    "service": {
+      "type": "object",
+      "required": ["name", "type", "database", "schema", "hostPort"],
+      "properties": {
+        "name": {"type": "string"},
+        "type": {"type": "string"},
+        "database": {"type": "string"},
+        "schema": {"type": "string"},
+        "hostPort": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "source": {"type": "string"},
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "columns"],
+        "properties": {
+          "name": {"type": "string"},
+          "fullyQualifiedName": {"type": "string"},
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "dataType", "tags"],
+              "properties": {
+                "name": {"type": "string"},
+                "dataType": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "lineage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fromEntity", "pipeline", "toEntity"],
+        "properties": {
+          "fromEntity": {"type": "string"},
+          "pipeline": {"type": "array", "items": {"type": "string"}},
+          "toEntity": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -8,7 +8,8 @@ row, then ``staging_writer.write_rows``, then
 ``checkpoint_markers.mark_success`` / ``mark_failed``.
 
 Importable core: ``extract_pmc(raw_dir, processed_dir, *, max_files=0,
-force=False, workers=1) -> dict``. ``main()`` is the thin CLI wrapper.
+force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
+wrapper.
 
 Roadmap CLI (§4.7):
   python -m episteme.data.pmc.extract_pmc \\
@@ -25,11 +26,13 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree as ET
+
+import defusedxml.ElementTree as ET
 
 _SRC = Path(__file__).resolve().parents[3]
 if str(_SRC) not in sys.path:
@@ -53,6 +56,15 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
 SOURCE = "pmc"
+
+# audit_trail.record() now takes a Postgres transaction-scoped advisory lock
+# (pg_advisory_xact_lock) that serializes chain-appends across every process,
+# so this Python-level lock is no longer needed for that. It is retained
+# specifically to serialize the mirror_only fallback's file-append (a plain
+# file write that the DB-level lock does nothing for) across this process's
+# worker threads. extract() itself stays fully parallel -- only this block
+# serializes.
+_AUDIT_LOCK = threading.Lock()
 
 
 def _local(tag: str) -> str:
@@ -106,10 +118,9 @@ def parse_jats_fields(xml_path: Path) -> dict[str, Any]:
             out["title"] = _itertext(el)
         elif t == "abstract":
             # take the full text of each abstract node once
-            if el.find(".//abstract") is None or True:
-                txt = _itertext(el)
-                if txt and txt not in abstract_parts:
-                    abstract_parts.append(txt)
+            txt = _itertext(el)
+            if txt and txt not in abstract_parts:
+                abstract_parts.append(txt)
         elif t == "body":
             txt = _itertext(el)
             if txt:
@@ -131,10 +142,22 @@ def parse_jats_fields(xml_path: Path) -> dict[str, Any]:
             elif idt == "doi" and not out["doi"]:
                 out["doi"] = val
         elif t == "contrib" and (el.get("contrib-type") in (None, "author")):
-            last = _child_text(el, "surname")
-            fore = _child_text(el, "given-names")
-            if last or fore:
-                authors.append(f"{fore} {last}".strip() if fore else last)
+            # JATS nests the name one level down: <contrib><name><surname/>
+            # <given-names/></name></contrib> -- surname/given-names are
+            # grandchildren of contrib, not direct children, so _child_text
+            # must be called on the <name> element, not on <contrib> itself
+            # (field-shape report, Task 11: this bug made `authors` 100% null
+            # on real PMC JATS despite well-formed <contrib-group> data).
+            name_el = None
+            for c in el:
+                if _local(c.tag) == "name":
+                    name_el = c
+                    break
+            if name_el is not None:
+                last = _child_text(name_el, "surname")
+                fore = _child_text(name_el, "given-names")
+                if last or fore:
+                    authors.append(f"{fore} {last}".strip() if fore else last)
 
     if abstract_parts:
         # Prefer shortest unique abstract block (avoid body-sized duplicates)
@@ -237,11 +260,11 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
         "license": lic,
         "license_url": lic_url,
         "license_raw": lic_raw,
-        "subset": subset if subset == "commercial" else subset,
+        "subset": subset,
         "is_retracted": bool(meta.get("is_retracted", False)),
-        "pmc_version": str(meta.get("version")) if meta.get("version") is not None else (
-            version_id.split(".")[-1] if "." in version_id else None
-        ),
+        "pmc_version": str(meta.get("version"))
+        if meta.get("version") is not None
+        else (version_id.split(".")[-1] if "." in version_id else None),
         "is_manuscript": meta.get("is_manuscript"),
         "is_historical_ocr": meta.get("is_historical_ocr"),
         "pdf_url": None,
@@ -250,9 +273,10 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
     pdf = meta.get("pdf_url")
     if pdf:
         if str(pdf).startswith("s3://pmc-oa-opendata/"):
-            row["pdf_url"] = "https://pmc-oa-opendata.s3.amazonaws.com/" + str(pdf).split(
-                "s3://pmc-oa-opendata/", 1
-            )[-1].split("?")[0]
+            row["pdf_url"] = (
+                "https://pmc-oa-opendata.s3.amazonaws.com/"
+                + str(pdf).split("s3://pmc-oa-opendata/", 1)[-1].split("?")[0]
+            )
         else:
             row["pdf_url"] = str(pdf).split("?")[0]
 
@@ -317,18 +341,46 @@ def process_one(
             "write": write_info,
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        try:
-            _audit(
-                "extract_commit",
-                source=SOURCE,
-                source_file=basename,
-                n_rows=1,
-                extract_status=row.get("extract_status"),
-                subset=row.get("subset"),
-                schema_version=SCHEMA_VERSION,
-            )
-        except NotImplementedError:
-            pass  # SP1-beta: audit becomes mandatory
+        with _AUDIT_LOCK:
+            try:
+                # Extract has no long-lived DB txn of its own; open a fresh
+                # connection just for this one audit row and commit it
+                # immediately. Real chained audit is preferred over the
+                # file-only mirror whenever a DB is reachable (Task 10 ruling
+                # upgrades the earlier "file-only always" plan now that
+                # connection() works, per Task 6).
+                from episteme.data.db.connection import connection as _pg_connection
+
+                with _pg_connection() as _conn:
+                    _audit(
+                        "extract_commit",
+                        conn=_conn,
+                        object=f"{SOURCE} {basename}",
+                        rows_affected=1,
+                        reason=None,
+                        run_id=get_settings().run_id,
+                    )
+                    _conn.commit()
+            except Exception:  # noqa: BLE001 - best-effort: DB unavailable or audit failed
+                # No DB reachable / audit failed for any other reason: fall
+                # back to a file-only mirror record so the trail still has
+                # *something* for this extraction event, even without the
+                # hash chain (Task 10 ruling). This inner try/except must
+                # never escape -- mark_success() already ran, so letting an
+                # exception through here would wrongly fall into the outer
+                # except Exception below and flip this file to mark_failed.
+                try:
+                    from episteme import audit_trail as _audit_trail
+
+                    _audit_trail.mirror_only(
+                        "extract_commit",
+                        object=f"{SOURCE} {basename}",
+                        rows_affected=1,
+                        note="db_unavailable_or_failed",
+                        run_id=get_settings().run_id,
+                    )
+                except Exception:  # noqa: BLE001 - last-resort fallback must never escape
+                    pass
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -342,6 +394,17 @@ def process_one(
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
 
 
+def _print_verbose(result: dict[str, Any]) -> None:
+    """Print ``ok``/``skip``/``FAIL`` for one file's result to stderr."""
+    basename = result.get("source_file")
+    if result.get("skipped"):
+        print(f"skip {basename}", file=sys.stderr)
+    elif result.get("ok"):
+        print(f"ok {basename}", file=sys.stderr)
+    else:
+        print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
+
+
 def extract_pmc(
     raw_dir: Path,
     processed_dir: Path,
@@ -349,6 +412,7 @@ def extract_pmc(
     max_files: int = 0,
     force: bool = False,
     workers: int = 1,
+    verbose: bool = False,
 ) -> dict:
     """Importable core: parse PMC JATS/metadata under ``raw_dir`` into staging
     shards + ops markers under ``processed_dir``.
@@ -369,9 +433,10 @@ def extract_pmc(
 
     if workers == 1:
         for fp in files:
-            results.append(
-                process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
-            )
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
+            results.append(result)
+            if verbose:
+                _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
@@ -384,15 +449,20 @@ def extract_pmc(
                 ): fp
                 for fp in files
             }
+            # Completion order is non-deterministic above one worker, so
+            # verbose output above --workers 1 is per-file but unordered.
             for fut in as_completed(futs):
-                results.append(fut.result())
+                result = fut.result()
+                results.append(result)
+                if verbose:
+                    _print_verbose(result)
 
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
     rows = sum(int(r.get("n_rows") or 0) for r in results if r.get("ok"))
     summary = {"inputs": len(files), "ok": ok, "failed": failed, "rows": rows}
 
-    run_id = utc_now_iso().replace(":", "").replace("-", "")
+    run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
     try:
         write_run_manifest(
             processed_dir,
@@ -419,9 +489,7 @@ def extract_pmc(
 def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
-    p = argparse.ArgumentParser(
-        description="PMC JATS/metadata to episteme.articles staging shards"
-    )
+    p = argparse.ArgumentParser(description="PMC JATS/metadata to episteme.articles staging shards")
     p.add_argument("--raw-dir", type=Path, default=settings.raw_root / "pmc" / "oa_comm")
     p.add_argument("--processed-dir", type=Path, default=settings.processed_root)
     p.add_argument(
@@ -432,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--workers", type=int, default=1, help="Parallel file workers")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per file to stderr")
     args = p.parse_args(argv)
 
     raw_dir: Path = args.raw_dir
@@ -450,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         max_files=args.max_files,
         force=args.force,
         workers=args.workers,
+        verbose=args.verbose,
     )
 
     if res["inputs"] == 0:
@@ -457,8 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        f"done inputs={res['inputs']} ok={res['ok']} "
-        f"failed={res['failed']} rows={res['rows']}"
+        f"done inputs={res['inputs']} ok={res['ok']} " f"failed={res['failed']} rows={res['rows']}"
     )
     return 1 if res["failed"] else 0
 

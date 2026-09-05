@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mcpg": {
+      "command": "bash",
+      "args": ["scripts/mcpg-episteme.sh", "episteme"],
+      "env": {}
+    },
+    "mcpg-test": {
+      "command": "bash",
+      "args": ["scripts/mcpg-episteme.sh", "episteme_test"],
+      "env": {}
+    }
+  }
+}
