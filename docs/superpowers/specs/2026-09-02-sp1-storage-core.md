@@ -291,8 +291,34 @@ in which case `chunks` is created without `embedding` / `chunk_tsv` and
   19beta3/Windows build exists, soft-block per §3a (NOTICE, bare `chunks`, `migrate 0001`
   queued). Recorded as a ruling in the SDD ledger, not an SP1 failure.
 
+## 8a. Carried from the SP1-α whole-branch review (SP1-β must address)
+
+- **Loader keys `source_file` from row data, not the shard filename.** Shard stems have
+  `.gz`/`.xml` stripped (pubmed `pubmed25n0001.xml.gz` → `pubmed25n0001.parquet`), so the
+  filename can't reconstruct `source_file`. `postgres_loader`'s idempotent
+  `DELETE WHERE source_file = $1` must read the value from the shard's `source_file` **column**
+  (every row carries it), and the per-input `.ok` markers stay keyed on the real input basename.
+- **`assert source in article_schema.SOURCES` on the write path.** Add it to
+  `staging_writer.write_rows` (or `article_schema.finalize_row`) so a bad `source` value fails
+  loud. Then fix the drift it exposes: `data/europepmc/preprints/extract_europepmc_preprints.py`
+  sets `SOURCE = "epmc_preprint"` / id-prefix `epmc_preprint` — not in `SOURCES`
+  (`europepmc_preprint` is). Align that constant + its id prefix in SP1-β (it's touched anyway
+  when `extract_europepmc_preprints` is filled).
+- **Parquet-schema read-back test.** A test that writes a shard and asserts column types:
+  `year` int32 (nullable), `authors`/`mesh`/`publication_types` `list<string>`,
+  `is_retracted`/`is_manuscript`/`is_historical_ocr` bool — this is the exact interface
+  `postgres_loader`'s `COPY` consumes.
+- **`--verbose` / progress callback** on `extract_pmc` (and the pattern for future extractors) —
+  the importable-core split dropped the upstream per-file `ok/skip/FAIL <file>` output.
+- **`defusedxml`** — swap `xml.etree.ElementTree` for `defusedxml.ElementTree` in
+  `extract_pmc.py` (and set the pattern for SP2 extractors). Add `defusedxml` to `[data]`.
+- **`authors` under-parsing** (upstream direct-children-only JATS walk) — expected to show as a
+  high null rate in the PMC field-shape report (§7 exit criterion 6); fix the JATS contrib
+  mapping there.
+
 ## 9. Document control
 
 | Version | Date | Notes |
 |---|---|---|
 | v1 | 2026-09-02 | Initial SP1 spec from the Phase-0 roadmap. |
+| v1.1 | 2026-09-03 | SP1-α merged; §8a records the SP1-α whole-branch review deferrals for SP1-β. |

@@ -64,12 +64,14 @@ class Settings:
     pg_database: str
     pg_user: str
     pg_password: str
+    db_password: str
     om_host: str | None
     om_jwt: str | None
     ncbi_api_key: str | None
     download_threads: int
     sample_limit: int
     actor: str | None
+    run_id: str | None
     ncbi_ftp_host: str
     pmc_s3_bucket: str
     ebi_ftp_host: str
@@ -102,16 +104,23 @@ def get_settings() -> Settings:
         pg_database=_get("PGDATABASE", "episteme"),
         pg_user=_get("PGUSER", "episteme"),
         pg_password=_get("PGPASSWORD", ""),
+        db_password=_get("EPISTEME_DB_PASSWORD", "") or "",
         om_host=_get("OM_HOST"),
         om_jwt=_get("OM_JWT"),
         ncbi_api_key=_get("NCBI_API_KEY"),
         download_threads=_get_int("EPISTEME_DOWNLOAD_THREADS", 4),
         sample_limit=_get_int("EPISTEME_SAMPLE_LIMIT", 0),
         actor=_get("EPISTEME_ACTOR"),
+        # Set by scripts/data/run_pipeline.sh (export EPISTEME_RUN_ID) so every
+        # stage it execs shares one audit run_id; None for a standalone CLI
+        # invocation, where each module falls back to generating its own.
+        run_id=_get("EPISTEME_RUN_ID"),
         ncbi_ftp_host=_get("NCBI_FTP_HOST", "ftp.ncbi.nlm.nih.gov"),
         pmc_s3_bucket=_get("PMC_S3_BUCKET", "pmc-oa-opendata"),
         ebi_ftp_host=_get("EBI_FTP_HOST", "ftp.ebi.ac.uk"),
-        europepmc_base_url=_get("EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"),
+        europepmc_base_url=_get(
+            "EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"
+        ),
         apollo_hf_repo=_get("APOLLO_HF_REPO", "FreedomIntelligence/ApolloCorpus"),
     )
 

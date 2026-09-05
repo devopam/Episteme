@@ -1,10 +1,10 @@
 from episteme.data.article_schema import (
+    MIN_OK_TEXT_LEN,
     SOURCES,
     build_text,
     decide_extract_status,
     normalize_license,
     subset_from_license,
-    MIN_OK_TEXT_LEN,
 )
 
 
@@ -20,12 +20,16 @@ def test_build_text_joins_present_parts_only():
 
 
 def test_extract_status_ok_when_abstract_present_even_if_text_short():
-    status, notes = decide_extract_status(text="short", abstract="a real abstract", body_text=None, has_id=True)
+    status, notes = decide_extract_status(
+        text="short", abstract="a real abstract", body_text=None, has_id=True
+    )
     assert status == "ok"
 
 
 def test_extract_status_partial_for_title_only_short_text():
-    status, notes = decide_extract_status(text="x" * (MIN_OK_TEXT_LEN - 1), abstract=None, body_text=None, has_id=True)
+    status, notes = decide_extract_status(
+        text="x" * (MIN_OK_TEXT_LEN - 1), abstract=None, body_text=None, has_id=True
+    )
     assert status == "partial"
 
 

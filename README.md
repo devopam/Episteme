@@ -4,7 +4,7 @@ Phase 0 of the Episteme Medical LLM: data gathering pipelines and model fine-tun
 
 ## Background
 
-The Episteme Medical LLM adopts a bimodal data strategy. 
+The Episteme Medical LLM adopts a bimodal data strategy.
 Stable, foundational scientific literature and chemical/genomic databases are baked directly into the model's parametric weights (Phase 0).
 Proprietary, customer-specific, or highly dynamic clinical guidelines and product labels are strictly reserved for Retrieval-Augmented Generation (RAG) at run-time (Phase 1).
 
@@ -39,12 +39,13 @@ To install optional feature groups:
 
 ### 1. Data Pipeline
 
-The data pipeline is driven by per-source scripts under `scripts/` (a
-per-source `scripts/data/` layout is coming in a later phase) and
-documented end-to-end (first-time and incremental) in
+The data pipeline is driven by per-source scripts under `scripts/data/`
+and documented end-to-end (first-time and incremental) in
 [`docs/10-data-sources-runbook.md`](docs/10-data-sources-runbook.md).
 Corpus-level curation lives in `episteme.data.curate`
 (`serialize_structured_sources`, `deduplicate_corpus`, `decontaminate_benchmarks`).
+PostgreSQL setup (roles, schema, extensions) is `scripts/data/db/` —
+run `install_extensions.sh` then `init_database.sh` against `.env`'s `PG*` vars.
 
 ### 2. Model Pipeline
 

@@ -1,4 +1,4 @@
-"""Shared schema constants and row helpers (extraction contract v1.2)."""
+"""Shared schema constants and row helpers (extraction contract v1.3)."""
 
 from __future__ import annotations
 
@@ -7,21 +7,41 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 # Schema changelog:
 #   1.1  contract v1.1 (2026-08-31 sample audit): PMC provenance cols, license norm, status rules.
 #   1.2  (SP1-α, 2026-09-02): SOURCES extended to the full Phase-0 roadmap list.
 #        The row shape stays PROVISIONAL — refined per-source against real data before full load
 #        (roadmap §4.2). Bump this + append a line on every refinement.
+#   1.3  (SP1-β Task 11, 2026-09-04, proving slice on the real 2-file PMC sample): the field-shape
+#        report caught `authors` at 100% non-null->null on real JATS -- extract_pmc.py's
+#        _child_text(contrib, "surname"/"given-names") was reading direct children of <contrib>,
+#        but JATS nests them one level down under <contrib><name>. Fixed to read from <name>.
+#        No column added/removed/retyped; row shape itself is unchanged, so this is a bugfix bump,
+#        not a contract change. `mesh` and `publication_types` are STILL expected null for pmc
+#        (PMC OA JATS carries no MeSH; publication_types would need <article-categories> parsing,
+#        not attempted this task -- noted as a follow-up, not applied).
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200
 
 SOURCES = (
-    "pubmed", "pmc", "bookshelf",
-    "europepmc_preprint", "europepmc_manuscript", "europepmc_lite",
-    "apollo", "guidelines",
-    "chembl", "uniprot", "pubchem", "clinvar", "reactome", "mesh", "ontologies", "openalex",
+    "pubmed",
+    "pmc",
+    "bookshelf",
+    "europepmc_preprint",
+    "europepmc_manuscript",
+    "europepmc_lite",
+    "apollo",
+    "guidelines",
+    "chembl",
+    "uniprot",
+    "pubchem",
+    "clinvar",
+    "reactome",
+    "mesh",
+    "ontologies",
+    "openalex",
 )
 
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")
