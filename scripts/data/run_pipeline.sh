@@ -81,6 +81,7 @@ if [ -n "$MAX_FILES" ]; then
     download_args=(--limit "$MAX_FILES")
     extract_args=(--max-files "$MAX_FILES")
 fi
+[ "$FORCE" = "1" ] && extract_args+=(--force)
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when

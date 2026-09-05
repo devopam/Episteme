@@ -50,7 +50,7 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         || { log INFO "load_dotenv: no pyproject.toml ancestor, skipping"; return 0; }
     env_file="$root/.env"
     [ -f "$env_file" ] || { log INFO "load_dotenv: no $env_file, skipping"; return 0; }
-    local line key
+    local line key val
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"                            # tolerate CRLF .env
         case "$line" in

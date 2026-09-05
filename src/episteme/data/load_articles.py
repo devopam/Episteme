@@ -86,9 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no shards under {staging_dir}")
         return 0
 
-    run_id = (
-        get_settings().run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    )
+    external_run_id = get_settings().run_id
+    run_id = external_run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    # Skip our own run_start/run_end bracket when an orchestrator (e.g.
+    # run_pipeline.sh, via EPISTEME_RUN_ID) already supplied the run_id --
+    # otherwise a consumer sees two nested brackets for one logical run.
+    own_bracket = external_run_id is None
 
     if args.workers > 1:
         # TODO(SP3): parallel via ProcessPoolExecutor (process_one + --executor).
@@ -97,8 +100,9 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     with connection() as conn:
-        audit_trail.record("run_start", conn=conn, object=source, run_id=run_id)
-        conn.commit()
+        if own_bracket:
+            audit_trail.record("run_start", conn=conn, object=source, run_id=run_id)
+            conn.commit()
 
         for shard in shards:
             name = shard.name
@@ -133,8 +137,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"body_deleted={result['body_deleted']} event={result['event']}"
             )
 
-        audit_trail.record("run_end", conn=conn, object=source, run_id=run_id)
-        conn.commit()
+        if own_bracket:
+            audit_trail.record("run_end", conn=conn, object=source, run_id=run_id)
+            conn.commit()
 
     print(f"done shards={len(shards)} failed={failures}")
     return 1 if failures else 0

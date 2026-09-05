@@ -158,6 +158,11 @@ def record(
     code_version = _code_version()
 
     with conn.cursor() as cur:
+        # Transaction-scoped advisory lock: serializes every record() call across
+        # every process (not just threads in one process) so two concurrent
+        # callers can never read the same prev_hash and fork the chain. Released
+        # automatically at COMMIT/ROLLBACK of conn's transaction.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext('episteme._audit'))")
         cur.execute("SELECT record_hash FROM episteme._audit ORDER BY seq DESC LIMIT 1")
         row = cur.fetchone()
     prev_hash = row[0] if row else _GENESIS_HASH

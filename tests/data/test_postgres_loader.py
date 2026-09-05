@@ -32,6 +32,15 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     from episteme.data.article_schema import empty_article_row, finalize_row
     from episteme.data.staging_writer import write_rows
 
+    # a different source sharing the same source_file basename must never be
+    # touched by a pmc load -- source_file basenames are not globally unique
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file) VALUES (%s, %s, %s)",
+            ("pubmed:other", "pubmed", "B01.json"),
+        )
+    pg_conn.commit()
+
     rows = [
         finalize_row(
             {
@@ -68,7 +77,9 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     pg_conn.commit()
     assert r1["event"] == "load_commit"
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM episteme.articles WHERE source_file='B01.json'")
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles WHERE source_file='B01.json' AND source='pmc'"
+        )
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT text FROM episteme.article_body WHERE article_id='pmcid:PMC1'")
         assert "acetylcholinesterase" in cur.fetchone()[0]
@@ -87,7 +98,9 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     assert r2["event"] == "load_replace"
     assert r2["deleted"] == 2
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM episteme.articles WHERE source_file='B01.json'")
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles WHERE source_file='B01.json' AND source='pmc'"
+        )
         assert cur.fetchone()[0] == 2
         cur.execute("SELECT count(*) FROM episteme.article_body WHERE article_id='pmcid:PMC1'")
         assert cur.fetchone()[0] == 1
@@ -105,7 +118,18 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     )
     pg_conn.commit()
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM episteme.articles WHERE source_file='B01.json'")
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles WHERE source_file='B01.json' AND source='pmc'"
+        )
         assert cur.fetchone()[0] == 1
         cur.execute("SELECT count(*) FROM episteme.article_body WHERE article_id='pmcid:PMC2'")
         assert cur.fetchone()[0] == 0  # no orphan
+
+    # the pubmed row inserted above, sharing B01.json's source_file, must
+    # still be untouched by all the pmc loads/reloads above.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles "
+            "WHERE source='pubmed' AND source_file='B01.json'"
+        )
+        assert cur.fetchone()[0] == 1
