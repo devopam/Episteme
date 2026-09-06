@@ -108,21 +108,91 @@ write_sync_stamp() { # write_sync_stamp DIR
     log INFO "write_sync_stamp: $dir/last_sync_utc.txt"
 }
 
-discover_manifest() { # discover_manifest URL DEST
-    log WARN "discover_manifest is a stub (SP3 will harden): URL=${1:-} DEST=${2:-}"
-    return 0
+resolve_dest() { # resolve_dest SOURCE [SUBPATH] -> <raw root>/SOURCE[/SUBPATH]
+    local src="$1" sub="${2:-}"
+    local root="${EPISTEME_RAW_ROOT:-${EPISTEME_DATA_ROOT:-.}/01_raw}"
+    printf '%s\n' "$root/$src${sub:+/$sub}"
 }
 
-size_match_skip() { # size_match_skip FILE URL — exit 0 to skip a re-download
-    log WARN "size_match_skip is a stub (SP3 will harden): FILE=${1:-} URL=${2:-}"
-    return 1  # until SP3 adds the HEAD/Content-Length check, never skip
+size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS this url (local matches remote size)
+    local local_path="$1" url="$2"
+    [ -s "$local_path" ] || return 1
+    command -v curl >/dev/null 2>&1 || return 1   # can't verify -> fetch
+    local remote_len local_len
+    remote_len="$(curl -sSIL --connect-timeout 20 --max-time 90 "$url" 2>/dev/null \
+        | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' | tail -n1)"
+    local_len="$(wc -c < "$local_path" | tr -d '[:space:]')"
+    [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ]
 }
 
-aria2_fetch() { # aria2_fetch URL_LIST DEST
-    log WARN "aria2_fetch is a stub (SP3 will harden): URL_LIST=${1:-} DEST=${2:-}"
-    command -v aria2c >/dev/null 2>&1 || log WARN "aria2_fetch: aria2c not installed"
-    return 0
+discover_manifest() { # discover_manifest BASE_URL REGEX... -> first filename matching each regex, one per line
+    local base="$1"; shift
+    local listing
+    listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)" || {
+        log ERROR "discover_manifest: cannot list $base/"
+        return 1
+    }
+    local names
+    names="$(printf '%s\n' "$listing" \
+        | grep -oE 'href="[^"]+"' | sed -E 's/href="//; s/"$//' \
+        | sed 's/[?#].*$//' | grep -vE '^(\?|/|\.\./|#|https?:)' | sort -u)"
+    local re
+    for re in "$@"; do
+        printf '%s\n' "$names" | grep -E "$re" | head -n1 || true
+    done
 }
+
+http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be `URL<TAB>relpath`)
+    local dest_dir="$1"; shift
+    mkdir -p "$dest_dir"
+    local -a urls=()
+    if [ "$#" -gt 0 ]; then urls=("$@"); else mapfile -t urls; fi
+    [ "${#urls[@]}" -gt 0 ] || { log INFO "http_fetch: nothing to fetch"; return 0; }
+
+    if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        local line url rel
+        for line in "${urls[@]}"; do
+            url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+            log INFO "DRY: would fetch $url -> $dest_dir/$rel"
+            command -v curl >/dev/null 2>&1 && size_match_skip "$dest_dir/$rel" "$url" \
+                && log INFO "DRY:   (already size-matched, would skip)"
+        done
+        return 0
+    fi
+
+    if command -v aria2c >/dev/null 2>&1; then
+        local aria_in rc; aria_in="$(mktemp)"
+        local line url rel
+        for line in "${urls[@]}"; do
+            url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+            printf '%s\n  dir=%s\n  out=%s\n' "$url" "$dest_dir/$(dirname "$rel")" "$(basename "$rel")" >> "$aria_in"
+        done
+        aria2c -c -x16 -s16 -j"${EPISTEME_DOWNLOAD_THREADS:-4}" \
+            --max-tries=15 --retry-wait=30 --auto-file-renaming=false \
+            --allow-overwrite=true --file-allocation=none --console-log-level=warn \
+            -i "$aria_in"
+        rc=$?; rm -f "$aria_in"; return "$rc"
+    fi
+
+    command -v curl >/dev/null 2>&1 || die "no download tool: install aria2c (or curl for the slow path)"
+    log WARN "aria2c not found — sequential curl fallback (degraded throughput)"
+    local line url rel
+    for line in "${urls[@]}"; do
+        url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+        mkdir -p "$dest_dir/$(dirname "$rel")"
+        curl -fL -C - --retry 15 --retry-delay 30 -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
+    done
+}
+
+cap_urls() { # cap_urls N — echo the first N lines of stdin; passthrough if N empty/0/non-numeric
+    local n="${1:-}"
+    case "$n" in
+        ''|0|*[!0-9]*) cat ;;
+        *) head -n "$n" ;;
+    esac
+}
+
+aria2_fetch() { http_fetch "$@"; }   # roadmap §4.6 name kept as an alias
 
 aws_sync() { # aws_sync S3_URI DEST [ARGS...]
     log WARN "aws_sync is a stub (SP3 will harden): S3_URI=${1:-} DEST=${2:-}"
