@@ -117,3 +117,8 @@ def test_dotenv_overrides_sources_env(fresh_config, monkeypatch):
     monkeypatch.delenv("CHEMBL_BASE", raising=False)
     cfg = fresh_config("CHEMBL_BASE=https://dotenv.example/chembl\n")
     assert cfg.get_settings().chembl_base == "https://dotenv.example/chembl"
+
+    # top leg: real env beats ./.env for the same endpoint var
+    monkeypatch.setenv("CHEMBL_BASE", "https://realenv.example/chembl")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().chembl_base == "https://realenv.example/chembl"
