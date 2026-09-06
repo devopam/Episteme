@@ -11,6 +11,25 @@
 # pipefail is safe to inherit; -e / -u are the caller's choice, not ours.
 set -o pipefail
 
+# Endpoint defaults — single source of truth (SP3: scripts/data/_lib/sources.env).
+# Load order everywhere (last wins): sources.env -> ./.env -> real environment.
+# Capture the pre-existing environment FIRST (names for load_dotenv's guard, and a
+# full snapshot), then source sources.env with `set -a` so every KEY=value is
+# exported at *source* time. Re-applying the snapshot afterwards guarantees a var
+# already present in the real environment is never clobbered by sources.env;
+# load_dotenv() then lets ./.env override a sources.env value but not a real one.
+_COMMON_REAL_ENV_KEYS=" $(compgen -e | tr '\n' ' ') "
+_COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_COMMON_LIB_DIR/sources.env" ]; then
+    _common_real_env_snapshot="$(export -p)"
+    set -a
+    # shellcheck disable=SC1091
+    . "$_COMMON_LIB_DIR/sources.env"
+    set +a
+    eval "$_common_real_env_snapshot"   # restore real-env values; keep new keys
+    unset _common_real_env_snapshot
+fi
+
 log() { # log LEVEL MSG...
     local level="$1"; shift
     printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$*" >&2
@@ -60,7 +79,9 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         key="${line%%=*}"
         key="${key#"${key%%[![:space:]]*}"}"            # ltrim
         key="${key%"${key##*[![:space:]]}"}"            # rtrim
-        [ -n "${!key:-}" ] && continue                  # real env wins
+        case "${_COMMON_REAL_ENV_KEYS:- }" in           # real pre-script env wins;
+            *" $key "*) continue ;;                     # a sources.env value does not
+        esac                                            # block the ./.env override
         val="${line#*=}"
         case "$val" in                                  # strip one matching quote pair
             \"*\") val="${val#\"}"; val="${val%\"}" ;;

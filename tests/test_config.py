@@ -14,10 +14,11 @@ def fresh_config(tmp_path, monkeypatch):
             monkeypatch.delenv(var, raising=False)
 
     def _load(text: str):
-        toml_content = "[project]\nname = \"episteme-test\"\n"
+        toml_content = '[project]\nname = "episteme-test"\n'
         (tmp_path / "pyproject.toml").write_text(toml_content, encoding="utf-8")
         env_file.write_text(text, encoding="utf-8")
         import episteme.config as cfg
+
         importlib.reload(cfg)
         cfg.get_settings.cache_clear()
         return cfg
@@ -73,22 +74,46 @@ def test_data_root_derives_the_three_roots(fresh_config):
 
 
 def test_explicit_root_overrides_data_root(fresh_config):
-    cfg = fresh_config(
-        "EPISTEME_DATA_ROOT=/mnt/ssd\n"
-        "EPISTEME_RAW_ROOT=/other/raw\n"
-    )
+    cfg = fresh_config("EPISTEME_DATA_ROOT=/mnt/ssd\n" "EPISTEME_RAW_ROOT=/other/raw\n")
     s = cfg.get_settings()
-    assert s.raw_root == Path("/other/raw")            # explicit wins
-    assert s.processed_root == Path("/mnt/ssd/02_processed")   # derived
+    assert s.raw_root == Path("/other/raw")  # explicit wins
+    assert s.processed_root == Path("/mnt/ssd/02_processed")  # derived
 
 
 def test_data_root_defaults_to_dot(fresh_config):
     cfg = fresh_config("")
     s = cfg.get_settings()
     assert s.data_root == Path(".")
-    assert s.raw_root == Path("01_raw")               # Path(".") / "01_raw"
+    assert s.raw_root == Path("01_raw")  # Path(".") / "01_raw"
 
 
 def test_db_password_from_env(fresh_config):
     cfg = fresh_config("EPISTEME_DB_PASSWORD=s3cr3t\n")
     assert cfg.get_settings().db_password == "s3cr3t"
+
+
+_CHEMBL_DEFAULT = "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest"
+
+
+def test_sources_env_load_order(tmp_path, monkeypatch):
+    # sources.env default is visible
+    import episteme.config as cfg
+
+    monkeypatch.delenv("CHEMBL_BASE", raising=False)
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    s = cfg.get_settings()
+    assert getattr(s, "chembl_base", None) == _CHEMBL_DEFAULT
+
+    # real environment overrides sources.env
+    monkeypatch.setenv("CHEMBL_BASE", "https://mirror.example/chembl")
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().chembl_base == "https://mirror.example/chembl"
+
+
+def test_dotenv_overrides_sources_env(fresh_config, monkeypatch):
+    # middle leg of the load order: ./.env beats sources.env, loses to real env
+    monkeypatch.delenv("CHEMBL_BASE", raising=False)
+    cfg = fresh_config("CHEMBL_BASE=https://dotenv.example/chembl\n")
+    assert cfg.get_settings().chembl_base == "https://dotenv.example/chembl"
