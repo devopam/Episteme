@@ -18,7 +18,10 @@ set -o pipefail
 # exported at *source* time. Re-applying the snapshot afterwards guarantees a var
 # already present in the real environment is never clobbered by sources.env;
 # load_dotenv() then lets ./.env override a sources.env value but not a real one.
-_COMMON_REAL_ENV_KEYS=" $(compgen -e | tr '\n' ' ') "
+# Capture once per process: a second `. common.sh` (e.g. an _lib helper that
+# itself sources this file) must NOT recapture after sources.env is exported, or
+# every .env override of an endpoint var silently stops working.
+[ -n "${_COMMON_REAL_ENV_KEYS:-}" ] || _COMMON_REAL_ENV_KEYS=" $(compgen -e | tr '\n' ' ') "
 _COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$_COMMON_LIB_DIR/sources.env" ]; then
     _common_real_env_snapshot="$(export -p)"
@@ -79,9 +82,14 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         key="${line%%=*}"
         key="${key#"${key%%[![:space:]]*}"}"            # ltrim
         key="${key%"${key##*[![:space:]]}"}"            # rtrim
-        case "${_COMMON_REAL_ENV_KEYS:- }" in           # real pre-script env wins;
-            *" $key "*) continue ;;                     # a sources.env value does not
-        esac                                            # block the ./.env override
+        # real pre-script env wins — but only if it actually had a VALUE. An
+        # exported-but-empty var (`docker run -e PGHOST`) must not block .env;
+        # this matches config.py _get(), which treats "" as absent. The
+        # export -p restore above already put the real value back, so ${!key}
+        # here reads the real-env value, not the sources.env one.
+        case "${_COMMON_REAL_ENV_KEYS:- }" in
+            *" $key "*) [ -n "${!key:-}" ] && continue ;;
+        esac
         val="${line#*=}"
         case "$val" in                                  # strip one matching quote pair
             \"*\") val="${val#\"}"; val="${val%\"}" ;;
