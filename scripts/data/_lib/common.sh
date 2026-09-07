@@ -161,14 +161,20 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     [ "${#urls[@]}" -gt 0 ] || { log INFO "http_fetch: nothing to fetch"; return 0; }
 
     if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
-        # dry-run creates nothing on disk — not even the dest dir.
-        local line url rel
+        # dry-run creates nothing on disk — not even the dest dir. Accumulate the
+        # listing and emit it in one write: `log` forks `date` per call, and a
+        # big source (bookshelf ~9.5k urls) would otherwise pay that per line.
+        local line url rel out=""
+        local have_curl=0; command -v curl >/dev/null 2>&1 && have_curl=1
         for line in "${urls[@]}"; do
             url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
-            log INFO "DRY: would fetch $url -> $dest_dir/$rel"
-            command -v curl >/dev/null 2>&1 && size_match_skip "$dest_dir/$rel" "$url" \
-                && log INFO "DRY:   (already size-matched, would skip)"
+            out+="DRY: would fetch $url -> $dest_dir/$rel"$'\n'
+            if [ "$have_curl" = "1" ] && [ -s "$dest_dir/$rel" ] && size_match_skip "$dest_dir/$rel" "$url"; then
+                out+="DRY:   (already size-matched, would skip)"$'\n'
+            fi
         done
+        printf '%s' "$out" >&2
+        log INFO "http_fetch: dry-run — ${#urls[@]} url(s) listed, nothing transferred"
         return 0
     fi
     mkdir -p "$dest_dir"
@@ -218,8 +224,8 @@ s3_sync() { # s3_sync S3_URI DEST_DIR [-- extra passthrough args]
     # must narrow the S3_URI instead.
     local uri="$1" dest="$2"; shift 2 || true
     local -a extra=(); [ "${1:-}" = "--" ] && { shift; extra=("$@"); }
-    mkdir -p "$dest"
     if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        # dry-run creates nothing on disk — not even the dest dir.
         # A failed dry-run probe must be visible, not swallowed — otherwise a
         # rejected flag looks like a clean "nothing to sync".
         if command -v s5cmd >/dev/null 2>&1; then
@@ -233,6 +239,7 @@ s3_sync() { # s3_sync S3_URI DEST_DIR [-- extra passthrough args]
         fi
         return 0
     fi
+    mkdir -p "$dest"
     if command -v s5cmd >/dev/null 2>&1; then
         s5cmd --no-sign-request sync "$uri/*" "$dest/"
     elif command -v aws >/dev/null 2>&1; then
