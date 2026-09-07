@@ -156,12 +156,12 @@ list_manifest() { # list_manifest BASE_URL [FILTER_ERE] -> EVERY listed filename
 
 http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be `URL<TAB>relpath`)
     local dest_dir="$1"; shift
-    mkdir -p "$dest_dir"
     local -a urls=()
     if [ "$#" -gt 0 ]; then urls=("$@"); else mapfile -t urls; fi
     [ "${#urls[@]}" -gt 0 ] || { log INFO "http_fetch: nothing to fetch"; return 0; }
 
     if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        # dry-run creates nothing on disk — not even the dest dir.
         local line url rel
         for line in "${urls[@]}"; do
             url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
@@ -171,6 +171,7 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         done
         return 0
     fi
+    mkdir -p "$dest_dir"
 
     if command -v aria2c >/dev/null 2>&1; then
         local aria_in rc; aria_in="$(mktemp)"

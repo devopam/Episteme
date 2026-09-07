@@ -29,10 +29,13 @@ MAX_FILES=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --force) FORCE=1; shift ;;
-        --reason) REASON="${2:-}"; shift 2 ;;
+        # `shift; [ $# -gt 0 ] && shift` not `shift 2`: a trailing valueless
+        # --reason/--max-files would make `shift 2` fail (count out of range),
+        # leave $1 unchanged, and spin the while-loop forever.
+        --reason) REASON="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         # download_pmc.py's flag is --limit, extract_pmc.py's is --max-files --
         # one orchestrator flag, translated per downstream script below.
-        --max-files) MAX_FILES="${2:-}"; shift 2 ;;
+        --max-files) MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         # env-only signal for the fetch engine / wrappers; never appended to
         # any *_args array. Exported so every downstream subprocess sees it.
         --dry-run) export EPISTEME_DRY_RUN=1; shift ;;
