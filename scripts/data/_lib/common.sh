@@ -199,14 +199,22 @@ cap_urls() { # cap_urls N — echo the first N lines of stdin; passthrough if N 
 aria2_fetch() { http_fetch "$@"; }   # roadmap §4.6 name kept as an alias
 
 s3_sync() { # s3_sync S3_URI DEST_DIR [-- extra passthrough args]
+    # NOTE: passthrough args after `--` are forwarded to awscli only; the s5cmd
+    # backend ignores them (s5cmd's --exclude is a pre-subcommand global with
+    # different glob semantics). A wrapper that needs exact filtering on s5cmd
+    # must narrow the S3_URI instead.
     local uri="$1" dest="$2"; shift 2 || true
     local -a extra=(); [ "${1:-}" = "--" ] && { shift; extra=("$@"); }
     mkdir -p "$dest"
     if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        # A failed dry-run probe must be visible, not swallowed — otherwise a
+        # rejected flag looks like a clean "nothing to sync".
         if command -v s5cmd >/dev/null 2>&1; then
-            s5cmd --no-sign-request cp --dry-run "$uri/*" "$dest/" || true
+            s5cmd --no-sign-request cp --dry-run "$uri/*" "$dest/" \
+                || log WARN "s3_sync: s5cmd dry-run probe failed for $uri (check --dry-run flag position on this s5cmd version)"
         elif command -v aws >/dev/null 2>&1; then
-            aws s3 sync "$uri" "$dest" --no-sign-request --dryrun "${extra[@]}" || true
+            aws s3 sync "$uri" "$dest" --no-sign-request --dryrun "${extra[@]}" \
+                || log WARN "s3_sync: aws dry-run probe failed for $uri"
         else
             log INFO "DRY: would sync $uri -> $dest"
         fi
