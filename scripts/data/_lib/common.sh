@@ -188,7 +188,11 @@ cap_urls() { # cap_urls N — echo the first N lines of stdin; passthrough if N 
     local n="${1:-}"
     case "$n" in
         ''|0|*[!0-9]*) cat ;;
-        *) head -n "$n" ;;
+        # Drain the tail after the first N lines so the upstream producer in a
+        # `producer | cap_urls N | http_fetch` pipeline never takes SIGPIPE —
+        # under the `pipefail` this file sets, a SIGPIPE'd producer would make
+        # the whole pipeline exit 141. Output is still exactly the first N lines.
+        *) { head -n "$n"; cat >/dev/null; } ;;
     esac
 }
 
