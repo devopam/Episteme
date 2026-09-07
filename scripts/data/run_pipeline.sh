@@ -14,7 +14,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--force] [--reason REASON] [--max-files N]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
     exit 2
 }
 
@@ -116,7 +116,10 @@ run_stage() {
     if ! "$@"; then
         log ERROR "stage failed: $name"
         log ERROR "resume with: $0 $SOURCE $name"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $name" >/dev/null 2>&1 || true
+        # DR-1: a dry run touches no DB, so it also emits no failure-path run_end
+        # (that would be a lone run_end with no matching run_start).
+        [ "${EPISTEME_DRY_RUN:-0}" = "1" ] \
+            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $name" >/dev/null 2>&1 || true
         exit 1
     fi
 }
@@ -138,6 +141,10 @@ fi
 wrapper_args=()
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")
+
+# Set in the non-pmc early-validation block above; declared here too so the
+# cross-block use in the dispatch `else` is explicit under `set -u`.
+wpath="${wpath:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
