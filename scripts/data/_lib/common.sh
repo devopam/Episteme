@@ -103,6 +103,10 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
 write_sync_stamp() { # write_sync_stamp DIR
     local dir="$1"
     [ -n "$dir" ] || die "write_sync_stamp: DIR required"
+    if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        log INFO "dry-run: not writing sync stamp under $dir"
+        return 0
+    fi
     mkdir -p "$dir"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/last_sync_utc.txt"
     log INFO "write_sync_stamp: $dir/last_sync_utc.txt"
@@ -125,21 +129,29 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
     [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ]
 }
 
-discover_manifest() { # discover_manifest BASE_URL REGEX... -> first filename matching each regex, one per line
-    local base="$1"; shift
-    local listing
-    listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)" || {
-        log ERROR "discover_manifest: cannot list $base/"
-        return 1
-    }
-    local names
-    names="$(printf '%s\n' "$listing" \
+_scrape_listing() { # _scrape_listing BASE_URL -> cleaned filenames from an HTML/autoindex dir listing, one per line, sorted unique
+    local base="$1" listing
+    listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)" || return 1
+    printf '%s\n' "$listing" \
         | grep -oE 'href="[^"]+"' | sed -E 's/href="//; s/"$//' \
-        | sed 's/[?#].*$//' | grep -vE '^(\?|/|\.\./|#|https?:)' | sort -u)"
+        | sed 's/[?#].*$//' | grep -vE '^(\?|/|\.\./|#|https?:|$)' | sort -u
+}
+
+discover_manifest() { # discover_manifest BASE_URL REGEX... -> FIRST filename matching each regex, one line each, in regex order (no line for a non-match)
+    local base="$1"; shift
+    local names
+    names="$(_scrape_listing "$base")" || { log ERROR "discover_manifest: cannot list $base/"; return 1; }
     local re
     for re in "$@"; do
         printf '%s\n' "$names" | grep -E "$re" | head -n1 || true
     done
+}
+
+list_manifest() { # list_manifest BASE_URL [FILTER_ERE] -> EVERY listed filename (optional ERE filter), sorted unique, NO head
+    local base="$1" filt="${2:-.}"
+    local names
+    names="$(_scrape_listing "$base")" || { log ERROR "list_manifest: cannot list $base/"; return 1; }
+    printf '%s\n' "$names" | grep -E "$filt" || true
 }
 
 http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be `URL<TAB>relpath`)
