@@ -18,7 +18,11 @@ while [ $# -gt 0 ]; do
         --force)     shift ;;                          # no local prune here — consume + ignore
         --reason)    shift; [ $# -gt 0 ] && shift ;;   # run_pipeline already enforced it
         works_jsonl|works_parquet|jsonl|parquet|full) MODE="$1"; shift ;;
-        *)           log WARN "download_openalex.sh: ignoring $1"; shift ;;
+        -*)          log WARN "download_openalex.sh: ignoring $1"; shift ;;
+        # A bare non-flag token that is not a known mode is almost certainly a
+        # mistyped MODE — hard-reject it. Silently falling back to the default
+        # prefix would sync the wrong (possibly hundreds-of-GB) tree (F-2).
+        *)           die "openalex: unknown mode '$1' (want: works_jsonl works_parquet jsonl parquet full)" ;;
     esac
 done
 
