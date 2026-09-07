@@ -44,6 +44,7 @@ dest="$(resolve_dest openfda)"
 # prints one .zip URL per line. Keep the heredoc single-quoted (no shell expand).
 PYSRC="$(cat <<'PY'
 import json, sys
+from urllib.parse import urlsplit
 
 mode = sys.argv[1]
 data = json.load(sys.stdin)
@@ -89,24 +90,32 @@ for path, u in urls:
         continue
     seen.add(u)
     selected += 1
-    print(u)
+    # Emit URL<TAB>relpath. openFDA partitions high-volume endpoints by quarter
+    # (…/device/event/2013q1/… vs …/2013q2/…) so basenames collide; the URL path
+    # minus its leading slash is a collision-free on-disk layout (F-1).
+    print(u + "\t" + urlsplit(u).path.lstrip("/"))
 print(f"selected_urls={selected}", file=sys.stderr)
 PY
 )"
 
-mapfile -t urls < <(curl -sSL --fail --connect-timeout 30 --max-time 120 "$OPENFDA_CATALOG" | "$PY" -c "$PYSRC" "$MODE")
-[ "${#urls[@]}" -gt 0 ] || die "openfda: no zip URLs for mode=$MODE"
+# Fetch the catalog first (small JSON) so a transport failure is reported as
+# such, not misattributed to "no zip URLs" (M-1).
+catalog="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$OPENFDA_CATALOG")" \
+    || die "openfda: cannot fetch catalog $OPENFDA_CATALOG"
+mapfile -t entries < <(printf '%s' "$catalog" | "$PY" -c "$PYSRC" "$MODE")
+[ "${#entries[@]}" -gt 0 ] || die "openfda: no zip URLs for mode=$MODE (catalog parsed but nothing matched?)"
 
 lines=()
-for url in "${urls[@]}"; do
-    [ -n "$url" ] || continue
-    base="${url##*/}"; base="${base%%\?*}"    # flat dest, namespaced by basename (no per-iter fork)
+for entry in "${entries[@]}"; do
+    [ -n "$entry" ] || continue
+    url="${entry%%$'\t'*}"
+    rel="${entry#*$'\t'}"
     # force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$base"; fi
-    if size_match_skip "$dest/$base" "$url"; then
-        log INFO "skip (size-matched): $base"
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$rel"; fi
+    if size_match_skip "$dest/$rel" "$url"; then
+        log INFO "skip (size-matched): $rel"
     else
-        lines+=("$url")
+        lines+=("$entry")
     fi
 done
 
