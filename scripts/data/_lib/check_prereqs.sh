@@ -3,8 +3,8 @@
 set -uo pipefail
 _row() {
     local t="$1" hint="$2" p
-    if p="$(command -v "$t" 2>/dev/null)"; then printf '  %-14s %s\n' "$t" "$p"
-    else printf '  %-14s MISSING  (%s)\n' "$t" "$hint"; fi
+    if p="$(command -v "$t" 2>/dev/null)"; then printf '  %-16s %s\n' "$t" "$p"
+    else printf '  %-16s MISSING  (%s)\n' "$t" "$hint"; fi
 }
 echo "acquisition-layer prerequisites:"
 _row aria2c        "http/ftp segmented download; apt/brew install aria2"
