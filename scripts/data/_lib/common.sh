@@ -4,9 +4,9 @@
 # Source it, don't execute it:
 #   . "$(dirname "${BASH_SOURCE[0]}")/../_lib/common.sh"
 #
-# SP1-β lands log / die / require_env / load_dotenv / write_sync_stamp fully.
-# discover_manifest / size_match_skip / aria2_fetch / aws_sync are minimal
-# working bodies that SP3 hardens — each announces itself as a stub.
+# SP1-β landed log / die / require_env / load_dotenv / write_sync_stamp fully.
+# SP3 added the fetch engine (resolve_dest, size_match_skip, discover_manifest,
+# http_fetch/aria2_fetch, s3_sync/aws_sync, cap_urls) and the sources.env load-order block.
 
 # pipefail is safe to inherit; -e / -u are the caller's choice, not ours.
 set -o pipefail
@@ -198,8 +198,26 @@ cap_urls() { # cap_urls N — echo the first N lines of stdin; passthrough if N 
 
 aria2_fetch() { http_fetch "$@"; }   # roadmap §4.6 name kept as an alias
 
-aws_sync() { # aws_sync S3_URI DEST [ARGS...]
-    log WARN "aws_sync is a stub (SP3 will harden): S3_URI=${1:-} DEST=${2:-}"
-    command -v aws >/dev/null 2>&1 || log WARN "aws_sync: aws cli not installed"
-    return 0
+s3_sync() { # s3_sync S3_URI DEST_DIR [-- extra passthrough args]
+    local uri="$1" dest="$2"; shift 2 || true
+    local -a extra=(); [ "${1:-}" = "--" ] && { shift; extra=("$@"); }
+    mkdir -p "$dest"
+    if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        if command -v s5cmd >/dev/null 2>&1; then
+            s5cmd --no-sign-request cp --dry-run "$uri/*" "$dest/" || true
+        elif command -v aws >/dev/null 2>&1; then
+            aws s3 sync "$uri" "$dest" --no-sign-request --dryrun "${extra[@]}" || true
+        else
+            log INFO "DRY: would sync $uri -> $dest"
+        fi
+        return 0
+    fi
+    if command -v s5cmd >/dev/null 2>&1; then
+        s5cmd --no-sign-request sync "$uri/*" "$dest/"
+    elif command -v aws >/dev/null 2>&1; then
+        aws s3 sync "$uri" "$dest" --no-sign-request "${extra[@]}"
+    else
+        die "no S3 tool: install s5cmd (fast) or awscli"
+    fi
 }
+aws_sync() { s3_sync "$@"; }   # roadmap §4.6 name kept as an alias

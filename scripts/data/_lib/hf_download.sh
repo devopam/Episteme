@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# hf_fetch REPO_ID REPO_TYPE DEST_DIR [REVISION]  -- Hugging Face download helper.
+set -uo pipefail
+
+hf_fetch() {
+    local repo="$1" rtype="${2:-dataset}" dest="$3" rev="${4:-}"
+    mkdir -p "$dest"
+    local bin=""
+    command -v hf >/dev/null 2>&1 && bin="hf"
+    [ -z "$bin" ] && command -v huggingface-cli >/dev/null 2>&1 && bin="huggingface-cli"
+    [ -z "$bin" ] && { echo "ERROR: install the HF CLI (pip install -U 'huggingface_hub[cli,hf_transfer]')" >&2; return 1; }
+
+    if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY: would $bin download $repo (type=$rtype${rev:+ rev=$rev}) -> $dest" >&2
+        return 0
+    fi
+    export HF_HUB_ENABLE_HF_TRANSFER=1
+    local -a args=(download "$repo" --local-dir "$dest")
+    [ "$rtype" != "model" ] && args+=(--repo-type "$rtype")
+    [ -n "$rev" ] && args+=(--revision "$rev")
+    if "$bin" "${args[@]}"; then return 0; fi
+    # retry as model-type (batch-script behaviour)
+    echo "WARN: $bin download as $rtype failed; retrying as model" >&2
+    args=(download "$repo" --local-dir "$dest"); [ -n "$rev" ] && args+=(--revision "$rev")
+    "$bin" "${args[@]}"
+}
