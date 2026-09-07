@@ -61,7 +61,10 @@ if [ "${#planned[@]}" -eq 0 ]; then
     log WARN "mesh: directory listings resolved nothing — probing known filenames"
     for y in "$YEAR" "$PREV"; do
         for f in "desc$y.xml" "qual$y.xml" "supp$y.xml"; do
-            code="$(curl -sS -o /dev/null -w '%{http_code}' -L --connect-timeout 15 --max-time 30 "$MESH_BASE/xmlmesh$y/$f" || true)"
+            # No -L: a stale path that 302-redirects to an error page (current
+            # NLM behaviour) must read as non-200 and be dropped, not chased to
+            # a 200 error body that would then be fetched and falsely stamped.
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 "$MESH_BASE/xmlmesh$y/$f" || true)"
             [ "$code" = "200" ] && planned+=("$MESH_BASE/xmlmesh$y/$f"$'\t'"xmlmesh$y/$f")
         done
     done
