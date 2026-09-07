@@ -4,7 +4,7 @@
 # only (no extract/parse). Swiss-Prot product set only; TrEMBL is not fetched.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/data/_lib/common.sh
+# shellcheck source=../_lib/common.sh
 . "$HERE/../_lib/common.sh"
 
 MAX_FILES=""
@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
 done
 
 load_dotenv
-require_env EPISTEME_ACTOR
+require_env EPISTEME_ACTOR UNIPROT_MIRRORS
 
 dest="$(resolve_dest uniprot swissprot)"
 
@@ -43,7 +43,8 @@ files=(reldate.txt LICENSE README uniprot.xsd uniprot_sprot.xml.gz uniprot_sprot
 urls=()
 for f in "${files[@]}"; do
     u="$BASE/$f"
-    [ "$FORCE" = "1" ] && rm -f "$dest/$f"          # W-4: force a re-fetch
+    # W-4: force a re-fetch — but never delete real files during a --dry-run preview
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$f"; fi
     if size_match_skip "$dest/$f" "$u"; then
         log INFO "skip (size-matched): $f"
     else

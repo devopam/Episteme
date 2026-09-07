@@ -5,7 +5,7 @@
 # ancillaries) or all (adds postgresql / mysql / h5 / fps dumps).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/data/_lib/common.sh
+# shellcheck source=../_lib/common.sh
 . "$HERE/../_lib/common.sh"
 
 MODE="default"
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
 done
 
 load_dotenv
-require_env EPISTEME_ACTOR
+require_env EPISTEME_ACTOR CHEMBL_BASE
 
 dest="$(resolve_dest chembl)"
 
@@ -51,13 +51,14 @@ if [ "$MODE" = "all" ]; then
 fi
 
 mapfile -t files < <(discover_manifest "$CHEMBL_BASE" "${patterns[@]}" | sort -u)
-[ "${#files[@]}" -gt 0 ] || die "chembl: no files matched at $CHEMBL_BASE (listing format changed?)"
+[ "${#files[@]}" -gt 0 ] || die "chembl: no files resolved at $CHEMBL_BASE (listing unavailable or format changed)"
 
 urls=()
 for f in "${files[@]}"; do
     [ -n "$f" ] || continue
     u="$CHEMBL_BASE/$f"
-    [ "$FORCE" = "1" ] && rm -f "$dest/$f"          # W-4: force a re-fetch
+    # W-4: force a re-fetch — but never delete real files during a --dry-run preview
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$f"; fi
     if size_match_skip "$dest/$f" "$u"; then
         log INFO "skip (size-matched): $f"
     else
