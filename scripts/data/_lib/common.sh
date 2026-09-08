@@ -131,7 +131,7 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
 
 _safe_rel() { # _safe_rel REL — reject absolute paths and any '..' path component
     case "/$1" in */../*|*/..) return 1 ;; esac
-    case "$1" in /*|//*) return 1 ;; esac
+    case "$1" in /*) return 1 ;; esac   # `/*` already covers `//...`
     return 0
 }
 
