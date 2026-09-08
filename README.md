@@ -31,7 +31,7 @@ pip install -e .
 ```
 
 To install optional feature groups:
-- Data pipeline: `pip install -e ".[data]"` — required by the data-acquisition scripts (e.g. `scripts/download_pmc_oa_comm.sh`), which import `requests`/`pandas`/etc.
+- Data pipeline: `pip install -e ".[data]"` — required by the data-acquisition scripts (e.g. `scripts/data/pmc/download_pmc.sh`), which import `requests`/etc.
 - Model training: `pip install -e ".[model]"`
 - Development & tests: `pip install -e ".[dev]"`
 
