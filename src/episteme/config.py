@@ -59,6 +59,10 @@ def _load_sources_env() -> None:
                     val = val[1:-1]
                 _SOURCES.setdefault(key.strip(), val)
             return
+    raise ConfigError(
+        "scripts/data/_lib/sources.env not found relative to episteme.config "
+        "(endpoint defaults unavailable — non-editable install?)"
+    )
 
 
 def _get_int(name: str, default: int) -> int:
