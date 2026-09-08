@@ -3,7 +3,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/_lib/common.sh"
 load_dotenv
-require_env EPISTEME_ACTOR
+# require_env EPISTEME_ACTOR is deferred to *after* argument validation (M5) so a
+# no-arg invocation prints usage() rather than a "missing env var" error.
 
 PY="${PYTHON:-}"
 if [ -z "$PY" ]; then
@@ -23,9 +24,19 @@ STAGE="${2:-}"
 [ -n "$SOURCE" ] && [ -n "$STAGE" ] || usage
 shift 2 || true
 
+# M5: validate args first, THEN require the audit actor — so `run_pipeline.sh`
+# with no/bad args gives usage(), not "missing required environment variable".
+require_env EPISTEME_ACTOR
+
 FORCE=0
 REASON=""
 MAX_FILES=""
+# I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
+# hf_corpus `<repo_id>`, chembl `all`, …). Collect and forward them to the
+# table-driven wrapper rather than WARN-and-drop — the wrapper is the layer that
+# can judge a real typo (e.g. openalex's F-2 `die`). pmc's stage chain below is
+# deliberately NOT changed: its downstream flags are all `--`-prefixed.
+passthrough=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --force) FORCE=1; shift ;;
@@ -39,7 +50,7 @@ while [ $# -gt 0 ]; do
         # env-only signal for the fetch engine / wrappers; never appended to
         # any *_args array. Exported so every downstream subprocess sees it.
         --dry-run) export EPISTEME_DRY_RUN=1; shift ;;
-        *) log WARN "run_pipeline.sh: ignoring unknown arg $1"; shift ;;
+        *) passthrough+=("$1"); shift ;;
     esac
 done
 
@@ -88,6 +99,15 @@ case "$STAGE" in
     all|download|extract|load|graph|materialize|enrich) ;;
     *) usage ;;
 esac
+
+# C2: SP3 wires --dry-run for pmc's `download` stage only (download_pmc.py has a
+# true pre-network no-op). Every other pmc stage ignores EPISTEME_DRY_RUN but
+# DR-1 still strips its audit bracket -> a real, unaudited DB write that exits 0.
+# Reject the combination loudly rather than run it. `all` (STAGE != download)
+# is rejected too: the review wants the combination refused, not silently partial.
+if [ "$SOURCE" = "pmc" ] && [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && [ "$STAGE" != "download" ]; then
+    die "pmc $STAGE has no --dry-run (SP3 wires it for download only) — drop --dry-run or use 'pmc download --dry-run'" 3
+fi
 
 # Non-pmc sources: SP3 wires only `download` (and `all`, which runs download
 # then stops). Every other stage is SP2 (literature extract) / SP4 (structured
@@ -147,6 +167,8 @@ fi
 wrapper_args=()
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")
+# I1: forward the collected MODE positionals last (guard the expansion for set -u).
+[ "${#passthrough[@]}" -eq 0 ] || wrapper_args+=("${passthrough[@]}")
 
 # Set in the non-pmc early-validation block above; declared here too so the
 # cross-block use in the dispatch `else` is explicit under `set -u`.
@@ -164,6 +186,9 @@ else
     "$PY" -m episteme.audit_trail record run_start --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
         || log WARN "run_start audit failed; proceeding unaudited (is the DB up?)"
 fi
+
+# M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
+bash "$HERE/_lib/check_prereqs.sh" >&2 || true
 
 if [ "$SOURCE" = "pmc" ]; then
     # pmc keeps its full stage chain.
@@ -186,7 +211,6 @@ if [ "$SOURCE" = "pmc" ]; then
 else
     # Non-pmc: SOURCE, STAGE and $wpath were all validated before the audit
     # bracket. Only `download` / `all` reach here; both run the one wrapper.
-    bash "$HERE/_lib/check_prereqs.sh" >&2 || true
     run_stage download bash "$wpath" "${wrapper_args[@]}"
     if [ "$STAGE" = "all" ]; then
         log INFO "$SOURCE: only 'download' is wired in SP3 (extract/serialize = SP2/SP4)"
