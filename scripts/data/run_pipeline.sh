@@ -136,6 +136,9 @@ if [ -n "$MAX_FILES" ]; then
     download_args=(--limit "$MAX_FILES")
     extract_args=(--max-files "$MAX_FILES")
 fi
+# pmc's download_pmc.py takes --dry-run directly (a true pre-network no-op); the
+# table-driven wrappers instead read EPISTEME_DRY_RUN from the environment.
+[ "${EPISTEME_DRY_RUN:-0}" = "1" ] && download_args+=(--dry-run)
 [ "$FORCE" = "1" ] && extract_args+=(--force)
 
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args

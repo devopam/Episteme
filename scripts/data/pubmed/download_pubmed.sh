@@ -1,64 +1,74 @@
 #!/usr/bin/env bash
+# Episteme SP3 acquisition wrapper: PubMed annual-baseline / daily-update bulk
+# download. Thin shell over scripts/data/_lib/common.sh — directory listing +
+# size-skip + fetch only (no extract/parse). Each xml.gz is fetched alongside
+# its NCBI-published .md5 sibling (kept under <dest>/md5/ for verify_pubmed.sh).
+# MODE positional: baseline (default) | updates.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../_lib/common.sh
+. "$HERE/../_lib/common.sh"
 
-# ============================================================
-# Episteme - PubMed Baseline Downloader (aria2c)
-# ============================================================
+MODE="baseline"
+MAX_FILES=""
+FORCE=0
 
-set -euo pipefail
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)        export EPISTEME_DRY_RUN=1; shift ;;
+        --max-files)      MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        --force)          FORCE=1; shift ;;
+        --reason)         shift; [ $# -gt 0 ] && shift ;;   # run_pipeline already enforced it
+        baseline|updates) MODE="$1"; shift ;;
+        *)                log WARN "download_pubmed.sh: ignoring $1"; shift ;;
+    esac
+done
 
-# -------- Configuration --------
-BASE_URL="ftp://ftp.ncbi.nlm.nih.gov/pubmed/baseline"
-OUTPUT_DIR="${1:-./01_raw/pubmed/baseline}"   # You can pass a custom path as first argument
-CONNECTIONS_PER_SERVER=8
-SPLITS=8
-MAX_CONCURRENT_DOWNLOADS=6
-MAX_TRIES=12
-RETRY_WAIT=30
+load_dotenv
+require_env EPISTEME_ACTOR PUBMED_FTP_BASE
 
-# -------- Prepare directories --------
-mkdir -p "$OUTPUT_DIR"
-cd "$OUTPUT_DIR"
+dest="$(resolve_dest pubmed)"
 
-echo "=================================================="
-echo "PubMed Baseline Downloader"
-echo "Target directory: $(pwd)"
-echo "=================================================="
+# MODE -> upstream subdirectory (baseline files vs daily update files).
+case "$MODE" in
+    baseline) sub="baseline" ;;
+    updates)  sub="updatefiles" ;;
+    *)        die "pubmed: bad mode '$MODE' (baseline|updates)" ;;
+esac
 
-# -------- Step 1: Get list of baseline files --------
-echo "→ Fetching list of baseline files..."
-curl -s --list-only "$BASE_URL/" \
-  | grep -E 'pubmed26n[0-9]+\.xml\.gz$' \
-  | sort > pubmed_baseline_files.txt
+mapfile -t xmls < <(list_manifest "$PUBMED_FTP_BASE/$sub" 'pubmed[0-9]+n[0-9]+\.xml\.gz$')
+[ "${#xmls[@]}" -gt 0 ] || die "pubmed: no xml.gz files at $PUBMED_FTP_BASE/$sub (mode=$MODE)"
 
-FILE_COUNT=$(wc -l < pubmed_baseline_files.txt | tr -d ' ')
-echo "→ Found $FILE_COUNT baseline files"
+# Each data file gets two planned entries: the xml.gz under <mode>/ and its
+# NCBI-published .md5 sibling under md5/ (same upstream directory).
+planned=()
+for f in "${xmls[@]}"; do
+    [ -n "$f" ] || continue
+    planned+=("$PUBMED_FTP_BASE/$sub/$f"$'\t'"$MODE/$f")
+    planned+=("$PUBMED_FTP_BASE/$sub/$f.md5"$'\t'"md5/$f.md5")
+done
 
-if [[ "$FILE_COUNT" -eq 0 ]]; then
-  echo "ERROR: No baseline files found. Exiting."
-  exit 1
+lines=()
+for entry in "${planned[@]}"; do
+    url="${entry%%$'\t'*}"
+    rel="${entry#*$'\t'}"
+    # W-4: force a re-fetch — but never delete real files during a --dry-run preview
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$rel"; fi
+    if size_match_skip "$dest/$rel" "$url"; then
+        log INFO "skip (size-matched): $rel"
+    else
+        lines+=("$entry")
+    fi
+done
+
+if [ "${#lines[@]}" -eq 0 ]; then
+    log INFO "pubmed: up to date"
+    write_sync_stamp "$dest"
+    exit 0
 fi
 
-# -------- Step 2: Create full URL list --------
-echo "→ Creating URL list..."
-sed "s|^|${BASE_URL}/|" pubmed_baseline_files.txt > pubmed_baseline_urls.txt
-
-# -------- Step 3: Download with aria2c --------
-echo "→ Starting download with aria2c..."
-echo "   (This is resumable – you can safely stop and re-run the script)"
-echo ""
-
-aria2c -c \
-  -x "$CONNECTIONS_PER_SERVER" \
-  -s "$SPLITS" \
-  -j "$MAX_CONCURRENT_DOWNLOADS" \
-  --max-tries="$MAX_TRIES" \
-  --retry-wait="$RETRY_WAIT" \
-  --auto-file-renaming=false \
-  --allow-overwrite=false \
-  -i pubmed_baseline_urls.txt
-
-echo ""
-echo "=================================================="
-echo "Download finished (or caught up)."
-echo "Files are in: $(pwd)"
-echo "=================================================="
+if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+    write_sync_stamp "$dest"
+else
+    die "pubmed: fetch failed"
+fi

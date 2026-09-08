@@ -25,7 +25,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlencode
 
 import requests
@@ -109,7 +109,7 @@ def parse_filelist(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for row in reader:
         # Normalise keys
-        norm = { (k or "").strip(): (v or "").strip() for k, v in row.items() }
+        norm = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
         rows.append(norm)
     return rows
 
@@ -219,7 +219,6 @@ def resolve_version_id(pmcid: str) -> tuple[str, dict[str, Any]] | None:
     pmcid = pmcid.strip()
     if not pmcid.upper().startswith("PMC"):
         pmcid = f"PMC{pmcid}"
-    base = pmcid.upper() if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
     # Keep original casing style PMC...
     if not pmcid.startswith("PMC"):
         pmcid = f"PMC{pmcid}"
@@ -365,9 +364,11 @@ def main() -> None:
         help="Parallel download workers",
     )
     parser.add_argument(
+        "--dry-run",
         "--dry_run",
+        dest="dry_run",
         action="store_true",
-        help="Resolve IDs / metadata only; do not write article files",
+        help="Print what would be downloaded and exit without resolving IDs or writing files",
     )
     parser.add_argument(
         "--api_key",
@@ -387,6 +388,14 @@ def main() -> None:
     for f in args.formats:
         formats.extend(f.split())
     formats = [f.lower() for f in formats]
+
+    if args.dry_run:
+        print(
+            f"dry-run: would download PMC commercial OA from {S3_HTTP}/ "
+            f"(filter=commercial_license_only, limit={args.limit}, formats={formats}); "
+            "resolving nothing, writing nothing"
+        )
+        return
 
     out: Path = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -421,10 +430,7 @@ def main() -> None:
     failures: list[tuple[str, str]] = []
 
     with ThreadPoolExecutor(max_workers=args.threads) as ex:
-        futs = {
-            ex.submit(process_one, pmcid, out, formats, args.dry_run): pmcid
-            for pmcid in ids
-        }
+        futs = {ex.submit(process_one, pmcid, out, formats, args.dry_run): pmcid for pmcid in ids}
         for fut in tqdm(as_completed(futs), total=len(futs), desc="PMC commercial"):
             pmcid = futs[fut]
             try:
