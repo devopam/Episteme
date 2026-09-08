@@ -177,14 +177,29 @@ Frozen names from roadmap §4.6. `aria2_fetch` / `aws_sync` from §4.6 are kept 
   be fetched + HEAD size-checks where cheap; **zero bytes transferred; exit 0
   even with no fetch tool installed.**
 - `--max-files N` (already in `run_pipeline.sh` from SP1-β) caps a wrapper's URL
-  list to the first N entries after resolution — for sources that are one big
-  dump (uniprot `sprot.dat.gz`), `--max-files 1` picks the smallest declared
-  ancillary file (`LICENSE`, `reldate.txt`) so a real end-to-end fetch is cheap.
+  list to the first N entries **after resolution and before the `--force`/prune
+  loop** — for sources that are one big dump (uniprot `sprot.dat.gz`),
+  `--max-files 1` picks the smallest declared ancillary file (`LICENSE`,
+  `reldate.txt`) so a real end-to-end fetch is cheap. Capping *before* the prune
+  makes `--max-files N` a **stable, reproducible slice**: re-running
+  `--max-files 2` twice fetches the same 2 files the first time and nothing the
+  second (both size-matched), rather than walking forward through the manifest.
+  `--force` (which deletes before re-fetch) therefore also operates only on that
+  capped slice, never the full resolved set.
+  *(SP3 whole-branch review C1 / amendment 2026-09-08: the original wording
+  "first N entries after resolution" was implemented as cap-after-prune, which
+  made `--force --max-files` delete everything and re-fetch N. Corrected to
+  cap-before-prune.)*
 - Idempotency (roadmap §4.11): unit of work = one remote file. Re-run =
   `size_match_skip` prunes already-complete files; `aria2c -c` resumes partials.
-  `write_sync_stamp "$DEST_DIR"` on success (`last_sync_utc.txt`). Bulk-download
-  wrappers do **not** write per-file `.ok` markers (that is an extract/serialize
-  concept); their "done" signal is the sync stamp + size-match on re-run.
+  `write_sync_stamp "$DEST_DIR"` on **any successful invocation**, including a
+  `--max-files`-bounded one (§10.2 exercises exactly this). The sync stamp is an
+  *operational* "this dir was last touched at T" marker — it is **not** a claim
+  that the source is fully mirrored. "Is this source complete?" is a separate
+  manifest-completeness question, out of scope for SP3; a bounded run legitimately
+  stamps. Bulk-download wrappers do **not** write per-file `.ok` markers (that is
+  an extract/serialize concept); their per-invocation "done" signal is the sync
+  stamp + size-match on re-run.
 - `--force` on a bulk wrapper → delete local files before re-fetch (still needs
   `--reason`, enforced by `run_pipeline.sh` as in SP1-β).
 
