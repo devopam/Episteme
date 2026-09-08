@@ -21,9 +21,48 @@ class ConfigError(RuntimeError):
     """Raised when a required configuration value is missing."""
 
 
+# Committed endpoint defaults (scripts/data/_lib/sources.env), populated once by
+# _load_sources_env(). These rank BELOW the real environment and the project
+# .env: _get() consults this dict only when neither supplies a value. Nothing is
+# written to os.environ, so config.py stays the sole os.environ *reader*.
+_SOURCES: dict[str, str] = {}
+
+
 def _get(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
+    if val not in (None, ""):
+        return val
+    val = _SOURCES.get(name)
     return val if val not in (None, "") else default
+
+
+def _load_sources_env() -> None:
+    """Populate ``_SOURCES`` from the nearest ``scripts/data/_lib/sources.env``.
+
+    Load order everywhere (last wins): sources.env -> .env -> real environment.
+    This is the lowest tier; ``.env`` (loaded into ``os.environ`` by
+    ``load_dotenv``) and the real environment both override it, and neither is
+    ever clobbered because nothing here touches ``os.environ``.
+    """
+    _SOURCES.clear()
+    here = Path(__file__).resolve()
+    for directory in (here.parent, *here.parents):
+        cand = directory / "scripts" / "data" / "_lib" / "sources.env"
+        if cand.is_file():
+            for raw in cand.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                    val = val[1:-1]
+                _SOURCES.setdefault(key.strip(), val)
+            return
+    raise ConfigError(
+        "scripts/data/_lib/sources.env not found relative to episteme.config "
+        "(endpoint defaults unavailable — non-editable install?)"
+    )
 
 
 def _get_int(name: str, default: int) -> int:
@@ -77,6 +116,20 @@ class Settings:
     ebi_ftp_host: str
     europepmc_base_url: str
     apollo_hf_repo: str
+    # SP3 acquisition endpoints — defaults live in scripts/data/_lib/sources.env
+    chembl_base: str
+    uniprot_base: str
+    pubchem_base: str
+    clinvar_base: str
+    reactome_base: str
+    mesh_base: str
+    pubmed_ftp_base: str
+    europepmc_base: str
+    bookshelf_base: str
+    openalex_s3: str
+    dailymed_base: str
+    openfda_catalog: str
+    aact_downloads: str
 
     def pg_dsn(self) -> str:
         return (
@@ -87,6 +140,7 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    _load_sources_env()  # committed endpoint defaults; ranked below .env and real env
     dotenv_path = _find_project_dotenv()
     if dotenv_path:
         load_dotenv(dotenv_path)  # loads the project-root .env if present; real env vars still win
@@ -122,6 +176,21 @@ def get_settings() -> Settings:
             "EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"
         ),
         apollo_hf_repo=_get("APOLLO_HF_REPO", "FreedomIntelligence/ApolloCorpus"),
+        chembl_base=_get("CHEMBL_BASE"),
+        uniprot_base=_get("UNIPROT_BASE"),
+        pubchem_base=_get("PUBCHEM_BASE"),
+        clinvar_base=_get("CLINVAR_BASE"),
+        reactome_base=_get("REACTOME_BASE"),
+        mesh_base=_get("MESH_BASE"),
+        pubmed_ftp_base=_get("PUBMED_FTP_BASE"),
+        # C-1: EUROPEPMC_BASE, else the legacy EUROPEPMC_BASE_URL, else the literal.
+        europepmc_base=_get("EUROPEPMC_BASE")
+        or _get("EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"),
+        bookshelf_base=_get("BOOKSHELF_BASE"),
+        openalex_s3=_get("OPENALEX_S3"),
+        dailymed_base=_get("DAILYMED_BASE"),
+        openfda_catalog=_get("OPENFDA_CATALOG"),
+        aact_downloads=_get("AACT_DOWNLOADS"),
     )
 
 

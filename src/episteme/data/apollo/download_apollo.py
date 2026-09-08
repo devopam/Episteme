@@ -9,7 +9,10 @@ from __future__ import annotations
 
 
 def main() -> None:
-    raise NotImplementedError("acquisition apollo is not implemented yet")
+    raise NotImplementedError(
+        "apollo download is a shell wrapper in SP3 — run scripts/data/apollo/download_apollo.sh "
+        "(or scripts/data/run_pipeline.sh apollo download)"
+    )
 
 
 if __name__ == "__main__":

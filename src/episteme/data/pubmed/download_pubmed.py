@@ -9,7 +9,10 @@ from __future__ import annotations
 
 
 def main() -> None:
-    raise NotImplementedError("acquisition pubmed is not implemented yet")
+    raise NotImplementedError(
+        "pubmed download is a shell wrapper in SP3 — run scripts/data/pubmed/download_pubmed.sh "
+        "(or scripts/data/run_pipeline.sh pubmed download)"
+    )
 
 
 if __name__ == "__main__":
