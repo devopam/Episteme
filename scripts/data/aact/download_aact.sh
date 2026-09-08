@@ -57,12 +57,21 @@ for path in "${paths[@]}"; do
         *exported_files*)   name="flatfiles_${date_seg}.zip" ;;
         *)                  log WARN "aact: unrecognized link $path (skipping)"; continue ;;
     esac
+    # I2: date_seg comes from a scraped href capture — reject a traversal before
+    # it reaches the on-disk relpath.
+    _safe_rel "$name" || die "aact: unsafe filename '$name' from scraped link"
     planned+=("$host$path"$'\t'"$name")
 done
 
 if [ "${#planned[@]}" -eq 0 ]; then
     log WARN "aact: resolved 0 download links (page layout changed — SP3-followup); volatile deferred source"
     exit 0
+fi
+
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t planned < <(printf '%s\n' "${planned[@]}" | cap_urls "$MAX_FILES")
 fi
 
 lines=()
@@ -84,7 +93,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "aact: fetch failed"

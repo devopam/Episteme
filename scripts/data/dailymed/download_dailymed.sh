@@ -75,6 +75,12 @@ done <<< "$urls"
 
 [ "${#planned[@]}" -gt 0 ] || die "dailymed: no .zip URLs resolved for mode=$MODE (page layout changed?)"
 
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t planned < <(printf '%s\n' "${planned[@]}" | cap_urls "$MAX_FILES")
+fi
+
 lines=()
 for h in "${planned[@]}"; do
     base="${h##*/}"
@@ -93,7 +99,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "dailymed: fetch failed"

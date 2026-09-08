@@ -105,6 +105,12 @@ catalog="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$OPENFDA_CATALO
 mapfile -t entries < <(printf '%s' "$catalog" | "$PY" -c "$PYSRC" "$MODE")
 [ "${#entries[@]}" -gt 0 ] || die "openfda: no zip URLs for mode=$MODE (catalog parsed but nothing matched?)"
 
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t entries < <(printf '%s\n' "${entries[@]}" | cap_urls "$MAX_FILES")
+fi
+
 lines=()
 for entry in "${entries[@]}"; do
     [ -n "$entry" ] || continue
@@ -125,7 +131,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "openfda: fetch failed"

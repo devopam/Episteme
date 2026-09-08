@@ -48,6 +48,14 @@ for f in "${xmls[@]}"; do
     planned+=("$PUBMED_FTP_BASE/$sub/$f.md5"$'\t'"md5/$f.md5")
 done
 
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched. Each data
+# file contributes two lines (xml.gz + its .md5 sibling), so an odd cap can end
+# on a .md5 — that is the literal §4 "first N after resolution" reading.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t planned < <(printf '%s\n' "${planned[@]}" | cap_urls "$MAX_FILES")
+fi
+
 lines=()
 for entry in "${planned[@]}"; do
     url="${entry%%$'\t'*}"
@@ -67,7 +75,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "pubmed: fetch failed"

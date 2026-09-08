@@ -37,6 +37,13 @@ items=(
     "ucum|README.md|$UCUM_README_URL"
 )
 
+# C1: --max-files caps the RESOLVED item set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched. (Cap `items`,
+# the resolved list; `lines` below is the post-prune fetch list.)
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t items < <(printf '%s\n' "${items[@]}" | cap_urls "$MAX_FILES")
+fi
+
 lines=()
 for it in "${items[@]}"; do
     IFS='|' read -r sub fname url <<< "$it"
@@ -56,7 +63,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "ontologies: fetch failed"

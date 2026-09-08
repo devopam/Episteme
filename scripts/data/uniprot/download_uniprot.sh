@@ -30,6 +30,15 @@ dest="$(resolve_dest uniprot swissprot)"
 BASE=""
 code=""
 IFS='|' read -r -a mirrors <<< "${UNIPROT_MIRRORS:-}"
+# M3: UNIPROT_BASE (sources.env + Settings) is otherwise dead in the shell layer.
+# Seed the probe list with it so an operator's .env override actually takes
+# effect. Prepend only if not already present (it is byte-identical to the first
+# mirror in the shipped sources.env — avoid probing the same URL twice).
+if [ -n "${UNIPROT_BASE:-}" ]; then
+    _seen=0
+    for m in "${mirrors[@]}"; do [ "$m" = "$UNIPROT_BASE" ] && _seen=1; done
+    [ "$_seen" = "1" ] || mirrors=("$UNIPROT_BASE" "${mirrors[@]}")
+fi
 for m in "${mirrors[@]}"; do
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 20 --max-time 45 "$m/reldate.txt" 2>/dev/null || true)"
     [ "$code" = "200" ] && { BASE="$m"; break; }
@@ -39,6 +48,12 @@ log INFO "uniprot mirror: $BASE"
 
 # U-1: ancillaries first so --max-files 2 grabs the two cheap files.
 files=(reldate.txt LICENSE README uniprot.xsd uniprot_sprot.xml.gz uniprot_sprot.fasta.gz uniprot_sprot.dat.gz uniprot_sprot_varsplic.fasta.gz)
+
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t files < <(printf '%s\n' "${files[@]}" | cap_urls "$MAX_FILES")
+fi
 
 urls=()
 for f in "${files[@]}"; do
@@ -58,7 +73,7 @@ if [ "${#urls[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${urls[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${urls[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "uniprot: fetch failed"

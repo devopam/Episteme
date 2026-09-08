@@ -28,6 +28,12 @@ dest="$(resolve_dest europepmc preprints)"
 mapfile -t files < <(list_manifest "$EUROPEPMC_PREPRINT_BASE" '\.(xml\.gz|txt\.gz|gz)$')
 [ "${#files[@]}" -gt 0 ] || die "europepmc preprints: no files at $EUROPEPMC_PREPRINT_BASE"
 
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched.
+if [ -n "$MAX_FILES" ]; then
+    mapfile -t files < <(printf '%s\n' "${files[@]}" | cap_urls "$MAX_FILES")
+fi
+
 lines=()
 for f in "${files[@]}"; do
     [ -n "$f" ] || continue
@@ -49,7 +55,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "europepmc preprints: fetch failed"

@@ -47,6 +47,11 @@ fi
 
 [ -n "$paths" ] || die "bookshelf: no .tar.gz paths in file_list"
 
+# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
+# otherwise --force deletes the whole set and only N are re-fetched. ($paths is a
+# newline string here, not an array — cap it in place.)
+[ -z "$MAX_FILES" ] || paths="$(printf '%s\n' "$paths" | cap_urls "$MAX_FILES")"
+
 lines=()
 while IFS= read -r rel || [ -n "$rel" ]; do
     [ -n "$rel" ] || continue
@@ -67,7 +72,7 @@ if [ "${#lines[@]}" -eq 0 ]; then
     exit 0
 fi
 
-if printf '%s\n' "${lines[@]}" | cap_urls "$MAX_FILES" | http_fetch "$dest"; then
+if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
     write_sync_stamp "$dest"
 else
     die "bookshelf: fetch failed"
