@@ -96,6 +96,14 @@ _CHEMBL_DEFAULT = "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest"
 
 
 def test_sources_env_load_order(tmp_path, monkeypatch):
+    # M2: chdir to an isolated dir with a stub pyproject.toml and NO .env, so
+    # _find_project_dotenv() finds nothing and load_dotenv never writes the real
+    # ./.env into os.environ for the rest of the pytest session.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "episteme-test"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
     # sources.env default is visible
     import episteme.config as cfg
 

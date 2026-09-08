@@ -129,12 +129,25 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
     [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ]
 }
 
+_safe_rel() { # _safe_rel REL — reject absolute paths and any '..' path component
+    case "/$1" in */../*|*/..) return 1 ;; esac
+    case "$1" in /*|//*) return 1 ;; esac
+    return 0
+}
+
 _scrape_listing() { # _scrape_listing BASE_URL -> cleaned filenames from an HTML/autoindex dir listing, one per line, sorted unique
     local base="$1" listing
     listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)" || return 1
+    # The leading-`../` grep filter below is defence in depth; _safe_rel is the
+    # authoritative gate — it also catches an *embedded* traversal (a/../../x)
+    # that a remote-controlled autoindex could carry into `rm -f`/`curl -o`.
     printf '%s\n' "$listing" \
         | grep -oE 'href="[^"]+"' | sed -E 's/href="//; s/"$//' \
-        | sed 's/[?#].*$//' | grep -vE '^(\?|/|\.\./|#|https?:|$)' | sort -u
+        | sed 's/[?#].*$//' | grep -vE '^(\?|/|\.\./|#|https?:|$)' | sort -u \
+        | while IFS= read -r n; do
+            if _safe_rel "$n"; then printf '%s\n' "$n"
+            else log WARN "_scrape_listing: rejecting unsafe path '$n'"; fi
+        done
 }
 
 discover_manifest() { # discover_manifest BASE_URL REGEX... -> FIRST filename matching each regex, one line each, in regex order (no line for a non-match)
@@ -168,6 +181,7 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         local have_curl=0; command -v curl >/dev/null 2>&1 && have_curl=1
         for line in "${urls[@]}"; do
             url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+            _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
             out+="DRY: would fetch $url -> $dest_dir/$rel"$'\n'
             if [ "$have_curl" = "1" ] && [ -s "$dest_dir/$rel" ] && size_match_skip "$dest_dir/$rel" "$url"; then
                 out+="DRY:   (already size-matched, would skip)"$'\n'
@@ -184,6 +198,7 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         local line url rel
         for line in "${urls[@]}"; do
             url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+            _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
             printf '%s\n  dir=%s\n  out=%s\n' "$url" "$dest_dir/$(dirname "$rel")" "$(basename "$rel")" >> "$aria_in"
         done
         aria2c -c -x16 -s16 -j"${EPISTEME_DOWNLOAD_THREADS:-4}" \
@@ -198,6 +213,7 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     local line url rel
     for line in "${urls[@]}"; do
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+        _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
         mkdir -p "$dest_dir/$(dirname "$rel")"
         curl -fL -C - --retry 15 --retry-delay 30 -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
     done
