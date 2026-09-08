@@ -1,132 +1,131 @@
 #!/usr/bin/env bash
+# Episteme SP3: local MD5 verifier for the PubMed acquisition set. Thin shell
+# over scripts/data/_lib/common.sh — no colour codes, log-based, no network in
+# plain mode. Checks each local pubmed*.xml.gz against its .md5 (published by
+# NCBI, kept under <dest>/md5/ by download_pubmed.sh; falls back to a sibling
+# .md5). Exit 1 iff any file FAILs; a missing .md5 alone is a WARN, exit 0.
+#
+# Usage: verify_pubmed.sh [baseline|updates|all] [--repair] [--dry-run]
+#   --repair  re-fetch every FAIL / missing-.md5 file (needs PUBMED_FTP_BASE);
+#             honours --dry-run (lists, deletes/fetches nothing).
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../_lib/common.sh
+. "$HERE/../_lib/common.sh"
 
-# ============================================================
-# Episteme - PubMed Checksum Verification Script (Fixed)
-# Correctly parses NCBI-style MD5 files
-# ============================================================
+MODE="all"
+REPAIR=0
 
-set -euo pipefail
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)            export EPISTEME_DRY_RUN=1; shift ;;
+        --repair)             REPAIR=1; shift ;;
+        --reason)             shift; [ $# -gt 0 ] && shift ;;
+        baseline|updates|all) MODE="$1"; shift ;;
+        *)                    log WARN "verify_pubmed.sh: ignoring $1"; shift ;;
+    esac
+done
 
-DATA_DIR="${1:-./01_raw/pubmed}"
-BASELINE_DIR="$DATA_DIR/baseline"
-UPDATES_DIR="$DATA_DIR/updates"
-MD5_DIR="$DATA_DIR/md5"
+load_dotenv
+require_env EPISTEME_ACTOR
+[ "$REPAIR" = "1" ] && require_env PUBMED_FTP_BASE
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m'
+dest="$(resolve_dest pubmed)"
+md5_dir="$dest/md5"
 
-echo "=================================================="
-echo "PubMed Checksum Verification"
-echo "Data directory: $DATA_DIR"
-echo "=================================================="
+case "$MODE" in
+    baseline) modes=(baseline) ;;
+    updates)  modes=(updates) ;;
+    all)      modes=(baseline updates) ;;
+    *)        die "pubmed verify: bad mode '$MODE' (baseline|updates|all)" ;;
+esac
 
-TOTAL_ALL=0
-PASSED_ALL=0
-FAILED_ALL=0
-MISSING_ALL=0
-
-# Extract the actual MD5 hash from NCBI-style .md5 files
-extract_md5() {
-    local md5_file="$1"
-    # Handles formats like:
-    #   MD5(filename)= hash
-    #   hash  filename
-    #   hash
-    grep -oE '[a-fA-F0-9]{32}' "$md5_file" | head -n1
+# mode -> upstream subdirectory (for --repair URL construction).
+upstream_sub() {
+    case "$1" in
+        baseline) printf 'baseline\n' ;;
+        updates)  printf 'updatefiles\n' ;;
+    esac
 }
 
-verify_directory() {
-    local dir="$1"
-    local label="$2"
+md5_hex() { # md5_hex FILE -> first 32-hex token, or empty
+    grep -oE '[a-fA-F0-9]{32}' "$1" 2>/dev/null | head -n1
+}
 
-    if [[ ! -d "$dir" ]]; then
-        echo -e "${YELLOW}⚠  Directory not found: $dir — skipping $label${NC}"
-        return
+total_pass=0
+total_fail=0
+total_missing=0
+repair_entries=()
+
+for m in "${modes[@]}"; do
+    d="$dest/$m"
+    if [ ! -d "$d" ]; then
+        log WARN "pubmed verify: no directory $d — skipping $m"
+        continue
     fi
 
-    echo ""
-    echo -e "${BOLD}${BLUE}→ Verifying $label${NC}"
-    echo "  Location: $dir"
-    echo "--------------------------------------------------"
+    m_pass=0
+    m_fail=0
+    m_missing=0
 
-    local total=0
-    local passed=0
-    local failed=0
-    local missing_md5=0
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        base="$(basename "$file")"
+        md5_file="$md5_dir/$base.md5"
+        [ -f "$md5_file" ] || md5_file="$file.md5"
 
-    while IFS= read -r -d '' file; do
-        ((total++)) || true
-        filename=$(basename "$file")
-        md5_file="$MD5_DIR/${filename}.md5"
-
-        # Fallback: md5 next to the data file
-        if [[ ! -f "$md5_file" ]]; then
-            md5_file="${file}.md5"
-        fi
-
-        if [[ ! -f "$md5_file" ]]; then
-            echo -e "  ${YELLOW}⚠  Missing MD5: $filename${NC}"
-            ((missing_md5++)) || true
+        if [ ! -f "$md5_file" ]; then
+            log WARN "missing .md5: $m/$base"
+            m_missing=$((m_missing + 1))
+            [ "$REPAIR" = "1" ] && repair_entries+=("$m"$'\t'"$base")
             continue
         fi
 
-        expected=$(extract_md5 "$md5_file")
-        actual=$(md5sum "$file" | awk '{print $1}')
+        expected="$(md5_hex "$md5_file")"
+        actual="$(md5sum "$file" | awk '{print $1}')"
 
-        if [[ -z "$expected" ]]; then
-            echo -e "  ${YELLOW}⚠  Could not parse MD5 file: $filename${NC}"
-            ((missing_md5++)) || true
-            continue
-        fi
-
-        if [[ "$expected" == "$actual" ]]; then
-            echo -e "  ${GREEN}✓${NC} $filename"
-            ((passed++)) || true
+        if [ -z "$expected" ]; then
+            log WARN "unparseable .md5: $m/$base"
+            m_missing=$((m_missing + 1))
+            [ "$REPAIR" = "1" ] && repair_entries+=("$m"$'\t'"$base")
+        elif [ "$expected" = "$actual" ]; then
+            m_pass=$((m_pass + 1))
         else
-            echo -e "  ${RED}✗ FAILED: $filename${NC}"
-            echo -e "      Expected: $expected"
-            echo -e "      Actual:   $actual"
-            ((failed++)) || true
+            log ERROR "FAIL: $m/$base (expected $expected, got $actual)"
+            m_fail=$((m_fail + 1))
+            [ "$REPAIR" = "1" ] && repair_entries+=("$m"$'\t'"$base")
         fi
-    done < <(find "$dir" -maxdepth 1 -name "pubmed26n*.xml.gz" -print0 | sort -z)
+    done < <(find "$d" -maxdepth 1 -name 'pubmed[0-9]*n[0-9]*.xml.gz' | sort)
 
-    echo ""
-    echo -e "  ${BOLD}$label Summary:${NC}"
-    echo "    Total files : $total"
-    echo -e "    Passed      : ${GREEN}$passed${NC}"
-    echo -e "    Failed      : ${RED}$failed${NC}"
-    echo -e "    Missing MD5 : ${YELLOW}$missing_md5${NC}"
+    log INFO "pubmed verify [$m]: pass=$m_pass fail=$m_fail missing-md5=$m_missing"
+    total_pass=$((total_pass + m_pass))
+    total_fail=$((total_fail + m_fail))
+    total_missing=$((total_missing + m_missing))
+done
 
-    TOTAL_ALL=$((TOTAL_ALL + total))
-    PASSED_ALL=$((PASSED_ALL + passed))
-    FAILED_ALL=$((FAILED_ALL + failed))
-    MISSING_ALL=$((MISSING_ALL + missing_md5))
-}
+log INFO "pubmed verify [all]: pass=$total_pass fail=$total_fail missing-md5=$total_missing"
 
-verify_directory "$BASELINE_DIR" "Baseline"
-verify_directory "$UPDATES_DIR"  "Updates"
-
-echo ""
-echo "=================================================="
-echo -e "${BOLD}OVERALL SUMMARY${NC}"
-echo "=================================================="
-echo "  Total files checked : $TOTAL_ALL"
-echo -e "  Passed              : ${GREEN}$PASSED_ALL${NC}"
-echo -e "  Failed              : ${RED}$FAILED_ALL${NC}"
-echo -e "  Missing MD5         : ${YELLOW}$MISSING_ALL${NC}"
-echo "=================================================="
-
-if [[ "$FAILED_ALL" -gt 0 ]]; then
-    echo -e "${RED}Some files failed checksum verification.${NC}"
-    exit 1
-elif [[ "$MISSING_ALL" -gt 0 ]]; then
-    echo -e "${YELLOW}Verification finished with missing MD5 files.${NC}"
-    exit 0
-else
-    echo -e "${GREEN}All available files passed checksum verification.${NC}"
-    exit 0
+if [ "$REPAIR" = "1" ] && [ "${#repair_entries[@]}" -gt 0 ]; then
+    log INFO "pubmed verify: --repair — ${#repair_entries[@]} file(s) to re-fetch"
+    fetch_lines=()
+    for entry in "${repair_entries[@]}"; do
+        m="${entry%%$'\t'*}"
+        f="${entry#*$'\t'}"
+        sub="$(upstream_sub "$m")"
+        if [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+            rm -f "$dest/$m/$f" "$md5_dir/$f.md5" "$dest/$m/$f.md5"
+        fi
+        fetch_lines+=("$PUBMED_FTP_BASE/$sub/$f"$'\t'"$m/$f")
+        fetch_lines+=("$PUBMED_FTP_BASE/$sub/$f.md5"$'\t'"md5/$f.md5")
+    done
+    if printf '%s\n' "${fetch_lines[@]}" | http_fetch "$dest"; then
+        log INFO "pubmed verify: --repair fetch complete — re-run verify_pubmed.sh to confirm"
+    else
+        die "pubmed verify: --repair fetch failed"
+    fi
 fi
+
+if [ "$total_fail" -gt 0 ]; then
+    exit 1
+fi
+exit 0
