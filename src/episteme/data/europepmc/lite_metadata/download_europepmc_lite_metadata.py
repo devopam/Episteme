@@ -10,8 +10,9 @@ from __future__ import annotations
 
 def main() -> None:
     raise NotImplementedError(
-        "europepmc lite_metadata download is not implemented yet (Plan 3). "
-        "Use the shell script under scripts/ until then."
+        "europepmc lite download is a shell wrapper in SP3 — run "
+        "scripts/data/europepmc/lite_metadata/download_europepmc_lite.sh "
+        "(or scripts/data/run_pipeline.sh europepmc_lite download)"
     )
 
 

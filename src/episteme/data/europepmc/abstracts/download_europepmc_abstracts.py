@@ -10,8 +10,9 @@ from __future__ import annotations
 
 def main() -> None:
     raise NotImplementedError(
-        "europepmc abstracts download is not implemented yet (Plan 3). "
-        "This feed is deferred — see docs/10-data-sources-runbook.md; no downloader exists yet."
+        "europepmc abstracts download is a shell wrapper in SP3 — run "
+        "scripts/data/europepmc/abstracts/download_europepmc_abstracts.sh "
+        "(or scripts/data/run_pipeline.sh europepmc_abstracts download)"
     )
 
 
