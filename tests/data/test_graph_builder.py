@@ -1,8 +1,12 @@
 import importlib
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.pg
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_0002 = REPO_ROOT / "src/episteme/data/db/migrations/0002_container_and_book_parts.sql"
 
 _MIN_JATS = """<article>
   <front><article-meta>
@@ -30,13 +34,17 @@ def _setup_schema(conn):
     conn.commit()
 
 
-def _seed(pg_conn, tmp_path, monkeypatch):
+def _configure(tmp_path, monkeypatch):
     monkeypatch.setenv("EPISTEME_ACTOR", "t")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
     import episteme.config as cfg
 
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
+
+
+def _seed(pg_conn, tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
 
     _setup_schema(pg_conn)
 
@@ -112,7 +120,65 @@ def test_build_and_neighbours(pg_conn, tmp_path, monkeypatch):
         assert cur.fetchone()[0] == 1
 
     with pytest.raises(NotImplementedError):
-        graph_builder.build(pg_conn, source="pubmed", raw_dir=raw, run_id="g3")
+        graph_builder.build(pg_conn, source="chembl", raw_dir=raw, run_id="g3")
+
+
+def test_build_populates_article_parts(pg_conn, tmp_path, monkeypatch):
+    # schema.sql carries container_id/book_meta but NOT episteme.article_parts
+    # (Task 2 put that DDL in migration 0002 only); apply 0002 after the schema
+    # rebuild. It is idempotent -- same pattern as tests/test_migrations.py.
+    _configure(tmp_path, monkeypatch)
+    _setup_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
+    pg_conn.commit()
+
+    # one book row (container_id NULL) + two part rows pointing at it. year=0 is
+    # mandatory: articles_bookshelf has a y0 range partition but no DEFAULT.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO episteme.articles (id, source, source_file, container_id, book_meta, year)
+            VALUES
+              ('bookshelf:NBK1',    'bookshelf', 'NBK1.tar.gz', NULL,             '{}'::jsonb, 0),
+              ('bookshelf:NBK1:p1', 'bookshelf', 'NBK1.tar.gz', 'bookshelf:NBK1', NULL,        0),
+              ('bookshelf:NBK1:p2', 'bookshelf', 'NBK1.tar.gz', 'bookshelf:NBK1', NULL,        0)
+            """
+        )
+    pg_conn.commit()
+
+    from episteme.data import graph_builder
+
+    res = graph_builder.build(pg_conn, source="bookshelf", raw_dir=tmp_path, run_id="p1")
+    pg_conn.commit()
+
+    assert res["parts"] == 2
+    assert "cites" in res and res["cites"] == 0
+    assert res["mesh"] == 0
+    assert res["missing_xml"] == 0
+    assert res["skipped_no_pmid"] == 0
+    assert res["source_files"] == []
+
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.article_parts")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT count(*) FROM episteme._audit WHERE event_type='graph_commit'")
+        assert cur.fetchone()[0] >= 1
+
+    assert set(graph_builder.neighbours(pg_conn, "bookshelf:NBK1", kind="part")) == {
+        "bookshelf:NBK1:p1",
+        "bookshelf:NBK1:p2",
+    }
+    # reverse edge, via the UNION in the part CTE.
+    assert graph_builder.neighbours(pg_conn, "bookshelf:NBK1:p1", kind="part") == ["bookshelf:NBK1"]
+
+    # idempotency: a second build over the same source_file must not duplicate.
+    res2 = graph_builder.build(pg_conn, source="bookshelf", raw_dir=tmp_path, run_id="p2")
+    pg_conn.commit()
+    assert res2["parts"] == 2
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.article_parts")
+        assert cur.fetchone()[0] == 2
 
 
 def test_pgq_path_when_available(pg_conn, tmp_path, monkeypatch):

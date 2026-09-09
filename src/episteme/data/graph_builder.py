@@ -1,7 +1,8 @@
 """Populate the property-graph edge tables from loaded articles + raw PMC JATS.
 
-``build`` reads ``episteme.articles`` (source ``pmc``), locates each article's
-raw JATS XML under ``raw_dir``, and derives two edge sets per ``source_file``:
+``build`` reads ``episteme.articles``. For source ``pmc`` it locates each
+article's raw JATS XML under ``raw_dir`` and derives two edge sets per
+``source_file``:
 
   * ``episteme.article_cites`` -- ``(src_pmid, dst_pmid)`` from every
     ``<pub-id pub-id-type="pmid">`` under ``<ref-list>``.
@@ -13,10 +14,21 @@ raw JATS XML under ``raw_dir``, and derives two edge sets per ``source_file``:
     ``qualifiers`` are ``NULL``. ``neighbours(kind="mesh")`` falls back to
     ``descriptor_name`` when ``descriptor_ui`` is absent.
 
-Idempotency is DELETE-by-``source_file`` + INSERT (neither table has a primary
-key). ``build`` runs inside the caller's transaction and never commits --
-matching ``postgres_loader``. Each processed ``source_file`` gets one
-``audit_trail.record("graph_commit", ...)`` row.
+For every SP2 literature source (``pmc`` plus ``pubmed``, ``apollo``,
+``europepmc_manuscript``, ``europepmc_preprint``, ``guidelines``, ``bookshelf``
+-- see ``_GRAPH_SOURCES``) ``build`` also derives a third set, straight from the
+loaded rows with no raw XML involved:
+
+  * ``episteme.article_parts`` -- ``(container_id, part_id)`` book -> part
+    edges, one row per ``episteme.articles`` row whose ``container_id`` is set,
+    keyed to the part row's ``source_file``.
+
+Idempotency is DELETE-by-``source_file`` + INSERT (the cites/mesh tables have no
+primary key; ``article_parts`` additionally guards with
+``ON CONFLICT (container_id, part_id) DO NOTHING``). ``build`` runs inside the
+caller's transaction and never commits -- matching ``postgres_loader``. Each
+processed ``source_file`` gets one ``audit_trail.record("graph_commit", ...)``
+row.
 
 Articles with no ``pmid`` are counted and skipped (``skipped_no_pmid`` in the
 returned dict) rather than being silently excluded by the query.
@@ -45,6 +57,19 @@ import psycopg
 
 from episteme import audit_trail
 
+# Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
+# cites/mesh; the rest contribute ``article_parts`` (book -> part) edges only.
+# Anything outside this set is still ``NotImplementedError`` (e.g. ``chembl``).
+_GRAPH_SOURCES = (
+    "pmc",
+    "pubmed",
+    "apollo",
+    "europepmc_manuscript",
+    "europepmc_preprint",
+    "guidelines",
+    "bookshelf",
+)
+
 _CITES_INSERT = (
     "INSERT INTO episteme.article_cites (src_pmid, dst_pmid, source_file) VALUES (%s, %s, %s)"
 )
@@ -52,6 +77,10 @@ _MESH_INSERT = (
     "INSERT INTO episteme.article_mesh "
     "(pmid, descriptor_ui, descriptor_name, major_topic, qualifiers, source_file) "
     "VALUES (%s, %s, %s, %s, %s, %s)"
+)
+_PARTS_INSERT = (
+    "INSERT INTO episteme.article_parts (container_id, part_id, source_file) "
+    "VALUES (%s, %s, %s) ON CONFLICT (container_id, part_id) DO NOTHING"
 )
 
 
@@ -114,91 +143,135 @@ def _parse_jats(xml_path: Path) -> tuple[list[str], list[str]]:
 
 
 def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, Any]:
-    """Rebuild the citation + MeSH edge tables for ``source`` from raw JATS.
+    """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc).
 
-    One transaction; the caller commits. For every distinct ``source_file`` in
-    ``episteme.articles`` (source ``pmc``; rows with no ``pmid`` are counted in
-    ``skipped_no_pmid`` and excluded): DELETE its rows from both edge tables,
-    re-derive them from the raw JATS under ``raw_dir``, ``executemany`` them
-    back, and write one ``graph_commit`` audit row.
+    One transaction; the caller commits. Two phases:
 
-    Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid}``.
+    * **cites + mesh (``pmc`` only).** For every distinct ``source_file`` in
+      ``episteme.articles`` (rows with no ``pmid`` are counted in
+      ``skipped_no_pmid`` and excluded): DELETE its rows from both edge tables,
+      re-derive them from the raw JATS under ``raw_dir``, ``executemany`` them
+      back, and write one ``graph_commit`` audit row. For non-pmc sources this
+      phase is skipped and ``cites``/``mesh``/``missing_xml``/``skipped_no_pmid``
+      stay ``0`` and ``source_files`` stays ``[]``.
+    * **parts (every ``_GRAPH_SOURCES`` source).** DELETE-by-``source_file`` then
+      re-INSERT one ``episteme.article_parts`` row per loaded ``articles`` row
+      whose ``container_id`` is set, ``ON CONFLICT (container_id, part_id) DO
+      NOTHING``. One ``graph_commit`` audit row per ``source_file``.
+
+    Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts}``.
     """
-    if source != "pmc":
+    if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
 
     raw_dir = Path(raw_dir)
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, pmid, pmcid, source_file FROM episteme.articles WHERE source = 'pmc'"
-        )
-        article_rows = cur.fetchall()
-
     skipped_no_pmid = 0
-    by_file: dict[str, list[tuple[str, str | None]]] = {}
-    for _id, pmid, pmcid, source_file in article_rows:
-        if not pmid:
-            skipped_no_pmid += 1
-            continue
-        by_file.setdefault(source_file, []).append((pmid, pmcid))
-
     total_cites = 0
     total_mesh = 0
     missing_xml = 0
     handled: list[str] = []
 
-    for source_file, articles in sorted(by_file.items()):
-        cites_rows: list[tuple[str, str, str]] = []
-        mesh_rows: list[tuple[str, None, str, None, None, str]] = []
-        seen_cites: set[tuple[str, str]] = set()
-        seen_mesh: set[tuple[str, str]] = set()
-
-        for pmid, pmcid in articles:
-            xml_path = _find_xml(raw_dir, pmcid)
-            if xml_path is None:
-                missing_xml += 1
-                continue
-
-            dst_pmids, keywords = _parse_jats(xml_path)
-
-            for dst in dst_pmids:
-                if not dst or dst == pmid:
-                    continue
-                key = (pmid, dst)
-                if key in seen_cites:
-                    continue
-                seen_cites.add(key)
-                cites_rows.append((pmid, dst, source_file))
-
-            for name in keywords:
-                if not name:
-                    continue
-                key = (pmid, name)
-                if key in seen_mesh:
-                    continue
-                seen_mesh.add(key)
-                mesh_rows.append((pmid, None, name, None, None, source_file))
-
+    if source == "pmc":
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM episteme.article_cites WHERE source_file = %s", (source_file,))
-            cur.execute("DELETE FROM episteme.article_mesh WHERE source_file = %s", (source_file,))
-            if cites_rows:
-                cur.executemany(_CITES_INSERT, cites_rows)
-            if mesh_rows:
-                cur.executemany(_MESH_INSERT, mesh_rows)
+            cur.execute(
+                "SELECT id, pmid, pmcid, source_file FROM episteme.articles WHERE source = 'pmc'"
+            )
+            article_rows = cur.fetchall()
 
+        by_file: dict[str, list[tuple[str, str | None]]] = {}
+        for _id, pmid, pmcid, source_file in article_rows:
+            if not pmid:
+                skipped_no_pmid += 1
+                continue
+            by_file.setdefault(source_file, []).append((pmid, pmcid))
+
+        for source_file, articles in sorted(by_file.items()):
+            cites_rows: list[tuple[str, str, str]] = []
+            mesh_rows: list[tuple[str, None, str, None, None, str]] = []
+            seen_cites: set[tuple[str, str]] = set()
+            seen_mesh: set[tuple[str, str]] = set()
+
+            for pmid, pmcid in articles:
+                xml_path = _find_xml(raw_dir, pmcid)
+                if xml_path is None:
+                    missing_xml += 1
+                    continue
+
+                dst_pmids, keywords = _parse_jats(xml_path)
+
+                for dst in dst_pmids:
+                    if not dst or dst == pmid:
+                        continue
+                    key = (pmid, dst)
+                    if key in seen_cites:
+                        continue
+                    seen_cites.add(key)
+                    cites_rows.append((pmid, dst, source_file))
+
+                for name in keywords:
+                    if not name:
+                        continue
+                    key = (pmid, name)
+                    if key in seen_mesh:
+                        continue
+                    seen_mesh.add(key)
+                    mesh_rows.append((pmid, None, name, None, None, source_file))
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM episteme.article_cites WHERE source_file = %s", (source_file,)
+                )
+                cur.execute(
+                    "DELETE FROM episteme.article_mesh WHERE source_file = %s", (source_file,)
+                )
+                if cites_rows:
+                    cur.executemany(_CITES_INSERT, cites_rows)
+                if mesh_rows:
+                    cur.executemany(_MESH_INSERT, mesh_rows)
+
+            audit_trail.record(
+                "graph_commit",
+                conn=conn,
+                object=f"pmc {source_file}",
+                rows_affected=len(cites_rows) + len(mesh_rows),
+                run_id=run_id,
+            )
+
+            total_cites += len(cites_rows)
+            total_mesh += len(mesh_rows)
+            handled.append(source_file)
+
+    # SP2: container -> part edges, read from loaded rows (not raw XML). Runs for
+    # every allowed source, pmc included.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT container_id, id, source_file FROM episteme.articles "
+            "WHERE source = %s AND container_id IS NOT NULL",
+            (source,),
+        )
+        part_src_rows = cur.fetchall()
+
+    parts_by_file: dict[str, list[tuple[str, str]]] = {}
+    for c_id, part_id, src_file in part_src_rows:
+        parts_by_file.setdefault(src_file, []).append((c_id, part_id))
+
+    total_parts = 0
+    for src_file, pairs in sorted(parts_by_file.items()):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM episteme.article_parts WHERE source_file = %s", (src_file,))
+            cur.executemany(
+                _PARTS_INSERT,
+                [(c_id, part_id, src_file) for c_id, part_id in pairs],
+            )
         audit_trail.record(
             "graph_commit",
             conn=conn,
-            object=f"pmc {source_file}",
-            rows_affected=len(cites_rows) + len(mesh_rows),
+            object=f"{source} {src_file}",
+            rows_affected=len(pairs),
             run_id=run_id,
         )
-
-        total_cites += len(cites_rows)
-        total_mesh += len(mesh_rows)
-        handled.append(source_file)
+        total_parts += len(pairs)
 
     return {
         "source_files": handled,
@@ -206,6 +279,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "mesh": total_mesh,
         "missing_xml": missing_xml,
         "skipped_no_pmid": skipped_no_pmid,
+        "parts": total_parts,
     }
 
 
@@ -220,12 +294,18 @@ def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
     ``article_cites`` within ``hops`` levels (``hops=1`` = direct citations),
     the seed excluded.
 
+    ``kind="part"``: sorted distinct ids on the other end of an
+    ``episteme.article_parts`` edge touching ``pmid`` -- its parts when ``pmid``
+    is a container, its container when ``pmid`` is a part. Direct edges only;
+    ``hops`` is IGNORED for part. Always answered via the recursive-CTE back
+    end (never routed through SQL/PGQ).
+
     Any other ``kind`` raises ``ValueError``. When the ``episteme_graph``
     property graph exists, ``cites`` is answered via SQL/PGQ; otherwise (and
     always on this build) via a recursive CTE.
     """
-    if kind not in ("mesh", "cites"):
-        raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh' or 'cites'")
+    if kind not in ("mesh", "cites", "part"):
+        raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites' or 'part'")
     if kind == "cites" and _pgq_available(conn):
         return _neighbours_pgq(conn, pmid, hops)
     return _neighbours_cte(conn, pmid, hops, kind)
@@ -267,7 +347,17 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
             )
             return [r[0] for r in cur.fetchall()]
 
-    raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh' or 'cites'")
+    if kind == "part":
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT part_id FROM episteme.article_parts WHERE container_id = %s "
+                "UNION "
+                "SELECT container_id FROM episteme.article_parts WHERE part_id = %s",
+                (pmid, pmid),
+            )
+            return sorted({r[0] for r in cur.fetchall()})
+
+    raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites' or 'part'")
 
 
 def _pgq_available(conn) -> bool:
@@ -354,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
-        f"skipped_no_pmid={res['skipped_no_pmid']}"
+        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']}"
     )
     return 0
 
