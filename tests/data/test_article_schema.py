@@ -1,11 +1,37 @@
 from episteme.data.article_schema import (
+    ARTICLE_COLUMNS,
+    BOOK_META_KEYS,
     MIN_OK_TEXT_LEN,
+    SCHEMA_VERSION,
     SOURCES,
     build_text,
     decide_extract_status,
     normalize_license,
     subset_from_license,
 )
+
+
+def test_schema_version_and_columns():
+    assert SCHEMA_VERSION == "1.4"
+    assert ARTICLE_COLUMNS[-2:] == ["container_id", "book_meta"]
+    assert "isbn" in BOOK_META_KEYS
+
+
+def test_decide_extract_status_book_row_never_empty():
+    status, notes = decide_extract_status(
+        text="", abstract=None, body_text=None, has_id=True, book_meta={"isbn": "x"}
+    )
+    assert status == "partial"
+    assert notes == "book_row_short_text_len=0"
+    status, notes = decide_extract_status(
+        text="y" * MIN_OK_TEXT_LEN,
+        abstract=None,
+        body_text=None,
+        has_id=False,
+        book_meta={"isbn": "x"},
+    )
+    assert status == "ok"
+    assert notes is None
 
 
 def test_sources_covers_roadmap_phase0_set():
