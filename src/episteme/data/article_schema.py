@@ -179,12 +179,17 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
         return "CC BY", url, s[:300]
     if "TEXT MINING" in u or "TEXT-MINING" in u or "FAIR USE" in u:
         return "text_mining", url, s[:300]
+    # Permissive OSI licences (Apache-2.0, MIT, BSD, ISC): no share-alike, no
+    # non-commercial clause -> commercial-shard eligible. One bucket; the
+    # specific licence text is kept in license_raw.
+    if re.search(r"\b(APACHE|MIT|BSD|ISC)\b", u):
+        return "permissive", url, s[:300]
 
     return "unknown", url, s[:300]
 
 
 def subset_from_license(license_code: str, *, default: str = "open_metadata") -> str:
-    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND"):
+    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND", "permissive"):
         return "commercial"
     if license_code.startswith("CC BY-NC") or license_code == "text_mining":
         return "text_mining"
