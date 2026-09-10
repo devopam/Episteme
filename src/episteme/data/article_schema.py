@@ -180,12 +180,65 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
     if "TEXT MINING" in u or "TEXT-MINING" in u or "FAIR USE" in u:
         return "text_mining", url, s[:300]
     # Permissive OSI licences (Apache-2.0, MIT, BSD, ISC): no share-alike, no
-    # non-commercial clause -> commercial-shard eligible. One bucket; the
-    # specific licence text is kept in license_raw.
-    if re.search(r"\b(APACHE|MIT|BSD|ISC)\b", u):
+    # non-commercial clause -> commercial-shard eligible. One "permissive"
+    # bucket; the specific licence text is kept in license_raw.
+    #
+    # Governance boundary: only an unambiguous licence *identifier* qualifies
+    # -- an exact match (after whitespace/punctuation normalisation) against
+    # the SPDX-style tag set below. A bare token embedded in prose
+    # ("MIT Technology Review", "Apache Kafka docs", "...not under the Apache
+    # License...") must NOT reach subset=commercial: it falls through to
+    # "unknown" -> open_metadata, i.e. we under-claim commercial rights
+    # rather than over-claim them.
+    if _norm_license_key(s) in _PERMISSIVE_LICENSE_IDS:
         return "permissive", url, s[:300]
 
     return "unknown", url, s[:300]
+
+
+# SPDX-style permissive licence identifiers, normalised (lowercase, single
+# spaces, no surrounding punctuation). Extend deliberately -- every entry is a
+# commercial-shard grant.
+_PERMISSIVE_LICENSE_IDS = frozenset(
+    {
+        "apache",
+        "apache 2",
+        "apache-2",
+        "apache 2.0",
+        "apache-2.0",
+        "apache2",
+        "apache license",
+        "apache license 2.0",
+        "apache license version 2.0",
+        "apache license, version 2.0",
+        "apache software license",
+        "mit",
+        "mit-0",
+        "mit license",
+        "mit no attribution",
+        "bsd",
+        "0bsd",
+        "bsd-2-clause",
+        "bsd-3-clause",
+        "bsd 2-clause",
+        "bsd 3-clause",
+        "bsd-2",
+        "bsd-3",
+        "bsd license",
+        "bsd 2-clause license",
+        "bsd 3-clause license",
+        "isc",
+        "isc license",
+    }
+)
+
+
+def _norm_license_key(raw: str) -> str:
+    """Lowercase, collapse whitespace, drop surrounding punctuation -- so
+    ``"Apache-2.0"``, ``"apache-2.0 "`` and ``"Apache License, Version 2.0."``
+    all reduce to a stable key for the permissive-identifier set."""
+    k = re.sub(r"\s+", " ", raw).strip().lower()
+    return k.strip(" .;,\"'()[]")
 
 
 def subset_from_license(license_code: str, *, default: str = "open_metadata") -> str:
