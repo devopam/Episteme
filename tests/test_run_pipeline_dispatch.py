@@ -1,8 +1,11 @@
 """Contract smoke test for scripts/data/run_pipeline.sh dispatch.
 
-Shell-only (no DB): every assertion runs with --dry-run, which run_pipeline.sh
-handles *before* the audit bracket, so Postgres is never touched. Not marked
-`pg` — it runs under `pytest -m "not pg"`.
+Shell-only (no DB): most assertions run with --dry-run, which run_pipeline.sh
+handles *before* the audit bracket, so Postgres is never touched. The one
+exception, `test_bookshelf_extract_dispatches`, drives a real (non-dry-run)
+`bookshelf extract` — its `audit_trail record` targets `PGDATABASE=episteme_test`
+and degrades to a `log WARN` (no exception) when no DB is up, so the test still
+runs DB-free. Not marked `pg` — the whole module runs under `pytest -m "not pg"`.
 
 Guards the dispatch table that 21 sources + the SP3 exit criteria rest on, plus
 regression guards for the fix wave:
