@@ -25,6 +25,10 @@ SCHEMA_VERSION = "1.4"
 #        ARTICLE_COLUMNS for the literature-extractor / bookshelf work. A row carrying
 #        book_meta is a "book row": decide_extract_status returns ok/partial only (never
 #        empty/dropped). BOOK_META_KEYS is the advisory key set for the book_meta JSON.
+#        (SP2 Task 6, 2026-09-10) normalize_license gained a permissive-OSI arm:
+#        an exact SPDX-identifier match (apache-2.0 / mit / bsd-*-clause / isc, see
+#        _PERMISSIVE_LICENSE_IDS) -> license="permissive" -> subset="commercial".
+#        No column/type change; row shape unchanged.
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200

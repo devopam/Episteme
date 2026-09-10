@@ -72,11 +72,11 @@ from episteme.data.staging_writer import write_rows  # noqa: E402
 SOURCE = "apollo"
 
 # ApolloCorpus HF dataset card (FreedomIntelligence/ApolloCorpus) declares
-# license: apache-2.0. article_schema.normalize_license (contract v1.4) has no
-# Apache arm, so this maps to license="unknown" / subset="open_metadata"; the
-# raw string is carried in license_raw as the evidence. Promoting apache-2.0 to
-# subset="commercial" needs an article_schema change (out of scope for Task 6)
-# and is a field-shape sign-off decision.
+# license: apache-2.0. Per the Task 6 field-shape sign-off (user ruling,
+# 2026-09-10), article_schema.normalize_license gained a permissive-OSI arm:
+# "apache-2.0" -> license="permissive" -> subset="commercial", with the raw
+# string carried in license_raw as evidence. ApolloCorpus is therefore
+# commercial-shard eligible.
 APOLLO_LICENSE_RAW = "apache-2.0"
 
 # --------------------------------------------------------------------------- #
