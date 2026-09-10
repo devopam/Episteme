@@ -150,10 +150,31 @@ def test_unknown_source_dies_3(tmp_path: Path) -> None:
 
 
 def test_pmc_non_download_dry_run_dies_3(tmp_path: Path) -> None:
-    # FIX 2 (C2) regression guard.
+    # FIX 2 (C2) regression guard — SP2 generalised the message (PF-8.1).
     proc = _run(["pmc", "extract", "--dry-run"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
-    assert "no --dry-run" in proc.stderr
+    assert "--dry-run is supported on 'download' only" in proc.stderr
+
+
+def test_bookshelf_extract_dry_run_dies_3(tmp_path: Path) -> None:
+    # SP2 PF-8.1: --dry-run rejected on every write stage, every source.
+    proc = _run(["bookshelf", "extract", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "--dry-run is supported on 'download' only" in proc.stderr
+
+
+def test_bookshelf_extract_dispatches(tmp_path: Path) -> None:
+    # no data -> the (scaffold) extractor exits 0 (nothing to do) or 1 (no raw
+    # dir); NOT 3 (a dispatch bug: wrapper missing / stage not wired).
+    proc = _run(["bookshelf", "extract", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode in (0, 1), proc.stderr[-2000:]
+
+
+def test_corpus_materialize_dry_run_dies_3(tmp_path: Path) -> None:
+    # `corpus` is the materialize-only alias; --dry-run on it hits PF-8.1.
+    proc = _run(["corpus", "materialize", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "--dry-run is supported on 'download' only" in proc.stderr
 
 
 def test_openalex_bad_mode_reaches_wrapper_die(tmp_path: Path) -> None:
