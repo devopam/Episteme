@@ -74,3 +74,26 @@ def test_normalize_license_cc0_is_commercial():
     code, _, _ = normalize_license("CC0 1.0 Universal public domain dedication")
     assert code == "CC0"
     assert subset_from_license(code) == "commercial"
+
+
+def test_permissive_osi_licenses_map_to_commercial():
+    # SP2 apollo sign-off: Apache-2.0 / MIT / BSD / ISC -> subset "commercial".
+    for raw in (
+        "apache-2.0",
+        "Apache License, Version 2.0",
+        "MIT",
+        "MIT License",
+        "BSD-3-Clause",
+        "ISC License",
+    ):
+        code, _url, license_raw = normalize_license(raw)
+        assert code == "permissive", raw
+        assert subset_from_license(code) == "commercial", raw
+        assert license_raw  # the specific licence text is preserved
+
+
+def test_normalize_license_does_not_falsely_match_permissive_substrings():
+    # "permitted" / "limitations" must not trip the \bMIT\b / \bISC\b arms.
+    for raw in ("Use is permitted under stated limitations", "All rights reserved"):
+        code, _url, _raw = normalize_license(raw)
+        assert code == "unknown", raw
