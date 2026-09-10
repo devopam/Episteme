@@ -92,8 +92,19 @@ def test_permissive_osi_licenses_map_to_commercial():
         assert license_raw  # the specific licence text is preserved
 
 
-def test_normalize_license_does_not_falsely_match_permissive_substrings():
-    # "permitted" / "limitations" must not trip the \bMIT\b / \bISC\b arms.
-    for raw in ("Use is permitted under stated limitations", "All rights reserved"):
+def test_permissive_match_is_identifier_only_not_prose():
+    # Governance boundary: a permissive-licence *token* embedded in prose or an
+    # org/product name must NOT reach subset=commercial. These all stay
+    # "unknown" -> open_metadata (under-claim, never over-claim).
+    for raw in (
+        "Use is permitted under stated limitations",
+        "All rights reserved",
+        "MIT Technology Review, (c) 2024, no reuse",
+        "Apache Kafka documentation, all rights reserved",
+        "This work is NOT licensed under the Apache License; contact the authors",
+        "Contains BSD daemon artwork; text is proprietary",
+        "Committee report, MIT-affiliated authors",
+    ):
         code, _url, _raw = normalize_license(raw)
         assert code == "unknown", raw
+        assert subset_from_license(code) == "open_metadata", raw
