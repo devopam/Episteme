@@ -147,6 +147,14 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             litw="$HERE/$SOURCE/${STAGE}_${SOURCE}.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
+        enrich)
+            if [ "$SOURCE" = "europepmc_lite" ]; then
+                litw="$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
+                [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            else
+                die "$SOURCE enrich is not in SP2 — SP4 (structured serialize)" 3
+            fi
+            ;;
         *)
             die "$SOURCE $STAGE is not in SP3 — SP2 (literature extract) / SP4 (structured serialize)" 3
             ;;
@@ -218,6 +226,7 @@ wrapper_args=()
 # cross-block use in the dispatch `else` is explicit under `set -u`.
 wpath="${wpath:-}"
 idmapw="${idmapw:-}"
+litw="${litw:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
@@ -277,6 +286,13 @@ else
             fi
             ;;
         graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
+        enrich)
+            if [ "$SOURCE" = "europepmc_lite" ]; then
+                run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
+            else
+                die "$SOURCE enrich is not wired" 3
+            fi
+            ;;
         all)
             run_stage download bash "$wpath" "${wrapper_args[@]}"
             if _is_lit "$SOURCE"; then
