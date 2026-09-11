@@ -180,6 +180,21 @@ def test_corpus_materialize_dry_run_dies_3(tmp_path: Path) -> None:
     assert "--dry-run is supported on 'download' only" in proc.stderr
 
 
+def test_europepmc_id_mappings_extract_dies_3(tmp_path: Path) -> None:
+    # RULING (Task 11): europepmc_id_mappings is not in LIT_SOURCES -- it gets
+    # a `load`-only exception, not the full extract/load/graph chain.
+    proc = _run(["europepmc_id_mappings", "extract"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+
+
+def test_europepmc_id_mappings_load_dry_run_dies_3(tmp_path: Path) -> None:
+    # PF-8.1 (generalised): --dry-run rejected on every write stage, every
+    # source -- including the europepmc_id_mappings `load` exception arm.
+    proc = _run(["europepmc_id_mappings", "load", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "--dry-run is supported on 'download' only" in proc.stderr
+
+
 def test_openalex_bad_mode_reaches_wrapper_die(tmp_path: Path) -> None:
     # FIX 3 (I1) regression guard: the positional now reaches openalex's F-2 die.
     try:

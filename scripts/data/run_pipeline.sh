@@ -132,7 +132,17 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             wpath="$HERE/${WRAPPER[$SOURCE]}"
             [ -f "$wpath" ] || die "wrapper not found: $wpath (not yet implemented?)" 3
             ;;
-        extract|load|graph)
+        load)
+            if [ "$SOURCE" = "europepmc_id_mappings" ]; then
+                idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
+                [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
+            else
+                _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
+                litw="$HERE/$SOURCE/load_$SOURCE.sh"
+                [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            fi
+            ;;
+        extract|graph)
             _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
             litw="$HERE/$SOURCE/${STAGE}_${SOURCE}.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
@@ -207,6 +217,7 @@ wrapper_args=()
 # Set in the non-pmc early-validation block above; declared here too so the
 # cross-block use in the dispatch `else` is explicit under `set -u`.
 wpath="${wpath:-}"
+idmapw="${idmapw:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
@@ -258,7 +269,13 @@ else
     case "$STAGE" in
         download) run_stage download bash "$wpath" "${wrapper_args[@]}" ;;
         extract)  run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
-        load)     run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}" ;;
+        load)
+            if [ "$SOURCE" = "europepmc_id_mappings" ]; then
+                run_stage load bash "$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh" "${load_args[@]}"
+            else
+                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+            fi
+            ;;
         graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
         all)
             run_stage download bash "$wpath" "${wrapper_args[@]}"
