@@ -125,6 +125,7 @@ class Settings:
     mesh_base: str
     pubmed_ftp_base: str
     europepmc_base: str
+    europepmc_preprint_base: str
     bookshelf_base: str
     openalex_s3: str
     dailymed_base: str
@@ -186,6 +187,10 @@ def get_settings() -> Settings:
         # C-1: EUROPEPMC_BASE, else the legacy EUROPEPMC_BASE_URL, else the literal.
         europepmc_base=_get("EUROPEPMC_BASE")
         or _get("EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"),
+        # No literal default: _load_sources_env() supplies EUROPEPMC_PREPRINT_BASE
+        # from scripts/data/_lib/sources.env (and raises ConfigError if that file
+        # is missing). Mirrors chembl_base / uniprot_base / pubmed_ftp_base.
+        europepmc_preprint_base=_get("EUROPEPMC_PREPRINT_BASE"),
         bookshelf_base=_get("BOOKSHELF_BASE"),
         openalex_s3=_get("OPENALEX_S3"),
         dailymed_base=_get("DAILYMED_BASE"),

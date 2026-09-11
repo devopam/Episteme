@@ -120,6 +120,33 @@ def test_sources_env_load_order(tmp_path, monkeypatch):
     assert cfg.get_settings().chembl_base == "https://mirror.example/chembl"
 
 
+_EUROPEPMC_PREPRINT_DEFAULT = "https://ftp.ebi.ac.uk/pub/databases/pmc/preprints"
+
+
+def test_europepmc_preprint_base_from_sources_env(tmp_path, monkeypatch):
+    # PF-3: europepmc_preprint_base has NO literal default in config.py — its
+    # value comes from scripts/data/_lib/sources.env (EUROPEPMC_PREPRINT_BASE).
+    # Same isolation ritual as test_sources_env_load_order (M2): stub
+    # pyproject.toml + chdir + no .env so the real ./.env never leaks.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "episteme-test"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    import episteme.config as cfg
+
+    monkeypatch.delenv("EUROPEPMC_PREPRINT_BASE", raising=False)
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().europepmc_preprint_base == _EUROPEPMC_PREPRINT_DEFAULT
+
+    # real environment overrides sources.env
+    monkeypatch.setenv("EUROPEPMC_PREPRINT_BASE", "https://mirror.example/preprints")
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().europepmc_preprint_base == "https://mirror.example/preprints"
+
+
 def test_dotenv_overrides_sources_env(fresh_config, monkeypatch):
     # middle leg of the load order: ./.env beats sources.env, loses to real env
     monkeypatch.delenv("CHEMBL_BASE", raising=False)
