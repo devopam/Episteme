@@ -151,8 +151,17 @@ def _row_from_txt(data: bytes, *, source_file: str, member_name: str) -> dict[st
 
     lic, lic_url, lic_snip = normalize_license(_LICENSE_RAW)
 
+    # Archive-format suffix on `id` only (never on `source_record_id`): EBI
+    # ships this source as two parallel archive families over the *same*
+    # accession ranges (author_manuscript_txt.* / author_manuscript_xml.*,
+    # see download_europepmc_manuscript.sh's FMT argument), so the same
+    # pmcid can legitimately appear once per format. episteme.articles has
+    # no PK/unique constraint on `id` and postgres_loader's idempotency
+    # keys on source_file, not `id` -- without this suffix, extracting both
+    # format archives for one manuscript would silently produce two rows
+    # sharing one `id`.
     row: dict[str, Any] = {
-        "id": f"{SOURCE}:{pmcid}" if pmcid else f"{SOURCE}:{source_file}:{member_name}",
+        "id": f"{SOURCE}:{pmcid}:txt" if pmcid else f"{SOURCE}:{source_file}:{member_name}",
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": pmcid,
@@ -196,8 +205,11 @@ def _row_from_xml(tmp_path: Path, *, source_file: str, member_name: str) -> dict
 
     lic, lic_url, lic_snip = normalize_license(_LICENSE_RAW)
 
+    # Archive-format suffix on `id` only -- see the matching comment in
+    # _row_from_txt: the same pmcid can legitimately appear in both the
+    # txt-format and xml-format archive for one manuscript.
     row: dict[str, Any] = {
-        "id": f"{SOURCE}:{pmcid}" if pmcid else f"{SOURCE}:{source_file}:{member_name}",
+        "id": f"{SOURCE}:{pmcid}:xml" if pmcid else f"{SOURCE}:{source_file}:{member_name}",
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": pmcid,

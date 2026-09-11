@@ -142,3 +142,48 @@ def test_manuscript_pmcid_ignores_directory_prefix(tmp_path):
     rows = _all_rows(out_dir / "staging" / "europepmc_manuscript")
     assert rows[0]["pmcid"] == "PMC1249490"
     assert rows[0]["source_record_id"] == "PMC1249490"
+
+
+def test_manuscript_id_disambiguates_txt_vs_xml_same_pmcid(tmp_path):
+    """Regression (code review on 3b06a39): EBI ships this source as two
+    parallel archive families over the *same* accession ranges
+    (``author_manuscript_txt.*`` / ``author_manuscript_xml.*`` -- see
+    ``download_europepmc_manuscript.sh``'s ``FMT`` argument). Before this
+    fix, both formats' rows for one manuscript shared
+    ``id = f"{SOURCE}:{pmcid}"`` with no format suffix -- since
+    ``episteme.articles`` has no PK/unique constraint on ``id`` and
+    ``postgres_loader``'s idempotency keys on ``source_file`` (not ``id``),
+    extracting + loading both format archives for one manuscript would
+    silently produce two rows sharing one ``id``. ``source_record_id`` must
+    stay the bare ``pmcid`` -- only ``id`` gets the format suffix.
+    """
+    archive = tmp_path / "raw" / "same_pmcid_both_formats.tar.gz"
+    archive.parent.mkdir(parents=True)
+    txt_body = ("Same-manuscript plain-text member. " * 20).encode("utf-8")
+    xml_body = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b"<article><front><article-meta>"
+        b"<title-group><article-title>Same manuscript, xml format</article-title></title-group>"
+        b"</article-meta></front><body><p>" + b"x" * 300 + b"</p></body></article>"
+    )
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, data in (
+            ("PMC9999999.txt", txt_body),
+            ("PMC9999999.xml", xml_body),
+        ):
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    out_dir = tmp_path / "out"
+    res = extract_europepmc_manuscripts(tmp_path / "raw", out_dir)
+    assert res["rows"] == 2
+
+    rows = _all_rows(out_dir / "staging" / "europepmc_manuscript")
+    assert len(rows) == 2
+    assert all(r["pmcid"] == "PMC9999999" for r in rows)
+    assert all(r["source_record_id"] == "PMC9999999" for r in rows)
+
+    ids = {r["id"] for r in rows}
+    assert len(ids) == 2, f"expected two distinct ids, got a collision: {ids}"
+    assert ids == {"europepmc_manuscript:PMC9999999:txt", "europepmc_manuscript:PMC9999999:xml"}
