@@ -1,5 +1,11 @@
 -- SP2 migration 0002 -- container_id / book_meta + episteme.article_parts + bookshelf partitions.
--- Idempotent. Applied by migrate_database.sh after 0001, tracked in episteme._migrations.
+-- Idempotent. NOTE (2026-09): migrate_database.sh currently dies at 0001
+-- (pgvector is not installed on this PostgreSQL build), so the migration
+-- runner never reaches this file automatically. Apply directly:
+--   psql -d <db> -f src/episteme/data/db/migrations/0002_container_and_book_parts.sql
+-- (idempotent -- safe to re-run). Once run, it is NOT tracked in
+-- episteme._migrations on this build (that tracking happens inside the
+-- runner this file currently bypasses).
 
 ALTER TABLE episteme.articles      ADD COLUMN IF NOT EXISTS container_id text;
 ALTER TABLE episteme.articles      ADD COLUMN IF NOT EXISTS book_meta    jsonb;
@@ -45,4 +51,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS article_parts_uq
 CREATE INDEX IF NOT EXISTS article_parts_src_idx
     ON episteme.article_parts (source_file);
 
-GRANT SELECT, INSERT ON episteme.article_parts TO episteme_app;
+GRANT SELECT, INSERT, DELETE ON episteme.article_parts TO episteme_app;

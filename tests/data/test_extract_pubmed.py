@@ -82,3 +82,41 @@ def test_pubmed_report_writes_nothing(tmp_path, capsys):
     # --report writes NO shards, NO markers, NO run manifest
     assert not (tmp_path / "staging").exists()
     assert not (tmp_path / "_ops").exists()
+
+
+def test_pubmed_report_respects_max_files(tmp_path, capsys):
+    """Fix 3 (whole-branch review): --report must apply --max-files, same as
+    every other SP2 extractor's _run_report. Two raw-dir copies of the
+    fixture so the cap is observable via the "files:" line of the printed
+    field-shape table."""
+    import shutil
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    shutil.copy(FX / "pubmed_sample.xml.gz", raw_dir / "pubmed_sample.xml.gz")
+    shutil.copy(FX / "pubmed_sample.xml.gz", raw_dir / "pubmed_sample_2.xml.gz")
+
+    rc = main(
+        [
+            "--raw-dir",
+            str(raw_dir),
+            "--processed-dir",
+            str(tmp_path),
+            "--report",
+            "--max-files",
+            "1",
+        ]
+    )
+    assert rc == 0
+    capped_out = capsys.readouterr().out
+
+    rc = main(["--raw-dir", str(raw_dir), "--processed-dir", str(tmp_path), "--report"])
+    assert rc == 0
+    uncapped_out = capsys.readouterr().out
+
+    # Pin directly to the "files=N  rows=M" line so this fails if a future
+    # change caps rows instead of files, or differs for an incidental reason.
+    assert "files=1  rows=" in capped_out
+    assert "files=2  rows=" in uncapped_out
+    assert not (tmp_path / "staging").exists()
+    assert not (tmp_path / "_ops").exists()

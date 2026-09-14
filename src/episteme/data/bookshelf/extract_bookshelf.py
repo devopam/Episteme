@@ -517,8 +517,8 @@ def _print_verbose(result: dict[str, Any]) -> None:
 
 
 def extract_bookshelf(
-    raw_dir,
-    processed_dir,
+    raw_dir: Path,
+    processed_dir: Path,
     *,
     max_files: int = 0,
     force: bool = False,

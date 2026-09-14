@@ -13,8 +13,8 @@ FX = REPO_ROOT / "tests" / "fixtures" / "sp2" / "bookshelf"
 def _setup_schema(conn):
     with (
         conn.cursor() as cur,
-        open("src/episteme/data/db/extensions.sql") as ext,
-        open("src/episteme/data/db/schema.sql") as sch,
+        open(REPO_ROOT / "src/episteme/data/db/extensions.sql") as ext,
+        open(REPO_ROOT / "src/episteme/data/db/schema.sql") as sch,
     ):
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute(ext.read())

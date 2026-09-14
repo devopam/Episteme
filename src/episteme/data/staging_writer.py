@@ -67,6 +67,11 @@ def write_parquet_shard(
         elif c in ("is_retracted", "is_manuscript", "is_historical_ocr"):
             arrays[c] = pa.array(values, type=pa.bool_())
         else:
+            # NOTE: any jsonb-typed DB column (currently only book_meta) MUST be
+            # pre-serialized to a JSON string (json.dumps(...)) by the caller before
+            # it reaches this function -- a raw dict lands here and becomes Python's
+            # str(dict) repr (single-quoted, INVALID JSON), not real JSON. See
+            # extract_bookshelf.py's book_meta handling for the reference pattern.
             arrays[c] = pa.array(
                 [None if v is None else str(v) if not isinstance(v, str) else v for v in values],
                 type=pa.string(),

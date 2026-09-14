@@ -13,6 +13,7 @@ import pytest
 
 pytestmark = pytest.mark.pg
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "fixtures"
@@ -25,8 +26,8 @@ FIXTURE = (
 def _setup_schema(conn):
     with (
         conn.cursor() as cur,
-        open("src/episteme/data/db/extensions.sql") as ext,
-        open("src/episteme/data/db/schema.sql") as sch,
+        open(REPO_ROOT / "src/episteme/data/db/extensions.sql") as ext,
+        open(REPO_ROOT / "src/episteme/data/db/schema.sql") as sch,
     ):
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute(ext.read())

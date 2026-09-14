@@ -47,6 +47,11 @@ def test_migration_0002_article_parts_table_and_partitions(sa_conn):
             WHERE p.relname = 'article_parts'
         """)
         assert cur.fetchone()[0] == 8  # 8 hash buckets
+        # load-bearing: graph_builder's article_parts INSERT uses
+        # ON CONFLICT (container_id, part_id) DO NOTHING, which errors
+        # outright without a matching unique index.
+        cur.execute("SELECT to_regclass('episteme.article_parts_uq')")
+        assert cur.fetchone()[0] is not None
 
 
 def test_migration_0002_bookshelf_partition(sa_conn):
