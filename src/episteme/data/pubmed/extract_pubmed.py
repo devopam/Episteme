@@ -494,8 +494,10 @@ def _render_field_shape(rows: list[dict[str, Any]], n_files: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_report(raw_dir: Path) -> int:
+def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     files = discover_pubmed_files(raw_dir)
+    if max_files and max_files > 0:
+        files = files[:max_files]
     if not files:
         print(f"ERROR: no pubmed*.xml(.gz) under {raw_dir}", file=sys.stderr)
         return 1
@@ -539,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.report:
-        return _run_report(raw_dir)
+        return _run_report(raw_dir, args.max_files)
 
     print(f"schema={SCHEMA_VERSION} source={SOURCE}")
     print(f"raw_dir={raw_dir.resolve()} workers={max(1, args.workers)}")

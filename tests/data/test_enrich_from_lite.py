@@ -28,14 +28,16 @@ def _setup_schema(conn):
     conn.commit()
 
 
-def _seed_article(cur, *, id_, pmcid, journal=None, year=None, extract_status="ok"):
+def _seed_article(
+    cur, *, id_, pmcid, journal=None, year=None, extract_status="ok", source="pubmed"
+):
     cur.execute(
         """
         INSERT INTO episteme.articles
             (id, source, source_file, pmcid, journal, year, extract_status)
-        VALUES (%s, 'pubmed', 'seed.xml', %s, %s, %s, %s)
+        VALUES (%s, %s, 'seed.xml', %s, %s, %s, %s)
         """,
-        (id_, pmcid, journal, year, extract_status),
+        (id_, source, pmcid, journal, year, extract_status),
     )
 
 
@@ -61,8 +63,14 @@ def test_enrich_from_lite_fills_matched_rows_and_skips_others(pg_conn):
     with pg_conn.cursor() as cur:
         # 2 rows with pmcid set, journal/year NULL -- matched in sample.tgz
         # (PMC17774: Arthritis research/1999; PMC7441394: Scientific reports/2020).
+        # PMC17774 keeps a NULL year (defensive case -- NULL should still get
+        # filled). PMC7441394 seeds year=0 -- the REAL sentinel value
+        # postgres_loader._coerce_year always writes for an unknown year
+        # (never NULL); this is the case that actually matters (regression
+        # coverage for the CASE-based fill; coalesce() alone can never fire
+        # on 0, only on NULL).
         _seed_article(cur, id_="pmcid:PMC17774", pmcid="PMC17774")
-        _seed_article(cur, id_="pmcid:PMC7441394", pmcid="PMC7441394")
+        _seed_article(cur, id_="pmcid:PMC7441394", pmcid="PMC7441394", year=0)
         # journal ALREADY set (non-NULL) -- coalesce must NOT overwrite it;
         # year is NULL and IS matched in the fixture (PMC7445587: 2020).
         _seed_article(
@@ -195,3 +203,44 @@ def test_enrich_from_lite_does_not_overwrite_existing_mesh(pg_conn, tmp_path):
         row = cur.fetchone()
         assert row[0] == ["Existing Term"]
         assert row[1] == "ok"
+
+
+def test_enrich_from_lite_moves_row_across_year_partitions_for_pmc_source(pg_conn):
+    """Fix 1 follow-up: episteme.articles_pmc (and articles_bookshelf) are
+    RANGE-sub-partitioned by year, unlike the unpartitioned
+    articles_default the other seeded tests above land in (source='pubmed').
+    Seed a source='pmc' row at year=0 (articles_pmc_y0, the real sentinel
+    postgres_loader writes) and confirm the CASE-based UPDATE both fills the
+    real year (1999, from sample.tgz's PMC17774) AND physically moves the
+    row into episteme.articles_pmc_1995_2000 -- the cross-partition row
+    move the brief reasoned about analytically but told the fix wave not to
+    re-verify functionally. Postgres does support UPDATE-driven partition
+    row movement (since PG11); this exercises it for real."""
+    _setup_schema(pg_conn)
+
+    from episteme.data.europepmc.lite_metadata.enrich_from_lite import enrich_from_lite
+
+    with pg_conn.cursor() as cur:
+        _seed_article(cur, id_="pmcid:PMC17774-pmc", pmcid="PMC17774", year=0, source="pmc")
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT year, tableoid::regclass::text FROM episteme.articles WHERE id = %s",
+            ("pmcid:PMC17774-pmc",),
+        )
+        before_year, before_partition = cur.fetchone()
+        assert before_year == 0
+        assert before_partition == "episteme.articles_pmc_y0"
+
+    enrich_from_lite(FIXTURE, pg_conn)
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT year, tableoid::regclass::text FROM episteme.articles WHERE id = %s",
+            ("pmcid:PMC17774-pmc",),
+        )
+        after_year, after_partition = cur.fetchone()
+        assert after_year == 1999
+        assert after_partition == "episteme.articles_pmc_1995_2000"

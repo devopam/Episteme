@@ -18,9 +18,19 @@ def _block_real_db_audit(request, monkeypatch):
     means every non-pg extractor unit test silently appends junk
     ``extract_commit`` rows to the real hash-chained audit log.
 
-    Force the mirror path for every test *without* the ``pg`` marker by making
-    the connection factory raise. ``pg``-marked tests are left alone — they
-    target ``episteme_test`` via ``TEST_PG_DSN`` on purpose.
+    Force the mirror path for every test *without* the ``pg`` marker by
+    patching all three chokepoints in ``episteme.data.db.connection``:
+    ``connection`` (the lazy-import seam most extractors use),
+    ``get_pool`` (the pool factory ``connection()`` itself calls internally
+    -- patching this also closes a module-top-import caller like
+    ``load_articles.py``'s ``from ... import connection``, whose bound name
+    is stale but whose function BODY still resolves ``get_pool`` dynamically,
+    at call time, against ``connection.py``'s own module namespace -- so the
+    patch here is still seen), and ``dsn_from_settings`` (the DSN builder a
+    direct caller like ``corpus_materializer.py`` uses to hand a raw DSN to
+    DuckDB's ``ATTACH``, bypassing ``connection()``/``get_pool()`` entirely).
+    ``pg``-marked tests are left alone — they target ``episteme_test`` via
+    ``TEST_PG_DSN`` on purpose.
     """
     if "pg" in request.keywords:
         return
@@ -32,3 +42,5 @@ def _block_real_db_audit(request, monkeypatch):
         )
 
     monkeypatch.setattr("episteme.data.db.connection.connection", _no_db, raising=True)
+    monkeypatch.setattr("episteme.data.db.connection.get_pool", _no_db, raising=True)
+    monkeypatch.setattr("episteme.data.db.connection.dsn_from_settings", _no_db, raising=True)

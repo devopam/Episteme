@@ -16,6 +16,7 @@ fi
 
 usage() {
     echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
+    echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
 
