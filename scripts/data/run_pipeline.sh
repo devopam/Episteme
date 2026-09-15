@@ -16,6 +16,7 @@ fi
 
 usage() {
     echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
+    echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
 
@@ -73,6 +74,7 @@ declare -A WRAPPER=(
     [europepmc_lite]="europepmc/lite_metadata/download_europepmc_lite.sh"
     [europepmc_abstracts]="europepmc/abstracts/download_europepmc_abstracts.sh"
     [bookshelf]="bookshelf/download_bookshelf.sh"
+    [guidelines]="guidelines/download_guidelines.sh"
     [chembl]="chembl/download_chembl.sh"
     [uniprot]="uniprot/download_uniprot.sh"
     [pubchem]="pubchem/download_pubchem.sh"
@@ -87,11 +89,20 @@ declare -A WRAPPER=(
     [aact]="aact/download_aact.sh"
 )
 
+# SP2 literature sources: the six that get the full extract -> load -> graph
+# chain (dispatch to $HERE/<source>/<stage>_<source>.sh). Every other source is
+# download-only in SP2 (structured serialize = SP4). `_is_lit` gates the
+# extract/load/graph arms below.
+LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
+_is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
 # cover, must be a plain error with a clean exit — never a dangling,
 # DB-dependent run_start with no matching run_end.
-if [ -z "${WRAPPER[$SOURCE]:-}" ]; then
+# `corpus` is not a source token — it's the materialize-only alias handled in the
+# dispatch chain below (SOURCE == "corpus" arm). Let it past the WRAPPER lookup.
+if [ "$SOURCE" != "corpus" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
     die "unknown source '$SOURCE' (see scripts/data/_lib/check_prereqs.sh / the roadmap source list)" 3
 fi
 
@@ -100,29 +111,63 @@ case "$STAGE" in
     *) usage ;;
 esac
 
-# C2: SP3 wires --dry-run for pmc's `download` stage only (download_pmc.py has a
-# true pre-network no-op). Every other pmc stage ignores EPISTEME_DRY_RUN but
-# DR-1 still strips its audit bracket -> a real, unaudited DB write that exits 0.
-# Reject the combination loudly rather than run it. `all` (STAGE != download)
-# is rejected too: the review wants the combination refused, not silently partial.
-if [ "$SOURCE" = "pmc" ] && [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && [ "$STAGE" != "download" ]; then
-    die "pmc $STAGE has no --dry-run (SP3 wires it for download only) — drop --dry-run or use 'pmc download --dry-run'" 3
-fi
+# SP2 generalises SP3's C2: --dry-run is meaningful only for `download` (the
+# fetch wrappers have a real EPISTEME_DRY_RUN no-op). Every other stage writes
+# the DB; DR-1 would strip its audit bracket -> a real unaudited write. Refuse.
+# `all` is in the list too: it runs a write stage, so the review wants the
+# combination refused outright, not run download-only and silently partial.
+case "$STAGE" in
+    extract|load|graph|enrich|materialize|all)
+        [ "${EPISTEME_DRY_RUN:-0}" != "1" ] \
+            || die "$SOURCE $STAGE writes the DB — --dry-run is supported on 'download' only" 3 ;;
+esac
 
-# Non-pmc sources: SP3 wires only `download` (and `all`, which runs download
-# then stops). Every other stage is SP2 (literature extract) / SP4 (structured
-# serialize). Validate the wrapper path here too, so a not-yet-implemented
-# wrapper fails before the audit bracket rather than after it.
-if [ "$SOURCE" != "pmc" ]; then
+# Non-pmc sources: SP3 wires `download` (and `all`) for every source; SP2 adds
+# the `extract`/`load`/`graph` chain for the six literature sources only.
+# Validate the wrapper path here too, so a not-yet-implemented wrapper fails
+# before the audit bracket rather than after it. `corpus` (materialize alias) is
+# excluded — it has its own dispatch arm and its own pre-bracket reject below.
+if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
     case "$STAGE" in
         download|all)
             wpath="$HERE/${WRAPPER[$SOURCE]}"
             [ -f "$wpath" ] || die "wrapper not found: $wpath (not yet implemented?)" 3
             ;;
+        load)
+            if [ "$SOURCE" = "europepmc_id_mappings" ]; then
+                idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
+                [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
+            else
+                _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
+                litw="$HERE/$SOURCE/load_$SOURCE.sh"
+                [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            fi
+            ;;
+        extract|graph)
+            _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
+            litw="$HERE/$SOURCE/${STAGE}_${SOURCE}.sh"
+            [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            ;;
+        enrich)
+            if [ "$SOURCE" = "europepmc_lite" ]; then
+                litw="$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
+                [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            else
+                die "$SOURCE enrich is not in SP2 — SP4 (structured serialize)" 3
+            fi
+            ;;
         *)
             die "$SOURCE $STAGE is not in SP3 — SP2 (literature extract) / SP4 (structured serialize)" 3
             ;;
     esac
+fi
+
+# `corpus` is the materialize-only alias: reject every other stage here, before
+# the audit bracket, so a bad `corpus <stage>` exits clean with no dangling
+# run_start (matches the early-validation principle above). The dispatch arm
+# below carries a belt-and-braces `die` for the same case.
+if [ "$SOURCE" = "corpus" ] && [ "$STAGE" != "materialize" ]; then
+    die "corpus: only 'materialize' is wired" 3
 fi
 
 RUN_ID="${SOURCE}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -161,6 +206,14 @@ fi
 [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && download_args+=(--dry-run)
 [ "$FORCE" = "1" ] && extract_args+=(--force)
 
+# SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
+# --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
+# `load` reuses load_args above; `graph` gets no extra args (graph_builder.main
+# takes only --source/--raw-dir and errors on anything else, PF-8).
+lit_extract_args=()
+[ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
+[ "$FORCE" = "1" ] && lit_extract_args+=(--force)
+
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N
 # and --force --reason R. --dry-run is NOT here — it rides EPISTEME_DRY_RUN.
@@ -173,6 +226,8 @@ wrapper_args=()
 # Set in the non-pmc early-validation block above; declared here too so the
 # cross-block use in the dispatch `else` is explicit under `set -u`.
 wpath="${wpath:-}"
+idmapw="${idmapw:-}"
+litw="${litw:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
@@ -208,13 +263,48 @@ if [ "$SOURCE" = "pmc" ]; then
             run_stage enrich "$HERE/pmc/enrich_pmc.sh"
             ;;
     esac
+elif [ "$SOURCE" = "corpus" ]; then
+    # `corpus materialize` alias -> the same shard writer pmc's `materialize`
+    # stage runs (materialize_corpus.sh). --dry-run already died 3 above. Any
+    # non-materialize stage already died 3 in early validation; the arm below is
+    # belt-and-braces.
+    case "$STAGE" in
+        materialize) run_stage materialize "$HERE/materialize_corpus.sh" ;;
+        *)           die "corpus: only 'materialize' is wired" 3 ;;
+    esac
 else
     # Non-pmc: SOURCE, STAGE and $wpath were all validated before the audit
-    # bracket. Only `download` / `all` reach here; both run the one wrapper.
-    run_stage download bash "$wpath" "${wrapper_args[@]}"
-    if [ "$STAGE" = "all" ]; then
-        log INFO "$SOURCE: only 'download' is wired in SP3 (extract/serialize = SP2/SP4)"
-    fi
+    # bracket. `download` runs the one bulk wrapper; the six literature sources
+    # also get `extract`/`load`/`graph` (dispatch to $HERE/<source>/<stage>_<source>.sh).
+    case "$STAGE" in
+        download) run_stage download bash "$wpath" "${wrapper_args[@]}" ;;
+        extract)  run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
+        load)
+            if [ "$SOURCE" = "europepmc_id_mappings" ]; then
+                run_stage load bash "$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh" "${load_args[@]}"
+            else
+                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+            fi
+            ;;
+        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
+        enrich)
+            if [ "$SOURCE" = "europepmc_lite" ]; then
+                run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
+            else
+                die "$SOURCE enrich is not wired" 3
+            fi
+            ;;
+        all)
+            run_stage download bash "$wpath" "${wrapper_args[@]}"
+            if _is_lit "$SOURCE"; then
+                run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
+                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+            else
+                log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP4)"
+            fi
+            ;;
+    esac
 fi
 
 if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then

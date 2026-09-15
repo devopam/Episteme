@@ -1,20 +1,31 @@
 #!/usr/bin/env bash
-# Episteme SP3 acquisition wrapper: Europe PMC preprints feed bulk download.
-# Thin shell over scripts/data/_lib/common.sh — directory listing + size-skip +
-# fetch only (no extract/parse). Flat EBI directory; no MODE.
+# SP2 literature-download wrapper: Europe PMC preprint full text, REST-harvested
+# per PPR id. Thin shell over `python -m
+# episteme.data.europepmc.preprints.download_europepmc_preprints`.
+#
+# EBI DISCONTINUED the bulk preprint feed (2026-09-08 spike): the FTP dir now
+# holds only pprid.txt.gz + a privacy notice. The python module fetches that id
+# list and GETs each preprint's fullTextXML from the Europe PMC REST API.
+#
+# run_pipeline.sh drives `download` with wrapper_args = [--max-files N]
+# [--force --reason R] [passthrough...] and signals --dry-run via
+# EPISTEME_DRY_RUN. This loop forwards what the module understands
+# (--max-files / --since / --raw-dir / --dry-run) and absorbs the rest.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../_lib/common.sh
 . "$HERE/../../_lib/common.sh"
 
-MAX_FILES=""
-FORCE=0
+FWD=()
+[ "${EPISTEME_DRY_RUN:-0}" = "1" ] && FWD+=(--dry-run)
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dry-run)   export EPISTEME_DRY_RUN=1; shift ;;
-        --max-files) MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
-        --force)     FORCE=1; shift ;;
+        --dry-run)   FWD+=(--dry-run); shift ;;
+        --max-files) FWD+=(--max-files "${2:-}"); shift; [ $# -gt 0 ] && shift ;;
+        --since)     FWD+=(--since "${2:-}"); shift; [ $# -gt 0 ] && shift ;;
+        --raw-dir)   FWD+=(--raw-dir "${2:-}"); shift; [ $# -gt 0 ] && shift ;;
+        --force)     log INFO "download_europepmc_preprint.sh: --force is a no-op (resume via .harvest_state)"; shift ;;
         --reason)    shift; [ $# -gt 0 ] && shift ;;   # run_pipeline already enforced it
         *)           log WARN "download_europepmc_preprint.sh: ignoring $1"; shift ;;
     esac
@@ -23,40 +34,12 @@ done
 load_dotenv
 require_env EPISTEME_ACTOR EUROPEPMC_PREPRINT_BASE
 
-dest="$(resolve_dest europepmc preprints)"
-
-mapfile -t files < <(list_manifest "$EUROPEPMC_PREPRINT_BASE" '\.(xml\.gz|txt\.gz|gz)$')
-[ "${#files[@]}" -gt 0 ] || die "europepmc preprints: no files at $EUROPEPMC_PREPRINT_BASE"
-
-# C1: --max-files caps the RESOLVED set here, before the --force prune loop —
-# otherwise --force deletes the whole set and only N are re-fetched.
-if [ -n "$MAX_FILES" ]; then
-    mapfile -t files < <(printf '%s\n' "${files[@]}" | cap_urls "$MAX_FILES")
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+    for c in "$HERE/../../../../.venv/Scripts/python.exe" "$HERE/../../../../.venv/bin/python" python; do
+        command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+    done
 fi
+[ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-lines=()
-for f in "${files[@]}"; do
-    [ -n "$f" ] || continue
-    u="$EUROPEPMC_PREPRINT_BASE/$f"
-    # W-4: force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
-        rm -f "$dest/$f"
-    fi
-    if size_match_skip "$dest/$f" "$u"; then
-        log INFO "skip (size-matched): $f"
-    else
-        lines+=("$u")
-    fi
-done
-
-if [ "${#lines[@]}" -eq 0 ]; then
-    log INFO "europepmc preprints: up to date"
-    write_sync_stamp "$dest"
-    exit 0
-fi
-
-if printf '%s\n' "${lines[@]}" | http_fetch "$dest"; then
-    write_sync_stamp "$dest"
-else
-    die "europepmc preprints: fetch failed"
-fi
+exec "$PY" -m episteme.data.europepmc.preprints.download_europepmc_preprints "${FWD[@]}"

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="preprint" xml:lang="en">
+  <front>
+    <journal-meta>
+      <journal-title-group>
+        <journal-title>bioRxiv</journal-title>
+      </journal-title-group>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="doi">10.1101/2026.09.01.123456</article-id>
+      <title-group>
+        <article-title>A reconciled harvest of Europe PMC preprint full text</article-title>
+      </title-group>
+      <contrib-group>
+        <contrib contrib-type="author">
+          <name>
+            <surname>Okafor</surname>
+            <given-names>Ada</given-names>
+          </name>
+        </contrib>
+        <contrib contrib-type="author">
+          <name>
+            <surname>Nakamura</surname>
+            <given-names>Ren</given-names>
+          </name>
+        </contrib>
+      </contrib-group>
+      <pub-date pub-type="epub">
+        <year>2026</year>
+      </pub-date>
+      <permissions>
+        <license license-type="open-access" xlink:href="https://creativecommons.org/licenses/by/4.0/">
+          <license-p>This article is made available under a CC BY 4.0 International license.</license-p>
+        </license>
+      </permissions>
+      <abstract>
+        <p>We describe a per-identifier REST harvest of Europe PMC preprint full text after the
+        bulk feed was discontinued, and a JATS extractor reconciled to the shared article schema.</p>
+      </abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec>
+      <title>Introduction</title>
+      <p>Europe PMC previously distributed preprint full text as gzipped range archives on the EBI
+      FTP server. That bulk feed was retired in September 2026, leaving only a compressed list of
+      preprint identifiers. Each preprint's full text must now be fetched individually from the
+      Europe PMC REST service by its PPR identifier. This paragraph exists purely to give the
+      fixture a body substantially longer than three hundred characters so that the extractor
+      classifies the resulting row as an ok extraction rather than an empty one.</p>
+      <p>The extractor parses the JATS body, the permissions block, the contributor list and the
+      bibliographic identifiers, then emits a single unified article row per preprint file.</p>
+    </sec>
+  </body>
+</article>

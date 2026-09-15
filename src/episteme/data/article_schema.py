@@ -1,4 +1,4 @@
-"""Shared schema constants and row helpers (extraction contract v1.3)."""
+"""Shared schema constants and row helpers (extraction contract v1.4)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 # Schema changelog:
 #   1.1  contract v1.1 (2026-08-31 sample audit): PMC provenance cols, license norm, status rules.
 #   1.2  (SP1-α, 2026-09-02): SOURCES extended to the full Phase-0 roadmap list.
@@ -21,9 +21,22 @@ SCHEMA_VERSION = "1.3"
 #        not a contract change. `mesh` and `publication_types` are STILL expected null for pmc
 #        (PMC OA JATS carries no MeSH; publication_types would need <article-categories> parsing,
 #        not attempted this task -- noted as a follow-up, not applied).
+#   1.4  (SP2 Task 2, 2026-09-09): +container_id (text) and +book_meta (jsonb), appended to
+#        ARTICLE_COLUMNS for the literature-extractor / bookshelf work. A row carrying
+#        book_meta is a "book row": decide_extract_status returns ok/partial only (never
+#        empty/dropped). BOOK_META_KEYS is the advisory key set for the book_meta JSON.
+#        (SP2 Task 6, 2026-09-10) normalize_license gained a permissive-OSI arm:
+#        an exact SPDX-identifier match (apache-2.0 / mit / bsd-*-clause / isc, see
+#        _PERMISSIVE_LICENSE_IDS) -> license="permissive" -> subset="commercial".
+#        No column/type change; row shape unchanged.
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200
+
+# Advisory key set for the episteme.articles.book_meta JSON blob (SP2 bookshelf rows).
+# book_meta values must be JSON strings when written to a row dict -- see
+# staging_writer.write_parquet_shard's catch-all branch.
+BOOK_META_KEYS = ("isbn", "editors", "publisher", "edition", "n_parts")
 
 SOURCES = (
     "pubmed",
@@ -79,6 +92,8 @@ ARTICLE_COLUMNS = [
     "is_manuscript",
     "is_historical_ocr",
     "pdf_url",
+    "container_id",
+    "book_meta",
 ]
 
 
@@ -114,8 +129,15 @@ def decide_extract_status(
     abstract: str | None,
     body_text: str | None,
     has_id: bool,
+    book_meta: dict[str, Any] | None = None,
 ) -> tuple[str, str | None]:
     """Return (extract_status, extract_notes)."""
+    if book_meta is not None:
+        t = (text or "").strip()
+        if len(t) >= MIN_OK_TEXT_LEN:
+            return "ok", None
+        return "partial", f"book_row_short_text_len={len(t)}"
+
     t = (text or "").strip()
     abs_ok = bool(abstract and str(abstract).strip())
     body_ok = bool(body_text and str(body_text).strip())
@@ -163,12 +185,70 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
         return "CC BY", url, s[:300]
     if "TEXT MINING" in u or "TEXT-MINING" in u or "FAIR USE" in u:
         return "text_mining", url, s[:300]
+    # Permissive OSI licences (Apache-2.0, MIT, BSD, ISC): no share-alike, no
+    # non-commercial clause -> commercial-shard eligible. One "permissive"
+    # bucket; the specific licence text is kept in license_raw.
+    #
+    # Governance boundary: only an unambiguous licence *identifier* qualifies
+    # -- an exact match (after whitespace/punctuation normalisation) against
+    # the SPDX-style tag set below. A bare token embedded in prose
+    # ("MIT Technology Review", "Apache Kafka docs", "...not under the Apache
+    # License...") must NOT reach subset=commercial: it falls through to
+    # "unknown" -> open_metadata, i.e. we under-claim commercial rights
+    # rather than over-claim them.
+    if _norm_license_key(s) in _PERMISSIVE_LICENSE_IDS:
+        return "permissive", url, s[:300]
 
     return "unknown", url, s[:300]
 
 
+# SPDX-style permissive licence identifiers, normalised (lowercase, single
+# spaces, no surrounding punctuation). Extend deliberately -- every entry is a
+# commercial-shard grant.
+_PERMISSIVE_LICENSE_IDS = frozenset(
+    {
+        "apache",
+        "apache 2",
+        "apache-2",
+        "apache 2.0",
+        "apache-2.0",
+        "apache2",
+        "apache license",
+        "apache license 2.0",
+        "apache license version 2.0",
+        "apache license, version 2.0",
+        "apache software license",
+        "mit",
+        "mit-0",
+        "mit license",
+        "mit no attribution",
+        "bsd",
+        "0bsd",
+        "bsd-2-clause",
+        "bsd-3-clause",
+        "bsd 2-clause",
+        "bsd 3-clause",
+        "bsd-2",
+        "bsd-3",
+        "bsd license",
+        "bsd 2-clause license",
+        "bsd 3-clause license",
+        "isc",
+        "isc license",
+    }
+)
+
+
+def _norm_license_key(raw: str) -> str:
+    """Lowercase, collapse whitespace, drop surrounding punctuation -- so
+    ``"Apache-2.0"``, ``"apache-2.0 "`` and ``"Apache License, Version 2.0."``
+    all reduce to a stable key for the permissive-identifier set."""
+    k = re.sub(r"\s+", " ", raw).strip().lower()
+    return k.strip(" .;,\"'()[]")
+
+
 def subset_from_license(license_code: str, *, default: str = "open_metadata") -> str:
-    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND"):
+    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND", "permissive"):
         return "commercial"
     if license_code.startswith("CC BY-NC") or license_code == "text_mining":
         return "text_mining"
@@ -194,6 +274,7 @@ def finalize_row(row: dict[str, Any]) -> dict[str, Any]:
         abstract=out.get("abstract"),
         body_text=out.get("body_text"),
         has_id=has_id,
+        book_meta=out.get("book_meta"),
     )
     if not out.get("extract_status"):
         out["extract_status"] = status

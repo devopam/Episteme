@@ -57,7 +57,9 @@ CREATE TABLE episteme.articles (
     pmc_version        text,
     is_manuscript      boolean,
     is_historical_ocr  boolean,
-    pdf_url            text
+    pdf_url            text,
+    container_id       text,   -- SP2: parent container (book) id for bookshelf part rows; also in migration 0002
+    book_meta          jsonb   -- SP2: book-level metadata blob (see article_schema.BOOK_META_KEYS)
 ) PARTITION BY LIST (source);
 
 -- pmc list-partition, sub-partitioned by publication year.
@@ -301,7 +303,10 @@ DO $$ BEGIN
           DESTINATION KEY (dst_pmid) REFERENCES episteme.articles (pmid),
         episteme.article_mesh KEY (pmid, descriptor_ui)
           SOURCE KEY (pmid) REFERENCES episteme.articles (pmid)
-          DESTINATION KEY (descriptor_ui) REFERENCES episteme.articles (pmid)  -- refine in SP1-beta task 8
+          DESTINATION KEY (descriptor_ui) REFERENCES episteme.articles (pmid),  -- refine in SP1-beta task 8
+        episteme.article_parts KEY (container_id, part_id)  -- SP2: book -> part edges (table in migration 0002)
+          SOURCE KEY (container_id) REFERENCES episteme.articles (id)
+          DESTINATION KEY (part_id) REFERENCES episteme.articles (id)
       )
     $graph$;
     RAISE NOTICE 'episteme_graph property graph created';

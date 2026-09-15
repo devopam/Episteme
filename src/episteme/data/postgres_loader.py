@@ -7,7 +7,7 @@ owns the transaction boundary):
     2. DELETE FROM episteme.article_body for every article of the replaced
        source_file(s) (via the articles.id linkage, plus the shard's own ids)
     3. DELETE FROM episteme.articles      WHERE source_file = ANY(<file>)   (per file)
-    4. COPY the 26 "hot" columns into episteme.articles
+    4. COPY the hot (non-text) columns into episteme.articles
     5. COPY (article_id, source, year + 4 text cols) into episteme.article_body
     6. INSERT one episteme._lineage row per distinct source_file
     7. audit_trail.record("load_replace" if anything was deleted else "load_commit")
