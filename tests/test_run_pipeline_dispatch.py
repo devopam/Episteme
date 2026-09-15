@@ -222,3 +222,40 @@ def test_openalex_bad_mode_reaches_wrapper_die(tmp_path: Path) -> None:
         pytest.skip("openalex bogusmode: timed out")
     assert proc.returncode == 1, proc.stderr[-2000:]
     assert "unknown mode 'bogusmode'" in proc.stderr
+
+
+def test_chembl_serialize_dry_run_dies_3(tmp_path):
+    proc = _run(["chembl", "serialize", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "writes the DB" in proc.stderr
+
+
+def test_chembl_serialize_dispatches(tmp_path):
+    # no data -> the scaffold exits 0 (nothing to do); NOT 3 (dispatch bug)
+    proc = _run(["chembl", "serialize", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode in (0, 1), proc.stderr[-2000:]
+
+
+def test_uniprot_serialize_dry_run_dies_3(tmp_path):
+    # a second structured source with no wrapper yet -> caught by the
+    # [ -f ] guard, not a dispatch-logic bug (rc 3 either way, but this
+    # proves _is_structured("uniprot") is true and the arm is reached)
+    proc = _run(["uniprot", "serialize"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "not yet implemented" in proc.stderr or "wrapper not found" in proc.stderr
+
+
+def test_mesh_graph_wrapper_not_found_dies_3(tmp_path):
+    # mesh graph is allowed by the dispatch guard but graph_mesh.sh doesn't
+    # exist until Task 9 -- proves the mesh-specific graph carve-out is wired
+    # without needing the real wrapper yet.
+    proc = _run(["mesh", "graph"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "wrapper not found" in proc.stderr
+
+
+def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
+    # a structured source must NOT be reachable via the SP2 _is_lit gate
+    proc = _run(["pubchem", "extract"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "not in SP2" in proc.stderr or "not wired" in proc.stderr

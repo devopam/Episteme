@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -96,6 +96,9 @@ declare -A WRAPPER=(
 LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex"
+_is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
 # cover, must be a plain error with a clean exit — never a dangling,
@@ -107,7 +110,7 @@ if [ "$SOURCE" != "corpus" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
 fi
 
 case "$STAGE" in
-    all|download|extract|load|graph|materialize|enrich) ;;
+    all|download|extract|load|graph|materialize|enrich|serialize) ;;
     *) usage ;;
 esac
 
@@ -117,7 +120,7 @@ esac
 # `all` is in the list too: it runs a write stage, so the review wants the
 # combination refused outright, not run download-only and silently partial.
 case "$STAGE" in
-    extract|load|graph|enrich|materialize|all)
+    extract|load|graph|enrich|materialize|serialize|all)
         [ "${EPISTEME_DRY_RUN:-0}" != "1" ] \
             || die "$SOURCE $STAGE writes the DB — --dry-run is supported on 'download' only" 3 ;;
 esac
@@ -138,15 +141,27 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
                 idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
                 [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
             else
-                _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
+                _is_lit "$SOURCE" || _is_structured "$SOURCE" \
+                    || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured)" 3
                 litw="$HERE/$SOURCE/load_$SOURCE.sh"
                 [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             fi
             ;;
-        extract|graph)
+        extract)
             _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
-            litw="$HERE/$SOURCE/${STAGE}_${SOURCE}.sh"
+            litw="$HERE/$SOURCE/extract_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            ;;
+        graph)
+            _is_lit "$SOURCE" || [ "$SOURCE" = "mesh" ] \
+                || die "$SOURCE graph is not wired" 3
+            litw="$HERE/$SOURCE/graph_$SOURCE.sh"
+            [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            ;;
+        serialize)
+            _is_structured "$SOURCE" || die "$SOURCE $STAGE is not in SP4 — SP2 (literature) territory" 3
+            structw="$HERE/$SOURCE/serialize_$SOURCE.sh"
+            [ -f "$structw" ] || die "wrapper not found: $structw (not yet implemented?)" 3
             ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
@@ -214,6 +229,13 @@ lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
 
+# SP4 structured `serialize` wrappers accept only --max-files N and --force --
+# NOT --reason, mirroring lit_extract_args' shape. `load` reuses load_args;
+# `graph` (mesh only) gets no extra args, same as the lit graph arm.
+struct_serialize_args=()
+[ -n "$MAX_FILES" ] && struct_serialize_args+=(--max-files "$MAX_FILES")
+[ "$FORCE" = "1" ] && struct_serialize_args+=(--force)
+
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N
 # and --force --reason R. --dry-run is NOT here — it rides EPISTEME_DRY_RUN.
@@ -228,6 +250,7 @@ wrapper_args=()
 wpath="${wpath:-}"
 idmapw="${idmapw:-}"
 litw="${litw:-}"
+structw="${structw:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
@@ -287,6 +310,7 @@ else
             fi
             ;;
         graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
+        serialize) run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
                 run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
@@ -296,12 +320,18 @@ else
             ;;
         all)
             run_stage download bash "$wpath" "${wrapper_args[@]}"
-            if _is_lit "$SOURCE"; then
+            if _is_structured "$SOURCE"; then
+                run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
+                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                if [ "$SOURCE" = "mesh" ]; then
+                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+                fi
+            elif _is_lit "$SOURCE"; then
                 run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
                 run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
             else
-                log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP4)"
+                log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi
             ;;
     esac
