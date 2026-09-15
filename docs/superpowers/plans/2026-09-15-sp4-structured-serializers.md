@@ -746,7 +746,7 @@ def test_chembl_serialize_rows(tmp_path):
 
 ---
 
-### Task 9: `reactome` — `serialize_reactome.py` + `mesh graph` wrapper proof
+### Task 9: `reactome` — `serialize_reactome.py`
 
 **Files:**
 - Create: `src/episteme/data/reactome/__init__.py`, `src/episteme/data/reactome/serialize_reactome.py`
