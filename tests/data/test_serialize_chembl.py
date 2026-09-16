@@ -22,7 +22,7 @@ from pathlib import Path
 import polars as pl
 
 from episteme.data import article_schema
-from episteme.data.chembl.serialize_chembl import main, serialize_chembl
+from episteme.data.chembl.serialize_chembl import iter_rows_from_file, main, serialize_chembl
 
 FX = Path(__file__).resolve().parents[1] / "fixtures" / "sp4" / "chembl"
 
@@ -89,6 +89,63 @@ def test_chembl_serialize_rows(tmp_path):
     assert "unknown compound" in orphan["text"]
     assert orphan["extract_status"] == "partial"
     assert orphan["subset"] == "commercial"
+
+
+def test_chembl_tarball_extraction(tmp_path):
+    """Committed regression coverage for `_resolve_sqlite_db`'s tarball path.
+
+    A real ChEMBL download is a `chembl_NN_sqlite.tar.gz` tarball -- the ONLY
+    shape a real download ever actually produces, and the one carrying the
+    `filter="data"` safe-extraction control -- never a bare `.db` (that shape
+    is only the unit-test fixture / a manually-placed real file). This was
+    previously verified only via an uncommitted, one-off synthetic check
+    during implementation (see task-5-report.md Sec 2), which proves it
+    worked once, not that a future refactor can't silently drop
+    `filter="data"` or break the nested-path glob. Builds a real `.tar.gz`
+    wrapping a copy of the `sample.db` fixture under a
+    `chembl_37/chembl_37_sqlite/chembl_37.db` internal path, matching the
+    real release's known layout.
+    """
+    import shutil
+    import tarfile
+
+    raw_dir = tmp_path / "raw"
+    nested = raw_dir / "chembl_37" / "chembl_37_sqlite"
+    nested.mkdir(parents=True)
+    shutil.copy(FX / "sample.db", nested / "chembl_37.db")
+
+    tar_path = raw_dir / "chembl_37_sqlite.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(raw_dir / "chembl_37", arcname="chembl_37")
+    # Only the tarball itself should be a discoverable unit of work -- drop
+    # the loose nested tree so serialize_chembl sees exactly one input file
+    # (discover_chembl_files's "*.db" pattern would otherwise also match the
+    # inner chembl_37.db via rglob).
+    shutil.rmtree(raw_dir / "chembl_37")
+
+    processed_dir = tmp_path / "processed"
+    res = serialize_chembl(raw_dir, processed_dir)
+    assert res["inputs"] == 1
+    assert res["ok"] == 1
+    assert res["failed"] == 0
+    assert res["rows"] == 4
+
+    df = _read_shard(processed_dir / "staging" / "chembl")
+    rows = df.to_dicts()
+    assert rows
+    assert all(row["id"].startswith("chembl:") for row in rows)
+    # source_file must be the TARBALL's basename, not the extracted inner
+    # .db's name -- the unit of work is the release file as it lands in
+    # raw_dir, not whatever DuckDB happened to read it from internally.
+    assert all(row["source_file"] == "chembl_37_sqlite.tar.gz" for row in rows)
+
+    # Also exercise iter_rows_from_file directly against the tarball (the
+    # brief's own named function), independent of the process_one/markers
+    # plumbing serialize_chembl() wraps it in above.
+    direct_rows = list(iter_rows_from_file(tar_path))
+    assert len(direct_rows) == 4
+    assert all(r["source_file"] == "chembl_37_sqlite.tar.gz" for r in direct_rows)
+    assert {r["id"] for r in direct_rows} == {row["id"] for row in rows}
 
 
 def test_chembl_serialize_is_idempotent_without_force(tmp_path):
