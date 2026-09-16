@@ -217,11 +217,37 @@ def test_clinvar_gzip_input_is_supported(tmp_path):
     assert {row["id"] for row in rows} == {"clinvar:2", "clinvar:487086", "clinvar:4507303"}
 
 
-def test_clinvar_assembly_dedup_prefers_grch38(tmp_path):
-    """Direct ``iter_rows_from_file`` check (the brief's own named function):
-    3 distinct VariationIDs in, exactly 3 rows out -- the real
-    GRCh37+GRCh38 assembly-duplicate pairs (6 physical TSV lines) must
-    collapse to one row per VariationID, not double-count."""
-    rows = list(iter_rows_from_file(FX / "sample.tsv"))
+def test_clinvar_assembly_dedup_prefers_grch38():
+    """Directly exercises the module's ``_QUERY`` (not just its
+    downstream ``episteme.articles`` row, which doesn't carry ``assembly``
+    at all -- ``clinvar_row``/``_build_text`` never read it, so a row-level
+    assertion alone cannot prove which assembly the QUALIFY clause actually
+    picked). 3 distinct VariationIDs in, exactly 3 rows out -- the real
+    GRCh37+GRCh38 assembly-duplicate pairs (6 physical TSV lines) collapse
+    to one row per VariationID, and the SURVIVING row for each is
+    confirmed to be the real GRCh38 physical line, not merely "some" row
+    (a reversed or deleted ``CASE Assembly ...`` would still dedup to 3
+    rows but change which one survives -- this assertion would catch
+    that, a row-count-only assertion would not)."""
+    import duckdb
+
+    from episteme.data.clinvar.serialize_clinvar import _QUERY
+
+    con = duckdb.connect()
+    try:
+        con.execute(_QUERY, [str(FX / "sample.tsv")])
+        cols = [d[0] for d in con.description]
+        rows = [dict(zip(cols, raw, strict=True)) for raw in con.fetchall()]
+    finally:
+        con.close()
+
     assert len(rows) == 3
-    assert {r["source_record_id"] for r in rows} == {"2", "487086", "4507303"}
+    by_vid = {r["variation_id"]: r for r in rows}
+    assert set(by_vid) == {2, 487086, 4507303}
+    assert all(r["assembly"] == "GRCh38" for r in rows)
+
+    # Also exercise iter_rows_from_file directly (the brief's own named
+    # function) for the downstream row shape.
+    downstream = list(iter_rows_from_file(FX / "sample.tsv"))
+    assert len(downstream) == 3
+    assert {r["source_record_id"] for r in downstream} == {"2", "487086", "4507303"}
