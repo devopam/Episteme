@@ -216,16 +216,26 @@ _CANDIDATE_EXTS = (".txt.gz", ".gz", ".tsv", ".txt")
 # every field this module reads, so a genuinely absent value (e.g.
 # ClinicalSignificance="-", observed for real VariationID 4507303) omits its
 # clause in _build_text instead of rendering the literal "-" token.
+#
+# Only the columns ``_build_text``/``clinvar_row`` actually read are
+# selected -- ``Type``/``GeneSymbol``/``ReviewStatus`` are NOT (an earlier
+# draft selected them speculatively; dropped after a self-review pass
+# confirmed neither function reads them). This matters beyond tidiness: at
+# real full-file scale (~4.56M deduped rows), every unused column is a few
+# hundred MB of Python strings ``con.fetchall()`` materializes for nothing,
+# directly adding to the memory ceiling this task's real end-to-end attempt
+# hit (see task-8-report.md's Concern 1). ``assembly`` IS kept, despite not
+# feeding ``text`` either, because it is the one column that makes the
+# QUALIFY clause's GRCh38-preference actually observable/testable (see
+# ``test_clinvar_assembly_dedup_prefers_grch38``) -- without it, which
+# assembly row survives the dedup would be a silently untested behaviour.
 _QUERY = """
     SELECT
         VariationID                        AS variation_id,
-        NULLIF(Type, '-')                  AS variant_type,
         NULLIF(Name, '-')                  AS name,
-        NULLIF(GeneSymbol, '-')            AS gene_symbol,
         NULLIF(ClinicalSignificance, '-')  AS clinical_significance,
         NULLIF(PhenotypeList, '-')         AS phenotype_list,
         NULLIF(RCVaccession, '-')          AS rcv_accession,
-        NULLIF(ReviewStatus, '-')          AS review_status,
         Assembly                           AS assembly
     FROM read_csv(?, delim='\t', header=true, quote='')
     QUALIFY ROW_NUMBER() OVER (
