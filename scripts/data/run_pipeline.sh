@@ -195,7 +195,14 @@ fi
 if [ "$SOURCE" = "pmc" ]; then
     case "$STAGE" in
         download|extract|load|graph|materialize|enrich|all) ;;
-        *) die "pmc: $STAGE is not wired" 3 ;;
+        # Message distinguished from the belt-and-braces case-arm below on
+        # purpose: a dispatch test asserting only "not wired" would still
+        # pass if this early guard were ever deleted (the case-arm alone
+        # would still reject with rc 3), silently losing the property this
+        # guard exists for -- that pmc's run_start audit call never fires
+        # for an unwired stage. The distinct substring lets a test pin
+        # which guard actually fired.
+        *) die "pmc: $STAGE is not wired (early validation)" 3 ;;
     esac
 fi
 
