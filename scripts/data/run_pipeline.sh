@@ -185,6 +185,20 @@ if [ "$SOURCE" = "corpus" ] && [ "$STAGE" != "materialize" ]; then
     die "corpus: only 'materialize' is wired" 3
 fi
 
+# pmc: reject any STAGE outside its own known chain here, before the audit
+# bracket, same early-validation principle as `corpus` above -- `serialize` is
+# a valid top-level STAGE (SP4's structured-source allow-list) but pmc has no
+# dispatch arm for it; without this guard it would pass validation, write a
+# run_start/run_end audit pair, and no-op with rc 0 (a real dispatch bug the
+# whole-branch review flagged). The pmc case block below carries a
+# belt-and-braces `die` for the same case.
+if [ "$SOURCE" = "pmc" ]; then
+    case "$STAGE" in
+        download|extract|load|graph|materialize|enrich|all) ;;
+        *) die "pmc: $STAGE is not wired" 3 ;;
+    esac
+fi
+
 RUN_ID="${SOURCE}-$(date -u +%Y%m%dT%H%M%SZ)"
 # Exported so every stage's `python -m episteme.data.*` subprocess (via
 # config.get_settings().run_id) shares this one run_id instead of each
@@ -285,6 +299,7 @@ if [ "$SOURCE" = "pmc" ]; then
             run_stage materialize "$HERE/materialize_corpus.sh"
             run_stage enrich "$HERE/pmc/enrich_pmc.sh"
             ;;
+        *) die "pmc: $STAGE is not wired" 3 ;;
     esac
 elif [ "$SOURCE" = "corpus" ]; then
     # `corpus materialize` alias -> the same shard writer pmc's `materialize`

@@ -58,6 +58,7 @@ via ``audit_trail``.
 
 from __future__ import annotations
 
+import gzip
 import sys
 from pathlib import Path
 from typing import Any
@@ -157,30 +158,49 @@ def _parse_jats(xml_path: Path) -> tuple[list[str], list[str]]:
     return dst_pmids, keywords
 
 
+def _open_mesh_source(xml_path: Path):
+    """Binary file handle for ``xml_path`` -- transparently gzip-decompressing
+    when its suffix is ``.gz``. Mirrors ``serialize_mesh.py``'s own
+    ``_open_source`` helper (same real-world ``desc<year>.gz`` shape)."""
+    return gzip.open(xml_path, "rb") if xml_path.suffix == ".gz" else xml_path.open("rb")
+
+
 def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
     """Return {descriptor_ui: [tree_number, ...]} for every
-    <DescriptorRecord> in one MeSH descriptor release file. A parse failure
-    yields an empty dict (mirrors _parse_jats's failure mode)."""
+    <DescriptorRecord> in one MeSH descriptor release file (bare ``.xml`` or
+    gzip-compressed ``.gz``/``.xml.gz`` -- transparently decompressed via
+    ``_open_mesh_source``, the same real-world shape ``serialize_mesh.py``
+    discovers and writes into ``source_file``). Streamed via
+    ``ET.iterparse`` (``ET`` IS ``defusedxml.ElementTree``, same streaming
+    discipline ``serialize_mesh.py``'s ``_iter_descriptor_records`` already
+    established for this exact file shape -- SP2's 821MB-file precedent), so
+    memory stays flat regardless of file size. A parse failure (malformed
+    XML, corrupt gzip, ...) yields an empty dict (mirrors _parse_jats's
+    failure mode)."""
+    out: dict[str, list[str]] = {}
     try:
-        root = ET.parse(str(xml_path)).getroot()
+        with _open_mesh_source(xml_path) as fh:
+            context = iter(ET.iterparse(fh, events=("start", "end")))
+            _, root = next(context)
+            for event, elem in context:
+                if event != "end" or _local(elem.tag) != "DescriptorRecord":
+                    continue
+                ui = None
+                trees: list[str] = []
+                for el in elem.iter():
+                    tag = _local(el.tag)
+                    if tag == "DescriptorUI" and ui is None:
+                        ui = (el.text or "").strip()
+                    elif tag == "TreeNumber":
+                        txt = (el.text or "").strip()
+                        if txt:
+                            trees.append(txt)
+                if ui:
+                    out[ui] = trees
+                elem.clear()
+                root.clear()
     except Exception:  # noqa: BLE001 -- a malformed file must not abort the build
         return {}
-    out: dict[str, list[str]] = {}
-    for rec in root.iter():
-        if _local(rec.tag) != "DescriptorRecord":
-            continue
-        ui = None
-        trees: list[str] = []
-        for el in rec.iter():
-            tag = _local(el.tag)
-            if tag == "DescriptorUI" and ui is None:
-                ui = (el.text or "").strip()
-            elif tag == "TreeNumber":
-                txt = (el.text or "").strip()
-                if txt:
-                    trees.append(txt)
-        if ui:
-            out[ui] = trees
     return out
 
 
@@ -209,9 +229,13 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
       parent/child edges by tree-number-prefix matching, ``executemany`` them
       back ``ON CONFLICT (parent_descriptor_ui, child_descriptor_ui) DO
       NOTHING``, and write one ``graph_commit`` audit row per ``source_file``.
+      A ``source_file`` that IS found on disk but parses to zero descriptors
+      (malformed XML, corrupt gzip, ...) increments ``mesh_empty_parse`` and
+      prints a WARNING to stderr -- distinct from the file simply not
+      existing (silently skipped, no warning).
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
-    mesh_hierarchy}``.
+    mesh_hierarchy, mesh_empty_parse}``.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
@@ -329,6 +353,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     # from the raw descriptor release XML (same architectural pattern as the
     # pmc cites/mesh phase above -- no persisted "extra fields" column).
     total_mesh_hierarchy = 0
+    empty_parse = 0
     if source == "mesh":
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'")
@@ -343,6 +368,20 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
                 continue
 
             descriptors = _parse_mesh_descriptors(xml_path)
+            if not descriptors:
+                # The file WAS found on disk but yielded zero descriptors --
+                # a genuine "something is wrong" signal (malformed XML,
+                # corrupt gzip, unexpected root shape, ...), distinct from
+                # "the file simply doesn't exist" (silently `continue`d
+                # above). Print, don't hard-fail: build() must still finish
+                # the other source_files in this run.
+                empty_parse += 1
+                print(
+                    f"WARNING: graph_builder mesh phase: {xml_path} parsed to zero "
+                    f"descriptors (source_file={src_file!r}); mesh_hierarchy for this "
+                    "file will be empty -- check the file is valid MeSH descriptor XML",
+                    file=sys.stderr,
+                )
             # tree number -> descriptor UI, to resolve a child's parent prefix
             tree_to_ui = {t: ui for ui, trees in descriptors.items() for t in trees}
 
@@ -386,6 +425,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "skipped_no_pmid": skipped_no_pmid,
         "parts": total_parts,
         "mesh_hierarchy": total_mesh_hierarchy,
+        "mesh_empty_parse": empty_parse,
     }
 
 

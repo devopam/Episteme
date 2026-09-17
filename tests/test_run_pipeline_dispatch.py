@@ -263,6 +263,19 @@ def test_mesh_graph_dispatches(tmp_path):
     assert "stage: graph" in proc.stderr
 
 
+def test_pmc_serialize_dies_3(tmp_path: Path) -> None:
+    # FIX 2 (whole-branch review): `serialize` is a valid top-level STAGE (SP4
+    # added it to the general allow-list for the 8 structured sources), but
+    # pmc's own dispatch case-block has no arm for it -- pre-fix this silently
+    # no-ops with rc 0 after writing a run_start/run_end audit-row pair for a
+    # command that did zero work. Must die 3, mirroring `corpus`'s existing
+    # catch-all precedent (both its early-validation guard and its
+    # belt-and-braces case arm).
+    proc = _run(["pmc", "serialize"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "not wired" in proc.stderr
+
+
 def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
     # a structured source must NOT be reachable via the SP2 _is_lit gate
     proc = _run(["pubchem", "extract"], tmp_path, FAST_TIMEOUT)
