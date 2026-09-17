@@ -1,0 +1,33 @@
+format-version: 1.2
+data-version: hp/releases/2026-09-01
+subsetdef: secondary_consequence "Consequence of a disorder in another organ system."
+synonymtypedef: layperson "layperson term"
+default-namespace: human_phenotype
+idspace: dc http://purl.org/dc/elements/1.1/
+idspace: terms http://purl.org/dc/terms/
+remark: Please see license of HPO at http://www.human-phenotype-ontology.org
+ontology: hp.obo
+property_value: dc:creator "Human Phenotype Ontology Consortium" xsd:string
+property_value: dc:description "The Human Phenotype Ontology (HPO) provides a standardized vocabulary of phenotypic abnormalities and clinical features encountered in human disease." xsd:string
+property_value: dc:title "Human Phenotype Ontology" xsd:string
+property_value: owl:versionInfo "2026-09-01" xsd:string
+property_value: terms:license https://hpo.jax.org/app/license
+
+[Term]
+id: HP:0000001
+name: All
+comment: Root of all terms in the Human Phenotype Ontology.
+
+[Term]
+id: HP:0000002
+name: Abnormality of body height
+def: "Deviation from the norm of height with respect to that which is expected according to age and gender norms." [https://orcid.org/0000-0002-0736-9199]
+synonym: "Abnormality of body height" EXACT layperson []
+
+[Term]
+id: HP:0000003
+name: Multicystic kidney dysplasia
+alt_id: HP:0004715
+def: "Multicystic dysplasia of the kidney is characterized by multiple cysts of varying size in the kidney and the absence of a normal pelvicaliceal system. The condition is associated with ureteral or ureteropelvic atresia, and the affected kidney is nonfunctional." [https://orcid.org/0000-0002-0736-9199]
+comment: Multicystic kidney dysplasia is the result of abnormal fetal renal development in which the affected kidney is replaced by multiple cysts and has little or no residual function. The vast majority of multicystic kidneys are unilateral. Multicystic kidney can be diagnosed on prenatal ultrasound.
+synonym: "Multicystic dysplastic kidney" EXACT []
