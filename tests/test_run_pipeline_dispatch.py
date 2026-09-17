@@ -245,13 +245,17 @@ def test_uniprot_serialize_dry_run_dies_3(tmp_path):
     assert "not yet implemented" in proc.stderr or "wrapper not found" in proc.stderr
 
 
-def test_mesh_graph_wrapper_not_found_dies_3(tmp_path):
-    # mesh graph is allowed by the dispatch guard but graph_mesh.sh doesn't
-    # exist until Task 9 -- proves the mesh-specific graph carve-out is wired
-    # without needing the real wrapper yet.
+def test_mesh_graph_dispatches(tmp_path):
+    # SP4 Task 10 added the real scripts/data/mesh/graph_mesh.sh, closing the
+    # [ -f ] guard gap this test used to pin (it used to assert rc==3 /
+    # "wrapper not found" -- see git history). Now the mesh-specific graph
+    # carve-out actually dispatches: against an empty tmp_path data root,
+    # graph_builder.build() finds zero matching source_files and exits 0
+    # cleanly (same "no data -> 0/1, never 3" idiom as
+    # test_bookshelf_extract_dispatches above).
     proc = _run(["mesh", "graph"], tmp_path, FAST_TIMEOUT)
-    assert proc.returncode == 3, proc.stderr[-2000:]
-    assert "wrapper not found" in proc.stderr
+    assert proc.returncode in (0, 1), proc.stderr[-2000:]
+    assert "stage: graph" in proc.stderr
 
 
 def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
