@@ -620,7 +620,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
-        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']}"
+        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
+        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_empty_parse={res['mesh_empty_parse']}"
     )
     return 0
 

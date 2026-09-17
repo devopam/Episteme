@@ -271,9 +271,20 @@ def test_pmc_serialize_dies_3(tmp_path: Path) -> None:
     # command that did zero work. Must die 3, mirroring `corpus`'s existing
     # catch-all precedent (both its early-validation guard and its
     # belt-and-braces case arm).
+    #
+    # Asserts "(early validation)" specifically, not just "not wired": the
+    # early guard and the belt-and-braces case-arm die with distinguishable
+    # messages on purpose (see run_pipeline.sh's comment on the early guard)
+    # so this test pins which one actually fired. A generic "not wired"
+    # check would still pass if the early guard were ever deleted -- the
+    # case-arm alone would still reject with rc 3 -- silently losing the
+    # property this guard exists for: that pmc's run_start audit call never
+    # fires for an unwired stage. A re-review of the original fix flagged
+    # this exact gap (this branch was already bitten once by an
+    # under-discriminating dispatch test, see test_uniprot_serialize_dispatches).
     proc = _run(["pmc", "serialize"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
-    assert "not wired" in proc.stderr
+    assert "not wired (early validation)" in proc.stderr
 
 
 def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
