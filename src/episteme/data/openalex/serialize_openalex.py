@@ -181,7 +181,6 @@ from episteme.data.article_schema import (  # noqa: E402
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
@@ -356,6 +355,38 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
+_PARTITION_DIR_RE = re.compile(r"^updated_date=")
+
+
+def _qualified_source_file(path: Path) -> str:
+    """The identifier used for ops markers, the staging shard filename, the
+    audit row's ``object`` string, and each row's own ``source_file`` field.
+
+    Real OpenAlex S3 keys land as bare ``part_NNNN.gz`` REPEATED
+    IDENTICALLY across every ``updated_date=YYYY-MM-DD/`` partition
+    directory -- confirmed against the real bucket listing (every real
+    partition's first shard is literally named ``part_0000.gz``). A bare
+    ``path.name`` would therefore silently COLLIDE across partitions: two
+    different real shards would share one success marker (the second run
+    would look like a no-op skip) and overwrite one another's staging
+    Parquet shard. ``discover_openalex_files`` already fixes the discovery-
+    time half of this (see its own docstring); this is the per-file-
+    identity half.
+
+    When the immediate parent directory looks like a real
+    ``updated_date=...`` partition directory, the qualified name is
+    ``{parent}__{name}`` (e.g. ``updated_date=2026-06-26__part_0000.gz``).
+    Otherwise (a flat or manually-supplied ``raw_dir`` -- this module's own
+    fixture/test layout, or a hand-assembled real subset) the bare name is
+    kept unchanged, matching every other SP4 structured serializer's
+    convention.
+    """
+    parent_name = path.parent.name
+    if _PARTITION_DIR_RE.match(parent_name):
+        return f"{parent_name}__{path.name}"
+    return path.name
+
+
 def _open_maybe_gzip(path: Path):
     """Real OpenAlex S3 object keys land as bare ``part_NNNN.gz`` (gzip-
     compressed JSONL, no ``.jsonl`` in the name -- confirmed against a real
@@ -388,7 +419,7 @@ def iter_rows_from_file(path: Path, stats: Counter[str] | None = None) -> Iterat
     """
     if stats is None:
         stats = Counter()
-    source_file = path.name
+    source_file = _qualified_source_file(path)
     with _open_maybe_gzip(path) as fh:
         for line in fh:
             line = line.strip()
@@ -413,16 +444,43 @@ def discover_openalex_files(raw_dir: Path) -> list[Path]:
     ``download_openalex.sh``'s real ``works_jsonl`` mode syncs OpenAlex's own
     S3 object keys VERBATIM (bare ``part_NNNN.gz``, confirmed against a real
     fetched object -- see module docstring), landing recursively under
-    ``updated_date=YYYY-MM-DD/`` partition subdirectories --
-    ``checkpoint_markers.list_input_files``'s ``rglob`` already handles this
-    nesting (same idiom as every other SP4 structured serializer's
-    discovery). ``*.jsonl``/``*.jsonl.gz`` patterns are ALSO matched, for a
-    manually-supplied fixture/test raw_dir (this module's own
+    ``updated_date=YYYY-MM-DD/`` partition subdirectories. ``*.jsonl``/
+    ``*.jsonl.gz`` patterns are ALSO matched, for a manually-supplied
+    fixture/test raw_dir (this module's own
     tests/fixtures/sp4/openalex/sample.jsonl is a bare, uncompressed
-    ``.jsonl``, not ``.gz``)."""
-    patterns = ["part_*.gz", "*.jsonl", "*.jsonl.gz"]
-    files = list_input_files(raw_dir, patterns)
-    files.sort(key=lambda p: p.name)
+    ``.jsonl``, not ``.gz``).
+
+    Deliberately does NOT use ``checkpoint_markers.list_input_files`` (every
+    other SP4 structured serializer's discovery helper): that helper dedups
+    by BASENAME (``key = f.name``), which is safe for every other SP4
+    source (globally-unique basenames) but UNSAFE here -- confirmed
+    empirically (two real partition directories, each with its own real
+    ``part_0000.gz``, ``list_input_files`` silently returned only 1 of the
+    2, with no error/warning). Every real ``updated_date=.../`` partition's
+    first shard is literally named ``part_0000.gz`` (and the second
+    ``part_0001.gz``, etc.), so a basename dedup would silently DROP every
+    same-named file but the first one discovered across partitions -- a
+    real full multi-partition run would lose the overwhelming majority of
+    its input files with `inputs`/`ok`/`rows` all looking perfectly healthy
+    (no error surfaced). This function instead recurses with ``rglob``
+    directly and dedups by resolved FULL PATH. See ``_qualified_source_file``
+    for the matching per-file-identity fix (ops markers / staging shard
+    filenames / audit rows must ALSO be partition-qualified, not just
+    discovery)."""
+    raw_dir = Path(raw_dir)
+    patterns = ("part_*.gz", "*.jsonl", "*.jsonl.gz")
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for pat in patterns:
+        for p in sorted(raw_dir.rglob(pat)):
+            if not p.is_file():
+                continue
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            files.append(p)
+    files.sort(key=lambda p: str(p))
     return files
 
 
@@ -468,7 +526,10 @@ def process_one(
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # Partition-qualified, NOT a bare path.name -- see _qualified_source_file's
+    # docstring: a bare basename would collide across real updated_date=.../
+    # partitions (shared success marker, overwritten staging shard).
+    basename = _qualified_source_file(path)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
