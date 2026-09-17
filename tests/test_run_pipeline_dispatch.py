@@ -236,13 +236,18 @@ def test_chembl_serialize_dispatches(tmp_path):
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
 
 
-def test_uniprot_serialize_dry_run_dies_3(tmp_path):
-    # a second structured source with no wrapper yet -> caught by the
-    # [ -f ] guard, not a dispatch-logic bug (rc 3 either way, but this
-    # proves _is_structured("uniprot") is true and the arm is reached)
+def test_uniprot_serialize_dispatches(tmp_path):
+    # SP4 Task 6 added the real scripts/data/uniprot/serialize_uniprot.sh,
+    # closing the [ -f ] guard gap this test used to pin (it used to assert
+    # rc==3 / "wrapper not found" -- see git history, and Task 10's
+    # test_mesh_graph_dispatches for the identical precedent). Now uniprot
+    # serialize actually dispatches: against an empty tmp_path data root,
+    # the wrapper's own raw-dir existence check fails with rc 1 ("raw dir
+    # not found"), not rc 3 -- proves _is_structured("uniprot") is true and
+    # dispatch reaches inside the real wrapper.
     proc = _run(["uniprot", "serialize"], tmp_path, FAST_TIMEOUT)
-    assert proc.returncode == 3, proc.stderr[-2000:]
-    assert "not yet implemented" in proc.stderr or "wrapper not found" in proc.stderr
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert "raw dir not found" in proc.stderr
 
 
 def test_mesh_graph_dispatches(tmp_path):
