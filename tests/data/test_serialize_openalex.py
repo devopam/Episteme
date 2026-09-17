@@ -37,6 +37,8 @@ import polars as pl
 
 from episteme.data import article_schema
 from episteme.data.openalex.serialize_openalex import (
+    _qualified_source_file,
+    discover_openalex_files,
     is_biomedical,
     iter_rows_from_file,
     main,
@@ -299,14 +301,13 @@ def test_openalex_report_respects_max_files(tmp_path, capsys):
 
 
 def test_openalex_malformed_json_line_is_skipped_not_fatal(tmp_path):
+    from collections import Counter
+
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     good = (FX / "sample.jsonl").read_text(encoding="utf-8")
     bad_path = raw_dir / "with_bad_line.jsonl"
     bad_path.write_text(good + "{not valid json\n", encoding="utf-8")
-
-    stats: dict = {}
-    from collections import Counter
 
     counter: Counter = Counter()
     rows = list(iter_rows_from_file(bad_path, counter))
@@ -314,7 +315,6 @@ def test_openalex_malformed_json_line_is_skipped_not_fatal(tmp_path):
     assert counter["n_parse_errors"] == 1
     assert counter["n_records"] == 3
     assert counter["n_rejected_non_biomedical"] == 1
-    del stats  # unused placeholder to keep lint quiet if inspected
 
 
 def test_openalex_no_files_under_raw_dir(tmp_path):
@@ -323,3 +323,61 @@ def test_openalex_no_files_under_raw_dir(tmp_path):
     res = serialize_openalex(empty, tmp_path / "processed")
     assert res["inputs"] == 0
     assert res["rows"] == 0
+
+
+def test_openalex_discovers_same_basename_across_partitions(tmp_path):
+    """Real OpenAlex S3 keys land as bare ``part_0000.gz`` REPEATED
+    identically across every real ``updated_date=YYYY-MM-DD/`` partition
+    directory (confirmed against the real bucket listing). A basename-only
+    dedup (e.g. ``checkpoint_markers.list_input_files``' own dedup, used by
+    every OTHER SP4 structured serializer's discovery) would silently DROP
+    every same-named file but the first one found -- this must NOT happen
+    here: both real partitions' files must be discovered, processed
+    independently, and land as two distinct staging shards / success
+    markers (not one overwriting the other)."""
+    import gzip
+
+    raw_dir = tmp_path / "raw"
+    p1 = raw_dir / "updated_date=2026-06-25"
+    p2 = raw_dir / "updated_date=2026-06-26"
+    p1.mkdir(parents=True)
+    p2.mkdir(parents=True)
+    src = FX / "sample.jsonl"
+    with src.open("rb") as fsrc:
+        data = fsrc.read()
+    with gzip.open(p1 / "part_0000.gz", "wb") as f:
+        f.write(data)
+    with gzip.open(p2 / "part_0000.gz", "wb") as f:
+        f.write(data)
+
+    files = discover_openalex_files(raw_dir)
+    assert len(files) == 2, "same-basename files across partitions must NOT collide at discovery"
+    qualified = {_qualified_source_file(f) for f in files}
+    assert qualified == {
+        "updated_date=2026-06-25__part_0000.gz",
+        "updated_date=2026-06-26__part_0000.gz",
+    }
+
+    processed_dir = tmp_path / "processed"
+    res = serialize_openalex(raw_dir, processed_dir)
+    assert res["inputs"] == 2
+    assert res["ok"] == 2
+    assert res["failed"] == 0
+    # 2 accepted rows per shard (see fixture docstring) x 2 shards = 4 rows,
+    # NOT 2 (which would indicate the second partition's shard silently
+    # overwrote the first's, or was never discovered at all).
+    assert res["rows"] == 4
+
+    shards = list((processed_dir / "staging" / "openalex").glob("*.parquet"))
+    assert len(shards) == 2, "one staging shard per partition, no overwrite"
+    markers = list((processed_dir / "_ops" / "openalex" / "success").glob("*.ok"))
+    assert len(markers) == 2, "one success marker per partition, no collision"
+
+
+def test_qualified_source_file_flat_layout_keeps_bare_name():
+    """A flat/manually-supplied raw_dir (no updated_date=.../ nesting --
+    this module's own fixture/test layout) must keep the BARE filename
+    unchanged, matching every other SP4 structured serializer's
+    convention -- qualification only kicks in for a real partition
+    directory."""
+    assert _qualified_source_file(FX / "sample.jsonl") == "sample.jsonl"
