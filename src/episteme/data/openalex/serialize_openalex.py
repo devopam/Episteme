@@ -285,12 +285,14 @@ def _bare_doi(raw: str | None) -> str | None:
     return m.group(2) if m else s
 
 
-def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
+def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """One real OpenAlex ``works_jsonl`` record (already confirmed
     biomedical by the caller -- see ``is_biomedical``) -> a finalized
     ``episteme.articles`` row. See module docstring's "Bibliographic field
     mapping" section for the full field-by-field rationale."""
     native_id = _bare_id(rec.get("id"))
+    if not native_id:
+        return None  # no native id: caller counts + skips (never synthesize an id)
     doi = _bare_doi(rec.get("doi"))
     title = rec.get("title") or rec.get("display_name")
     year_raw = rec.get("publication_year")
@@ -324,7 +326,7 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
-        "id": f"{SOURCE}:{native_id}" if native_id else f"{SOURCE}:{source_file}:unknown",
+        "id": f"{SOURCE}:{native_id}",
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": native_id,
@@ -410,7 +412,11 @@ def iter_rows_from_file(
                 stats["n_rejected_non_biomedical"] += 1
                 continue
             stats["n_accepted"] += 1
-            yield openalex_row(rec, source_file)
+            row = openalex_row(rec, source_file)
+            if row is None:
+                stats["skipped_no_id"] += 1
+                continue
+            yield row
 
 
 def discover_openalex_files(raw_dir: Path) -> list[Path]:
@@ -506,6 +512,7 @@ def process_one(
             "n_accepted_biomedical": filter_stats.get("n_accepted", 0),
             "n_rejected_non_biomedical": filter_stats.get("n_rejected_non_biomedical", 0),
             "n_parse_errors": filter_stats.get("n_parse_errors", 0),
+            "skipped_no_id": filter_stats.get("skipped_no_id", 0),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
@@ -536,6 +543,8 @@ def _print_verbose(result: dict[str, Any]) -> None:
             f"status={result.get('extract_status_counts')}",
             file=sys.stderr,
         )
+        if result.get("skipped_no_id"):
+            print(f"  skipped_no_id={result['skipped_no_id']}", file=sys.stderr)
     else:
         print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
 

@@ -225,3 +225,21 @@ def test_pubchem_primary_file_without_any_siblings(tmp_path):
     )
     # No siblings at all -> every optional field omitted, no exception.
     assert all(row["extract_status"] in article_schema.EXTRACT_STATUSES for row in rows)
+
+
+def test_pubchem_record_without_cid_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "CID-SMILES.tsv").write_text("1\tCC(=O)O\n\tCCO\n", encoding="utf-8")
+    res = serialize_pubchem(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "pubchem").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert ids == ["pubchem:1"]
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "pubchem" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1

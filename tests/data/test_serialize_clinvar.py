@@ -251,3 +251,28 @@ def test_clinvar_assembly_dedup_prefers_grch38():
     downstream = list(iter_rows_from_file(FX / "sample.tsv"))
     assert len(downstream) == 3
     assert {r["source_record_id"] for r in downstream} == {"2", "487086", "4507303"}
+
+
+def test_clinvar_record_without_variation_id_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    src = (FX / "sample.tsv").read_text(encoding="utf-8").splitlines()
+    header, first = src[0], src[1]
+    cols = header.lstrip("#").split("\t")
+    bad = first.split("\t")
+    bad[cols.index("VariationID")] = ""
+    (raw / "variant_summary.txt").write_text(
+        "\n".join([header, first, "\t".join(bad)]) + "\n", encoding="utf-8"
+    )
+    res = serialize_clinvar(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "clinvar").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert len(ids) == 1 and ids[0].startswith("clinvar:")
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "clinvar" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1
