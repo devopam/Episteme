@@ -153,6 +153,24 @@ def load_source_file(
         )
         body_deleted = cur.rowcount
 
+        # (d0) id-collision guard: a periodic full-dump re-release (SP4's
+        # normal re-run shape) may reuse a native id under a DIFFERENT
+        # source_file than the one that first wrote it. Delete any such row
+        # here. The NOT(...) predicate keeps this delete disjoint from the
+        # per-source_file loop below (that loop's predicate is
+        # source_file = ANY([sf]) -- the exact complement of this one) --
+        # neither delete can ever match a row the other matches, so
+        # per_file_deleted[sf]'s accounting in the loop below stays exact
+        # with no double-counting. Scoped by source, same as every other
+        # delete here (source_file basenames are not globally unique across
+        # sources).
+        cur.execute(
+            "DELETE FROM episteme.articles "
+            "WHERE id = ANY(%s) AND source = %s AND NOT (source_file = ANY(%s))",
+            (deleted_ids, source, source_files),
+        )
+        deleted += cur.rowcount
+
         # (d) articles, per source_file, so _lineage gets per-file counts.
         # scoped by source: source_file basenames are not globally unique across sources
         for sf in source_files:

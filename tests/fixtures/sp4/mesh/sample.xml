@@ -1,0 +1,11 @@
+<DescriptorRecordSet><DescriptorRecord><DescriptorUI>D003924</DescriptorUI>
+<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>
+<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>
+<ConceptList><Concept PreferredConceptYN="Y"><ConceptUI>M0006282</ConceptUI>
+<ConceptName><String>Diabetes Mellitus</String></ConceptName>
+<ScopeNote>A subclass of DIABETES MELLITUS that is not INSULIN-responsive or dependent (NIDDM). It is characterized initially by INSULIN RESISTANCE and HYPERINSULINEMIA; and eventually by GLUCOSE INTOLERANCE; HYPERGLYCEMIA; and overt diabetes. Type II diabetes mellitus is no longer considered a disease exclusively found in adults. Patients seldom develop KETOSIS but often exhibit OBESITY.</ScopeNote>
+</Concept></ConceptList>
+</DescriptorRecord><DescriptorRecord><DescriptorUI>D003920</DescriptorUI>
+<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>
+<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>
+</DescriptorRecord></DescriptorRecordSet>

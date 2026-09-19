@@ -222,3 +222,73 @@ def test_openalex_bad_mode_reaches_wrapper_die(tmp_path: Path) -> None:
         pytest.skip("openalex bogusmode: timed out")
     assert proc.returncode == 1, proc.stderr[-2000:]
     assert "unknown mode 'bogusmode'" in proc.stderr
+
+
+def test_chembl_serialize_dry_run_dies_3(tmp_path):
+    proc = _run(["chembl", "serialize", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "writes the DB" in proc.stderr
+
+
+def test_chembl_serialize_dispatches(tmp_path):
+    # no data -> the scaffold exits 0 (nothing to do); NOT 3 (dispatch bug)
+    proc = _run(["chembl", "serialize", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode in (0, 1), proc.stderr[-2000:]
+
+
+def test_uniprot_serialize_dispatches(tmp_path):
+    # SP4 Task 6 added the real scripts/data/uniprot/serialize_uniprot.sh,
+    # closing the [ -f ] guard gap this test used to pin (it used to assert
+    # rc==3 / "wrapper not found" -- see git history, and Task 10's
+    # test_mesh_graph_dispatches for the identical precedent). Now uniprot
+    # serialize actually dispatches: against an empty tmp_path data root,
+    # the wrapper's own raw-dir existence check fails with rc 1 ("raw dir
+    # not found"), not rc 3 -- proves _is_structured("uniprot") is true and
+    # dispatch reaches inside the real wrapper.
+    proc = _run(["uniprot", "serialize"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert "raw dir not found" in proc.stderr
+
+
+def test_mesh_graph_dispatches(tmp_path):
+    # SP4 Task 10 added the real scripts/data/mesh/graph_mesh.sh, closing the
+    # [ -f ] guard gap this test used to pin (it used to assert rc==3 /
+    # "wrapper not found" -- see git history). Now the mesh-specific graph
+    # carve-out actually dispatches: against an empty tmp_path data root,
+    # graph_builder.build() finds zero matching source_files and exits 0
+    # cleanly (same "no data -> 0/1, never 3" idiom as
+    # test_bookshelf_extract_dispatches above).
+    proc = _run(["mesh", "graph"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode in (0, 1), proc.stderr[-2000:]
+    assert "stage: graph" in proc.stderr
+
+
+def test_pmc_serialize_dies_3(tmp_path: Path) -> None:
+    # FIX 2 (whole-branch review): `serialize` is a valid top-level STAGE (SP4
+    # added it to the general allow-list for the 8 structured sources), but
+    # pmc's own dispatch case-block has no arm for it -- pre-fix this silently
+    # no-ops with rc 0 after writing a run_start/run_end audit-row pair for a
+    # command that did zero work. Must die 3, mirroring `corpus`'s existing
+    # catch-all precedent (both its early-validation guard and its
+    # belt-and-braces case arm).
+    #
+    # Asserts "(early validation)" specifically, not just "not wired": the
+    # early guard and the belt-and-braces case-arm die with distinguishable
+    # messages on purpose (see run_pipeline.sh's comment on the early guard)
+    # so this test pins which one actually fired. A generic "not wired"
+    # check would still pass if the early guard were ever deleted -- the
+    # case-arm alone would still reject with rc 3 -- silently losing the
+    # property this guard exists for: that pmc's run_start audit call never
+    # fires for an unwired stage. A re-review of the original fix flagged
+    # this exact gap (this branch was already bitten once by an
+    # under-discriminating dispatch test, see test_uniprot_serialize_dispatches).
+    proc = _run(["pmc", "serialize"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "not wired (early validation)" in proc.stderr
+
+
+def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
+    # a structured source must NOT be reachable via the SP2 _is_lit gate
+    proc = _run(["pubchem", "extract"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "not in SP2" in proc.stderr or "not wired" in proc.stderr
