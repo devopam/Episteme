@@ -23,12 +23,22 @@ loaded rows with no raw XML involved:
     edges, one row per ``episteme.articles`` row whose ``container_id`` is set,
     keyed to the part row's ``source_file``.
 
+For source ``mesh`` (SP4), ``build`` derives a fourth set, re-parsing the raw
+MeSH descriptor release XML under ``raw_dir`` (matched to ``mesh`` articles
+rows' distinct ``source_file``s) rather than persisting a new "extra fields"
+column on ``articles`` -- same architectural pattern as the pmc cites/mesh
+phase above:
+
+  * ``episteme.mesh_hierarchy`` -- ``(parent_descriptor_ui, child_descriptor_ui)``
+    edges, computed by tree-number-prefix matching within one release file's
+    full descriptor set (a MeSH release ships its whole vocabulary in one
+    file, so this needs no cross-file join).
+
 Idempotency is DELETE-by-``source_file`` + INSERT (the cites/mesh tables have no
-primary key; ``article_parts`` additionally guards with
-``ON CONFLICT (container_id, part_id) DO NOTHING``). ``build`` runs inside the
-caller's transaction and never commits -- matching ``postgres_loader``. Each
-processed ``source_file`` gets one ``audit_trail.record("graph_commit", ...)``
-row.
+primary key; ``article_parts``/``mesh_hierarchy`` additionally guard with
+``ON CONFLICT ... DO NOTHING``). ``build`` runs inside the caller's transaction
+and never commits -- matching ``postgres_loader``. Each processed
+``source_file`` gets one ``audit_trail.record("graph_commit", ...)`` row.
 
 Articles with no ``pmid`` are counted and skipped (``skipped_no_pmid`` in the
 returned dict) rather than being silently excluded by the query.
@@ -48,6 +58,7 @@ via ``audit_trail``.
 
 from __future__ import annotations
 
+import gzip
 import sys
 from pathlib import Path
 from typing import Any
@@ -68,6 +79,7 @@ _GRAPH_SOURCES = (
     "europepmc_preprint",
     "guidelines",
     "bookshelf",
+    "mesh",
 )
 
 _CITES_INSERT = (
@@ -81,6 +93,10 @@ _MESH_INSERT = (
 _PARTS_INSERT = (
     "INSERT INTO episteme.article_parts (container_id, part_id, source_file) "
     "VALUES (%s, %s, %s) ON CONFLICT (container_id, part_id) DO NOTHING"
+)
+_MESH_HIERARCHY_INSERT = (
+    "INSERT INTO episteme.mesh_hierarchy (parent_descriptor_ui, child_descriptor_ui, source_file) "
+    "VALUES (%s, %s, %s) ON CONFLICT (parent_descriptor_ui, child_descriptor_ui) DO NOTHING"
 )
 
 
@@ -142,10 +158,57 @@ def _parse_jats(xml_path: Path) -> tuple[list[str], list[str]]:
     return dst_pmids, keywords
 
 
-def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, Any]:
-    """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc).
+def _open_mesh_source(xml_path: Path):
+    """Binary file handle for ``xml_path`` -- transparently gzip-decompressing
+    when its suffix is ``.gz``. Mirrors ``serialize_mesh.py``'s own
+    ``_open_source`` helper (same real-world ``desc<year>.gz`` shape)."""
+    return gzip.open(xml_path, "rb") if xml_path.suffix == ".gz" else xml_path.open("rb")
 
-    One transaction; the caller commits. Two phases:
+
+def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
+    """Return {descriptor_ui: [tree_number, ...]} for every
+    <DescriptorRecord> in one MeSH descriptor release file (bare ``.xml`` or
+    gzip-compressed ``.gz``/``.xml.gz`` -- transparently decompressed via
+    ``_open_mesh_source``, the same real-world shape ``serialize_mesh.py``
+    discovers and writes into ``source_file``). Streamed via
+    ``ET.iterparse`` (``ET`` IS ``defusedxml.ElementTree``, same streaming
+    discipline ``serialize_mesh.py``'s ``_iter_descriptor_records`` already
+    established for this exact file shape -- SP2's 821MB-file precedent), so
+    memory stays flat regardless of file size. A parse failure (malformed
+    XML, corrupt gzip, ...) yields an empty dict (mirrors _parse_jats's
+    failure mode)."""
+    out: dict[str, list[str]] = {}
+    try:
+        with _open_mesh_source(xml_path) as fh:
+            context = iter(ET.iterparse(fh, events=("start", "end")))
+            _, root = next(context)
+            for event, elem in context:
+                if event != "end" or _local(elem.tag) != "DescriptorRecord":
+                    continue
+                ui = None
+                trees: list[str] = []
+                for el in elem.iter():
+                    tag = _local(el.tag)
+                    if tag == "DescriptorUI" and ui is None:
+                        ui = (el.text or "").strip()
+                    elif tag == "TreeNumber":
+                        txt = (el.text or "").strip()
+                        if txt:
+                            trees.append(txt)
+                if ui:
+                    out[ui] = trees
+                elem.clear()
+                root.clear()
+    except Exception:  # noqa: BLE001 -- a malformed file must not abort the build
+        return {}
+    return out
+
+
+def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, Any]:
+    """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc,
+    raw MeSH descriptor XML for mesh).
+
+    One transaction; the caller commits. Three phases:
 
     * **cites + mesh (``pmc`` only).** For every distinct ``source_file`` in
       ``episteme.articles`` (rows with no ``pmid`` are counted in
@@ -157,9 +220,22 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     * **parts (every ``_GRAPH_SOURCES`` source).** DELETE-by-``source_file`` then
       re-INSERT one ``episteme.article_parts`` row per loaded ``articles`` row
       whose ``container_id`` is set, ``ON CONFLICT (container_id, part_id) DO
-      NOTHING``. One ``graph_commit`` audit row per ``source_file``.
+      NOTHING``. One ``graph_commit`` audit row per ``source_file``. (``mesh``
+      rows have ``container_id IS NULL``, so this phase naturally contributes
+      0 rows for ``source="mesh"`` -- no guard needed.)
+    * **mesh_hierarchy (``mesh`` only).** For every distinct ``source_file`` in
+      ``episteme.articles`` with ``source='mesh'``: DELETE-by-``source_file``,
+      re-parse the matching raw MeSH descriptor XML under ``raw_dir``, derive
+      parent/child edges by tree-number-prefix matching, ``executemany`` them
+      back ``ON CONFLICT (parent_descriptor_ui, child_descriptor_ui) DO
+      NOTHING``, and write one ``graph_commit`` audit row per ``source_file``.
+      A ``source_file`` that IS found on disk but parses to zero descriptors
+      (malformed XML, corrupt gzip, ...) increments ``mesh_empty_parse`` and
+      prints a WARNING to stderr -- distinct from the file simply not
+      existing (silently skipped, no warning).
 
-    Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts}``.
+    Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
+    mesh_hierarchy, mesh_empty_parse}``.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
@@ -273,6 +349,74 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         )
         total_parts += len(pairs)
 
+    # SP4: MeSH descriptor parent/child tree-number edges, re-parsed straight
+    # from the raw descriptor release XML (same architectural pattern as the
+    # pmc cites/mesh phase above -- no persisted "extra fields" column).
+    total_mesh_hierarchy = 0
+    empty_parse = 0
+    if source == "mesh":
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'")
+            mesh_files = [r[0] for r in cur.fetchall()]
+
+        for src_file in sorted(mesh_files):
+            xml_path = None
+            for cand in Path(raw_dir).rglob(src_file):
+                xml_path = cand
+                break
+            if xml_path is None:
+                continue
+
+            descriptors = _parse_mesh_descriptors(xml_path)
+            if not descriptors:
+                # The file WAS found on disk but yielded zero descriptors --
+                # a genuine "something is wrong" signal (malformed XML,
+                # corrupt gzip, unexpected root shape, ...), distinct from
+                # "the file simply doesn't exist" (silently `continue`d
+                # above). Print, don't hard-fail: build() must still finish
+                # the other source_files in this run.
+                empty_parse += 1
+                print(
+                    f"WARNING: graph_builder mesh phase: {xml_path} parsed to zero "
+                    f"descriptors (source_file={src_file!r}); mesh_hierarchy for this "
+                    "file will be empty -- check the file is valid MeSH descriptor XML",
+                    file=sys.stderr,
+                )
+            # tree number -> descriptor UI, to resolve a child's parent prefix
+            tree_to_ui = {t: ui for ui, trees in descriptors.items() for t in trees}
+
+            edges: list[tuple[str, str, str]] = []
+            seen: set[tuple[str, str]] = set()
+            for ui, trees in descriptors.items():
+                for tree in trees:
+                    if "." not in tree:
+                        continue  # top-level descriptor, no parent
+                    parent_tree = tree.rsplit(".", 1)[0]
+                    parent_ui = tree_to_ui.get(parent_tree)
+                    if not parent_ui or parent_ui == ui:
+                        continue
+                    key = (parent_ui, ui)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append((parent_ui, ui, src_file))
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM episteme.mesh_hierarchy WHERE source_file = %s", (src_file,)
+                )
+                if edges:
+                    cur.executemany(_MESH_HIERARCHY_INSERT, edges)
+
+            audit_trail.record(
+                "graph_commit",
+                conn=conn,
+                object=f"mesh {src_file}",
+                rows_affected=len(edges),
+                run_id=run_id,
+            )
+            total_mesh_hierarchy += len(edges)
+
     return {
         "source_files": handled,
         "cites": total_cites,
@@ -280,6 +424,8 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "missing_xml": missing_xml,
         "skipped_no_pmid": skipped_no_pmid,
         "parts": total_parts,
+        "mesh_hierarchy": total_mesh_hierarchy,
+        "mesh_empty_parse": empty_parse,
     }
 
 
@@ -300,12 +446,21 @@ def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
     ``hops`` is IGNORED for part. Always answered via the recursive-CTE back
     end (never routed through SQL/PGQ).
 
+    ``kind="mesh_parent"``/``"mesh_child"``: sorted distinct descriptor UIs one
+    edge away in ``episteme.mesh_hierarchy`` (``mesh_parent`` walks up, i.e.
+    toward broader terms; ``mesh_child`` walks down). Direct edges only;
+    ``hops`` is IGNORED. Always answered via the recursive-CTE back end
+    (never routed through SQL/PGQ), same as ``part``.
+
     Any other ``kind`` raises ``ValueError``. When the ``episteme_graph``
     property graph exists, ``cites`` is answered via SQL/PGQ; otherwise (and
     always on this build) via a recursive CTE.
     """
-    if kind not in ("mesh", "cites", "part"):
-        raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites' or 'part'")
+    if kind not in ("mesh", "cites", "part", "mesh_parent", "mesh_child"):
+        raise ValueError(
+            f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
+            "'mesh_parent' or 'mesh_child'"
+        )
     if kind == "cites" and _pgq_available(conn):
         return _neighbours_pgq(conn, pmid, hops)
     return _neighbours_cte(conn, pmid, hops, kind)
@@ -357,7 +512,28 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
             )
             return sorted({r[0] for r in cur.fetchall()})
 
-    raise ValueError(f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites' or 'part'")
+    if kind == "mesh_parent":
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT parent_descriptor_ui FROM episteme.mesh_hierarchy "
+                "WHERE child_descriptor_ui = %s ORDER BY parent_descriptor_ui",
+                (pmid,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    if kind == "mesh_child":
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT child_descriptor_ui FROM episteme.mesh_hierarchy "
+                "WHERE parent_descriptor_ui = %s ORDER BY child_descriptor_ui",
+                (pmid,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    raise ValueError(
+        f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
+        "'mesh_parent' or 'mesh_child'"
+    )
 
 
 def _pgq_available(conn) -> bool:
@@ -444,7 +620,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
-        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']}"
+        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
+        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_empty_parse={res['mesh_empty_parse']}"
     )
     return 0
 

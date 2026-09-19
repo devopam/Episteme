@@ -7,6 +7,7 @@ pytestmark = pytest.mark.pg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_0002 = REPO_ROOT / "src/episteme/data/db/migrations/0002_container_and_book_parts.sql"
+MIGRATION_0003 = REPO_ROOT / "src/episteme/data/db/migrations/0003_mesh_hierarchy.sql"
 
 _MIN_JATS = """<article>
   <front><article-meta>
@@ -179,6 +180,111 @@ def test_build_populates_article_parts(pg_conn, tmp_path, monkeypatch):
     with pg_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM episteme.article_parts")
         assert cur.fetchone()[0] == 2
+
+
+def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
+    _setup_schema(pg_conn)  # existing helper
+    with pg_conn.cursor() as cur:
+        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
+        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
+    pg_conn.commit()
+
+    # a tiny real-shaped MeSH descriptor XML: D003920 (child) under D003924's
+    # tree number prefix (parent), per NLM's DescriptorRecordSet shape.
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "desc2026.xml").write_text(
+        "<DescriptorRecordSet>"
+        "<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "</DescriptorRecordSet>",
+        encoding="utf-8",
+    )
+
+    # seed the loaded articles rows graph_builder reads to find source_files
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file, source_record_id) "
+            "VALUES (%s, 'mesh', %s, %s), (%s, 'mesh', %s, %s)",
+            ("mesh:D003924", "desc2026.xml", "D003924", "mesh:D003920", "desc2026.xml", "D003920"),
+        )
+    pg_conn.commit()
+
+    from episteme.data.graph_builder import build, neighbours
+
+    res = build(pg_conn, source="mesh", raw_dir=raw, run_id="t")
+    pg_conn.commit()
+    assert res["mesh_hierarchy"] == 1
+    assert neighbours(pg_conn, "D003924", kind="mesh_child") == ["D003920"]
+    assert neighbours(pg_conn, "D003920", kind="mesh_parent") == ["D003924"]
+
+    # idempotency: a second build over the same source_file must not duplicate.
+    res2 = build(pg_conn, source="mesh", raw_dir=raw, run_id="t2")
+    pg_conn.commit()
+    assert res2["mesh_hierarchy"] == 1
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.mesh_hierarchy")
+        assert cur.fetchone()[0] == 1
+
+
+def test_build_populates_mesh_hierarchy_gzip(pg_conn, tmp_path, monkeypatch):
+    # FIX 1 (whole-branch review): serialize_mesh.py's real-world discovery
+    # accepts desc*.xml.gz/desc*.gz and writes the COMPRESSED basename as
+    # source_file -- graph_builder must be able to parse that same gzip file
+    # it later rglobs for, not just plain .xml (pre-fix: ET.parse() cannot
+    # read gzip bytes, raises ParseError, caught by the bare except, and
+    # silently returns {} -- mesh_hierarchy ends up 0, not 1).
+    import gzip
+
+    _setup_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
+        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
+    pg_conn.commit()
+
+    # identical synthetic descriptor content to test_build_populates_mesh_hierarchy,
+    # written gzip-compressed instead of plain .xml -- mirrors what a real
+    # serialize_mesh run over a desc<year>.gz input actually produces.
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    xml_bytes = (
+        b"<DescriptorRecordSet>"
+        b"<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>"
+        b"<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>"
+        b"<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>"
+        b"</DescriptorRecord>"
+        b"<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>"
+        b"<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>"
+        b"<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>"
+        b"</DescriptorRecord>"
+        b"</DescriptorRecordSet>"
+    )
+    with gzip.open(raw / "desc2026.gz", "wb") as fh:
+        fh.write(xml_bytes)
+
+    # seed with the COMPRESSED basename, matching what serialize_mesh writes
+    # into source_file for a real desc<year>.gz input (path.name verbatim).
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file, source_record_id) "
+            "VALUES (%s, 'mesh', %s, %s), (%s, 'mesh', %s, %s)",
+            ("mesh:D003924", "desc2026.gz", "D003924", "mesh:D003920", "desc2026.gz", "D003920"),
+        )
+    pg_conn.commit()
+
+    from episteme.data.graph_builder import build, neighbours
+
+    res = build(pg_conn, source="mesh", raw_dir=raw, run_id="tg")
+    pg_conn.commit()
+    assert res["mesh_hierarchy"] == 1
+    assert neighbours(pg_conn, "D003924", kind="mesh_child") == ["D003920"]
+    assert neighbours(pg_conn, "D003920", kind="mesh_parent") == ["D003924"]
 
 
 def test_pgq_path_when_available(pg_conn, tmp_path, monkeypatch):

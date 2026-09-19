@@ -3,10 +3,11 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.pg  # applies 0002 to episteme_test
+pytestmark = pytest.mark.pg  # applies 0002 + 0003 to episteme_test
 
 REPO = Path(__file__).resolve().parents[1]
 MIGRATION_0002 = REPO / "src/episteme/data/db/migrations/0002_container_and_book_parts.sql"
+MIGRATION_0003 = REPO / "src/episteme/data/db/migrations/0003_mesh_hierarchy.sql"
 
 
 @pytest.fixture(scope="module")
@@ -17,12 +18,13 @@ def sa_conn():
     if not dsn:
         pytest.skip("TEST_PG_DSN not set")
     with psycopg.connect(dsn, autocommit=True) as c:
-        # 0002 is idempotent; apply it here so these assertions hold regardless of
-        # test-ordering (other pg tests DROP SCHEMA episteme CASCADE + reload
-        # schema.sql only) and of migrate_database.sh dying at 0001 on builds
+        # 0002 and 0003 are idempotent; apply them here so these assertions hold
+        # regardless of test-ordering (other pg tests DROP SCHEMA episteme CASCADE +
+        # reload schema.sql only) and of migrate_database.sh dying at 0001 on builds
         # without pgvector.
         with c.cursor() as cur:
             cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
+            cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
         yield c
 
 
@@ -59,4 +61,12 @@ def test_migration_0002_bookshelf_partition(sa_conn):
         cur.execute("SELECT to_regclass('episteme.articles_bookshelf')")
         assert cur.fetchone()[0] is not None
         cur.execute("SELECT to_regclass('episteme.articles_bookshelf_y0')")
+        assert cur.fetchone()[0] is not None
+
+
+def test_migration_0003_mesh_hierarchy_table(sa_conn):
+    with sa_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('episteme.mesh_hierarchy')")
+        assert cur.fetchone()[0] is not None
+        cur.execute("SELECT to_regclass('episteme.mesh_hierarchy_uq')")
         assert cur.fetchone()[0] is not None

@@ -35,6 +35,7 @@ data = [
     "duckdb>=1.1",
     "defusedxml>=0.7",
     "jsonschema>=4.0.0",
+    "pronto>=2.7",
 ]
 model = [
     "torch>=2.0.0",
