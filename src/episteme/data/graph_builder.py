@@ -67,6 +67,7 @@ import defusedxml.ElementTree as ET
 import psycopg
 
 from episteme import audit_trail
+from episteme.data.checkpoint_markers import find_input_by_key
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
 # cites/mesh; the rest contribute ``article_parts`` (book -> part) edges only.
@@ -360,10 +361,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
             mesh_files = [r[0] for r in cur.fetchall()]
 
         for src_file in sorted(mesh_files):
-            xml_path = None
-            for cand in Path(raw_dir).rglob(src_file):
-                xml_path = cand
-                break
+            xml_path = find_input_by_key(Path(raw_dir), src_file)
             if xml_path is None:
                 continue
 

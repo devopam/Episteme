@@ -71,8 +71,9 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
@@ -248,7 +249,7 @@ def bioactivity_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield one ``episteme.articles`` row per ``activities`` record from one
     ChEMBL SQLite release file (bare ``.db`` or ``*sqlite.tar.gz``).
 
@@ -262,7 +263,7 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
     release, not fixed here (chunked/paginated reads + shard-batched writes
     would be the fix, out of scope for this task's fixture-gated proof).
     """
-    source_file = path.name
+    source_file = source_file or path.name
     with tempfile.TemporaryDirectory(prefix="chembl_extract_") as td:
         db_path = _resolve_sqlite_db(path, Path(td))
         con = duckdb.connect()
@@ -283,8 +284,8 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def discover_chembl_files(raw_dir: Path) -> list[Path]:
-    files = list_input_files(raw_dir, ["chembl*sqlite.tar.gz", "*.db"])
-    files.sort(key=lambda p: p.name)
+    files = discover_input_files(raw_dir, ["chembl*sqlite.tar.gz", "*.db"])
+    files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
 
@@ -340,9 +341,10 @@ def process_one(
     path: Path,
     *,
     processed_dir: Path,
+    raw_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -350,7 +352,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -427,14 +429,16 @@ def serialize_chembl(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -531,7 +535,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        for row in iter_rows_from_file(fp):
+        for row in iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)):
             rows.append(row)
     print(_render_field_shape(rows, len(files)), end="")
     return 0
