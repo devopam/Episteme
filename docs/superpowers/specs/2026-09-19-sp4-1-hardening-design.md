@@ -104,7 +104,12 @@ basename), so existing markers, shards and stored `source_file` values stay vali
 once (ClinVar `tab_delimited/…`, ontologies `go/go.obo`, bookshelf's hashed tree, openalex partitions); the
 first re-run reprocesses them, and SP4 Task 1's id-collision guard replaces the old rows under the old
 names, so no duplicates result. `discover_openalex_files`/`_qualified_source_file` are deleted in favor of
-the shared helper (the key format is identical for openalex's real layout), leaving one convention.
+the shared helper, leaving one convention (keys are relative to the `--raw-dir` passed, so a run should use
+a consistent raw dir). Two consequences the design must handle: (a) `graph_builder`'s mesh phase re-finds
+raw files by the stored `source_file`, so it locates them through an inverse helper
+(`find_input_by_key`) instead of `rglob(source_file)`; (b) the SP2 literature extractors are **not**
+migrated — they keep the legacy basename-keyed `list_input_files` (validated against real data in SP2;
+SP2's drift log already records bookshelf's hashed-tree case as a follow-up), listed as a deferred item.
 
 **Task 4 — id fallback.** The five serializers that synthesize `f"{SOURCE}:{source_file}:unknown"` when a
 record has no native id instead skip the record and count it (per-file stats and `--verbose`). The frozen
@@ -143,8 +148,10 @@ changes.*
 ### 3.4 Licences (tasks 10–11)
 
 **Task 10 — CC URLs.** `normalize_license` recognises `creativecommons.org/licenses/<code>/<ver>` and
-`/publicdomain/zero/` URLs by extracting the code segment and reusing the existing arms (NC-before-BY
-ordering preserved). GO and MONDO then resolve to `CC BY` → `commercial`. Existing rows in `episteme_test`
+`/publicdomain/zero/` URLs. The existing substring arms already handle `by-sa`, `by-nd` and `by-nc*` URLs
+(the text is upper-cased before matching), so only two new arms are needed — plain `licenses/by/` → `CC BY`
+and `publicdomain/zero/` → `CC0` — placed after the existing token arms so current behavior is unchanged.
+GO and MONDO then resolve to `CC BY` → `commercial`. Existing rows in `episteme_test`
 need re-serialization; the real database holds no SP4 rows.
 
 **Task 11 — `public_domain`.** New licence code; `subset_from_license("public_domain") == "commercial"`.
