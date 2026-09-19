@@ -185,3 +185,41 @@ def test_mesh_scope_note_prefers_preferred_concept():
     assert "HYPERGLYCEMIA" in by_id["D003924"]["text"]
     assert by_id["D003920"]["text"].startswith("Diabetes Mellitus, Type 2.")
     assert "ScopeNote" not in by_id["D003920"]["text"]
+
+
+def test_mesh_report_respects_max_files(tmp_path, capsys):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    shutil.copy(FX / "sample.xml", raw_dir / "desc2025.xml")
+    shutil.copy(FX / "sample.xml", raw_dir / "desc2026.xml")
+
+    rc = main(
+        [
+            "--raw-dir",
+            str(raw_dir),
+            "--processed-dir",
+            str(tmp_path),
+            "--report",
+            "--max-files",
+            "1",
+        ]
+    )
+    assert rc == 0
+    capped_out = capsys.readouterr().out
+
+    rc = main(
+        [
+            "--raw-dir",
+            str(raw_dir),
+            "--processed-dir",
+            str(tmp_path),
+            "--report",
+            "--max-files",
+            "2",
+        ]
+    )
+    assert rc == 0
+    wider_out = capsys.readouterr().out
+
+    assert "files=1" in capped_out
+    assert "files=2" in wider_out
