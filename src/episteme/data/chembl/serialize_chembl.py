@@ -129,6 +129,34 @@ def _is_tarball(path: Path) -> bool:
     return name.endswith(".tar.gz") or name.endswith(".tgz")
 
 
+_HAS_DATA_FILTER = hasattr(tarfile, "data_filter")
+
+
+def _safe_extract(archive: Path, dest: Path) -> None:
+    """Extract ``archive`` into ``dest`` without trusting member paths.
+
+    Uses ``filter="data"`` when this interpreter has it (3.12+, and the
+    3.10.12 / 3.11.4 backports); otherwise validates every member itself.
+    """
+    dest = Path(dest)
+    with tarfile.open(archive) as tf:
+        if _HAS_DATA_FILTER:
+            tf.extractall(dest, filter="data")  # nosec B202 - filter="data" bounds extraction
+            return
+        root = dest.resolve()
+        for m in tf.getmembers():
+            target = (root / m.name).resolve()
+            if (
+                m.name.startswith(("/", "\\"))
+                or not target.is_relative_to(root)
+                or m.issym()
+                or m.islnk()
+                or m.isdev()
+            ):
+                raise RuntimeError(f"unsafe tar member {m.name!r}")
+        tf.extractall(dest)  # nosec B202 - every member validated above
+
+
 def _resolve_sqlite_db(path: Path, extract_dir: Path) -> Path:
     """Return a real ``.db`` file on disk for ``path``.
 
@@ -143,8 +171,7 @@ def _resolve_sqlite_db(path: Path, extract_dir: Path) -> Path:
     """
     if not _is_tarball(path):
         return path
-    with tarfile.open(path) as tf:
-        tf.extractall(extract_dir, filter="data")  # nosec B202 - filter="data" bounds extraction
+    _safe_extract(path, extract_dir)
     candidates = sorted(Path(extract_dir).rglob("*.db"))
     if not candidates:
         raise RuntimeError(f"no .db file found inside chembl tarball {path.name}")

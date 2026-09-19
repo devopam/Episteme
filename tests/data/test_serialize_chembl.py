@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from episteme.data import article_schema
 from episteme.data.chembl.serialize_chembl import iter_rows_from_file, main, serialize_chembl
@@ -232,3 +233,29 @@ def test_chembl_record_without_activity_id_is_counted_and_skipped(tmp_path, monk
     assert not any(str(i).endswith(":unknown") for i in df["id"].to_list())
     marker = json.loads(next((tmp_path / "_ops" / "chembl" / "success").glob("*.ok")).read_text())
     assert marker["stats"]["skipped_no_id"] == 1
+
+
+def _tar_with(member_name: str, tmp_path):
+    import io
+    import tarfile
+
+    p = tmp_path / "evil.tar.gz"
+    with tarfile.open(p, "w:gz") as tf:
+        data = b"x"
+        info = tarfile.TarInfo(member_name)
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    return p
+
+
+@pytest.mark.parametrize("has_filter", [True, False])
+def test_unsafe_tar_member_is_rejected(tmp_path, monkeypatch, has_filter):
+    import episteme.data.chembl.serialize_chembl as sc
+
+    monkeypatch.setattr(sc, "_HAS_DATA_FILTER", has_filter)
+    p = _tar_with("../escape.db", tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(Exception):  # noqa: B017 - either path may raise a different type
+        sc._safe_extract(p, out)
+    assert not (tmp_path / "escape.db").exists()
