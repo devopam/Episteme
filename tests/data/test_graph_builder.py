@@ -287,6 +287,52 @@ def test_build_populates_mesh_hierarchy_gzip(pg_conn, tmp_path, monkeypatch):
     assert neighbours(pg_conn, "D003920", kind="mesh_parent") == ["D003924"]
 
 
+def test_build_finds_mesh_file_by_nested_source_file_key(pg_conn, tmp_path):
+    # SP4.1: serialize_mesh now stores the raw-dir-relative input key
+    # ("nlm__desc2026.xml" for raw/nlm/desc2026.xml) as source_file. The mesh
+    # phase must resolve that key back to the file, not rglob for it verbatim.
+    _setup_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
+        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
+    pg_conn.commit()
+
+    raw = tmp_path / "raw"
+    (raw / "nlm").mkdir(parents=True)
+    (raw / "nlm" / "desc2026.xml").write_bytes(
+        b"<DescriptorRecordSet>"
+        b"<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>"
+        b"<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>"
+        b"<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>"
+        b"</DescriptorRecord>"
+        b"<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>"
+        b"<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>"
+        b"<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>"
+        b"</DescriptorRecord>"
+        b"</DescriptorRecordSet>"
+    )
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file, source_record_id) "
+            "VALUES (%s, 'mesh', %s, %s), (%s, 'mesh', %s, %s)",
+            (
+                "mesh:D003924",
+                "nlm__desc2026.xml",
+                "D003924",
+                "mesh:D003920",
+                "nlm__desc2026.xml",
+                "D003920",
+            ),
+        )
+    pg_conn.commit()
+
+    from episteme.data.graph_builder import build
+
+    res = build(pg_conn, source="mesh", raw_dir=raw, run_id="tn")
+    pg_conn.commit()
+    assert res["mesh_hierarchy"] == 1
+
+
 def test_pgq_path_when_available(pg_conn, tmp_path, monkeypatch):
     from episteme.data import graph_builder
 

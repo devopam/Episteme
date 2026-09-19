@@ -36,8 +36,8 @@ from pathlib import Path
 import polars as pl
 
 from episteme.data import article_schema
+from episteme.data.checkpoint_markers import input_key
 from episteme.data.openalex.serialize_openalex import (
-    _qualified_source_file,
     discover_openalex_files,
     is_biomedical,
     iter_rows_from_file,
@@ -352,7 +352,7 @@ def test_openalex_discovers_same_basename_across_partitions(tmp_path):
 
     files = discover_openalex_files(raw_dir)
     assert len(files) == 2, "same-basename files across partitions must NOT collide at discovery"
-    qualified = {_qualified_source_file(f) for f in files}
+    qualified = {input_key(f, raw_dir) for f in files}
     assert qualified == {
         "updated_date=2026-06-25__part_0000.gz",
         "updated_date=2026-06-26__part_0000.gz",
@@ -374,10 +374,9 @@ def test_openalex_discovers_same_basename_across_partitions(tmp_path):
     assert len(markers) == 2, "one success marker per partition, no collision"
 
 
-def test_qualified_source_file_flat_layout_keeps_bare_name():
+def test_input_key_flat_layout_keeps_bare_name():
     """A flat/manually-supplied raw_dir (no updated_date=.../ nesting --
     this module's own fixture/test layout) must keep the BARE filename
     unchanged, matching every other SP4 structured serializer's
-    convention -- qualification only kicks in for a real partition
-    directory."""
-    assert _qualified_source_file(FX / "sample.jsonl") == "sample.jsonl"
+    convention -- nesting only qualifies the key."""
+    assert input_key(FX / "sample.jsonl", FX) == "sample.jsonl"

@@ -25,7 +25,7 @@ nests each vocabulary in its OWN subdirectory --
 ``01_raw/ontologies/go/{go.obo,go.owl}``,
 ``01_raw/ontologies/hpo/{hp.obo,hp.owl}``,
 ``01_raw/ontologies/mondo/{mondo.obo,mondo.owl}``. Discovery therefore
-recurses (``Path.rglob``), unlike ``list_input_files``'s flat-dir-oriented
+recurses (``Path.rglob``), unlike the legacy flat-dir-oriented ``list_input_files``
 precedent (mesh/reactome's fixtures/real downloads are single-directory).
 
 ``.obo``/``.owl`` pair collision (a real structural issue the brief's own
@@ -199,6 +199,7 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    input_key,
     is_success,
     mark_failed,
     mark_success,
@@ -254,7 +255,7 @@ def discover_ontology_files(raw_dir: Path) -> list[Path]:
         owl = sorted(p for p in candidates if p.suffix == _OWL_EXT)
         files.extend(obo if obo else owl)
 
-    files.sort(key=lambda p: str(p))
+    files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
 
@@ -350,7 +351,7 @@ def ontology_row(term: Any, source_file: str, license_raw: str | None) -> dict[s
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield one ``episteme.articles`` row per term in one OBO/OWL ontology
     file. ``pronto.Ontology(path)`` reads the whole file (not a streaming
     parse -- real GO/MONDO files run tens of MB with tens of thousands of
@@ -359,7 +360,7 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
     that specifically required ``iterparse`` streaming). Terms are sorted by
     ``term.id`` for deterministic output ordering (``onto.terms()`` is
     unordered)."""
-    source_file = path.name
+    source_file = source_file or path.name
     onto = pronto.Ontology(str(path))
     license_raw = _extract_license_raw(onto)
     for term in sorted(onto.terms(), key=lambda t: str(t.id)):
@@ -408,9 +409,10 @@ def process_one(
     path: Path,
     *,
     processed_dir: Path,
+    raw_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -418,7 +420,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -495,14 +497,16 @@ def serialize_ontologies(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -599,7 +603,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        for row in iter_rows_from_file(fp):
+        for row in iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)):
             rows.append(row)
     print(_render_field_shape(rows, len(files)), end="")
     return 0
