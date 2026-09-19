@@ -287,13 +287,15 @@ tail -c1 .env | od -An -c | grep -q '\\n' || printf '\n' >> .env
 cat >> .env <<'EOF'
 
 # --- Database mode (SP4.1) ---
+# Development-phase setting: set EPISTEME_DB_MODE=restricted at go-live.
 PGDATABASE_SECONDARY=episteme_test
-EPISTEME_DB_MODE=unrestricted            # development-phase setting; set to restricted at go-live
-# EPISTEME_DB_TARGET=primary             # primary | secondary
+EPISTEME_DB_MODE=unrestricted
+# EPISTEME_DB_TARGET=primary   (primary | secondary)
 EOF
-grep -c '^EPISTEME_DB_MODE=unrestricted' .env   # expect 1 (prints a count only)
+grep -c '^EPISTEME_DB_MODE=unrestricted$' .env  # expect 1 (prints a count only)
 git status --short                              # .env must NOT appear
 ```
+**Never put an inline `# comment` after a value in `.env`.** `scripts/data/_lib/common.sh`'s shell `load_dotenv` does not strip them, so the comment text would be exported as part of the value and `config.py` would reject it. Comments go on their own lines.
 
 - [ ] **Step 4: Run — verify pass:** `.venv/Scripts/python.exe -m pytest -q tests/test_db_guard.py -m "not pg"` → all green; then the pg test: `set -a; . ./.env; set +a; .venv/Scripts/python.exe -m pytest -q tests/test_db_guard.py -m pg` → 1 passed (this resolves spec open item 4: report whether the read-only option survives pool reconnects). Then the whole non-pg suite (`-m "not pg"`) → no regressions (the new Settings fields are defaulted).
 - [ ] **Step 5: Commit** — `feat(sp4.1): fail-closed DB-mode guard (read-only|restricted|unrestricted)` — `git add src/episteme/data/db/guard.py src/episteme/config.py src/episteme/data/db/connection.py .env.example tests/test_db_guard.py` (never `.env`).
@@ -721,7 +723,7 @@ def _fake_aws(bindir: Path, log: Path) -> None:
         "  printf '2026-06-01 00:00:00        100 data/jsonl/works/updated_date=2026-05-02/part_0000.gz\\n'\n"
         "  printf '2026-06-01 00:00:00        100 data/jsonl/works/updated_date=2026-05-03/part_0000.gz\\n'\n"
         'elif [ "$2" = "cp" ]; then\n'
-        '  mkdir -p "$(dirname "$4")"; echo data > "$4"\n'
+        '  mkdir -p "$(dirname "$5")"; echo data > "$5"\n'
         "fi\n",
         encoding="utf-8",
     )
@@ -756,7 +758,7 @@ def test_no_max_files_still_uses_sync(tmp_path):
     proc, calls = _run(tmp_path)
     assert any(" sync " in f" {c} " for c in calls)
 ```
-  (Adapt the fake's argv positions to how `aws` is actually invoked once implemented — `aws s3 ls … / aws s3 cp …`; the assertions above are what must hold.) Fails today (`--max-files` is ignored).
+  (The fake assumes the invocations `aws s3 ls --no-sign-request --recursive <uri>/` and `aws s3 cp --no-sign-request <src> <dest>`, so `$2` is the subcommand and `$5` is `cp`'s destination; implement `s3_fetch_first_n` with exactly that argv shape.) Fails today (`--max-files` is ignored). Note `s3_sync` prefers `s5cmd` when installed, so `test_no_max_files_still_uses_sync` assumes `s5cmd` is absent — skip it when `shutil.which("s5cmd")`.
 - [ ] **Step 2: Implement.** In `common.sh` add `s3_fetch_first_n`: list with `aws s3 ls --no-sign-request --recursive "$uri/"`, take the object key from the last column, `sort` ascending (deterministic; spec open item 3 — lexicographic order, i.e. oldest partitions first; note the choice in a comment), `head -n "$n"`, then for each key `aws s3 cp --no-sign-request "s3://<bucket>/$key" "$dest/<key relative to the prefix>"`, skipping an object whose local size already equals the listed size; under `EPISTEME_DRY_RUN=1` print the planned `n` keys and fetch nothing. In `download_openalex.sh`: when `MAX_FILES` is a positive integer call `s3_fetch_first_n "$src" "$dst" "$MAX_FILES"`, else the existing `s3_sync`; remove the "`--max-files` is ignored" log line.
 - [ ] **Step 3: Run — pass;** `bash -n`; `PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex download --dry-run --max-files 2` lists exactly 2 planned objects (real network listing, no fetch).
 - [ ] **Step 4: Real bounded proof:** fetch `--max-files 1` for real (public bucket, no credentials), confirm one shard lands under the wrapper's destination, run `serialize_openalex --report` over it; `git clean -fdx 01_raw/openalex 02_processed`.
@@ -880,6 +882,8 @@ def test_normalize_license_never_assigns_public_domain_from_free_text():
 
 ## Close-out
 
+**Execution order:** Task 13 runs BEFORE Task 12 (ruling recorded in the ledger): a dependency bump changes the tree, so the final sweep and drift entry must come after it.
+
 ### Task 12: Full sweep and drift log
 
 **Files:** Modify `docs/project-incubation-baseline.md`; touch nothing else except a test fixture if a genuine gap is found (mirror SP2/SP4's Task 13 discipline).
@@ -887,7 +891,7 @@ def test_normalize_license_never_assigns_public_domain_from_free_text():
 - [ ] **Step 1: `not pg` suite** → all green; record the count. **Step 2: full suite** (`set -a; . ./.env; set +a; .venv/Scripts/python.exe -m pytest -q`) → green; record the count.
 - [ ] **Step 3: `run_pipeline.sh` sweep** (every command prefixed `PGDATABASE=episteme_test`; `--dry-run` skips the audit bracket): for each of `chembl uniprot pubchem clinvar reactome mesh ontologies openalex`: `serialize --dry-run` → rc 3, `download --dry-run` → rc 0; `cdisc_bc download --dry-run` → rc 0; `cdisc_bc serialize` → rc 3; `pmc serialize` → rc 3; `mesh graph --dry-run` → rc 3; `mesh extract` → rc 3. Transcript into the report.
 - [ ] **Step 4: `bash -n`** on every new/modified `.sh`. **Step 5: grep gate** (Global Constraints) → empty.
-- [ ] **Step 6: Drift log** — one dated entry (match the SP4 entries' style): SP4.1 landed (spec + plan paths); the DB-mode guard (modes, settings, `.env` keys added, code default `restricted`); **the go-live checklist item — set `EPISTEME_DB_MODE=restricted` in `.env` before any production operation (the user's `.env` is `unrestricted` during development, by decision)**; the shared input identity (and the deferred SP2-extractor migration, incl. bookshelf's hashed tree); the wrapper fixes; `cdisc_bc` (source, licence CC-BY-4.0, provenance behavior, download-only); licence mapping incl. the governance record (all three government-hosted sources, PubChem/ClinVar contributor-content risk stated, decision 2026-09-19); Dependabot outcome (from Task 13); deferred items (streaming shard writes, UCUM parser, full-scale runs, `cdisc_bc` serializer, SP5).
+- [ ] **Step 6: Drift log** — one dated entry (match the SP4 entries' style): SP4.1 landed (spec + plan paths); the DB-mode guard (modes, settings, `.env` keys added, code default `restricted`); **the go-live checklist item — set `EPISTEME_DB_MODE=restricted` in `.env` before any production operation (the user's `.env` is `unrestricted` during development, by decision)**; the shared input identity (and the deferred SP2-extractor migration, incl. bookshelf's hashed tree); the wrapper fixes; `cdisc_bc` (source, licence CC-BY-4.0, provenance behavior, download-only); licence mapping incl. the governance record (all three government-hosted sources, PubChem/ClinVar contributor-content risk stated, decision 2026-09-19); Dependabot outcome (from Task 13's report, which has already run); deferred items (streaming shard writes, UCUM parser, full-scale runs, `cdisc_bc` serializer, SP5).
 - [ ] **Step 7: Commit** — `docs(sp4.1): drift-log entry — hardening and acquisition follow-ups landed`.
 
 ### Task 13: Dependabot triage
@@ -897,7 +901,7 @@ def test_normalize_license_never_assigns_public_domain_from_free_text():
 - [ ] **Step 1: List** — `gh api repos/devopam/Episteme/dependabot/alerts --jq '.[] | select(.state=="open") | [.number, .security_advisory.severity, .dependency.package.name, .dependency.scope, (.security_vulnerability.first_patched_version.identifier // "none")] | @tsv'` (at plan time: 7 open — `cryptography` ×4 with patched versions 48.0.1/49.0.0/50.0.0, `nltk`, `accelerate`, `diskcache` with no patched version).
 - [ ] **Step 2: Classify** each: is the package a direct dependency (`pyproject.toml`) or transitive (`uv pip show`/`pip show` "Required-by")? Is a fixed version available? Would the fix be patch/minor or a major bump?
 - [ ] **Step 3: Apply only** patch/minor bumps of packages whose fix version exists, and only if the full suite (both runs) stays green after the bump; revert anything that breaks. Do NOT apply major bumps or upgrades with no fixed version — report them. No `git add` of anything but `pyproject.toml`/lock if changed.
-- [ ] **Step 4: Report** the table (alert → classification → action/reason) into the report and fold it into the drift entry (amend via a follow-up commit `docs(sp4.1): record Dependabot triage outcome`; do not amend the earlier commit).
+- [ ] **Step 4: Report** the table (alert → classification → action/reason) in the task report; Task 12 (which runs after this task) folds it into the drift entry. Commit any applied bump as `chore(sp4.1): apply patch-level security bumps (Dependabot triage)`; if nothing was applied, there is nothing to commit.
 
 ---
 
