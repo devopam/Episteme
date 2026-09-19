@@ -292,3 +292,49 @@ def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
     proc = _run(["pubchem", "extract"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "not in SP2" in proc.stderr or "not wired" in proc.stderr
+
+
+def _run_env(args: list[str], tmp_path: Path, timeout: int, **env_over: str):
+    env = {
+        **os.environ,
+        "EPISTEME_ACTOR": "episteme_sys_admin",
+        "EPISTEME_DATA_ROOT": str(tmp_path),
+        **env_over,
+    }
+    return subprocess.run(
+        [BASH, str(SCRIPT), *args],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_restricted_mode_refuses_production_database(tmp_path: Path) -> None:
+    # PGPORT=1: even if the guard were ever broken, no real connection to any
+    # database can be opened by this test.
+    proc = _run_env(
+        ["chembl", "serialize"],
+        tmp_path,
+        FAST_TIMEOUT,
+        PGDATABASE="episteme",
+        EPISTEME_DB_MODE="restricted",
+        PGPORT="1",
+    )
+    assert "Refusing to open a connection to production database" in proc.stderr
+    assert "connection refused" not in proc.stderr.lower()
+
+
+def test_restricted_mode_allows_secondary_target(tmp_path: Path) -> None:
+    proc = _run_env(
+        ["chembl", "serialize"],
+        tmp_path,
+        FAST_TIMEOUT,
+        PGDATABASE="episteme",
+        PGDATABASE_SECONDARY="episteme_test",
+        EPISTEME_DB_TARGET="secondary",
+        EPISTEME_DB_MODE="restricted",
+        PGPORT="1",
+    )
+    assert "Refusing to open a connection to production database" not in proc.stderr
