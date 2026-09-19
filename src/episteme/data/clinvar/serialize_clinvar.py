@@ -203,8 +203,8 @@ _AUDIT_LOCK = threading.Lock()
 
 # Primary file discovery: the real download_clinvar.sh (tsv/default mode)
 # artifact is always exactly "variant_summary.txt.gz" under a
-# "tab_delimited/" subdirectory of raw_dir -- list_input_files's rglob
-# covers the nesting. The trailing "*.tsv" pattern is a generic fixture-only
+# "tab_delimited/" subdirectory of raw_dir -- discover_input_files's
+# recursive discovery covers the nesting. The trailing "*.tsv" pattern is a generic fixture-only
 # fallback (mirrors chembl's own generic "*.db" fixture-discovery idiom) so
 # a hand-built/extracted fixture doesn't need to be named "variant_summary*"
 # -- this task's own fixture is "sample.tsv".
@@ -283,15 +283,17 @@ def _build_text(rec: dict[str, Any]) -> str:
     return sentence
 
 
-def clinvar_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
+def clinvar_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """One deduped ``VariationID`` record -> a finalized ``episteme.articles`` row."""
     variation_id = rec.get("variation_id")
     native_id = str(variation_id) if variation_id is not None else None
+    if not native_id:
+        return None  # no native id: caller counts + skips (never synthesize an id)
     lic, lic_url, lic_raw = normalize_license(_CLINVAR_LICENSE_RAW)
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
-        "id": f"{SOURCE}:{native_id}" if native_id else f"{SOURCE}:{source_file}:unknown",
+        "id": f"{SOURCE}:{native_id}",
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": native_id,
@@ -323,7 +325,12 @@ def clinvar_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(
+    path: Path,
+    *,
+    source_file: str | None = None,
+    stats: dict[str, int] | None = None,
+) -> Iterator[dict[str, Any]]:
     """Yield one ``episteme.articles`` row per DISTINCT ``VariationID`` in
     one ClinVar ``variant_summary`` file (bare ``.tsv``/``.txt``, or the
     real ``.txt.gz``/bare ``.gz`` download shape -- DuckDB's CSV reader
@@ -349,7 +356,12 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
         cols = [d[0] for d in con.description]
         for raw in con.fetchall():
             rec = dict(zip(cols, raw, strict=True))
-            yield clinvar_row(rec, source_file)
+            row = clinvar_row(rec, source_file)
+            if row is None:
+                if stats is not None:
+                    stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                continue
+            yield row
     finally:
         con.close()
 
@@ -420,8 +432,9 @@ def process_one(
     t0 = time.time()
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
+    iter_stats: dict[str, int] = {}
     try:
-        for row in iter_rows_from_file(path, source_file=basename):
+        for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -439,6 +452,7 @@ def process_one(
             "elapsed_sec": elapsed,
             "write": write_info,
         }
+        stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
         _best_effort_audit(basename, len(rows))
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
@@ -465,6 +479,8 @@ def _print_verbose(result: dict[str, Any]) -> None:
             f"status={result.get('extract_status_counts')}",
             file=sys.stderr,
         )
+        if result.get("skipped_no_id"):
+            print(f"  skipped_no_id={result['skipped_no_id']}", file=sys.stderr)
     else:
         print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
 

@@ -310,3 +310,24 @@ def test_reactome_summation_dedup_prefers_first_alphabetical():
 
     assert len(rows) == 1
     assert rows[0][1].startswith("TLR4 is unique among the TLR family")
+
+
+def test_reactome_record_without_pathway_id_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "ReactomePathways.tsv").write_text(
+        "R-HSA-109581\tApoptosis\tHomo sapiens\n\tNameless pathway\tHomo sapiens\n",
+        encoding="utf-8",
+    )
+    res = serialize_reactome(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "reactome").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert ids == ["reactome:R-HSA-109581"]
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "reactome" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1

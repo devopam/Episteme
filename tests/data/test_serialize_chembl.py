@@ -198,3 +198,37 @@ def test_chembl_report_respects_max_files(tmp_path, capsys):
 
     assert "files=1  rows=" in capped_out
     assert "files=2  rows=" in uncapped_out
+
+
+def test_chembl_row_builder_returns_none_without_activity_id():
+    from episteme.data.chembl.serialize_chembl import bioactivity_row
+
+    assert bioactivity_row({"activity_id": None, "standard_type": "IC50"}, "x.db") is None
+
+
+def test_chembl_record_without_activity_id_is_counted_and_skipped(tmp_path, monkeypatch):
+    """``activities.activity_id`` is ``INTEGER PRIMARY KEY`` in the real ChEMBL
+    schema, so an id-less record cannot be built through the SQLite input.
+    Exercise the real plumbing (iter_rows_from_file -> process_one -> marker)
+    by nulling the id of the first joined record just before the row builder."""
+    import json
+
+    from episteme.data.chembl import serialize_chembl as mod
+
+    orig = mod.bioactivity_row
+    calls = {"n": 0}
+
+    def flaky(rec, source_file):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            rec = {**rec, "activity_id": None}
+        return orig(rec, source_file)
+
+    monkeypatch.setattr(mod, "bioactivity_row", flaky)
+    res = serialize_chembl(FX, tmp_path)
+    assert res["ok"] == 1 and res["failed"] == 0
+    assert res["rows"] == 3  # fixture has 4 activities; one skipped
+    df = _read_shard(tmp_path / "staging" / "chembl")
+    assert not any(str(i).endswith(":unknown") for i in df["id"].to_list())
+    marker = json.loads(next((tmp_path / "_ops" / "chembl" / "success").glob("*.ok")).read_text())
+    assert marker["stats"]["skipped_no_id"] == 1

@@ -380,3 +380,27 @@ def test_input_key_flat_layout_keeps_bare_name():
     unchanged, matching every other SP4 structured serializer's
     convention -- nesting only qualifies the key."""
     assert input_key(FX / "sample.jsonl", FX) == "sample.jsonl"
+
+
+def test_openalex_record_without_id_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    lines = (FX / "sample.jsonl").read_text(encoding="utf-8").splitlines()
+    good = json.loads(lines[0])
+    bad = dict(good)
+    bad["id"] = None
+    (raw / "sample.jsonl").write_text(
+        json.dumps(good) + "\n" + json.dumps(bad) + "\n", encoding="utf-8"
+    )
+    res = serialize_openalex(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "openalex").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert ids == ["openalex:W7165474278"]
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "openalex" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1
