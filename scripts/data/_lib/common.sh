@@ -274,11 +274,13 @@ s3_fetch_first_n() { # s3_fetch_first_n S3_URI DEST_DIR N - bounded fetch of the
     rest="${uri#"$scheme"}"
     bucket="${rest%%/*}"; prefix=""; [ "$rest" != "$bucket" ] && prefix="${rest#*/}"
     listing="$(aws s3 ls --no-sign-request --recursive "$uri/")" || die "s3_fetch_first_n: listing failed for $uri"
-    # manifest.json is index metadata, not a data shard: excluded so N counts shards.
-    # Selection: lexicographic ascending key order (oldest updated_date= partitions first), first N.
+    # manifest.json (exact basename) is index metadata, not a data shard: excluded so N counts shards.
+    # Selection: lexicographic BYTE order (LC_ALL=C; oldest updated_date= partitions first), first N.
     local picked
-    picked="$(printf '%s\n' "$listing" | tr -d '\r' | awk 'NF>=4 {sz=$3; $1=$2=$3=""; sub(/^ +/,""); print $0 "\t" sz}' | grep -v 'manifest\.json'"$(printf '\t')" | sort | head -n "$n")"
-    [ -n "$picked" ] || { log WARN "s3_fetch_first_n: no objects under $uri"; return 0; }
+    picked="$(printf '%s\n' "$listing" | tr -d '\r' \
+        | awk 'NF>=4 {sz=$3; $1=$2=$3=""; sub(/^ +/,""); c=split($0,q,"/"); if (q[c]!="manifest.json") print $0 "\t" sz}' \
+        | LC_ALL=C sort | head -n "$n")"
+    [ -n "$picked" ] || { log ERROR "s3_fetch_first_n: no objects under $uri (wrong prefix?)"; return 1; }
     local line key size rel
     while IFS= read -r line; do
         key="${line%$'\t'*}"; size="${line##*$'\t'}"
@@ -293,6 +295,6 @@ s3_fetch_first_n() { # s3_fetch_first_n S3_URI DEST_DIR N - bounded fetch of the
             continue
         fi
         mkdir -p "$dest/$(dirname "$rel")"
-        aws s3 cp --no-sign-request "$scheme$bucket/$key" "$dest/$rel" || die "s3_fetch_first_n: cp failed: $key"
+        aws s3 cp --no-sign-request "$scheme$bucket/$key" "$dest/$rel" </dev/null || die "s3_fetch_first_n: cp failed: $key"
     done <<< "$picked"
 }

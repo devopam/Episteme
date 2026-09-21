@@ -43,7 +43,8 @@ src="${OPENALEX_S3%/}${suffix:+/$suffix}"
 dst="$(resolve_dest openalex "$suffix")"
 
 case "$MAX_FILES" in
-    ''|0|*[!0-9]*) fetch=(s3_sync "$src" "$dst") ;;
+    ''|0) fetch=(s3_sync "$src" "$dst") ;;
+    *[!0-9]*) die "openalex: --max-files must be a non-negative integer (got '$MAX_FILES')" 2 ;;
     *)             fetch=(s3_fetch_first_n "$src" "$dst" "$MAX_FILES") ;;
 esac
 
