@@ -16,6 +16,7 @@ regression guards for the fix wave:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -151,8 +152,14 @@ def test_mesh_download_dry_run_resolves_a_descriptor_release(tmp_path: Path) -> 
     if proc.returncode == 1:
         pytest.skip(f"mesh: wrapper failed transiently (rc=1): {proc.stderr[-800:]}")
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert "resolved 0 files" not in proc.stderr, proc.stderr[-2000:]
-    assert "desc" in proc.stderr + proc.stdout
+    if "resolved 0 files" in proc.stderr:
+        codes = re.findall(r"desc\d{4}\.(?:gz|xml)=(\d{3})", proc.stderr)
+        if codes and all(c == "000" for c in codes):
+            pytest.skip("mesh: every probe failed at the network level (NLM unreachable)")
+        pytest.fail(f"NLM reachable but no descriptor release resolved: {proc.stderr[-2000:]}")
+    assert re.search(
+        r"would fetch \S+/desc\d{4}\.gz -> \S+/desc\d{4}\.gz", proc.stderr
+    ), proc.stderr[-2000:]
 
 
 def test_non_download_stage_for_table_source_dies_3(tmp_path: Path) -> None:
