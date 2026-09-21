@@ -14,18 +14,27 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 from episteme.config import get_settings
+from episteme.data.db.guard import check_database_allowed, pool_kwargs
 
 _POOL: ConnectionPool | None = None
 
 
 def dsn_from_settings() -> str:
-    return get_settings().pg_dsn()
+    settings = get_settings()
+    check_database_allowed(settings)
+    return settings.pg_dsn()
 
 
 def get_pool() -> ConnectionPool:
     global _POOL
     if _POOL is None:
-        _POOL = ConnectionPool(dsn_from_settings(), min_size=1, max_size=8, open=True)
+        _POOL = ConnectionPool(
+            dsn_from_settings(),
+            kwargs=pool_kwargs(get_settings()),
+            min_size=1,
+            max_size=8,
+            open=True,
+        )
     return _POOL
 
 

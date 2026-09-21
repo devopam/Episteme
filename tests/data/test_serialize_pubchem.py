@@ -68,13 +68,14 @@ def test_pubchem_serialize_rows(tmp_path):
     assert len({row["id"] for row in rows}) == 3
     assert {row["id"] for row in rows} == {"pubchem:1", "pubchem:4", "pubchem:406"}
 
-    # PubChem's real Fair Use Disclaimer text does not match any existing
-    # normalize_license arm -- falls through to the conservative default.
-    # Spec Sec 8 open item 2, flagged not silently patched (see module
-    # docstring).
-    assert all(row["license"] == "unknown" for row in rows)
-    assert all(row["subset"] == "open_metadata" for row in rows)
-    assert all(row["license_raw"] is not None for row in rows)
+    # Source-anchored governance override (SP4.1 Task 11): public_domain ->
+    # commercial; license_raw keeps the real Fair Use Disclaimer text (which
+    # does not itself contain the words "Fair Use"; license_raw is capped at 300 chars).
+    assert all(row["license"] == "public_domain" for row in rows)
+    assert all(row["subset"] == "commercial" for row in rows)
+    assert all(
+        "Databases of molecular data on the NCBI FTP site" in row["license_raw"] for row in rows
+    )
 
     assert all(row["container_id"] is None for row in rows)
     assert all(row["book_meta"] is None for row in rows)
@@ -225,3 +226,21 @@ def test_pubchem_primary_file_without_any_siblings(tmp_path):
     )
     # No siblings at all -> every optional field omitted, no exception.
     assert all(row["extract_status"] in article_schema.EXTRACT_STATUSES for row in rows)
+
+
+def test_pubchem_record_without_cid_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "CID-SMILES.tsv").write_text("1\tCC(=O)O\n\tCCO\n", encoding="utf-8")
+    res = serialize_pubchem(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "pubchem").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert ids == ["pubchem:1"]
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "pubchem" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1

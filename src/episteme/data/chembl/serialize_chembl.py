@@ -71,8 +71,9 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
@@ -128,6 +129,34 @@ def _is_tarball(path: Path) -> bool:
     return name.endswith(".tar.gz") or name.endswith(".tgz")
 
 
+_HAS_DATA_FILTER = hasattr(tarfile, "data_filter")
+
+
+def _safe_extract(archive: Path, dest: Path) -> None:
+    """Extract ``archive`` into ``dest`` without trusting member paths.
+
+    Uses ``filter="data"`` when this interpreter has it (3.12+, and the
+    3.10.12 / 3.11.4 backports); otherwise validates every member itself.
+    """
+    dest = Path(dest)
+    with tarfile.open(archive) as tf:
+        if _HAS_DATA_FILTER:
+            tf.extractall(dest, filter="data")  # nosec B202 - filter="data" bounds extraction
+            return
+        root = dest.resolve()
+        for m in tf.getmembers():
+            target = (root / m.name).resolve()
+            if (
+                m.name.startswith(("/", "\\"))
+                or not target.is_relative_to(root)
+                or m.issym()
+                or m.islnk()
+                or m.isdev()
+            ):
+                raise RuntimeError(f"unsafe tar member {m.name!r}")
+        tf.extractall(dest)  # nosec B202 - every member validated above
+
+
 def _resolve_sqlite_db(path: Path, extract_dir: Path) -> Path:
     """Return a real ``.db`` file on disk for ``path``.
 
@@ -142,8 +171,7 @@ def _resolve_sqlite_db(path: Path, extract_dir: Path) -> Path:
     """
     if not _is_tarball(path):
         return path
-    with tarfile.open(path) as tf:
-        tf.extractall(extract_dir, filter="data")  # nosec B202 - filter="data" bounds extraction
+    _safe_extract(path, extract_dir)
     candidates = sorted(Path(extract_dir).rglob("*.db"))
     if not candidates:
         raise RuntimeError(f"no .db file found inside chembl tarball {path.name}")
@@ -208,15 +236,17 @@ def _build_text(rec: dict[str, Any]) -> str:
     return sentence
 
 
-def bioactivity_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
+def bioactivity_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """One ``activities`` join record -> a finalized ``episteme.articles`` row."""
     activity_id = rec.get("activity_id")
     native_id = str(activity_id) if activity_id is not None else None
+    if not native_id:
+        return None  # no native id: caller counts + skips (never synthesize an id)
     lic, lic_url, lic_raw = normalize_license(_CHEMBL_LICENSE_RAW)
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
-        "id": f"{SOURCE}:{native_id}" if native_id else f"{SOURCE}:{source_file}:unknown",
+        "id": f"{SOURCE}:{native_id}",
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": native_id,
@@ -248,7 +278,12 @@ def bioactivity_row(rec: dict[str, Any], source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(
+    path: Path,
+    *,
+    source_file: str | None = None,
+    stats: dict[str, int] | None = None,
+) -> Iterator[dict[str, Any]]:
     """Yield one ``episteme.articles`` row per ``activities`` record from one
     ChEMBL SQLite release file (bare ``.db`` or ``*sqlite.tar.gz``).
 
@@ -262,7 +297,7 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
     release, not fixed here (chunked/paginated reads + shard-batched writes
     would be the fix, out of scope for this task's fixture-gated proof).
     """
-    source_file = path.name
+    source_file = source_file or path.name
     with tempfile.TemporaryDirectory(prefix="chembl_extract_") as td:
         db_path = _resolve_sqlite_db(path, Path(td))
         con = duckdb.connect()
@@ -277,14 +312,19 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
             cols = [d[0] for d in con.description]
             for raw in con.fetchall():
                 rec = dict(zip(cols, raw, strict=True))
-                yield bioactivity_row(rec, source_file)
+                row = bioactivity_row(rec, source_file)
+                if row is None:
+                    if stats is not None:
+                        stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                    continue
+                yield row
         finally:
             con.close()
 
 
 def discover_chembl_files(raw_dir: Path) -> list[Path]:
-    files = list_input_files(raw_dir, ["chembl*sqlite.tar.gz", "*.db"])
-    files.sort(key=lambda p: p.name)
+    files = discover_input_files(raw_dir, ["chembl*sqlite.tar.gz", "*.db"])
+    files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
 
@@ -340,17 +380,19 @@ def process_one(
     path: Path,
     *,
     processed_dir: Path,
+    raw_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
+    iter_stats: dict[str, int] = {}
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -368,6 +410,7 @@ def process_one(
             "elapsed_sec": elapsed,
             "write": write_info,
         }
+        stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
         _best_effort_audit(basename, len(rows))
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
@@ -394,6 +437,8 @@ def _print_verbose(result: dict[str, Any]) -> None:
             f"status={result.get('extract_status_counts')}",
             file=sys.stderr,
         )
+        if result.get("skipped_no_id"):
+            print(f"  skipped_no_id={result['skipped_no_id']}", file=sys.stderr)
     else:
         print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
 
@@ -427,14 +472,16 @@ def serialize_chembl(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -531,7 +578,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        for row in iter_rows_from_file(fp):
+        for row in iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)):
             rows.append(row)
     print(_render_field_shape(rows, len(files)), end="")
     return 0

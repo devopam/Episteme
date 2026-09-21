@@ -27,6 +27,8 @@ class ConfigError(RuntimeError):
 # written to os.environ, so config.py stays the sole os.environ *reader*.
 _SOURCES: dict[str, str] = {}
 
+DB_MODES = ("read-only", "restricted", "unrestricted")
+
 
 def _get(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
@@ -131,6 +133,10 @@ class Settings:
     dailymed_base: str
     openfda_catalog: str
     aact_downloads: str
+    db_mode: str = "restricted"
+    db_target: str = "primary"
+    production_database: str = "episteme"
+    pg_database_secondary: str | None = None
 
     def pg_dsn(self) -> str:
         return (
@@ -149,6 +155,16 @@ def get_settings() -> Settings:
     raw_root = Path(_get("EPISTEME_RAW_ROOT") or (data_root / "01_raw"))
     processed_root = Path(_get("EPISTEME_PROCESSED_ROOT") or (data_root / "02_processed"))
     corpus_root = Path(_get("EPISTEME_CORPUS_ROOT") or (data_root / "03_corpus"))
+    db_mode = (_get("EPISTEME_DB_MODE") or "restricted").strip().lower()
+    if db_mode not in DB_MODES:
+        raise ConfigError(f"EPISTEME_DB_MODE must be one of {DB_MODES}, got {db_mode!r}")
+    db_target = (_get("EPISTEME_DB_TARGET") or "primary").strip().lower()
+    if db_target not in ("primary", "secondary"):
+        raise ConfigError(f"EPISTEME_DB_TARGET must be primary|secondary, got {db_target!r}")
+    secondary = _get("PGDATABASE_SECONDARY") or None
+    if db_target == "secondary" and not secondary:
+        raise ConfigError("EPISTEME_DB_TARGET=secondary but PGDATABASE_SECONDARY is not set")
+    pg_database = secondary if db_target == "secondary" else _get("PGDATABASE", "episteme")
     return Settings(
         data_root=data_root,
         raw_root=raw_root,
@@ -156,7 +172,7 @@ def get_settings() -> Settings:
         corpus_root=corpus_root,
         pg_host=_get("PGHOST", "localhost"),
         pg_port=_get_int("PGPORT", 5432),
-        pg_database=_get("PGDATABASE", "episteme"),
+        pg_database=pg_database,
         pg_user=_get("PGUSER", "episteme"),
         pg_password=_get("PGPASSWORD", ""),
         db_password=_get("EPISTEME_DB_PASSWORD", "") or "",
@@ -196,6 +212,10 @@ def get_settings() -> Settings:
         dailymed_base=_get("DAILYMED_BASE"),
         openfda_catalog=_get("OPENFDA_CATALOG"),
         aact_downloads=_get("AACT_DOWNLOADS"),
+        db_mode=db_mode,
+        db_target=db_target,
+        production_database=_get("EPISTEME_PRODUCTION_DATABASE", "episteme"),
+        pg_database_secondary=secondary,
     )
 
 

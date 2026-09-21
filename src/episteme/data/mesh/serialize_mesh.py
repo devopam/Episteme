@@ -13,15 +13,13 @@ one ``<DescriptorRecordSet>`` document holding the ENTIRE MeSH vocabulary --
 compressed sibling ``desc2025.gz`` is 16,840,289 bytes). ``download_mesh.sh``
 (SP3) resolved ZERO files in a live, ``episteme_test``-scoped run against
 this real layout: its candidate directories (``$MESH_BASE/xmlmesh$YEAR``,
-``$MESH_BASE/ascii$YEAR``, ...) no longer exist -- NLM's current real layout
-is ``$MESH_BASE/<year>/xmlmesh/desc<year>.xml``. This is a pre-existing SP3
-gap, out of this task's scope (the brief explicitly says ``download_mesh.sh``
-"already exists and works -- you do not need to modify it"; empirically, on
-2026-09-17, it does not resolve real files, but fixing its directory-listing
-logic is not this task's job). This task's real end-to-end (task-10-report.md)
-fetched the real ``desc2025.gz`` directly instead, decompressed it, and ran
-the full ``serialize -> load -> graph`` chain against the real, complete
-2025 MeSH descriptor release.
+``$MESH_BASE/ascii$YEAR``, ...) no longer existed -- NLM's current real layout
+is ``$MESH_BASE/<year>/xmlmesh/desc<year>.xml``. That SP3 gap was FIXED in
+SP4.1 (commit e238997, ``download_mesh.sh`` now resolves the current NLM
+descriptor release). This task's original real end-to-end (task-10-report.md,
+written before that fix) fetched the real ``desc2025.gz`` directly instead,
+decompressed it, and ran the full ``serialize -> load -> graph`` chain against
+the real, complete 2025 MeSH descriptor release.
 
 Real per-descriptor shape (confirmed against the real 2025 file):
 ``<DescriptorRecord><DescriptorUI>D000001</DescriptorUI><DescriptorName>
@@ -130,10 +128,13 @@ anywhere in the real text). Run through the ordinary
 (NOT a hardcode) -- confirmed it resolves to ``license="unknown"`` ->
 ``subset="open_metadata"``, exactly as the brief predicted (a "Public
 Domain" declaration with no CC0/CC-BY/permissive-OSI token does not hit any
-of ``normalize_license``'s existing regex arms). FLAGGED, not forced: a
-genuine gap between MeSH's real free-for-any-use licence and this schema's
-license-code vocabulary, same posture as pubchem/clinvar's own flagged
-licence gaps -- ``article_schema.py`` is NOT touched by this task's diff.
+of ``normalize_license``'s existing regex arms). Originally FLAGGED as a gap
+between MeSH's real free-for-any-use licence and the schema's license-code
+vocabulary; RESOLVED in SP4.1 Task 11: ``mesh_row`` applies a source-anchored
+governance override (user decision 2026-09-19) setting
+``license="public_domain"`` -> ``subset="commercial"``. ``normalize_license``
+itself still returns ``unknown`` for this text, and ``license_raw`` keeps the
+real NLM terms text.
 
 Importable core: ``serialize_mesh(raw_dir, processed_dir, *, max_files=0,
 force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
@@ -171,6 +172,7 @@ from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    LICENSE_PUBLIC_DOMAIN,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -179,8 +181,9 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
@@ -191,8 +194,8 @@ SOURCE = "mesh"
 
 # NLM's real "Terms and Conditions MeSH" page, fetched directly at
 # implementation time (2026-09-17) -- see module docstring's "Licence"
-# section for the full confirmed unknown -> open_metadata resolution
-# (matches the brief's own prediction, unlike reactome's real-licence match).
+# section: normalize_license() yields unknown -> open_metadata for this text, but
+# mesh_row overrides it to public_domain -> commercial (SP4.1 Task 11).
 _MESH_LICENSE_RAW = (
     "National Library of Medicine (NLM) Terms and Conditions for MeSH data "
     "(page metadata: DC.Rights = Public Domain). NLM freely provides MeSH "
@@ -325,6 +328,12 @@ def mesh_row(
     """One parsed ``<DescriptorRecord>`` -> a finalized ``episteme.articles``
     row."""
     lic, lic_url, lic_raw = normalize_license(_MESH_LICENSE_RAW)
+    # GOVERNANCE OVERRIDE (SP4.1 spec 3.4, user decision 2026-09-19): this source's
+    # own terms are treated as public domain -> commercial-eligible. Source-anchored
+    # on purpose: normalize_license() never returns this for free text. PubChem and
+    # ClinVar carry contributor-submitted content with per-record terms; the
+    # user accepted that risk. license_raw keeps the real disclaimer text.
+    lic = LICENSE_PUBLIC_DOMAIN
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
@@ -360,15 +369,16 @@ def mesh_row(
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield one ``episteme.articles`` row per ``<DescriptorRecord>`` in one
     MeSH descriptor XML file (bare ``.xml``, or the real ``.gz``/hypothetical
     ``.xml.gz`` compressed shape -- transparently decompressed via
     ``_open_source``). Streams via ``defusedxml.ElementTree.iterparse`` (see
-    module docstring); ``source_file`` is ``path.name`` verbatim, matching
-    what ``graph_builder.build``'s ``rglob(src_file)`` re-parse lookup
-    expects (reactome's precedent)."""
-    source_file = path.name
+    module docstring); ``source_file`` defaults to ``path.name``, but the
+    pipeline passes the raw-dir-relative ``input_key(path, raw_dir)`` (SP4.1
+    shared input identity), which is what ends up in ``articles.source_file``
+    and what ``graph_builder.build``'s re-parse lookup resolves."""
+    source_file = source_file or path.name
     with _open_source(path) as fh:
         for descriptor_ui, name, scope_note in _iter_descriptor_records(fh):
             yield mesh_row(descriptor_ui, name, scope_note, source_file)
@@ -380,9 +390,9 @@ def discover_mesh_files(raw_dir: Path) -> list[Path]:
     -- see module docstring for why the peek, not the naming pattern alone,
     is the real filter (keeps real sibling qual*/supp*/pa* files, and any
     unrelated/corrupt XML, out)."""
-    candidates = list_input_files(raw_dir, _CANDIDATE_PATTERNS)
+    candidates = discover_input_files(raw_dir, _CANDIDATE_PATTERNS)
     files = [p for p in candidates if _is_descriptor_file(p)]
-    files.sort(key=lambda p: p.name)
+    files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
 
@@ -428,9 +438,10 @@ def process_one(
     path: Path,
     *,
     processed_dir: Path,
+    raw_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -438,7 +449,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -514,14 +525,16 @@ def serialize_mesh(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, processed_dir=processed_dir, raw_dir=raw_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -618,7 +631,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        for row in iter_rows_from_file(fp):
+        for row in iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)):
             rows.append(row)
     print(_render_field_shape(rows, len(files)), end="")
     return 0

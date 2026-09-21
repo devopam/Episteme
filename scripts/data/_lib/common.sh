@@ -265,3 +265,36 @@ s3_sync() { # s3_sync S3_URI DEST_DIR [-- extra passthrough args]
     fi
 }
 aws_sync() { s3_sync "$@"; }   # roadmap §4.6 name kept as an alias
+
+s3_fetch_first_n() { # s3_fetch_first_n S3_URI DEST_DIR N - bounded fetch of the first N objects under a prefix
+    local uri="${1%/}" dest="$2" n="$3"
+    case "$n" in ''|*[!0-9]*|0) die "s3_fetch_first_n: N must be a positive integer (got '$n')" ;; esac
+    command -v aws >/dev/null 2>&1 || die "s3_fetch_first_n: awscli required"
+    local scheme="${uri%%//*}//" bucket prefix listing rest
+    rest="${uri#"$scheme"}"
+    bucket="${rest%%/*}"; prefix=""; [ "$rest" != "$bucket" ] && prefix="${rest#*/}"
+    listing="$(aws s3 ls --no-sign-request --recursive "$uri/")" || die "s3_fetch_first_n: listing failed for $uri"
+    # manifest.json (exact basename) is index metadata, not a data shard: excluded so N counts shards.
+    # Selection: lexicographic BYTE order (LC_ALL=C; oldest updated_date= partitions first), first N.
+    local picked
+    picked="$(printf '%s\n' "$listing" | tr -d '\r' \
+        | awk 'NF>=4 {sz=$3; $1=$2=$3=""; sub(/^ +/,""); c=split($0,q,"/"); if (q[c]!="manifest.json") print $0 "\t" sz}' \
+        | LC_ALL=C sort | head -n "$n")"
+    [ -n "$picked" ] || { log ERROR "s3_fetch_first_n: no objects under $uri (wrong prefix?)"; return 1; }
+    local line key size rel
+    while IFS= read -r line; do
+        key="${line%$'\t'*}"; size="${line##*$'\t'}"
+        rel="${key#"$prefix"/}"
+        _safe_rel "$rel" || { log ERROR "s3_fetch_first_n: unsafe key '$key' - skipping"; continue; }
+        if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+            log INFO "DRY: would fetch $scheme$bucket/$key ($size bytes) -> $dest/$rel"
+            continue
+        fi
+        if [ -f "$dest/$rel" ] && [ "$(wc -c < "$dest/$rel" | tr -d '[:space:]')" = "$size" ]; then
+            log INFO "s3_fetch_first_n: $rel already size-matched, skipping"
+            continue
+        fi
+        mkdir -p "$dest/$(dirname "$rel")"
+        aws s3 cp --no-sign-request "$scheme$bucket/$key" "$dest/$rel" </dev/null || die "s3_fetch_first_n: cp failed: $key"
+    done <<< "$picked"
+}

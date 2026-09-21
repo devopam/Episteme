@@ -86,14 +86,11 @@ def test_clinvar_serialize_rows(tmp_path):
         "clinvar:4507303",
     }
 
-    # ClinVar's real disclaimer/data-use text (NCBI/NIH, public-domain-
-    # flavoured, attribution REQUESTED not required) does not match any
-    # existing normalize_license arm -- falls through to the conservative
-    # default. Flagged (not silently patched), same posture as pubchem
-    # task-7's spec Sec 8 open item 2.
-    assert all(row["license"] == "unknown" for row in rows)
-    assert all(row["subset"] == "open_metadata" for row in rows)
-    assert all(row["license_raw"] is not None for row in rows)
+    # Source-anchored governance override (SP4.1 Task 11): public_domain ->
+    # commercial; license_raw keeps the real disclaimer/data-use text.
+    assert all(row["license"] == "public_domain" for row in rows)
+    assert all(row["subset"] == "commercial" for row in rows)
+    assert all("not intended for direct diagnostic use" in row["license_raw"] for row in rows)
 
     assert all(row["container_id"] is None for row in rows)
     assert all(row["book_meta"] is None for row in rows)
@@ -251,3 +248,28 @@ def test_clinvar_assembly_dedup_prefers_grch38():
     downstream = list(iter_rows_from_file(FX / "sample.tsv"))
     assert len(downstream) == 3
     assert {r["source_record_id"] for r in downstream} == {"2", "487086", "4507303"}
+
+
+def test_clinvar_record_without_variation_id_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    src = (FX / "sample.tsv").read_text(encoding="utf-8").splitlines()
+    header, first = src[0], src[1]
+    cols = header.lstrip("#").split("\t")
+    bad = first.split("\t")
+    bad[cols.index("VariationID")] = ""
+    (raw / "variant_summary.txt").write_text(
+        "\n".join([header, first, "\t".join(bad)]) + "\n", encoding="utf-8"
+    )
+    res = serialize_clinvar(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "clinvar").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert len(ids) == 1 and ids[0].startswith("clinvar:")
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "clinvar" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1

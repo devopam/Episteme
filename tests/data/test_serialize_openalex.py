@@ -36,8 +36,8 @@ from pathlib import Path
 import polars as pl
 
 from episteme.data import article_schema
+from episteme.data.checkpoint_markers import input_key
 from episteme.data.openalex.serialize_openalex import (
-    _qualified_source_file,
     discover_openalex_files,
     is_biomedical,
     iter_rows_from_file,
@@ -352,7 +352,7 @@ def test_openalex_discovers_same_basename_across_partitions(tmp_path):
 
     files = discover_openalex_files(raw_dir)
     assert len(files) == 2, "same-basename files across partitions must NOT collide at discovery"
-    qualified = {_qualified_source_file(f) for f in files}
+    qualified = {input_key(f, raw_dir) for f in files}
     assert qualified == {
         "updated_date=2026-06-25__part_0000.gz",
         "updated_date=2026-06-26__part_0000.gz",
@@ -374,10 +374,33 @@ def test_openalex_discovers_same_basename_across_partitions(tmp_path):
     assert len(markers) == 2, "one success marker per partition, no collision"
 
 
-def test_qualified_source_file_flat_layout_keeps_bare_name():
+def test_input_key_flat_layout_keeps_bare_name():
     """A flat/manually-supplied raw_dir (no updated_date=.../ nesting --
     this module's own fixture/test layout) must keep the BARE filename
     unchanged, matching every other SP4 structured serializer's
-    convention -- qualification only kicks in for a real partition
-    directory."""
-    assert _qualified_source_file(FX / "sample.jsonl") == "sample.jsonl"
+    convention -- nesting only qualifies the key."""
+    assert input_key(FX / "sample.jsonl", FX) == "sample.jsonl"
+
+
+def test_openalex_record_without_id_is_counted_and_skipped(tmp_path):
+    import json
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    lines = (FX / "sample.jsonl").read_text(encoding="utf-8").splitlines()
+    good = json.loads(lines[0])
+    bad = dict(good)
+    bad["id"] = None
+    (raw / "sample.jsonl").write_text(
+        json.dumps(good) + "\n" + json.dumps(bad) + "\n", encoding="utf-8"
+    )
+    res = serialize_openalex(raw, tmp_path / "processed")
+    assert res["ok"] == 1 and res["failed"] == 0
+    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "openalex").glob("*.parquet")))
+    ids = [str(i) for i in df["id"].to_list()]
+    assert not any(i.endswith(":unknown") for i in ids)
+    assert ids == ["openalex:W7165474278"]
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "openalex" / "success").glob("*.ok")).read_text()
+    )
+    assert marker["stats"]["skipped_no_id"] == 1
