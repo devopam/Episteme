@@ -47,6 +47,12 @@ Corpus-level curation lives in `episteme.data.curate`
 PostgreSQL setup (roles, schema, extensions) is `scripts/data/db/` —
 run `install_extensions.sh` then `init_database.sh` against `.env`'s `PG*` vars.
 
+Further data documentation:
+- [`docs/10-data-sources-runbook.md`](docs/10-data-sources-runbook.md): operator runbook for every wired source.
+- [`docs/11-gxp-data-integrity.md`](docs/11-gxp-data-integrity.md): the data-integrity (GxP) posture of the pipeline, as implemented.
+- [`docs/12-source-inventory.md`](docs/12-source-inventory.md): live per-source inventory (class, stages, licence basis, cadence).
+- [`docs/02-data-sources.md`](docs/02-data-sources.md): master catalog of candidate and wired sources.
+
 ### 2. Model Pipeline
 
 The model pipeline supports model-switching (config-driven base checkpoints), parameter-efficient fine-tuning (LoRA), and standard benchmarks scoring.
@@ -72,6 +78,19 @@ Verify that all modules and integration dry-runs compile and pass correctly:
 ```bash
 python -m pytest
 ```
+
+## Documentation
+
+Design and planning background lives in `docs/`:
+[`01-strategy-summary`](docs/01-strategy-summary.md),
+[`02-data-sources`](docs/02-data-sources.md),
+[`03-acquisition-checklist`](docs/03-acquisition-checklist.md),
+[`04-training-recipe`](docs/04-training-recipe.md),
+[`05-pmc-commercial-oa`](docs/05-pmc-commercial-oa.md),
+[`06-multilingual-corpora`](docs/06-multilingual-corpora.md),
+[`07-knowledge-graph-lessons`](docs/07-knowledge-graph-lessons.md),
+[`08-data-storage-principles`](docs/08-data-storage-principles.md),
+[`09-extraction-contract`](docs/09-extraction-contract.md).
 
 ## Contributing
 
