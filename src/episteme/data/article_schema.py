@@ -163,7 +163,7 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
 
     s = str(raw).strip()
     url = None
-    m = re.search(r"https?://creativecommons\.org/licenses/[^\s)\"']+", s, re.I)
+    m = re.search(r"https?://creativecommons\.org/(?:licenses|publicdomain)/[^\s)\"']+", s, re.I)
     if m:
         url = m.group(0).rstrip(".,;")
 
@@ -183,6 +183,13 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
         return "CC BY-ND", url, s[:300]
     if re.search(r"\bCC\s*BY\b", u) or "CREATIVE COMMONS ATTRIBUTION" in u:
         return "CC BY", url, s[:300]
+    # Bare creativecommons.org URLs (GO/MONDO declare only this). The by-sa/
+    # by-nd/by-nc* URL forms are already caught by the substring arms above.
+    # Like those, these do not understand negation ("not licensed under <url>").
+    if re.search(r"creativecommons\.org/licenses/by/", s, re.I):
+        return "CC BY", url, s[:300]
+    if re.search(r"creativecommons\.org/publicdomain/zero/", s, re.I):
+        return "CC0", url, s[:300]
     if "TEXT MINING" in u or "TEXT-MINING" in u or "FAIR USE" in u:
         return "text_mining", url, s[:300]
     # Permissive OSI licences (Apache-2.0, MIT, BSD, ISC): no share-alike, no
