@@ -245,3 +245,20 @@ def test_wrapper_exit_codes_are_qualified_by_the_dispatcher():
             assert "exit 2" not in line or "rc 1" in line, line
     assert "surface as rc 1" in t
     assert "public_domain" in t and "governance override" in t
+
+
+def test_fast_path_uses_wired_stages_and_bounds_only_download():
+    t = _text()
+    sec = t[t.index("### 0.3 Fast path") : t.index("Exit codes of `run_pipeline.sh`")]
+    blocks = re.findall(r"```bash\n(.*?)```", sec, re.S)
+    inv = _invocations([ln.strip() for b in blocks for ln in b.splitlines() if ln.strip()])
+    assert inv, "fast path shows no run_pipeline.sh commands"
+    assert inv[0][:2] == ["openalex", "download"], inv[0]
+    for rest in inv:
+        src, stage = rest[0], rest[1]
+        assert _allowed(src, stage), f"fast path uses an unwired stage: {src} {stage}"
+        if "--max-files" in rest:
+            assert stage in {"download", "serialize", "all"}, rest  # never on load or graph
+    # openalex is structured: the fast path must not use extract or graph for it
+    assert not any(r[0] == "openalex" and r[1] in {"extract", "graph"} for r in inv)
+    assert "EUROPEPMC_PREPRINT_BASE" in sec and "would harvest 0 ids" in sec
