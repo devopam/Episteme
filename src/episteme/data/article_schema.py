@@ -153,6 +153,11 @@ def decide_extract_status(
     return "partial", f"short_text_len={len(t)}"
 
 
+LICENSE_PUBLIC_DOMAIN = "public_domain"
+"""Source-anchored licence code. normalize_license() NEVER returns it; only
+serializers set it as an explicit governance override (SP4.1 spec 3.4)."""
+
+
 def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
     """
     Returns (license, license_url, license_raw).
@@ -255,7 +260,14 @@ def _norm_license_key(raw: str) -> str:
 
 
 def subset_from_license(license_code: str, *, default: str = "open_metadata") -> str:
-    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND", "permissive"):
+    if license_code in (
+        "CC0",
+        "CC BY",
+        "CC BY-SA",
+        "CC BY-ND",
+        "permissive",
+        LICENSE_PUBLIC_DOMAIN,
+    ):
         return "commercial"
     if license_code.startswith("CC BY-NC") or license_code == "text_mining":
         return "text_mining"

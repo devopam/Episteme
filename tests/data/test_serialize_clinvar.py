@@ -86,14 +86,11 @@ def test_clinvar_serialize_rows(tmp_path):
         "clinvar:4507303",
     }
 
-    # ClinVar's real disclaimer/data-use text (NCBI/NIH, public-domain-
-    # flavoured, attribution REQUESTED not required) does not match any
-    # existing normalize_license arm -- falls through to the conservative
-    # default. Flagged (not silently patched), same posture as pubchem
-    # task-7's spec Sec 8 open item 2.
-    assert all(row["license"] == "unknown" for row in rows)
-    assert all(row["subset"] == "open_metadata" for row in rows)
-    assert all(row["license_raw"] is not None for row in rows)
+    # Source-anchored governance override (SP4.1 Task 11): public_domain ->
+    # commercial; license_raw keeps the real disclaimer/data-use text.
+    assert all(row["license"] == "public_domain" for row in rows)
+    assert all(row["subset"] == "commercial" for row in rows)
+    assert all("not intended for direct diagnostic use" in row["license_raw"] for row in rows)
 
     assert all(row["container_id"] is None for row in rows)
     assert all(row["book_meta"] is None for row in rows)

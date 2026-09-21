@@ -13,15 +13,13 @@ one ``<DescriptorRecordSet>`` document holding the ENTIRE MeSH vocabulary --
 compressed sibling ``desc2025.gz`` is 16,840,289 bytes). ``download_mesh.sh``
 (SP3) resolved ZERO files in a live, ``episteme_test``-scoped run against
 this real layout: its candidate directories (``$MESH_BASE/xmlmesh$YEAR``,
-``$MESH_BASE/ascii$YEAR``, ...) no longer exist -- NLM's current real layout
-is ``$MESH_BASE/<year>/xmlmesh/desc<year>.xml``. This is a pre-existing SP3
-gap, out of this task's scope (the brief explicitly says ``download_mesh.sh``
-"already exists and works -- you do not need to modify it"; empirically, on
-2026-09-17, it does not resolve real files, but fixing its directory-listing
-logic is not this task's job). This task's real end-to-end (task-10-report.md)
-fetched the real ``desc2025.gz`` directly instead, decompressed it, and ran
-the full ``serialize -> load -> graph`` chain against the real, complete
-2025 MeSH descriptor release.
+``$MESH_BASE/ascii$YEAR``, ...) no longer existed -- NLM's current real layout
+is ``$MESH_BASE/<year>/xmlmesh/desc<year>.xml``. That SP3 gap was FIXED in
+SP4.1 (commit e238997, ``download_mesh.sh`` now resolves the current NLM
+descriptor release). This task's original real end-to-end (task-10-report.md,
+written before that fix) fetched the real ``desc2025.gz`` directly instead,
+decompressed it, and ran the full ``serialize -> load -> graph`` chain against
+the real, complete 2025 MeSH descriptor release.
 
 Real per-descriptor shape (confirmed against the real 2025 file):
 ``<DescriptorRecord><DescriptorUI>D000001</DescriptorUI><DescriptorName>
@@ -130,10 +128,13 @@ anywhere in the real text). Run through the ordinary
 (NOT a hardcode) -- confirmed it resolves to ``license="unknown"`` ->
 ``subset="open_metadata"``, exactly as the brief predicted (a "Public
 Domain" declaration with no CC0/CC-BY/permissive-OSI token does not hit any
-of ``normalize_license``'s existing regex arms). FLAGGED, not forced: a
-genuine gap between MeSH's real free-for-any-use licence and this schema's
-license-code vocabulary, same posture as pubchem/clinvar's own flagged
-licence gaps -- ``article_schema.py`` is NOT touched by this task's diff.
+of ``normalize_license``'s existing regex arms). Originally FLAGGED as a gap
+between MeSH's real free-for-any-use licence and the schema's license-code
+vocabulary; RESOLVED in SP4.1 Task 11: ``mesh_row`` applies a source-anchored
+governance override (user decision 2026-09-19) setting
+``license="public_domain"`` -> ``subset="commercial"``. ``normalize_license``
+itself still returns ``unknown`` for this text, and ``license_raw`` keeps the
+real NLM terms text.
 
 Importable core: ``serialize_mesh(raw_dir, processed_dir, *, max_files=0,
 force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
@@ -171,6 +172,7 @@ from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    LICENSE_PUBLIC_DOMAIN,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -192,8 +194,8 @@ SOURCE = "mesh"
 
 # NLM's real "Terms and Conditions MeSH" page, fetched directly at
 # implementation time (2026-09-17) -- see module docstring's "Licence"
-# section for the full confirmed unknown -> open_metadata resolution
-# (matches the brief's own prediction, unlike reactome's real-licence match).
+# section: normalize_license() yields unknown -> open_metadata for this text, but
+# mesh_row overrides it to public_domain -> commercial (SP4.1 Task 11).
 _MESH_LICENSE_RAW = (
     "National Library of Medicine (NLM) Terms and Conditions for MeSH data "
     "(page metadata: DC.Rights = Public Domain). NLM freely provides MeSH "
@@ -326,6 +328,12 @@ def mesh_row(
     """One parsed ``<DescriptorRecord>`` -> a finalized ``episteme.articles``
     row."""
     lic, lic_url, lic_raw = normalize_license(_MESH_LICENSE_RAW)
+    # GOVERNANCE OVERRIDE (SP4.1 spec 3.4, user decision 2026-09-19): this source's
+    # own terms are treated as public domain -> commercial-eligible. Source-anchored
+    # on purpose: normalize_license() never returns this for free text. PubChem and
+    # ClinVar carry contributor-submitted content with per-record terms; the
+    # user accepted that risk. license_raw keeps the real disclaimer text.
+    lic = LICENSE_PUBLIC_DOMAIN
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
@@ -366,9 +374,10 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
     MeSH descriptor XML file (bare ``.xml``, or the real ``.gz``/hypothetical
     ``.xml.gz`` compressed shape -- transparently decompressed via
     ``_open_source``). Streams via ``defusedxml.ElementTree.iterparse`` (see
-    module docstring); ``source_file`` is ``path.name`` verbatim, matching
-    what ``graph_builder.build``'s ``rglob(src_file)`` re-parse lookup
-    expects (reactome's precedent)."""
+    module docstring); ``source_file`` defaults to ``path.name``, but the
+    pipeline passes the raw-dir-relative ``input_key(path, raw_dir)`` (SP4.1
+    shared input identity), which is what ends up in ``articles.source_file``
+    and what ``graph_builder.build``'s re-parse lookup resolves."""
     source_file = source_file or path.name
     with _open_source(path) as fh:
         for descriptor_ui, name, scope_note in _iter_descriptor_records(fh):

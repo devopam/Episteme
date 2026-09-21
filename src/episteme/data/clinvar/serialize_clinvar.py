@@ -117,10 +117,10 @@ a hardcode) -- confirmed it falls through every existing arm (no CC/BY/NC/
 SA/ND token, no "TEXT MINING"/"FAIR USE" substring, no permissive-OSI
 identifier match) to ``license="unknown"`` ->
 ``subset_from_license("unknown")`` == ``"open_metadata"`` (the conservative
-default). EXPECTED and ACCEPTABLE per this task's brief (same posture as
-pubchem task-7's spec Sec 8 open item 2) -- flagged here and in
-task-8-report.md, NO new ``normalize_license`` arm added, ``article_schema.py``
-is NOT touched by this task's diff.
+default). RESOLVED in SP4.1 Task 11: ``clinvar_row`` applies a
+source-anchored governance override (user decision 2026-09-19) ->
+``license="public_domain"`` -> ``subset="commercial"``; ``normalize_license``
+is unchanged and ``license_raw`` keeps the real disclaimer text.
 
 Importable core: ``serialize_clinvar(raw_dir, processed_dir, *, max_files=0,
 force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
@@ -157,6 +157,7 @@ from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    LICENSE_PUBLIC_DOMAIN,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -179,9 +180,9 @@ SOURCE = "clinvar"
 # from https://www.ncbi.nlm.nih.gov/clinvar/docs/maintenance_use/ at
 # implementation time (2026-09-16) -- NOT a CC-variant string. Run through
 # normalize_license()/subset_from_license() like every other field -- NOT a
-# hardcode. See module docstring's "Licence" section for the confirmed
-# unknown -> open_metadata resolution and the explicit flag (no new
-# normalize_license arm added).
+# hardcode. See module docstring's "Licence" section: normalize_license()
+# yields unknown, but clinvar_row overrides it to public_domain -> commercial
+# (SP4.1 Task 11, user decision 2026-09-19).
 _CLINVAR_LICENSE_RAW = (
     "The information on this website is not intended for direct diagnostic "
     "use or medical decision-making without review by a genetics "
@@ -290,6 +291,12 @@ def clinvar_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     if not native_id:
         return None  # no native id: caller counts + skips (never synthesize an id)
     lic, lic_url, lic_raw = normalize_license(_CLINVAR_LICENSE_RAW)
+    # GOVERNANCE OVERRIDE (SP4.1 spec 3.4, user decision 2026-09-19): this source's
+    # own terms are treated as public domain -> commercial-eligible. Source-anchored
+    # on purpose: normalize_license() never returns this for free text. PubChem and
+    # ClinVar carry contributor-submitted content with per-record terms; the
+    # user accepted that risk. license_raw keeps the real disclaimer text.
+    lic = LICENSE_PUBLIC_DOMAIN
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
