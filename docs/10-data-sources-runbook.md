@@ -29,7 +29,9 @@ Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/
 
 ### 0.3 Fast path: smallest real end-to-end run
 
-Assumes prerequisites (section 1.1), `.env` (section 1), a reachable `episteme_test` with migrations 0002 and 0003 applied (section 2). Source: `europepmc_preprint`, three preprint full texts, through download, extract, load and graph. Needs internet access to Europe PMC.
+Source: `openalex`, one works shard, through download, serialize and load (the structured chain; `graph` is not wired for `openalex`, section 4.2). It needs the `aws` CLI (section 1.1) and internet access to the public OpenAlex S3 bucket (`OPENALEX_S3` in `scripts/data/_lib/sources.env`); it does not touch `ftp.ebi.ac.uk`. An alternative literature chain on Europe PMC is at the end of this section.
+
+Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reachable `episteme_test`, and migrations 0002 and 0003 applied. Run the check in section 2.3 first and expect `t|t|t`; if it does not, apply the migrations there before step 3. `EPISTEME_ACTOR` is free text recorded on audit rows; for a test run `episteme_sys_admin` is what the repository's own tests use (the value is only recorded as text on audit rows, so any attributable name works).
 
 ```bash
 # 1. preflight: prints only "set" / "MISSING", never a value (expect all set)
@@ -38,26 +40,42 @@ bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for k in EPISTE
 # 2. confirm the server and database (expect: episteme_test|19beta3)
 PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 
-# 3. run: download 3 preprints, extract them, load them, build graph edges
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+# 3a. download one works_jsonl shard (the listing of the S3 prefix can take minutes)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex download --max-files 1
+
+# 3b. serialize the shard into the biomedical staging subset
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex serialize --max-files 1
+
+# 3c. load the staged shard into episteme.articles
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex load
 
 # 4. check the audit chain (expect: audit chain OK, exit 0)
-PGDATABASE=episteme_test bash scripts/data/verify_audit_trail.sh
+PGDATABASE=episteme_test bash scripts/data/verify_audit_trail.sh 2>&1 | grep "audit chain"
 
-# 5. see what landed (row count for europepmc_preprint should now be non-zero)
-PGDATABASE=episteme_test bash scripts/data/source_inventory.sh
+# 5. see what landed (row count for openalex should now be non-zero)
+PGDATABASE=episteme_test bash scripts/data/source_inventory.sh 2>&1 | grep -v "couldn't stop"
 ```
 
-What to expect from step 3, in order (stderr is timestamped `[INFO]` lines):
+Run steps 3b to 5 only if the previous step exited 0; `audit chain OK` does not prove data landed. What to expect, in order (stderr is timestamped `[INFO]` lines):
 
-- `run_start` is recorded (no output), then a prerequisites table (`aria2c`, `aws`, `curl`, `hf`, ... `MISSING` rows are informational).
-- `stage: download`, then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>` (`E` depends on how many of the newest ids have no full text yet). Per the downloader code a per-preprint 404, 429 or 503 counts in `errors` and is not fatal; a rerun should report `skipped>0`.
-- `stage: extract`, then `done inputs=3 ok=3 failed=0 rows=<n>`.
-- `stage: load`, then one `ok <shard>.parquet rows=... event=load_commit` (or `.jsonl`) line and `done shards=1 failed=0`.
-- `stage: graph`, then a `done source_files=...` line.
-- `pipeline done: europepmc_preprint all`, process exit code 0.
+- Every `run_pipeline.sh` run records `run_start` (no output) and prints a prerequisites table (`aria2c`, `aws`, `curl`, `hf`, ... `MISSING` rows are informational; a missing `aws` is not informational for this path).
+- Step 3a: `stage: download`, the S3 listing, then a copy of the oldest `updated_date=` shard (a `.gz` of a few MB; it lands under `<raw>/openalex/data/jsonl/works/`), `write_sync_stamp`, then `pipeline done: openalex download`.
+- Step 3b: the serializer prints `schema=... source=openalex`, `raw_dir=<path> workers=1`, then `done inputs=1 ok=1 failed=0 rows=<n> records_seen=<m> accepted=<n> rejected_non_biomedical=<k>`. `rows` is only the works tagged Medicine or Biology, so it is smaller than `records_seen`; the count depends on the shard, so do not compare it to a fixed number. Exit 1 with `ERROR: no openalex works_jsonl files under <dir>` means step 3a fetched nothing.
+- Step 3c: one `ok <shard> rows=... event=load_commit` line and `done shards=1 failed=0`, then `pipeline done: openalex load`.
 
-Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`). On Windows, Python stages may also print `couldn't stop thread 'pool-1-...'` lines on stderr at exit (observed with `verify_audit_trail.sh` and `source_inventory.sh`); they were not seen to affect the exit code.
+If a step fails: the dispatcher prints `stage failed: <name>` and `resume with: ...`; fix the cause and rerun that one command (serialize and load keep per-file and per-shard markers, so finished work is skipped). A failed download wrote nothing to the database. Common causes: `s3_fetch_first_n: awscli required` (install the AWS CLI), `listing failed` (no network path to S3), or a `PGDATABASE` prefix missing (section 3).
+
+On Windows, `couldn't stop thread 'pool-1-...'` lines can appear on stderr at exit from `run_pipeline.sh` (at the start, from the `run_start` audit), `verify_audit_trail.sh` and `source_inventory.sh`; they were not seen to affect the exit code. They can bury the result line, and a `tail` may show only noise, so grep for the line you want (`audit chain OK`) as in step 4.
+
+**Alternative fast path: Europe PMC preprints.** This runs download, extract, load and graph for three preprints, but it depends on `ftp.ebi.ac.uk` being reachable from your machine (the id list `pprid.txt.gz`). The base URL is the key `EUROPEPMC_PREPRINT_BASE` in `scripts/data/_lib/sources.env`; override it in `.env` if you have a mirror.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+```
+
+Expected: `stage: download` then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>`, `stage: extract` then `done inputs=3 ok=3 failed=0 rows=<n>`, `stage: load` then one `ok <shard> ... event=load_commit` line and `done shards=1 failed=0`, `stage: graph` then `done source_files=...`, and `pipeline done: europepmc_preprint all` with exit code 0. A per-preprint 404, 429 or 503 counts in `errors` and is not fatal. If the id list itself cannot be fetched, the downloader aborts with a raw Python traceback (a `ConnectionError` naming `pprid.txt.gz`), exit code 1, `stage failed: download` and `resume with: ...`; nothing was written to the database. Check with `curl -I` against the base URL plus `/pprid.txt.gz`, retry later, or use the `openalex` path above. The `--dry-run` preview is not a reachability check: with the upstream unreachable it prints a WARN, `would harvest 0 ids`, and exits 0. Treat `0` there as an error, not as nothing to do.
+
+Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`). On Windows, Python stages may also print `couldn't stop thread 'pool-1-...'` lines on stderr at exit (observed with `run_pipeline.sh`, `verify_audit_trail.sh` and `source_inventory.sh`, see section 0.3); they were not seen to affect the exit code.
 
 If step 2 does not print `episteme_test|19beta3`, stop: you are talking to a different server or database.
 
@@ -87,7 +105,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 
 | Key | Meaning |
 |---|---|
-| `EPISTEME_ACTOR` | **Required** by `run_pipeline.sh` and every stage wrapper (the dispatcher and the wrappers exit 2 if unset). Identity recorded on every audit row. `source_inventory.sh` does not need it; `db/*.sh` do not use it. |
+| `EPISTEME_ACTOR` | **Required** by `run_pipeline.sh` and every stage wrapper (the dispatcher and the wrappers exit 2 if unset). Identity recorded on every audit row (free text; for a test run `episteme_sys_admin` is acceptable). `source_inventory.sh` does not need it; `db/*.sh` do not use it. |
 | `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connection used by the Python stages (role `episteme_app` at runtime). `PGDATABASE` is what the guard checks (section 3). |
 | `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
 | `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
@@ -330,7 +348,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo graph
 
 #### Europe PMC preprints (`europepmc_preprint`)
 
-Per-preprint full-text XML, harvested one id at a time from the Europe PMC REST API using the id list `pprid.txt.gz` at `EUROPEPMC_PREPRINT_BASE`. The old bulk range archives were discontinued by the upstream (spike of 2026-09-08). Raw: `<raw>/europepmc/preprints/PPR*.xml` plus a `.harvest_state` resume list. Ids are taken newest first so a capped run returns usable preprints. This is the smallest full literature chain; the fast path in section 0.3 uses it.
+Per-preprint full-text XML, harvested one id at a time from the Europe PMC REST API using the id list `pprid.txt.gz` at `EUROPEPMC_PREPRINT_BASE`. The old bulk range archives were discontinued by the upstream (spike of 2026-09-08). Raw: `<raw>/europepmc/preprints/PPR*.xml` plus a `.harvest_state` resume list. Ids are taken newest first so a capped run returns usable preprints. This is the smallest full literature chain; section 0.3 keeps it as the alternative fast path (it needs `ftp.ebi.ac.uk`).
 
 ```bash
 # preview (fetches only the id list; prints "would harvest N ids"; writes nothing)
@@ -552,6 +570,8 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --d
 # after an upstream commit, force a refetch
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --force --reason "refetch after COSMoS update"
 ```
+
+Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN that it was not found and downloads fall back to sequential `curl`; that is expected. The run ends with `write_sync_stamp: ./01_raw/cdisc_bc/last_sync_utc.txt` and `pipeline done: cdisc_bc download`, and `<raw>/cdisc_bc/` then holds `LICENSE`, `PROVENANCE.txt`, `export/` and `last_sync_utc.txt`.
 
 ---
 
