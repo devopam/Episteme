@@ -153,3 +153,49 @@ def test_sources_and_entrypoints_are_real():
         assert Path(REPO / p).is_file(), p
     assert "docs/11-gxp-data-integrity.md" in sec10
     assert (REPO / "docs" / "11-gxp-data-integrity.md").is_file()
+
+
+def _code_text(*roots: str) -> str:
+    out = []
+    for root in roots:
+        for p in (REPO / root).rglob("*"):
+            if p.is_file() and p.suffix in (".py", ".sh") and ".venv" not in p.parts:
+                out.append(p.read_text(encoding="utf-8", errors="ignore"))
+    return "\n".join(out)
+
+
+def test_row_issues_has_no_writer():
+    """docs/09 says nothing writes row_issues/; pin that absence."""
+    assert "no code in `src/` writes it" in doc(DOC)
+    assert "row_issues" not in _code_text("src", "scripts")
+
+
+def test_unemitted_error_classes_have_no_emitter():
+    """docs/09 says io_error / schema_violation / corrupt_source have no emitter."""
+    text = doc(DOC)
+    code = _code_text("src", "scripts")
+    for cls in ("io_error", "schema_violation", "corrupt_source"):
+        assert f"`{cls}`" in text, cls
+        assert cls not in code, cls
+
+
+def test_id_less_behaviour_for_uniprot_and_mesh():
+    """uniprot raises on an empty accession; mesh silently drops an empty descriptor UI."""
+    import io
+
+    from episteme.data.mesh.serialize_mesh import _iter_descriptor_records
+    from episteme.data.uniprot.serialize_uniprot import _parse_header
+
+    with pytest.raises(ValueError):
+        _parse_header(">sp||NAME_HUMAN Some protein OS=Homo sapiens OX=9606")
+    xml = (
+        b"<DescriptorRecordSet>"
+        b"<DescriptorRecord><DescriptorUI></DescriptorUI>"
+        b"<DescriptorName><String>NoId</String></DescriptorName></DescriptorRecord>"
+        b"<DescriptorRecord><DescriptorUI>D000001</DescriptorUI>"
+        b"<DescriptorName><String>Has Id</String></DescriptorName></DescriptorRecord>"
+        b"</DescriptorRecordSet>"
+    )
+    assert [g[0] for g in _iter_descriptor_records(io.BytesIO(xml))] == ["D000001"]
+    sec = _section(doc(DOC), "| Records with no native id |", "\n")
+    assert "`mesh` silently drops" in sec and "`uniprot` does not skip" in sec

@@ -146,6 +146,15 @@ def test_flags_are_real_and_used_sensibly():
             assert src != "corpus", rest
 
 
+def _is_wrapper_mode(text: str, mode: str) -> bool:
+    """True when `mode` appears in the wrapper's mode-parsing construct (a `case` pattern such
+    as `parquet)` / `a|b)`, or a MODE assignment / comparison), not merely anywhere in the file."""
+    m = re.escape(mode)
+    case_pat = rf'^\s*(?:[\w"*.-]+\|)*"?{m}"?(?:\|[\w"*.-]+)*\)'
+    mode_ref = rf'\bMODE\w*\s*(?:=|==|!=)\s*"?{m}\b'
+    return bool(re.search(case_pat, text, re.M) or re.search(mode_ref, text))
+
+
 def test_positional_modes_exist_in_the_wrapper():
     for rest in _all_invocations():
         src, stage, args = rest[0], rest[1], rest[2:]
@@ -161,7 +170,7 @@ def test_positional_modes_exist_in_the_wrapper():
                 continue
             if src == "hf_corpus":
                 continue  # <repo_id> argument, not a mode
-            assert re.search(rf"\b{re.escape(a)}\b", _wrapper_text(src)), (src, a)
+            assert _is_wrapper_mode(_wrapper_text(src), a), (src, a)
 
 
 def test_every_wired_source_has_a_runbook_section_or_inventory_pointer():

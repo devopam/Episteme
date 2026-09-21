@@ -174,11 +174,11 @@ Logical table: **`episteme.articles`**
 
 ### 4.1 Tables
 
-| Item | Current behaviour (verified against `db/schema.sql`, `postgres_loader.py`) |
+| Item | Current behaviour (verified against `src/episteme/data/db/schema.sql`, migration 0002, `postgres_loader.py`) |
 |------|------|
 | Row of record | `episteme.articles`: narrow "hot" table, the `ARTICLE_COLUMNS` minus `title`, `abstract`, `body_text`, `text`. No primary key and no unique index on `id`. |
 | Text | `episteme.article_body` holds `article_id` (the row's `id`), `source`, `year` and the four text columns. |
-| Partitioning | `LIST (source)`. Only `pmc` is sub-partitioned by `RANGE (year)`; every other source lands in the default partition. |
+| Partitioning | `articles`: `LIST (source)`. `pmc` (in `schema.sql`) and `bookshelf` (added by migration 0002, `src/episteme/data/db/migrations/0002_container_and_book_parts.sql`) are each sub-partitioned by `RANGE (year)`; every other source lands in the default partition. `article_body` is `LIST (source)` only, with no year sub-partitions: `article_body_pmc` and `article_body_default` in `schema.sql`, plus `article_body_bookshelf` from migration 0002. |
 | Unknown year | The loader coerces `year` NULL or unparseable to `0` (partition `articles_pmc_y0` for `pmc`). |
 | Staging hand-off | Extract and serialize write one Parquet shard (JSONL if pyarrow is missing) per input under `staging/<source>/`; `load_articles` reads it and loads Postgres. |
 | Lineage | One `episteme._lineage` row per loaded `source_file` (`rows_inserted`, `rows_deleted`, `input_content_hash`, `run_id`). |
@@ -228,7 +228,7 @@ Applies to `serialize_<src>` for `chembl`, `uniprot`, `pubchem`, `clinvar`, `rea
 
 | Gap | Where |
 |-----|-------|
-| v1.1 said Iceberg with `source` + `year` partitions; the code is Postgres, `LIST (source)` with year sub-partitions for `pmc` only. ADR-0002 describes year sub-partitions for each source; `db/schema.sql` only creates them for `pmc`. | 4.1 |
+| v1.1 said Iceberg with `source` + `year` partitions; the code is Postgres, `LIST (source)` with year sub-partitions for `pmc` (`src/episteme/data/db/schema.sql`) and `bookshelf` (migration 0002) only. ADR-0002 describes year sub-partitions for each source, and says `article_body` mirrors `articles` (`LIST (source)` then `RANGE (year)`); the code has none for other sources and `article_body` is `LIST (source)` only. | 4.1 |
 | `skipped_no_id` is not uniform across the structured serializers (table above). | 4.4 |
 | `row_issues/` has no writer. Of the failure classes in 2.4, the code sets `error_class` to `parse_error`, `unknown`, or (serializers) the exception type name; `io_error`, `schema_violation` and `corrupt_source` have no emitter in `src/episteme/data`. | 2.2, 2.4 |
 | Apollo `subset` was `other` here; the code assigns `permissive` -> `commercial` from the HF card (`apache-2.0`). | 6.2 |
