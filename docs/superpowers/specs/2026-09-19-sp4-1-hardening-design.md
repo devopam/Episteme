@@ -135,13 +135,19 @@ unchanged when the flag is absent. `--dry-run` prints the planned N.
 
 **Task 9 — `cdisc_bc` (new source, download-only).** Interpretation of the user's "BioMedical Concepts
 acquisition" request: **CDISC Biomedical Concepts and SDTM Dataset Specializations**, published in the
-public `cdisc-org/COSMoS` repository (`export/`: CSV and Excel of the latest versions; no API key; content
-CC-BY-4.0, code MIT). Roadmap conventions apply: source token `cdisc_bc`, wrapper
-`scripts/data/cdisc_bc/download_cdisc_bc.sh`, `WRAPPER` table entry, endpoint URLs only in
-`sources.env`, `--dry-run` supported, dispatch tests. Default mode fetches `export/` (listing via GitHub's
-contents API); an optional `yaml` mode adds the `yaml/` tree. **Provenance:** the wrapper records the
-resolved repository commit SHA, retrieval time and a copy of the licence file alongside the data (SP3's
-provenance-only handling, in the same spirit as the volatile group). No serializer in this plan.
+public `cdisc-org/COSMoS` repository (`export/`: CSV and Excel of the latest versions; no API key).
+**Licence (corrected during execution):** the repository README says code and scripts are MIT and that
+"the content files like documentation and minutes" are CC-BY-4.0; it states **no licence for the
+`export/` data files** (the repo `LICENSE` is MIT), so the data licence is *unverified* — an earlier draft
+of this spec said "content CC-BY-4.0", which over-claimed. Roadmap conventions apply: source token
+`cdisc_bc`, wrapper `scripts/data/cdisc_bc/download_cdisc_bc.sh`, `WRAPPER` table entry, endpoint URLs only
+in `sources.env`, `--dry-run` supported, dispatch tests. The wrapper fetches `export/` only (listing via
+GitHub's contents API; no `yaml` mode — `contents/yaml` holds only dated subfolders, so a `yaml` mode was
+dropped during execution). **Provenance:** the wrapper records the resolved repository commit SHA,
+retrieval time, the repo URL, and an honest licence line ("not stated for export/ data … verify before
+redistribution") plus a copy of the repo `LICENSE`, alongside the data. No serializer in this plan; any
+future `cdisc_bc` serializer must treat the data licence as unverified (default `open_metadata`) until the
+user confirms CDISC's terms.
 *If the user meant a different source (e.g. UMLS concepts — licence-gated, Stream 2 only), only this task
 changes.*
 
