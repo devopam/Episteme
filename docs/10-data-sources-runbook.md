@@ -1,459 +1,629 @@
-# Episteme — Data Sources Runbook
+# Episteme - Data Sources Operator Runbook
 
-**Status:** Living document  
-**Purpose:** Operational memory for each open-data source: what it is, how to acquire it, update cadence, scripts, known failures, and license posture.  
-**Related:** `docs/09-extraction-contract.md`, `docs/08-data-storage-principles.md`
+**Status:** Living document (SP5, v2). The single operator runbook for the acquisition and load pipeline.
+**Purpose:** Run any wired source, first time or incrementally, against a database you are allowed to touch, and know what "good" looks like.
+**Related:** `docs/12-source-inventory.md` (what is wired, per source), `docs/11-gxp-data-integrity.md` (audit trail, DB-mode guard, go-live), `docs/09-extraction-contract.md` (row contract), `docs/08-data-storage-principles.md` (schema, migrations).
 
----
-
-## 0. Quick status board (as of 2026-08-31)
-
-| Source | Raw on disk | Script(s) | Notes |
-|--------|-------------|-----------|-------|
-| PubMed baseline + daily | Yes | PubMed aria2 / MD5 scripts | Primary abstract corpus |
-| ApolloCorpus | Yes | `download_apollo_corpus.sh` | Multilingual; license diligence open |
-| EPMC preprints | Yes | `download_europepmc.sh` | 5 range archives |
-| EPMC preprint abstracts | Deferred | same | Upstream zip often unlisted/unfetchable |
-| EPMC ID mappings | **Corrupt file** | `download_epmc_id_mappings.sh` | **Re-download required** |
-| Author manuscripts | Partial / retry | `download_author_manuscripts.sh` | EPMC 503 intermittent |
-| EPMC lite metadata | Incomplete | `download_epmc_lite_metadata.sh` | Resume `PMCLiteMetadata.tgz` |
-| PMC commercial OA | Sample only | `download_pmc_oa_comm.sh` | Full pull on SSD |
-
-Storage root (typical): `EpistemeData/01_raw/...`
+Every command in a code fence below is meant to be pasted as-is from the repository root. `tests/docs/test_runbook_doc.py` checks that each `run_pipeline.sh` line is one the dispatcher accepts.
 
 ---
 
-## 1. PubMed (NLM)
+## 0. Read this first
 
-### What
-Citation/abstract XML for the MEDLINE/PubMed corpus. Baseline yearly + **daily** update files. Not full text.
+### 0.1 What replaced the status board
 
-### Location (raw)
-```text
-01_raw/pubmed/baseline/     # pubmedNNNN.xml.gz + .md5
-01_raw/pubmed/updatefiles/  # daily increments + .md5
-```
+The old dated "quick status board" is gone. Two documents replace it:
 
-### Official endpoints
-- Baseline: `ftp://ftp.ncbi.nlm.nih.gov/pubmed/baseline/`
-- Updates: `ftp://ftp.ncbi.nlm.nih.gov/pubmed/updatefiles/`
-- Prefer listing exact filenames (no shell globs on FTP).
+- **What exists and how it is licensed:** `docs/12-source-inventory.md` (static: class, stages wired, licence class and basis, cadence, script).
+- **What is on this machine right now:** `scripts/data/source_inventory.sh` (machine-local: last sync stamp and `episteme.articles` row count per source; section 7).
 
-### Scripts
-- Baseline / update download with aria2c + resume
-- Separate MD5 download + `verify` / repair helpers (as built earlier in the project)
+Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/09-extraction-contract.md`. Storage: `docs/08-data-storage-principles.md`.
 
-### Frequency
-| Artifact | Cadence |
-|----------|---------|
-| Baseline | Annual (new year set) |
-| Update files | **Daily** |
+### 0.2 Ground rules
 
-### How to run (pattern)
+1. **Agents and CI run against `episteme_test`, never `episteme`.** Prefix every pipeline command with `PGDATABASE=episteme_test`. A real environment variable beats `.env`, so the prefix always wins. Each Bash invocation is a fresh shell in most agent harnesses, so an earlier `export` does not persist: put the prefix on every command.
+2. **Confirm the server before any DB step** (section 2.2). This machine can have more than one PostgreSQL installed (a PG 17 client is first on `PATH`); the pipeline database is the native PG19beta3 on `localhost:5433`.
+3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `./01_raw/pmc/oa_comm` relative to the current directory.
+4. **Never print `.env`.** It holds credentials. Section 1.3 shows how to check that a key is set without showing its value.
+5. **Do not run a bulk download unbounded** unless that is the actual task. Use `--max-files N` (section 4.3) and read section 5 for which sources honour it.
+
+### 0.3 Fast path: smallest real end-to-end run
+
+Assumes prerequisites (section 1.1), `.env` (section 1), a reachable `episteme_test` with migrations 0002 and 0003 applied (section 2). Source: `europepmc_preprint`, three preprint full texts, through download, extract, load and graph. Needs internet access to Europe PMC.
+
 ```bash
-# Baseline (example pattern — use project scripts)
-# Download listed pubmed*.xml.gz + matching .md5
-# Verify MD5; repair mismatches
+# 1. preflight: prints only "set" / "MISSING", never a value (expect all set)
+bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for k in EPISTEME_ACTOR PGHOST PGPORT PGUSER PGPASSWORD EPISTEME_SYS_ADMIN_PASSWORD; do if [ -n "${!k:-}" ]; then echo "$k=set"; else echo "$k=MISSING"; fi; done'
 
-# Daily updates: resume from last successful date / file list
+# 2. confirm the server and database (expect: episteme_test|19beta3)
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
+
+# 3. run: download 3 preprints, extract them, load them, build graph edges
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+
+# 4. check the audit chain (expect: audit chain OK, exit 0)
+PGDATABASE=episteme_test bash scripts/data/verify_audit_trail.sh
+
+# 5. see what landed (row count for europepmc_preprint should now be non-zero)
+PGDATABASE=episteme_test bash scripts/data/source_inventory.sh
 ```
 
-### Extraction posture
-- `source = pubmed`
-- `subset = open_metadata`
-- `license = unknown` (unless policy maps NLM terms more finely)
-- Expect many **title-only** historical records → `extract_status=partial` when short
+What to expect from step 3, in order (stderr is timestamped `[INFO]` lines):
 
-### Known issues
+- `run_start` is recorded (no output), then a prerequisites table (`aria2c`, `aws`, `curl`, `hf`, ... `MISSING` rows are informational).
+- `stage: download`, then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>`. A per-preprint 404 or 503 counts in `errors` and is never fatal; a second run of the same command prints `skipped>0`.
+- `stage: extract`, then `done inputs=3 ok=3 failed=0 rows=<n>`.
+- `stage: load`, then one `ok <shard>.parquet rows=... event=load_commit` (or `.jsonl`) line and `done shards=1 failed=0`.
+- `stage: graph`, then a `done source_files=...` line.
+- `pipeline done: europepmc_preprint all`, process exit code 0.
+
+Exit codes: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing required environment variable, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Python stages also print harmless `couldn't stop thread 'pool-1-...'` lines on stderr at exit on Windows; ignore them.
+
+If step 2 does not print `episteme_test|19beta3`, stop: you are talking to a different server or database.
+
+---
+
+## 1. Environment and `.env`
+
+Configuration is read from three places. Shell scripts load them in this order, last wins: `scripts/data/_lib/sources.env` (committed endpoint defaults) then `./.env` then the real environment. `src/episteme/config.py` is the only Python reader and ranks them real environment, then `.env`, then `sources.env`. In both, a real environment variable **with a non-empty value** beats `.env`.
+
+### 1.1 Prerequisites
+
+| Need | For | Check |
+|---|---|---|
+| Git Bash (or bash) | every `scripts/data/*.sh` | `bash --version` |
+| Python venv `.venv` with `pip install -e ".[data]"` | all Python stages; scripts look for `.venv/Scripts/python.exe`, then `.venv/bin/python`, then `python`. Override with `PYTHON=/path/to/python`. | `.venv/Scripts/python.exe -c "import episteme"` |
+| PostgreSQL 19 client (`psql`) | section 2 and the migration commands. Scripts prefer `/c/Program Files/PostgreSQL/19/bin/psql`; override with `PSQL=...`. | `"/c/Program Files/PostgreSQL/19/bin/psql" --version` |
+| `curl` | every listing-based download, size checks | `curl --version` |
+| `aria2c` | fast segmented downloads; without it downloads fall back to sequential `curl` (slow, warned) | `aria2c --version` |
+| `aws` CLI (or `s5cmd`) | `openalex` only | `aws --version` |
+| Hugging Face CLI (`hf`, or the older `huggingface-cli`) | `apollo`, `guidelines`, `hf_corpus` only | `hf --version` |
+
+`scripts/data/_lib/check_prereqs.sh` prints this tool table (it never fails) at the start of every `run_pipeline.sh` run.
+
+### 1.2 Keys (names only)
+
+Values are never shown in this document. Put them in `.env` (gitignored) or the real environment.
+
+| Key | Meaning |
+|---|---|
+| `EPISTEME_ACTOR` | **Required** by `run_pipeline.sh` and every stage wrapper (exit 2 if unset). Identity recorded on every audit row. `source_inventory.sh` does not need it; `db/*.sh` do not use it. |
+| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connection used by the Python stages (role `episteme_app` at runtime). `PGDATABASE` is what the guard checks (section 3). |
+| `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
+| `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
+| `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh` (operator only; see section 2). |
+| `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
+| `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
+| `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
+| `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
+| `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
+| `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
+| `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
+| `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
+| `OM_HOST`, `OM_JWT` | Optional OpenMetadata ingest; blank means skip. |
+| `PYTHON`, `PSQL` | Interpreter and client overrides for the scripts. |
+| Endpoint keys (`PUBMED_FTP_BASE`, `EUROPEPMC_BASE`, `EUROPEPMC_PREPRINT_BASE`, `CHEMBL_BASE`, `UNIPROT_MIRRORS`, `OPENALEX_S3`, `COSMOS_API_BASE`, ...) | Defaults live in `scripts/data/_lib/sources.env`. Override in `.env` or the environment; never edit a wrapper. |
+
+Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europe PMC feeds: `<raw>/europepmc/<preprints|manuscripts|id_mappings|lite_metadata|abstracts>/`), staging shards in `<processed>/staging/<source>/`, per-file markers under `<processed>/_ops/<source>/`, the audit JSONL mirror in `<processed>/_ops/_audit/`, corpus shards under `<corpus>/`. `last_sync_utc.txt` in a source's raw directory is the stamp `source_inventory.sh` reads.
+
+### 1.3 The `.env` file rules
+
+- **Plain `KEY=value` lines only.** The shell loader (`load_dotenv` in `scripts/data/_lib/common.sh`) does **not** strip inline comments, so `KEY=value   # note` loads the value `value   # note`. Put comments on their own lines. It strips one matching pair of surrounding quotes, tolerates CRLF, and does not understand an `export ` prefix.
+- `.env.example` currently carries inline comments on several lines (for example `EPISTEME_DATA_ROOT=.` followed by a comment). Strip them when you copy it to `.env`; the Python side tolerates them but the shell side does not.
+- Values that contain spaces must be quoted.
+- Check a key without printing it: the preflight command in section 0.3. `.env` is gitignored; never paste or commit it.
+
+### 1.4 Windows notes
+
+- `psql` on `PATH` may be an older version; pass `PSQL="/c/Program Files/PostgreSQL/19/bin/psql"` as shown.
+- The field-shape `--report` mode (section 6.3) crashes with a `cp1252` encoding error on Windows consoles when a record contains non-ASCII text. Run it with `PYTHONIOENCODING=utf-8`.
+
+---
+
+## 2. Database setup
+
+### 2.1 Roles and databases
+
+Native PostgreSQL 19beta3, `localhost:5433`, databases `episteme` (primary, production name) and `episteme_test` (secondary; agents and CI). Roles: `postgres` (bootstrap only), `episteme_sys_admin` (DDL, migrations, developer), `episteme_app` (pipeline runtime; INSERT and SELECT only on `_audit`).
+
+Bootstrapping is an operator task and is normally already done. **Agents do not run these**; `init_database.sh` creates and touches *both* databases including production, and the guard does not cover raw `psql` scripts (docs/11 section 7):
+
+```bash
+bash scripts/data/db/install_extensions.sh
+bash scripts/data/db/init_database.sh
+```
+
+- `install_extensions.sh` tries `CREATE EXTENSION vector` and `pg_search` in both databases. On the local PG19beta3 build the extension files are absent: it prints the server error, defers to migration 0001, and still exits 0.
+- `init_database.sh` is idempotent: roles and databases only if absent, `extensions.sql`, then `schema.sql` per database. An existing `episteme` schema is left alone unless `EPISTEME_INIT_FORCE=1`, which drops and recreates it (data loss). It needs `PGHOST`, `PGPORT`, `EPISTEME_SYS_ADMIN_PASSWORD` and `EPISTEME_DB_PASSWORD` and never echoes a password.
+
+### 2.2 Confirm the server before any DB step (mandatory for agents)
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
+```
+
+Expected on the local build: `episteme_test|19beta3`. Any other database name or version means you are on the wrong server or the wrong database: stop and fix `PGPORT`/`PGDATABASE` before continuing. (The check uses `select current_setting('server_version')` written with `$$` quoting so it survives the shell.)
+
+### 2.3 Migrations: 0001 blocked, 0002 and 0003 applied by hand
+
+Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
+
+| Migration | Adds | Status on the local build |
+|---|---|---|
+| `0001_add_chunk_vector_columns.sql` | `chunks.embedding` (pgvector) and `chunks.chunk_tsv` | **Cannot apply:** `vector` and `pg_search` are absent on PG19beta3. Needed only for Phase 1 retrieval. |
+| `0002_container_and_book_parts.sql` | `articles.container_id` and `book_meta`, the `bookshelf` partitions, `article_parts` | Required before **any** load (the loader writes those columns) and before `graph`. |
+| `0003_mesh_hierarchy.sql` | `episteme.mesh_hierarchy` | Required before `mesh` graph. |
+
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 or 0003, apply those two directly. Both are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+```
+
+Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t`):
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$)"'
+```
+
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies all three and tracks them. Do not run it on the local build.
+
+---
+
+## 3. The database-mode guard
+
+Full statement: `docs/11-gxp-data-integrity.md` section 7. Operator summary:
+
+| Setting | Values | Effect |
+|---|---|---|
+| `EPISTEME_DB_MODE` | `read-only`, `restricted`, `unrestricted` | `restricted` (the default when unset) refuses to open a connection when the target database name equals `EPISTEME_PRODUCTION_DATABASE` (default `episteme`). `read-only` opens connections with `default_transaction_read_only=on`. `unrestricted` never refuses. Any other value is a config error. |
+| `EPISTEME_DB_TARGET` | `primary` (default), `secondary` | `primary` uses `PGDATABASE`; `secondary` uses `PGDATABASE_SECONDARY` (must be set, else a config error). |
+| `PGDATABASE_SECONDARY` | database name | The secondary target; `episteme_test` here. |
+| `EPISTEME_PRODUCTION_DATABASE` | database name | The name the guard protects. Default `episteme`. |
+
+Rules of use:
+
+- **Agents and CI target `episteme_test`:** `PGDATABASE=episteme_test` on every command (or `EPISTEME_DB_TARGET=secondary`). With the shipped `.env` (`PGDATABASE=episteme`, mode `restricted`), a command without the prefix is refused with `Refusing to open a connection to production database 'episteme'`; nothing is written. Symptom in `run_pipeline.sh`: `WARN run_start audit failed; proceeding unaudited (... refused by the DB-mode guard ...)`, and DB-writing stages fail. Python stages that audit best-effort (extract, serialize) keep going and fall back to an unchained mirror line, so a missing prefix can also look like a quiet success; always check the `PGDATABASE` prefix first.
+- The guard compares the **database name only**. It does not check the server, and it does not cover raw `psql` and `scripts/data/db/*.sh`. It is a safety rail, not an access control.
+- Do not use `EPISTEME_DB_MODE=unrestricted` from an agent. The `.env` template ships `restricted`.
+- **Go-live:** production runs set `EPISTEME_DB_MODE=restricted` in the environment (a development convenience of `unrestricted` must not be carried over) and follow the checklist in docs/11 section 8: verify the audit chain, confirm audit partitions exist for the current and coming months (only `_audit_202609`, `_audit_202610` and a default partition ship), protect the mirror directory, confirm server identity by hand. A deliberate production run uses a one-command override, `EPISTEME_DB_MODE=unrestricted`, prefixed on that command only.
+
+---
+
+## 4. Pipeline model
+
+### 4.1 The dispatcher
+
+```text
+bash scripts/data/run_pipeline.sh <source> <stage> [--dry-run] [--force] [--reason REASON] [--max-files N]
+bash scripts/data/run_pipeline.sh corpus materialize
+```
+
+Stages: `all`, `download`, `extract`, `load`, `graph`, `materialize`, `enrich`, `serialize`. Sources are the keys of the `WRAPPER` table in `scripts/data/run_pipeline.sh` (all listed in `docs/12-source-inventory.md`), plus the alias `corpus` (materialize only).
+
+Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2), then an unknown source (exit 3), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
+
+Tokens the dispatcher does not recognise are not dropped: they are forwarded to the download wrapper as the MODE or repo argument (for example `parquet` for `openalex`, `all` for `chembl`, a repo id for `hf_corpus`) and to flags such as `--include-current` or `--since`. Only the download wrapper sees them.
+
+### 4.2 Stage matrix
+
+| Source class | download | extract | serialize | load | graph | enrich | materialize | all |
+|---|---|---|---|---|---|---|---|---|
+| `pmc` | yes | yes | no (exit 3) | yes | yes | yes | yes | download, extract, load, graph, materialize, enrich |
+| Literature: `pubmed`, `apollo`, `europepmc_preprint`, `europepmc_manuscript`, `guidelines`, `bookshelf` | yes | yes | no | yes | yes | no | no | download, extract, load, graph |
+| Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
+| `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
+| `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
+| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc` | yes | no | no | no | no | no | no | download only |
+| `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
+
+Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
+
+### 4.3 Flags
+
+- **`--dry-run`** is supported on `download` only; any other stage (including `all`) exits 3 with `... writes the DB - --dry-run is supported on 'download' only`. A dry run writes no files and skips the whole audit bracket (`dry-run: skipping run_start/run_end audit bracket`). It is **not** always offline: most wrappers still list or probe the upstream over the network (`curl` listings, mirror and release probes; `cdisc_bc` makes two GitHub API calls that count against the unauthenticated 60 requests per hour limit). The Hugging Face wrappers (`apollo`, `guidelines`, `hf_corpus`) only echo what they would do. `hf_corpus` with no repo id is a soft no-op (exit 0) under `--dry-run` and an error otherwise.
+- **`--max-files N`** bounds the run; the meaning is per stage:
+  - `download`: caps the resolved file set (`pmc` translates it to `--limit`; default `--limit 10` when absent, `0` means all). Honoured by every source except `apollo`, `guidelines` and `hf_corpus` (the Hugging Face CLI resumes by itself; the flag is ignored with an INFO line).
+  - `extract` and `serialize`: caps the number of input files parsed (default from `EPISTEME_SAMPLE_LIMIT`, `0` = all).
+  - `all`: applies to its download, extract and serialize stages.
+  - `load`, `graph`, `enrich`, `materialize`: ignored.
+  - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` dies with exit 2.
+  - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
+- **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
+
+### 4.4 Audit bracket and resume
+
+Every non-dry run records `run_start` and, on completion, `run_end`, both with object = the source and a run id `<source>-<UTC timestamp>` shared by all stages of the invocation. On a stage failure the dispatcher records a `run_end` with reason `failed at stage <name>`, prints `resume with: run_pipeline.sh <source> <name>` and exits 1. A failed `run_start` or `run_end` (database down, refused by the guard) is only a `WARN`, so a run can complete without its bracket; verify (section 7). Extract and serialize stages keep a per-file success marker and skip finished files; `load` keeps a per-shard `load_success` marker. Re-running a stage is therefore the resume mechanism.
+
+### 4.5 Per-stage arguments (what the dispatcher forwards)
+
+| Stage | Receives |
+|---|---|
+| `download` | `--max-files N`, `--force --reason R`, tokens it does not recognise; `--dry-run` as `EPISTEME_DRY_RUN=1` |
+| `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
+| `load` | `--force --reason R` only |
+| `graph`, `enrich`, `materialize` | nothing |
+
+---
+
+## 5. Sources
+
+Each block gives what it is, where it lands, the first-time commands, the incremental commands, and known failures. Licence and cadence per source: `docs/12-source-inventory.md`. All commands carry `PGDATABASE=episteme_test`; downloads need internet access. "Incremental" means: rerun the same commands. Downloaders skip size-matched files; extract, serialize and load skip files that already have a success marker.
+
+### 5.1 Literature (download, extract, load, graph)
+
+Row contract and status rules: `docs/09-extraction-contract.md`. Load and graph need migration 0002 (section 2.3).
+
+#### PubMed (`pubmed`)
+
+Citation and abstract XML: baseline (annual) and daily update files, from `PUBMED_FTP_BASE`. Not full text. Raw: `<raw>/pubmed/baseline/` (mode `baseline`, the default), `<raw>/pubmed/updates/` (mode `updates`, the upstream `updatefiles` directory) and the published checksums under `<raw>/pubmed/md5/`.
+
+```bash
+# first time (bounded): one baseline file plus its checksum
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed download --max-files 2
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed graph
+
+# whole baseline in one go (large; unbounded)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed all
+
+# incremental: daily update files
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed download updates
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
+```
+
+Verify downloaded checksums locally (offline): `bash scripts/data/pubmed/verify_pubmed.sh all`; add `--repair` to re-fetch failures. Exit 1 iff a file fails; a missing `.md5` alone is a warning.
+
 | Issue | Mitigation |
-|-------|------------|
-| FTP glob `pubmed26n*.xml.gz` fails | List remote names; feed explicit URL list to aria2c |
-| MD5 mismatches | Repair script; re-download failed files only |
-| Early PMIDs lack abstracts | Normal; status rules treat short title-only as `partial` |
+|---|---|
+| Checksum mismatch after a download | `bash scripts/data/pubmed/verify_pubmed.sh all --repair` re-fetches only failed or checksum-less files |
+| Early PMIDs have no abstract | Normal; short title-only records are `extract_status=partial` (docs/09) |
+| Extract reports no input files | Nothing downloaded under `<raw>/pubmed/` yet, or `EPISTEME_RAW_ROOT` points elsewhere than where the download wrote |
 
-### Sample audit notes
-- MeSH, authors, journal, language, publication types populate well.
-- Validate abstract extraction on a **recent** baseline file, not only pmid 1–5.
+#### PMC commercial open access (`pmc`)
 
----
+Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects with `metadata/PMC{id}.{version}.json`), licence-filtered to the commercial-friendly set. Raw: `./01_raw/pmc/oa_comm/` **relative to the current directory** (the downloader's default output directory is not read from `EPISTEME_RAW_ROOT`; run from the repository root and keep `EPISTEME_RAW_ROOT=./01_raw`, or the extractor will not find the files). `pmc` also owns `materialize` and `enrich`.
 
-## 2. PMC Commercial OA (`oa_comm`) — AWS Open Data
-
-### What
-Full-text open-access articles under **commercial-friendly** licenses (CC0, CC BY, CC BY-SA, CC BY-ND). Post–August 2026 layout is **per-article** objects + `metadata/PMC{id}.{ver}.json` (legacy `oa_comm/xml/all/` bulk prefixes removed/empty).
-
-### Location (raw)
-```text
-01_raw/pmc/oa_comm/
-  metadata/     # PMC*.json
-  xml/          # PMC*.xml when downloaded
-```
-
-### Official endpoints
-- Bucket: `s3://pmc-oa-opendata` (public, `--no-sign-request`)
-- HTTPS: `https://pmc-oa-opendata.s3.amazonaws.com/`
-- Metadata: `metadata/PMC{id}.{version}.json` with `xml_url`, `text_url`, `license_code`, …
-- Docs: NCBI “Accessing PMC Article Datasets Using Amazon Web Services”
-
-### Scripts
 ```bash
-./download_pmc_oa_comm.sh ./01_raw/pmc/oa_comm xml false <LIMIT>
-# LIMIT=20 sample; LIMIT=0 full commercial set (huge — use SSD)
+# first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --max-files 20
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc extract --max-files 20
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc graph
+
+# offline preview of the download plan (nothing resolved, nothing written)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --dry-run
+
+# full pipeline including corpus materialization and OpenMetadata manifest (unbounded)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc all
 ```
-Python: ESearch commercial filters **or** metadata-driven download; verifies `license_code`.
 
-### Frequency
-| Artifact | Cadence |
-|----------|---------|
-| Article objects / metadata | Continuous / daily |
-| Inventory reports under bucket | Daily (S3 inventory) |
+Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits. `pmc enrich` writes the OpenMetadata manifest; ingest happens only if `OM_HOST` is set (otherwise the manifest file only).
 
-### How to run
-```bash
-# Sample path test
-./download_pmc_oa_comm.sh ./01_raw/pmc/oa_comm xml false 20
-
-# Full (SSD)
-./download_pmc_oa_comm.sh /Volumes/SSD/.../01_raw/pmc/oa_comm xml false 0
-```
-Optional: `export NCBI_API_KEY=...` for ESearch rate limits.
-
-### Extraction posture
-- `source = pmc_oa_comm`
-- `subset = commercial` (after license check)
-- Populate `license` from `license_code`; `pmc_version`, `is_manuscript`, `is_historical_ocr`, `pdf_url` from metadata
-- Prefer **XML** for authors/journal/abstract/body; JSON alone is incomplete for bibliography
-
-### Known issues
 | Issue | Mitigation |
-|-------|------------|
-| Legacy path `oa_comm/xml/` empty after Aug 2026 | Use per-article + metadata JSON layout |
-| Full set ~millions of articles | SSD; staged `LIMIT`; long-running `tmux` |
-| Authors missing if only JSON used | Parse JATS XML |
+|---|---|
+| Legacy `oa_comm/xml/all/` bulk prefixes are empty since August 2026 | The downloader uses the per-article layout plus metadata JSON |
+| Full set is millions of articles | Bound with `--max-files`; use SSD and a long-lived session for a full pull |
+| Authors or journal missing | JSON alone is incomplete; the extractor reads the JATS XML |
 
-### Sample audit notes
-- CC BY commercial subset confirmed on samples.
-- Body text recoverable from XML; extend parser for authors/journal.
+#### Apollo corpus (`apollo`)
 
----
+Hugging Face dataset `APOLLO_HF_REPO` (`FreedomIntelligence/ApolloCorpus`). Raw: `<raw>/apollo/`. Needs the Hugging Face CLI. The download ignores `--max-files` and `--force`; only extract honours `--max-files`.
 
-## 3. Europe PMC — Preprints (full text)
-
-### What
-Open preprint full text packaged in PMCID/PPR range `.xml.gz` files on EBI FTP.
-
-### Location (raw)
-```text
-01_raw/europepmc/preprints/
-  PPR*_*.xml.gz
-  remote_manifest.txt
-```
-
-### Official endpoints
-```text
-ftp://ftp.ebi.ac.uk/pub/databases/pmc/preprints/
-```
-
-### Scripts
 ```bash
-./download_europepmc.sh ./01_raw/europepmc preprints
-# or: both  (preprints + abstracts)
+# preview (offline; prints what it would download)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo download --dry-run
+
+# first time
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo extract --max-files 5
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo graph
 ```
 
-### Frequency
-Incremental range files as EPMC publishes; not a simple daily single file.
-
-### How to run
-```bash
-./download_europepmc.sh ./01_raw/europepmc preprints
-# Restartable: size-matched files skipped
-```
-
-### Extraction posture
-- `source = epmc_preprint`
-- License from JATS → normalised `license` + `license_url`; NC licenses → `subset=text_mining`
-- Strong `title` / `abstract` / `body_text` in samples
-
-### Known issues
 | Issue | Mitigation |
-|-------|------------|
-| FTP listing flakiness | Dual `--list-only` + LIST parse |
-| Authors under-parsed in audit | Improve JATS contrib mapping |
+|---|---|
+| Neither `hf` nor `huggingface-cli` found | `pip install -U "huggingface_hub[cli,hf_transfer]"`; the prerequisites table shows which is present |
+| Sparse bibliographic fields | Expected for this corpus; docs/12 lists the licence class and the open commercial-use diligence |
 
-### Sample audit notes
-- License differentiation (CC BY vs BY-NC) works for subset routing.
+#### Europe PMC preprints (`europepmc_preprint`)
 
----
+Per-preprint full-text XML, harvested one id at a time from the Europe PMC REST API using the id list `pprid.txt.gz` at `EUROPEPMC_PREPRINT_BASE`. The old bulk range archives were discontinued by the upstream (spike of 2026-09-08). Raw: `<raw>/europepmc/preprints/PPR*.xml` plus a `.harvest_state` resume list. Ids are taken newest first so a capped run returns usable preprints. This is the smallest full literature chain; the fast path in section 0.3 uses it.
 
-## 4. Europe PMC — Preprint abstracts
-
-### What
-Bulk abstract packages (zip). Often only a **current-month** name appears; file may be listed but not fetchable.
-
-### Location (raw)
-```text
-01_raw/europepmc/preprint_abstracts/
-```
-
-### Official endpoints
-```text
-ftp://ftp.ebi.ac.uk/pub/databases/pmc/preprint_abstracts/
-```
-
-### Scripts
 ```bash
-./download_europepmc.sh ./01_raw/europepmc abstracts
+# preview (fetches only the id list; prints "would harvest N ids"; writes nothing)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download --dry-run
+
+# first time, bounded
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+
+# stage by stage
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint extract --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint graph
+
+# incremental: same download command; already-harvested ids are skipped
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download
 ```
 
-### Frequency
-Monthly-style packages when published.
+`--since` is accepted by this downloader but is a documented no-op (the id feed has no server-side filter). Per-id 404 (withdrawn, or no full text yet), 429 and 503 are counted in `errors=` and are not fatal; a 404 id is retried on the next run.
 
-### Known issues
+#### Europe PMC author manuscripts (`europepmc_manuscript`)
+
+Author-accepted manuscript tarballs from `EUROPEPMC_MANUSCRIPT_BASE`; text-mining licensed, not for commercial mixing by default policy. Raw: `<raw>/europepmc/manuscripts/`. Positional modes on download: format `xml` (default) or `txt`; scope `all` (default), `baseline` or `incr`.
+
+```bash
+# first time, bounded: two incremental archives
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_manuscript download incr --max-files 2
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_manuscript extract --max-files 2
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_manuscript load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_manuscript graph
+
+# baseline set (multi-GB tarballs; check free disk first)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_manuscript download baseline
+```
+
 | Issue | Mitigation |
-|-------|------------|
-| `Resource not found` for listed zip | Probe/fetchable check; **defer current month** |
-| Empty discovery | Non-fatal under `both` mode |
+|---|---|
+| HTTP 503 from the Europe PMC edge | Transient; rerun later (the origin path is correct). The downloaders retry inside `aria2c`/`curl` |
+| Very large baselines | Check free disk; interrupted runs resume, size-matched files are skipped |
 
-### Status
-**Deferred** until upstream publishes stable files. Preprint **full text** is the valuable path.
+#### Bookshelf (`bookshelf`)
 
----
+NCBI LitArch open-access book packages; the wrapper reads the package list from `file_list.txt` (falling back to `file_list.csv`) under `BOOKSHELF_BASE` because the hashed tree has no usable directory listing. Raw: `<raw>/bookshelf/packages/`. Needs migration 0002 (bookshelf partitions, `article_parts`). A dry run can list thousands of urls.
 
-## 5. Europe PMC — PMID–PMCID–DOI mappings
-
-### What
-Single mapping table for joins across PubMed / PMC / DOI.
-
-### Location (raw)
-```text
-01_raw/europepmc/id_mappings/
-  PMID_PMCID_DOI.csv.gz    # expected
-  remote_manifest.txt
-```
-
-### Official endpoints
-```text
-https://europepmc.org/ftp/DOI_mappings/
-# file: PMID_PMCID_DOI.csv.gz (~monthly overwrite on 1st)
-```
-
-### Scripts
 ```bash
-./download_epmc_id_mappings.sh ./01_raw/europepmc/id_mappings
+# first time, bounded
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf download --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf extract --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf graph
 ```
 
-### Frequency
-**Monthly** (file overwritten on the first of the month per EPMC docs).
+#### Guidelines (`guidelines`)
 
-### Integrity check (mandatory)
+Hugging Face dataset `GUIDELINES_HF_REPO` (`epfl-llm/guidelines`); rows are `unknown` licence, subset `other` (docs/12). Raw: `<raw>/guidelines/`. Download ignores `--max-files`.
+
 ```bash
-gzip -dc ./01_raw/europepmc/id_mappings/PMID_PMCID_DOI.csv.gz | head -5
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines extract --max-files 5
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines graph
 ```
-Expect real headers/rows.  
 
-**Audit finding (2026-08-31):** local file contained Oracle errors (`ORA-12537`, `SP2-0751`) — **not** mapping data. Treat as `corrupt_source`; delete and re-download.
+#### Europe PMC support feeds (no corpus rows)
 
-### Extraction posture
-- **Not** loaded into `episteme.articles`
-- Target table: `episteme.id_map`
-- Only after integrity check passes
+**`europepmc_id_mappings`**: the PMID / PMCID / DOI table (`PMID_PMCID_DOI.csv.gz`, about 340 MB) from `EUROPEPMC_ID_MAPPINGS_BASE`; loaded into `episteme.id_map`, not `episteme.articles`. Raw: `<raw>/europepmc/id_mappings/`. Monthly upstream refresh.
 
-### Known issues
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_id_mappings download
+gzip -dc 01_raw/europepmc/id_mappings/PMID_PMCID_DOI.csv.gz | head -3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_id_mappings load
+```
+
+Integrity check (mandatory before load): the `head` above must show the header `PMID,PMCID,DOI` and real rows. A payload holding error text (an earlier audit found Oracle `ORA-`/`SP2-` error text saved as the file) is a corrupt source: delete it and re-download. The load is idempotent (`ON CONFLICT DO NOTHING`), so a rerun of an unchanged file inserts no new rows; `--force` is accepted and does nothing.
+
+**`europepmc_lite`**: `PMCLiteMetadata.tgz` (about 2 GB), weekly. It enriches existing `episteme.articles` rows (journal, year); it creates no rows, so load an article source first. Raw: `<raw>/europepmc/lite_metadata/`.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_lite download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_lite enrich
+```
+
+**`europepmc_abstracts`**: preprint abstract zips from `EUROPEPMC_ABSTRACTS_BASE`; download-only. The current, still-accumulating month is deferred (`abstracts: deferring current (unpublished) month`) unless `--include-current` is passed, because upstream lists the file before it is fetchable.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_abstracts download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_abstracts download --include-current
+```
+
 | Issue | Mitigation |
-|-------|------------|
-| HTTP **503** from Cloudflare | Retry later; path is correct |
-| Corrupt payload | Validate with `head` after every download |
-| macOS Bash `mapfile` | Use portable script (no `mapfile`) |
+|---|---|
+| Interrupted 2 GB lite download | Rerun the same command; `aria2c -c` resumes (curl fallback also resumes) |
+| Only the current month listed for abstracts | Deferred by design; retry next month, or pass `--include-current` deliberately |
+| Corrupt id-mappings payload | Section above: `head` check, delete, re-download |
 
----
+### 5.2 Structured databases (download, serialize, load)
 
-## 6. Europe PMC — Author manuscripts
+Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`.
 
-### What
-Author-accepted manuscripts (XML/TXT tarballs by PMCID range) for text mining / funder OA policies. **Not** default commercial training material.
+| Source | Download modes (positional) | Notes |
+|---|---|---|
+| `chembl` | `default` (SQLite + SDF + chemreps + ancillaries), `all` (adds postgresql/mysql/h5/fps dumps) | Files are taken in a fixed priority order (licence, readme, checksums, release notes, SQLite tarball, SDF ...) so a small `--max-files` gets ancillaries first |
+| `uniprot` | none | Swiss-Prot only (no TrEMBL). Probes the mirrors in `UNIPROT_MIRRORS`. File order puts small ancillaries and the FASTA first, so `--max-files 4` is a usable FASTA-only set |
+| `pubchem` | `compound_extras` (default), `rdf_compound`, `compound_full`, `all_nlp` | Directory listing under `PUBCHEM_BASE`; very large modes |
+| `clinvar` | `tsv` (default), `vcf38`, `vcf37`, `xml`, `all` | Listing under `CLINVAR_BASE` |
+| `reactome` | none | Flat current-release directory |
+| `mesh` | optional 4-digit year (default current year, then previous) | Resolves `desc<year>.gz`; the only structured source with a graph stage (`mesh_hierarchy`, needs migration 0003) |
+| `ontologies` | none | GO, HPO, MONDO (`.obo` and `.owl`) and UCUM from fixed URLs. UCUM is downloaded but not serialized |
+| `openalex` | `works_jsonl` (default), `works_parquet`, `jsonl`, `parquet`, `full` | S3 prefix under `OPENALEX_S3`; needs the `aws` CLI (or `s5cmd` for an unbounded sync). An unknown mode dies. Bounded fetch below |
 
-### Location (raw)
-```text
-01_raw/europepmc/author_manuscripts/xml/
-  author_manuscript_xml.PMC00*.baseline.*.tar.gz
-  author_manuscript_xml.incr.*.tar.gz
-  *.filelist.csv / *.filelist.txt
-```
+First-time and incremental blocks (bounded where the option is real):
 
-### Official endpoints
-```text
-https://europepmc.org/ftp/manuscripts/
-```
-
-### Scripts
 ```bash
-./download_author_manuscripts.sh ./01_raw/europepmc/author_manuscripts xml all
-# modes: all | baseline | incr
+# uniprot: usable FASTA-only set, then serialize and load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh uniprot download --max-files 4
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh uniprot serialize --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh uniprot load
+
+# chembl: ancillaries and release notes only (first 5 files of the priority list)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh chembl download --max-files 5
+
+# pubchem, clinvar, reactome: one file each to try the wiring
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubchem download compound_extras --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh clinvar download tsv --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh reactome download --max-files 2
+
+# mesh: full chain, small (one descriptor file); needs migration 0003 for graph
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh mesh all
+
+# ontologies: first fixed item only (go.obo), then serialize and load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ontologies download --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ontologies serialize
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ontologies load
+
+# incremental for any structured source: rerun download, then serialize and load;
+# to reprocess everything after an upstream release, force with a stated reason
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh chembl serialize --force --reason "reprocess after ChEMBL release"
 ```
 
-### Frequency
-| Artifact | Cadence |
-|----------|---------|
-| Baseline packages | Periodic refresh (dated in filename) |
-| Incrementals | **Daily** when published |
+`chembl serialize` and `chembl load` need the full SQLite release, not the bounded ancillary set above; the bounded `chembl` command only exercises the download wiring.
 
-### How to run
+#### OpenAlex bounded fetch
+
+`openalex` is the largest source (hundreds of GB unbounded). Bound it with `--max-files`:
+
 ```bash
-# Prefer SSD for full baseline set (multi-GB tars)
-./download_author_manuscripts.sh ./01_raw/europepmc/author_manuscripts xml all
+# preview which first shard would be fetched (lists the whole S3 prefix, which can take minutes; writes nothing)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex download --dry-run --max-files 1
+
+# fetch the first works_jsonl shard, then serialize (biomedical subset) and load
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex download --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex serialize --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex load
+
+# or the three stages in one go
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex all --max-files 1
 ```
 
-### Extraction posture
-- `source = epmc_manuscript`
-- `subset = text_mining`
-- `license` often free-text fair-use / text-mining notice → normalise to `text_mining`
+Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimited sync; a positive integer fetches that many shard files, oldest `updated_date=` partition first (byte order), skipping files already present at the right size, never counting `manifest.json`; a non-integer (`abc`, `-1`) dies with exit 2 and a message naming the value. The serializer keeps only works tagged Medicine or Biology at the top concept level.
 
-### Known issues
 | Issue | Mitigation |
-|-------|------------|
-| HTTP **503** (Cloudflare) | Retry; path verified when origin up |
-| Large baselines (1–3GB+) | Disk check; `tmux`; restartable skips |
-| Authors under-parsed | JATS mapping improvement |
+|---|---|
+| `s3_fetch_first_n: awscli required` | Install the AWS CLI; a positive `--max-files` uses `aws`, an unbounded sync uses `s5cmd` if present, else `aws` |
+| `no S3 tool` on an unbounded run | Install `s5cmd` or `awscli` |
+| `uniprot: no mirror reachable` | All probed mirrors failed `reldate.txt`; check network or `UNIPROT_MIRRORS` |
+| `mesh: ... none returned HTTP 200` | NLM layout changed; the wrapper warns and exits 0 with nothing resolved. Check `MESH_BASE` |
+| Serializer prints `ERROR: no *.fasta.gz ... under <raw dir>` | Nothing downloaded yet, or the bounded set did not include the FASTA (uniprot needs `--max-files 4` or more) |
 
-### Sample audit notes
-- Full text quality good; commercial mix **forbidden** by default policy.
+### 5.3 Volatile sources (download only)
 
----
+These are download-only by design (Phase 1 retrieval material; docs/12). No serializer, no rows in `episteme.articles`. Outputs land in `<raw>/<source>/` with a `last_sync_utc.txt` stamp.
 
-## 7. Europe PMC — Lite full-text metadata
+| Source | Modes | Notes |
+|---|---|---|
+| `dailymed` | `index`, `monthly`, `fullparts`, `all` (default) | Scrapes `.zip` hrefs from DailyMed SPL resource pages under `DAILYMED_BASE` |
+| `openfda` | `label` (default), `drug`, `all_human`, `all` | Reads zip URLs out of the catalog JSON at `OPENFDA_CATALOG` |
+| `aact` | none | Scrapes date-keyed daily snapshot links from `AACT_DOWNLOADS`; a page whose layout changed resolves 0 links and exits 0 without a stamp |
 
-### What
-Weekly bulk of **key metadata** (lite API shape) for full-text articles — enrichment, not primary body text.
-
-### Location (raw)
-```text
-01_raw/europepmc/metadata_lite/
-  PMCLiteMetadata.tgz
-```
-
-### Official endpoints
-```text
-https://europepmc.org/ftp/pmclitemetadata/
-```
-
-### Scripts
 ```bash
-./download_epmc_lite_metadata.sh ./01_raw/europepmc/metadata_lite
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh dailymed download index --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda download label --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh aact download --max-files 1
 ```
 
-### Frequency
-**Weekly**
-
-### How to run
-```bash
-# Resume partial tgz
-./download_epmc_lite_metadata.sh ./01_raw/europepmc/metadata_lite
-```
-
-### Extraction posture
-- Enrichment / join support; not primary `text` for training
-- `subset = open_metadata`
-
-### Known issues
 | Issue | Mitigation |
-|-------|------------|
-| ~2GB tgz long download | aria2c `-c` resume |
-| Audit parse failed on incomplete archive | Finish download; re-audit |
-| Intermittent 503 | Retry |
+|---|---|
+| A single DailyMed page 404s | Warned and skipped; the rest of the modes continue |
+| AACT `resolved 0 download links` | Page layout change; tracked as deferred follow-up, not a hard failure |
 
----
+### 5.4 Acquisition mechanism (`hf_corpus`)
 
-## 8. ApolloCorpus (FreedomIntelligence)
+A generic Hugging Face fetch: `<repo_id>` is an argument, not an endpoint variable. Optional `[output_subdir] [revision]` follow it; `--repo-type dataset|model` selects the type (default `dataset`). Output: `<raw>/hf_corpus/<output_subdir>` (default: the repo id with `/` replaced by `_`), with `hf_repo_id.txt` and a stamp. `--max-files` and `--force` are ignored. Licence depends on the repo you pass and is not recorded by the pipeline.
 
-### What
-Multilingual medical dialogue / text corpus used for broad language coverage. Packaged via Hugging Face.
+```bash
+# preview: with no repo id a dry run is a soft no-op (exit 0)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh hf_corpus download --dry-run
 
-### Location (raw)
-```text
-01_raw/multilingual/apollo/raw/
+# fetch a repo (replace the placeholder; review its licence first)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh hf_corpus download <repo_id>
 ```
 
-### Official endpoints
-- Hugging Face: `FreedomIntelligence/ApolloCorpus`
-- Use `hf download` (CLI); `huggingface-cli` deprecated
+### 5.5 CDISC Biomedical Concepts (`cdisc_bc`)
 
-### Scripts
+CDISC Biomedical Concepts and SDTM dataset specialisations from the public GitHub repository `cdisc-org/COSMoS` (`export/` folder, CSV and XLSX). **Download-only; there is no serializer.** No modes; a stray positional token dies.
+
+- **Pinned to one commit.** Each run resolves the latest commit SHA of `main` first, then lists and fetches `export/` at that SHA, so one run is internally consistent.
+- **`PROVENANCE.txt`** is written beside the data in `<raw>/cdisc_bc/`: source repo URL, `commit_sha`, `retrieved_at`, and the licence note. The repository `LICENSE` file is stored beside it and does not count against `--max-files`.
+- **Licence: UNVERIFIED.** The repository `LICENSE` is MIT (repository code); the README grants CC-BY-4.0 to documentation and minutes only and states nothing for the `export/` data files. Verify before any redistribution or training use (docs/12).
+- **Re-fetch:** size-matched files are skipped and a same-size change under a new commit is not detected, so after an upstream update run with `--force --reason "..."`.
+- Even `--dry-run` makes two GitHub API calls (commit and listing). Unauthenticated GitHub allows 60 requests per hour; hitting the limit dies with `cannot resolve the latest commit ... (GitHub API rate limit?)`.
+
 ```bash
-./download_apollo_corpus.sh
-# extract helper auto-unzips when needed
-```
+# bounded first run: two data files plus LICENSE and PROVENANCE.txt
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --max-files 2
 
-### Frequency
-Static corpus releases (not daily). Re-pull on new upstream version if announced.
+# preview (network: GitHub API only; writes nothing)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --dry-run
 
-### Extraction posture
-- `source = apollo`
-- Sparse bibliographic fields expected
-- `language` should be populated when present in files
-- `subset = other` until commercial-use diligence on corpus license is finished
-- `license = corpus_declared` (refine after reading upstream terms)
-
-### Known issues
-| Issue | Mitigation |
-|-------|------------|
-| Sample audit saw text-only hashes | Inspect actual `*_text.json` schema; improve parser |
-| License for commercial LLM training | Explicit diligence before `subset=commercial` |
-
-### Brew note (macOS)
-```bash
-brew install huggingface-cli   # provides `hf`
+# after an upstream commit, force a refetch
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --force --reason "refetch after COSMoS update"
 ```
 
 ---
 
-## 9. Cross-cutting operations
+## 6. Materialize, ingest and field-shape checks
 
-### Sample field audit
+### 6.1 `corpus materialize`
+
+Writes the pretraining corpus shard under `<corpus>/` from `episteme.articles` in Postgres, with a `corpus_materialize` audit event. `corpus materialize` and `pmc materialize` run the same script (`scripts/data/materialize_corpus.sh`). No `--dry-run` (exit 3). It reads the database, so the guard applies. By default decontamination uses the mock question list; the real evaluation sets need `--no-sample-only` on the Python module and downloaded datasets.
+
 ```bash
-python3 analyze_source_samples.py \
-  --data-root ./01_raw \
-  --n 5 \
-  -o sample_audit_report.md \
-  --json sample_audit_report.json
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh corpus materialize
 ```
-Re-run after fixing corrupt ID mappings, completing lite metadata, or parser improvements.
 
-### Europe PMC 503 pattern
-- Symptom: `HTTP/2 503`, `server: cloudflare`
-- Paths are still correct; wait and retry
-- Probe: `curl -I https://europepmc.org/ftp/manuscripts/`
+### 6.2 `load_articles`
 
-### Restartability standard
-All bulk downloaders should:
-1. Discover remote file list → `remote_manifest.txt`
-2. Skip size-matched local files
-3. Use aria2c `-c` or equivalent
-4. Write `last_sync_utc.txt` when applicable
+`load` for every literature and structured source is `python -m episteme.data.load_articles --source <source>`, wrapped per source by `scripts/data/<source>/load_<source>.sh`. It reads every shard under `<processed>/staging/<source>/` (`*.parquet`, then `*.jsonl`), commits one transaction per shard, writes a `load_success` marker, and prints `ok <shard> rows=N deleted=N body_deleted=N event=...`, `skip <shard>` for an already-loaded shard, or `FAIL <shard>: <error>`. Exit 0 when nothing failed, 1 if any shard failed, 2 for `--force` without `--reason`. With no shards it prints `no shards under <dir>` and exits 0. Run inside `run_pipeline.sh` it does not add its own bracket (the dispatcher's run id is shared).
 
-### License routing (training)
-| `subset` | Use |
-|----------|-----|
-| `commercial` | Parametric LLM commercial path |
-| `text_mining` | Research / non-commercial product policy review |
-| `open_metadata` | Metadata/abstract features; not OA full-text commercial claim |
-| `other` | Hold until diligence clears |
+To load without the dispatcher (no `run_start`/`run_end` from the dispatcher; the loader adds its own):
+
+```bash
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.load_articles --source europepmc_preprint
+```
+
+### 6.3 Field-shape `--report` (parse only, writes nothing)
+
+Every extractor and serializer (`apollo`, `bookshelf`, `europepmc_manuscript`, `europepmc_preprint`, `guidelines`, `pubmed`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`) has a `--report` mode that parses in memory and prints a field-shape table with no shard, marker, manifest or audit row. The dispatcher does not forward `--report`; call the wrapper directly. On Windows set `PYTHONIOENCODING=utf-8` (the default `cp1252` console encoding crashes on non-ASCII text):
+
+```bash
+PYTHONIOENCODING=utf-8 bash scripts/data/uniprot/serialize_uniprot.sh --report --max-files 1
+PYTHONIOENCODING=utf-8 bash scripts/data/pubmed/extract_pubmed.sh --report --max-files 1
+```
+
+Run it after each new download or parser change as the smoke check.
 
 ---
 
-## 10. Suggested ops cadence
+## 7. Verify
+
+| Command | What it tells you |
+|---|---|
+| `bash scripts/data/verify_audit_trail.sh` | Recomputes the hash chain. Prints `audit chain OK` and exits 0, or `CHAIN BROKEN at seq [...]` and exits 1 (a `mirror_short` problem prints `[None]`). Needs `EPISTEME_ACTOR` and a reachable database (guarded like any Python connection); exit 2 if the actor is missing. Details and limits: docs/11 section 5. |
+| `bash scripts/data/source_inventory.sh` | Read-only table `source last_sync rows` for every wired source. `last_sync` reads `<raw>/<source>/last_sync_utc.txt`; `rows` is the `episteme.articles` count per source. `n/a` means no stamp or no rows for that source, or (for `rows` on every line) the database is unreachable or refused by the guard. Does not need `EPISTEME_ACTOR`. |
+| `bash scripts/data/pubmed/verify_pubmed.sh all` | Local MD5 check of the PubMed set (no network in plain mode). |
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/verify_audit_trail.sh
+PGDATABASE=episteme_test bash scripts/data/source_inventory.sh
+```
+
+Without the `PGDATABASE=episteme_test` prefix both fall back to the production name, are refused by the guard under the shipped `restricted` mode, and `source_inventory.sh` shows `n/a` for every row count.
+
+---
+
+## 8. Ops cadence
+
+Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhythm:
 
 | When | Action |
-|------|--------|
-| Daily | PubMed updatefiles; PMC OA delta if running continuous sync; author manuscript incr when EPMC up |
-| Weekly | EPMC lite metadata; review failure markers |
-| Monthly | EPMC ID mappings (after integrity check) |
-| On SSD ready | Full PMC `oa_comm`; consolidate `01_raw` |
-| After each major pull | `analyze_source_samples.py` smoke audit |
+|---|---|
+| Daily | `pubmed download updates`, then `extract` and `load`; PMC delta if running continuous sync; author-manuscript incrementals (`europepmc_manuscript download incr`) when Europe PMC is up |
+| Weekly | `europepmc_lite download` then `enrich`; review failed markers under `<processed>/_ops/<source>/` |
+| Monthly | `europepmc_id_mappings download` (after the `head` integrity check) then `load`; `europepmc_abstracts download` |
+| On upstream release | Rerun `download` for the structured sources; `serialize` and `load`; `cdisc_bc` with `--force --reason` |
+| After each major pull | `--report` field-shape smoke check (section 6.3); `source_inventory.sh` |
+| Before and after any production or go-live change | `verify_audit_trail.sh`; the docs/11 section 8 checklist |
+| When SSD is ready | Full `pmc all`; consolidate `<raw>` |
 
 ---
 
-## 11. Document control
+## 9. Document control
 
 | Version | Date | Notes |
-|---------|------|-------|
-| v1 | 2026-08-31 | Initial runbook from acquisition phase + sample audit |
+|---|---|---|
+| v1 | 2026-08-31 | Initial runbook from the acquisition phase and sample audit |
+| v2 | 2026-09-21 | SP5 rewrite: single operator runbook. Covers every wired source through `run_pipeline.sh`, the DB-mode guard, migrations 0002/0003 by hand, `episteme_test` targeting, `openalex` bounded fetch, `cdisc_bc`, verification. Dated status board replaced by `docs/12-source-inventory.md`; per-source facts checked against the wrappers |
