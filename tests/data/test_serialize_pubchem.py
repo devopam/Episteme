@@ -68,13 +68,14 @@ def test_pubchem_serialize_rows(tmp_path):
     assert len({row["id"] for row in rows}) == 3
     assert {row["id"] for row in rows} == {"pubchem:1", "pubchem:4", "pubchem:406"}
 
-    # PubChem's real Fair Use Disclaimer text does not match any existing
-    # normalize_license arm -- falls through to the conservative default.
-    # Spec Sec 8 open item 2, flagged not silently patched (see module
-    # docstring).
-    assert all(row["license"] == "unknown" for row in rows)
-    assert all(row["subset"] == "open_metadata" for row in rows)
-    assert all(row["license_raw"] is not None for row in rows)
+    # Source-anchored governance override (SP4.1 Task 11): public_domain ->
+    # commercial; license_raw keeps the real Fair Use Disclaimer text (which
+    # does not itself contain the words "Fair Use"; license_raw is capped at 300 chars).
+    assert all(row["license"] == "public_domain" for row in rows)
+    assert all(row["subset"] == "commercial" for row in rows)
+    assert all(
+        "Databases of molecular data on the NCBI FTP site" in row["license_raw"] for row in rows
+    )
 
     assert all(row["container_id"] is None for row in rows)
     assert all(row["book_meta"] is None for row in rows)

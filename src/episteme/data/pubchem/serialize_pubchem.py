@@ -88,9 +88,10 @@ substring match despite the word "restrictions" appearing -- the raw text
 does not contain the literal "FAIR USE" or "TEXT MINING" tokens the existing
 arm checks for) to ``license="unknown"`` -> ``subset_from_license("unknown")``
 == ``"open_metadata"`` (the conservative default). This is EXPECTED and
-ACCEPTABLE per the task-7 brief, which explicitly names this spec Sec 8 open
-item 2 and asks it be flagged, not silently patched around -- flagged here
-and in task-7-report.md, no new ``normalize_license`` arm added.
+ACCEPTABLE per the task-7 brief (spec Sec 8 open item 2). RESOLVED in SP4.1
+Task 11: ``pubchem_row`` applies a source-anchored governance override (user
+decision 2026-09-19) -> ``license="public_domain"`` -> ``subset="commercial"``;
+``normalize_license`` is unchanged and ``license_raw`` keeps the real text.
 
 Importable core: ``serialize_pubchem(raw_dir, processed_dir, *, max_files=0,
 force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
@@ -127,6 +128,7 @@ from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    LICENSE_PUBLIC_DOMAIN,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -150,8 +152,8 @@ SOURCE = "pubchem"
 # https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/Extras/README-Extras -- NOT a
 # CC-variant string. Run through normalize_license()/subset_from_license()
 # like every other field -- NOT a hardcode. See module docstring's "Licence"
-# section for the confirmed unknown -> open_metadata resolution and the
-# explicit spec Sec 8 open-item-2 flag.
+# section: normalize_license() yields unknown, but pubchem_row overrides it to
+# public_domain -> commercial (SP4.1 Task 11, user decision 2026-09-19).
 _PUBCHEM_LICENSE_RAW = (
     "Databases of molecular data on the NCBI FTP site include such examples "
     "as nucleotide sequences (GenBank), protein sequences, macromolecular "
@@ -332,6 +334,12 @@ def pubchem_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     if not native_id:
         return None  # no native id: caller counts + skips (never synthesize an id)
     lic, lic_url, lic_raw = normalize_license(_PUBCHEM_LICENSE_RAW)
+    # GOVERNANCE OVERRIDE (SP4.1 spec 3.4, user decision 2026-09-19): this source's
+    # own terms are treated as public domain -> commercial-eligible. Source-anchored
+    # on purpose: normalize_license() never returns this for free text. PubChem and
+    # ClinVar carry contributor-submitted content with per-record terms; the
+    # user accepted that risk. license_raw keeps the real disclaimer text.
+    lic = LICENSE_PUBLIC_DOMAIN
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {

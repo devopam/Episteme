@@ -3,6 +3,7 @@ import pytest
 from episteme.data.article_schema import (
     ARTICLE_COLUMNS,
     BOOK_META_KEYS,
+    LICENSE_PUBLIC_DOMAIN,
     MIN_OK_TEXT_LEN,
     SCHEMA_VERSION,
     SOURCES,
@@ -142,3 +143,35 @@ def test_existing_text_token_behavior_is_unchanged():
     assert normalize_license("CC BY 4.0")[0] == "CC BY"
     assert normalize_license("some prose with no licence")[0] == "unknown"
     assert normalize_license("https://example.com/licenses/by/4.0/")[0] == "unknown"
+
+
+def test_public_domain_code_maps_to_commercial():
+    assert LICENSE_PUBLIC_DOMAIN == "public_domain"
+    assert subset_from_license(LICENSE_PUBLIC_DOMAIN) == "commercial"
+
+
+def test_normalize_license_never_assigns_public_domain_from_free_text():
+    for raw in (
+        "This article is in the public domain.",
+        "Public Domain",
+        "US Government work, public domain in the United States",
+        "https://creativecommons.org/publicdomain/mark/1.0/",
+    ):
+        assert normalize_license(raw)[0] != LICENSE_PUBLIC_DOMAIN
+
+
+def test_public_domain_mark_url_is_not_cc0():
+    lic, url, _raw = normalize_license("https://creativecommons.org/publicdomain/mark/1.0/")
+    assert lic == "unknown"
+    assert subset_from_license(lic) == "open_metadata"
+    assert url and "publicdomain/mark" in url
+
+
+def test_creativecommons_url_is_case_insensitive():
+    lic, url, _raw = normalize_license("HTTPS://CreativeCommons.org/licenses/BY/4.0/")
+    assert lic == "CC BY"
+    assert url and url.lower().startswith("https://creativecommons.org/")
+
+
+def test_creativecommons_by_url_without_version_is_cc_by():
+    assert normalize_license("https://creativecommons.org/licenses/by/")[0] == "CC BY"

@@ -76,12 +76,11 @@ def test_mesh_serialize_rows(tmp_path):
     assert all(row["pmid"] is None and row["pmcid"] is None and row["doi"] is None for row in rows)
     assert all(row["extract_status"] in article_schema.EXTRACT_STATUSES for row in rows)
 
-    # NLM's real "Terms and Conditions MeSH" text carries no CC0/CC-BY/
-    # permissive-OSI token -> normalize_license falls through to "unknown",
-    # exactly as the brief predicted (flagged, not forced).
-    assert all(row["license"] == "unknown" for row in rows)
-    assert all(row["subset"] == "open_metadata" for row in rows)
-    assert all(row["license_raw"] is not None for row in rows)
+    # Source-anchored governance override (SP4.1 Task 11): public_domain ->
+    # commercial; license_raw keeps the real NLM terms text.
+    assert all(row["license"] == "public_domain" for row in rows)
+    assert all(row["subset"] == "commercial" for row in rows)
+    assert all("National Library of Medicine" in row["license_raw"] for row in rows)
 
     by_id = {row["id"]: row for row in rows}
 
