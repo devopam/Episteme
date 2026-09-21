@@ -36,7 +36,7 @@ Notes on the licence column: `public_domain` never comes from `normalize_license
 
 ## How to refresh machine-local columns
 
-Last sync and row counts depend on the machine's `01_raw` tree and database, so they are not stored here. Run `scripts/data/source_inventory.sh` on the machine in question; it reports the machine-local columns for the sources above. This file changes only when the wired-source set, a script path, a licence ruling or a cadence changes.
+Last sync and row counts depend on the machine's `01_raw` tree and database, so they are not stored here. Run `scripts/data/source_inventory.sh` on the machine in question; it reports the machine-local columns for the sources above (`last_sync` is the newest `last_sync_utc.txt` found anywhere under the source's raw directory, since some downloaders write the stamp in a nested folder). This file changes only when the wired-source set, a script path, a licence ruling or a cadence changes.
 
 ## Class definitions
 

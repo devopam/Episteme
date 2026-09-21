@@ -26,18 +26,28 @@ def wrapper_sources(run_pipeline: Path = _RUN) -> list[str]:
     return re.findall(r'\[(\w+)\]="[^"]+"', block.group(1))
 
 
+def _newest_stamp(source_dir: Path) -> str:
+    """Newest stamp anywhere under ``source_dir`` (ISO-8601 UTC sorts as text)."""
+    newest = ""
+    try:
+        for stamp in source_dir.rglob(_STAMP):
+            try:
+                value = stamp.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            newest = max(newest, value)
+    except OSError:
+        return ""
+    return newest
+
+
 def collect(raw_root: Path, sources: list[str], counts: dict[str, int] | None) -> list[dict]:
     rows = []
     for s in sources:
-        stamp = Path(raw_root) / s / _STAMP
-        try:
-            last = stamp.read_text(encoding="utf-8").strip()
-        except OSError:
-            last = ""
         rows.append(
             {
                 "source": s,
-                "last_sync": last,
+                "last_sync": _newest_stamp(Path(raw_root) / s),
                 "rows": None if counts is None else counts.get(s),
             }
         )

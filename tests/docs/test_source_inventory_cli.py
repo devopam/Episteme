@@ -18,6 +18,23 @@ def test_collect_reads_sync_stamp_and_counts(tmp_path):
     assert out["uniprot"]["last_sync"] == ""  # directory absent
 
 
+def test_collect_finds_nested_stamp(tmp_path):
+    d = tmp_path / "openalex" / "data" / "jsonl" / "works"
+    d.mkdir(parents=True)
+    (d / "last_sync_utc.txt").write_text("2026-09-21T10:00:00Z\n", encoding="utf-8")
+    out = collect(tmp_path, ["openalex"], None)
+    assert out[0]["last_sync"] == "2026-09-21T10:00:00Z"
+
+
+def test_collect_newest_stamp_wins(tmp_path):
+    top = tmp_path / "src"
+    sub = top / "a" / "b"
+    sub.mkdir(parents=True)
+    (top / "last_sync_utc.txt").write_text("2026-09-01T00:00:00Z", encoding="utf-8")
+    (sub / "last_sync_utc.txt").write_text("2026-09-20T00:00:00Z", encoding="utf-8")
+    assert collect(tmp_path, ["src"], None)[0]["last_sync"] == "2026-09-20T00:00:00Z"
+
+
 def test_cli_degrades_when_db_unreachable(tmp_path):
     env = {
         **os.environ,
