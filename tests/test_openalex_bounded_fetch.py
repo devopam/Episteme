@@ -54,6 +54,9 @@ def _run(tmp_path, *args, keys=None):
         "PATH": f"{(tmp_path / 'bin').as_posix()}{os.pathsep}{os.environ['PATH']}",
         "EPISTEME_ACTOR": "episteme_sys_admin",
         "EPISTEME_DATA_ROOT": str(tmp_path),
+        "EPISTEME_RAW_ROOT": str(
+            tmp_path / "01_raw"
+        ),  # a leaked value from another test must not win
         "PGDATABASE": "episteme_test",
     }
     proc = subprocess.run(
