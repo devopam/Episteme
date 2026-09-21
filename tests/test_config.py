@@ -171,18 +171,21 @@ def test_dotenv_overrides_sources_env(fresh_config, monkeypatch):
 
 
 class TestFreshConfigNoLeak:
-    """fresh_config must not leak load_dotenv-written vars into os.environ."""
+    """fresh_config must not leak load_dotenv-written vars into os.environ.
 
-    _SENTINEL = "EPISTEME_DATA_ROOT"
+    test_a loads an env file with a marker value; test_b asserts no marker value is left in
+    os.environ. Keyed on the marker, not on variable names, so a leak of the same names from
+    some unrelated earlier test cannot fail this check.
+    """
+
+    _MARK = "/mnt/fresh-config-leak-probe"
+    _ran = False
 
     def test_a_loads_env_file(self, fresh_config):
-        fresh_config("EPISTEME_DATA_ROOT=/mnt/leak\nEPISTEME_RAW_ROOT=/mnt/leak/raw\n")
-        type(self)._loaded = True
-
-    _loaded = False
+        fresh_config(f"EPISTEME_DATA_ROOT={self._MARK}\nEPISTEME_RAW_ROOT={self._MARK}/raw\n")
+        type(self)._ran = True
 
     def test_b_nothing_leaked_afterwards(self):
-        if not self._loaded:
+        if not self._ran:
             pytest.skip("needs test_a to have run first (file order)")
-        assert "EPISTEME_RAW_ROOT" not in os.environ
-        assert self._SENTINEL not in os.environ
+        assert not [k for k, v in os.environ.items() if self._MARK in v]
