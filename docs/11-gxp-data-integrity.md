@@ -16,8 +16,11 @@ not mean the system has been validated or that any regulatory claim is made.
 
 Claimed (all verifiable in code):
 
-- Every audited data event is one `episteme._audit` row written in the caller's
-  transaction, SHA-256 hash-chained to the previous row.
+- Audited data events are `episteme._audit` rows, SHA-256 hash-chained to the previous
+  row. Loads, graph builds, corpus materialization and forced reloads write the row in
+  the caller's transaction; the per-file extract and serialize events and
+  `config_change` write it on their own short connection and commit independently
+  (best-effort, see sections 2 and 4).
 - The application role has `REVOKE UPDATE, DELETE` on `_audit` and every existing
   partition.
 - A verifier (`episteme.audit_trail.verify`, wrapped by
@@ -32,7 +35,7 @@ deletion or edit (see section 5). Procedural items are listed in section 9.
 
 | Tier | Component | Mutability | Role |
 |---|---|---|---|
-| Operational logs | stderr / log output (`log INFO ...` in scripts, Python `logging`) | mutable | debugging and progress; not the record |
+| Operational logs | stderr / log output (`log INFO ...` in scripts; Python logging configured in `src/episteme/logging_setup.py`) | mutable | debugging and progress; not the record |
 | Audit trail | `episteme._audit` table plus a JSONL mirror | append-only by grant (table); by convention only (mirror) | the electronic record of data events |
 
 The JSONL mirror is written to `<processed_root>/_ops/_audit/audit-YYYYMMDD.jsonl`
@@ -41,14 +44,18 @@ The JSONL mirror is written to `<processed_root>/_ops/_audit/audit-YYYYMMDD.json
 - `record()` inserts the DB row first, then appends the same record (plus `record_hash`
   and a `ts` field) to the mirror. The DB insert is in the caller's open transaction
   and `record()` never commits; the caller owns commit and rollback.
-- A mirror write failure (`OSError`) is logged and **re-raised**: the caller sees it.
-  The DB row is not rolled back by `record()` itself. A broken mirror is therefore
-  loud, not silent.
-- `mirror_only()` is the best-effort variant for code with no DB transaction (the
-  per-file audit calls in the extract and serialize stages). It writes a JSONL line
-  only: no DB row, no hash chain, and a line marked `"chained": false`. A write
-  failure there is logged and swallowed. Mirror-only lines are not covered by the
-  tamper-evidence in section 5.
+- A mirror write failure (`OSError`) is logged and **re-raised** by `record()`. The DB
+  row is not rolled back by `record()` itself. That loudness only reaches callers that
+  let the exception propagate (loads, graph, corpus, `load_articles`). The extract and
+  serialize stages and `config_change` wrap the call in `except Exception`, so for them
+  an audit failure (database down, connection refused by the DB-mode guard, unwritable
+  mirror) does not stop or fail the stage; see the silent-degradation row in section 5.
+- `mirror_only()` is the last-resort fallback, used by the extract and serialize
+  stages only when their `record()` attempt fails. It writes a JSONL line only: no DB
+  row, no hash chain, a line marked `"chained": false` and `note`
+  `db_unavailable_or_failed`. A write failure there is logged and swallowed, and the
+  caller's second bare `except` swallows anything else. Such lines are not covered by
+  the tamper-evidence in section 5.
 
 ## 3. Audit record schema
 
@@ -102,22 +109,24 @@ exists in `src/`.
 |---|---|---|
 | `run_start` | a pipeline run began | `run_pipeline.sh` (via `python -m episteme.audit_trail record`); `load_articles` when it has no external run id |
 | `run_end` | a pipeline run ended (also on stage failure, reason `failed at stage ...`) | same as above |
-| `extract_commit` | an extract output file was committed | `mirror_only` in the extractors (JSONL only) |
-| `serialize_commit` | a structured-source serializer output was committed; added after the original design, which had no such type | `mirror_only` in the serializers (JSONL only) |
+| `extract_commit` | an extract output file was committed | the extractors' `_best_effort_audit`: `record()` on a fresh connection, committed immediately (chained DB row); `mirror_only` only as a fallback if that fails |
+| `serialize_commit` | a structured-source serializer output was committed; added after the original design, which had no such type | the serializers' `_best_effort_audit`: `record()` on a fresh connection, committed immediately (chained DB row); `mirror_only` only as a fallback if that fails |
 | `load_commit` | a shard was loaded with nothing replaced | `postgres_loader` (DB row) |
 | `load_replace` | a shard load replaced existing rows (delete count recorded) | `postgres_loader` (DB row) |
 | `graph_commit` | graph build output for a source file | `graph_builder` (DB row) |
 | `corpus_materialize` | corpus materialization | `corpus_materializer` (DB row) |
 | `schema_migration` | a schema migration was applied | **no call site**; reserved |
-| `force_override` | an operator forced a reload past a success marker | `load_articles` (DB row, with `reason`) |
+| `force_override` | an operator ran `load_articles --force --reason` | `load_articles` (DB row, with `reason`); emitted for every shard iterated, including shards that have no success marker, so rows are not 1:1 with bypassed markers |
 | `integrity_check` | an integrity check ran | **no call site**; reserved |
 | `manual_correction` | a manual data correction | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record manual_correction --reason ...`) |
-| `config_change` | a configuration change | `enrich_openmetadata` (DB row) |
+| `config_change` | a configuration change | `enrich_openmetadata` (DB row on its own connection; best-effort, a failure only prints a stderr warning) |
 
-Consequence: the `extract_commit` and `serialize_commit` events of a normal run are
-in the JSONL mirror only and are not hash-chained. The chained DB trail covers run
-brackets, loads, graph builds, corpus materialization, forced reloads and metadata
-enrichment.
+Consequence: in a normal run with a reachable database, `extract_commit` and
+`serialize_commit` are chained DB rows (plus mirror lines). They are best-effort: when
+the audit attempt fails, the event survives only as an unchained JSONL line (or, if
+that also fails, not at all), and the stage still succeeds. Whether a given run's
+extract/serialize events are chained rows can be seen from the mirror: fallback lines
+carry `"chained": false`.
 
 ## 5. Integrity
 
@@ -161,6 +170,7 @@ the code wins):
 | Verifier walks the chain across both table and mirror and reports the first divergence | **Partly.** The chain is verified on the table only; the mirror is checked by line count only. It reports all problems, not just the first. |
 | `reason` is required for `force_override`, `manual_correction`, `schema_migration` | **Partly.** See section 6. `record()` itself does not enforce it for any event type. |
 | Event set of 12 types | The code has 13 (adds `serialize_commit`). Three types have no emitter (section 4). |
+| No silent drops: every event produces an audit record | **Not guaranteed.** The extract and serialize stages and `enrich_openmetadata` treat auditing as best-effort: an audit failure (DB down, connection refused by the DB-mode guard, unwritable mirror) is swallowed and the stage succeeds. The only trace is an unchained JSONL fallback line with `note: db_unavailable_or_failed`, or nothing if the mirror is unwritable too. `run_pipeline.sh` likewise continues past a failed `run_start`/`run_end` (section 6). |
 
 ## 6. Actor and reason rules
 
@@ -169,7 +179,7 @@ Actor:
 - `record()` calls `require_actor()` (`episteme.config`), which raises `ConfigError`
   when `EPISTEME_ACTOR` is unset or empty. There is no fallback value. The check
   happens after the event-type check and before any database work.
-- Shell entry points (`run_pipeline.sh`, `verify_audit_trail.sh`, every stage wrapper)
+- Shell entry points (`run_pipeline.sh`, `verify_audit_trail.sh`, every stage wrapper under `scripts/data/<source>/`; the `db/*.sh` and `_lib` scripts are not covered)
   call `require_env EPISTEME_ACTOR` first and exit with code 2 when it is missing.
 - The value is whatever the operator sets. The code does not verify it against any
   identity system (see section 9).
@@ -179,8 +189,10 @@ Reason:
 - `run_pipeline.sh --force` without a non-empty `--reason` exits 2 with
   `--force requires --reason`, before any DB work.
 - `load_articles --force` without `--reason` exits 2 (`error: --force requires
-  --reason`), and with both it records one `force_override` audit row per forced
-  shard carrying the reason.
+  --reason`), and with both it records a `force_override` audit row, carrying the
+  reason, for every shard iterated in that run. The emit condition is `--force` plus
+  `--reason`, not an actual success-marker bypass, so shards with no marker also get a
+  row.
 - For `manual_correction` and `schema_migration` **no code requires a reason**, and
   neither event has an emitter. `python -m episteme.audit_trail record` accepts
   `--reason` as optional for every event type. The design rule is therefore a

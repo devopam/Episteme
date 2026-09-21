@@ -55,3 +55,35 @@ def test_unimplemented_design_items_are_stated_as_absent():
     assert text.count("**Not implemented.**") >= 3
     sql = (REPO / "src/episteme/data/db/schema.sql").read_text(encoding="utf-8")
     assert "not yet" in sql and "create_audit_partition" in sql
+
+
+def _event_row(text: str, ev: str) -> str:
+    rows = [ln for ln in text.splitlines() if ln.startswith(f"| `{ev}` |")]
+    assert len(rows) == 1, ev
+    return rows[0]
+
+
+def test_extract_and_serialize_commit_are_described_as_chained_with_fallback():
+    text = doc("11-gxp-data-integrity.md")
+    for ev in ("extract_commit", "serialize_commit"):
+        row = _event_row(text, ev)
+        assert "record()" in row and "chained DB row" in row, ev
+        assert "fallback" in row, ev
+        assert "JSONL only" not in row, ev
+
+
+def test_code_premise_extract_and_serialize_use_record_with_mirror_fallback():
+    base = REPO / "src/episteme/data"
+
+    def uses_both(pattern: str) -> list[str]:
+        hits = []
+        for f in base.rglob(pattern):
+            src = f.read_text(encoding="utf-8")
+            if "from episteme.audit_trail import record as _audit" in src and "mirror_only(" in src:
+                hits.append(f.name)
+        return hits
+
+    assert uses_both("extract_*.py"), "no extract module pairs record() with mirror_only fallback"
+    assert uses_both(
+        "serialize_*.py"
+    ), "no serialize module pairs record() with mirror_only fallback"
