@@ -226,3 +226,13 @@ def test_env_key_names_only_no_values_or_inline_comments():
         key, val = m.groups()
         if key.endswith(("PASSWORD", "API_KEY", "JWT")):
             assert val.startswith(("<", "$", '"$')), f"secret-looking value shown for {key}"
+
+
+def test_wrapper_exit_codes_are_qualified_by_the_dispatcher():
+    t = _text()
+    # a wrapper's own rc 2 is only observable when run directly; via run_pipeline.sh it is rc 1
+    for line in t.splitlines():
+        if "non-integer" in line or "unknown mode" in line:
+            assert "exit 2" not in line or "rc 1" in line, line
+    assert "surface as rc 1" in t
+    assert "public_domain" in t and "governance override" in t

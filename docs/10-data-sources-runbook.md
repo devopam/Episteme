@@ -51,13 +51,13 @@ PGDATABASE=episteme_test bash scripts/data/source_inventory.sh
 What to expect from step 3, in order (stderr is timestamped `[INFO]` lines):
 
 - `run_start` is recorded (no output), then a prerequisites table (`aria2c`, `aws`, `curl`, `hf`, ... `MISSING` rows are informational).
-- `stage: download`, then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>`. A per-preprint 404 or 503 counts in `errors` and is never fatal; a second run of the same command prints `skipped>0`.
+- `stage: download`, then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>` (`E` depends on how many of the newest ids have no full text yet). Per the downloader code a per-preprint 404, 429 or 503 counts in `errors` and is not fatal; a rerun should report `skipped>0`.
 - `stage: extract`, then `done inputs=3 ok=3 failed=0 rows=<n>`.
 - `stage: load`, then one `ok <shard>.parquet rows=... event=load_commit` (or `.jsonl`) line and `done shards=1 failed=0`.
 - `stage: graph`, then a `done source_files=...` line.
 - `pipeline done: europepmc_preprint all`, process exit code 0.
 
-Exit codes: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing required environment variable, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Python stages also print harmless `couldn't stop thread 'pool-1-...'` lines on stderr at exit on Windows; ignore them.
+Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`). On Windows, Python stages may also print `couldn't stop thread 'pool-1-...'` lines on stderr at exit (observed with `verify_audit_trail.sh` and `source_inventory.sh`); they were not seen to affect the exit code.
 
 If step 2 does not print `episteme_test|19beta3`, stop: you are talking to a different server or database.
 
@@ -87,7 +87,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 
 | Key | Meaning |
 |---|---|
-| `EPISTEME_ACTOR` | **Required** by `run_pipeline.sh` and every stage wrapper (exit 2 if unset). Identity recorded on every audit row. `source_inventory.sh` does not need it; `db/*.sh` do not use it. |
+| `EPISTEME_ACTOR` | **Required** by `run_pipeline.sh` and every stage wrapper (the dispatcher and the wrappers exit 2 if unset). Identity recorded on every audit row. `source_inventory.sh` does not need it; `db/*.sh` do not use it. |
 | `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connection used by the Python stages (role `episteme_app` at runtime). `PGDATABASE` is what the guard checks (section 3). |
 | `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
 | `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
@@ -201,7 +201,7 @@ bash scripts/data/run_pipeline.sh corpus materialize
 
 Stages: `all`, `download`, `extract`, `load`, `graph`, `materialize`, `enrich`, `serialize`. Sources are the keys of the `WRAPPER` table in `scripts/data/run_pipeline.sh` (all listed in `docs/12-source-inventory.md`), plus the alias `corpus` (materialize only).
 
-Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2), then an unknown source (exit 3), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
+Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from; a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
 
 Tokens the dispatcher does not recognise are not dropped: they are forwarded to the download wrapper as the MODE or repo argument (for example `parquet` for `openalex`, `all` for `chembl`, a repo id for `hf_corpus`) and to flags such as `--include-current` or `--since`. Only the download wrapper sees them.
 
@@ -227,7 +227,7 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
   - `extract` and `serialize`: caps the number of input files parsed (default from `EPISTEME_SAMPLE_LIMIT`, `0` = all).
   - `all`: applies to its download, extract and serialize stages.
   - `load`, `graph`, `enrich`, `materialize`: ignored.
-  - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` dies with exit 2.
+  - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` makes the wrapper die with its own exit code 2 when run directly; through `run_pipeline.sh` the observable rc is 1 (`stage failed: download`, `resume with: ...`).
   - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
 - **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
 
@@ -428,7 +428,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_abstracts d
 
 ### 5.2 Structured databases (download, serialize, load)
 
-Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`.
+Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`: for `mesh`, `pubchem` and `clinvar` the serializer sets `public_domain` as an explicit, source-anchored governance override (decision 2026-09-19; `license_raw` keeps the upstream text; see docs/09 and docs/12). The `cdisc_bc` licence is UNVERIFIED (section 5.5).
 
 | Source | Download modes (positional) | Notes |
 |---|---|---|
@@ -439,7 +439,7 @@ Structured sources are serialized into declarative-prose rows in `episteme.artic
 | `reactome` | none | Flat current-release directory |
 | `mesh` | optional 4-digit year (default current year, then previous) | Resolves `desc<year>.gz`; the only structured source with a graph stage (`mesh_hierarchy`, needs migration 0003) |
 | `ontologies` | none | GO, HPO, MONDO (`.obo` and `.owl`) and UCUM from fixed URLs. UCUM is downloaded but not serialized |
-| `openalex` | `works_jsonl` (default), `works_parquet`, `jsonl`, `parquet`, `full` | S3 prefix under `OPENALEX_S3`; needs the `aws` CLI (or `s5cmd` for an unbounded sync). An unknown mode dies. Bounded fetch below |
+| `openalex` | `works_jsonl` (default), `works_parquet`, `jsonl`, `parquet`, `full` | S3 prefix under `OPENALEX_S3`; needs the `aws` CLI (or `s5cmd` for an unbounded sync). An unknown mode makes the wrapper die (rc 2 directly, rc 1 through the dispatcher). Bounded fetch below |
 
 First-time and incremental blocks (bounded where the option is real):
 
@@ -489,7 +489,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex load
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openalex all --max-files 1
 ```
 
-Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimited sync; a positive integer fetches that many shard files, oldest `updated_date=` partition first (byte order), skipping files already present at the right size, never counting `manifest.json`; a non-integer (`abc`, `-1`) dies with exit 2 and a message naming the value. The serializer keeps only works tagged Medicine or Biology at the top concept level.
+Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimited sync; a positive integer fetches that many shard files, oldest `updated_date=` partition first (byte order), skipping files already present at the right size, never counting `manifest.json`; a non-integer (`abc`, `-1`) dies with a message naming the value: exit 2 from the wrapper run directly, but rc 1 through `run_pipeline.sh` (`stage failed: download`). The serializer keeps only works tagged Medicine or Biology at the top concept level.
 
 | Issue | Mitigation |
 |---|---|
@@ -534,13 +534,13 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh hf_corpus download <r
 
 ### 5.5 CDISC Biomedical Concepts (`cdisc_bc`)
 
-CDISC Biomedical Concepts and SDTM dataset specialisations from the public GitHub repository `cdisc-org/COSMoS` (`export/` folder, CSV and XLSX). **Download-only; there is no serializer.** No modes; a stray positional token dies.
+CDISC Biomedical Concepts and SDTM dataset specialisations from the public GitHub repository `cdisc-org/COSMoS` (`export/` folder, CSV and XLSX). **Download-only; there is no serializer.** No modes; a stray positional token makes the wrapper die (rc 1 through the dispatcher).
 
 - **Pinned to one commit.** Each run resolves the latest commit SHA of `main` first, then lists and fetches `export/` at that SHA, so one run is internally consistent.
 - **`PROVENANCE.txt`** is written beside the data in `<raw>/cdisc_bc/`: source repo URL, `commit_sha`, `retrieved_at`, and the licence note. The repository `LICENSE` file is stored beside it and does not count against `--max-files`.
 - **Licence: UNVERIFIED.** The repository `LICENSE` is MIT (repository code); the README grants CC-BY-4.0 to documentation and minutes only and states nothing for the `export/` data files. Verify before any redistribution or training use (docs/12).
 - **Re-fetch:** size-matched files are skipped and a same-size change under a new commit is not detected, so after an upstream update run with `--force --reason "..."`.
-- Even `--dry-run` makes two GitHub API calls (commit and listing). Unauthenticated GitHub allows 60 requests per hour; hitting the limit dies with `cannot resolve the latest commit ... (GitHub API rate limit?)`.
+- Even `--dry-run` makes two GitHub API calls (commit and listing). Unauthenticated GitHub allows 60 requests per hour; hitting the limit fails the stage (rc 1 through the dispatcher) with `cannot resolve the latest commit ... (GitHub API rate limit?)`.
 
 ```bash
 # bounded first run: two data files plus LICENSE and PROVENANCE.txt
@@ -577,7 +577,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.load_articles
 
 ### 6.3 Field-shape `--report` (parse only, writes nothing)
 
-Every extractor and serializer (`apollo`, `bookshelf`, `europepmc_manuscript`, `europepmc_preprint`, `guidelines`, `pubmed`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`) has a `--report` mode that parses in memory and prints a field-shape table with no shard, marker, manifest or audit row. The dispatcher does not forward `--report`; call the wrapper directly. On Windows set `PYTHONIOENCODING=utf-8` (the default `cp1252` console encoding crashes on non-ASCII text):
+Every extractor and serializer (`apollo`, `bookshelf`, `europepmc_manuscript`, `europepmc_preprint`, `guidelines`, `pubmed`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`) has a `--report` mode that parses in memory and prints a field-shape table with no shard, marker, manifest or audit row. The dispatcher does not forward `--report`; call the wrapper directly. On Windows set `PYTHONIOENCODING=utf-8` (known on Windows: the default `cp1252` console encoding has crashed this mode on non-ASCII text; the variable is a precaution and harmless elsewhere):
 
 ```bash
 PYTHONIOENCODING=utf-8 bash scripts/data/uniprot/serialize_uniprot.sh --report --max-files 1
