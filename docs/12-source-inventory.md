@@ -26,7 +26,7 @@ Conventions: "not stated" means neither the code nor `docs/02` / `docs/10` state
 | `mesh` | structured | download, serialize, load, graph | `public_domain` **governance override** (decision 2026-09-19): `normalize_license` returns `unknown` for NLM's MeSH terms (`serialize_mesh.py`) | not stated | `mesh/download_mesh.sh` |
 | `ontologies` | structured | download, serialize, load | per ontology, from the declared OBO licence: GO and MONDO `CC BY` -> `commercial`; HPO `unknown` -> `open_metadata`; UCUM not checked or serialized (`serialize_ontologies.py`) | not stated | `ontologies/download_ontologies.sh` |
 | `openalex` | structured | download, serialize, load | `CC0` -> `commercial`, the dataset-level metadata licence, not per-work OA licences (`serialize_openalex.py`) | not stated | `openalex/download_openalex.sh` |
-| `hf_corpus` | acquisition mechanism | download | depends on the repo id passed; not stated | static releases | `hf_corpus/download_hf_corpus.sh` |
+| `hf_corpus` | acquisition mechanism | download | depends on the repo id passed; not stated | not stated | `hf_corpus/download_hf_corpus.sh` |
 | `dailymed` | volatile (Stream 2) | download | not stated | daily / weekly / monthly zips (docs/02 s2.2) | `dailymed/download_dailymed.sh` |
 | `openfda` | volatile (Stream 2) | download | not stated | API / bulk (docs/02 s2.2) | `openfda/download_openfda.sh` |
 | `aact` | volatile (Stream 2) | download | not stated | monthly / daily dumps (docs/02 s2.2) | `aact/download_aact.sh` |

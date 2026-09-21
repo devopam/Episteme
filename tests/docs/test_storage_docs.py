@@ -54,11 +54,9 @@ def test_tables_named_in_docs_exist_in_sql():
     defined = _tables_defined()
     for name in ("07-knowledge-graph-lessons.md", "08-data-storage-principles.md"):
         for tbl in set(re.findall(r"`episteme\.(\w+)", doc(name))):
-            assert tbl in defined | _SCRIPT_TABLES | {
-                "license",
-                "subset",
-                "config",
-            }  # tag names and the python module, (name, tbl)
+            # "license" / "subset" / "config" are `episteme.<name>` spans that are not tables
+            # (column tag names and the python config module)
+            assert tbl in defined | _SCRIPT_TABLES | {"license", "subset", "config"}, (name, tbl)
 
 
 def test_columns_named_for_edge_tables_exist_in_schema():
@@ -108,6 +106,100 @@ def test_pgq_guard_described_matches_schema():
     assert "SQL/PGQ unavailable" in sql
 
 
-def test_docs_do_not_claim_iceberg_is_in_use():
+def test_src_does_not_use_pyiceberg():
     src = "\n".join(p.read_text(encoding="utf-8") for p in (REPO / "src").rglob("*.py"))
     assert "pyiceberg" not in src.lower()
+
+
+def _partitions(parent: str) -> list[str]:
+    """Relations declared `PARTITION OF episteme.<parent>` in schema + migrations."""
+    return re.findall(rf"episteme\.(\w+)\s+PARTITION OF episteme\.{parent}\b", _sql_text())
+
+
+def test_articles_partition_ladders_match_docs_08():
+    """pmc (schema.sql) and bookshelf (migration 0002) have year ladders; nothing else does."""
+    schema = _SCHEMA.read_text(encoding="utf-8")
+    mig2 = next(_MIGRATIONS.glob("0002_*.sql")).read_text(encoding="utf-8")
+    assert re.search(
+        r"articles_pmc\s+PARTITION OF episteme\.articles\s+FOR VALUES IN \('pmc'\)"
+        r"\s+PARTITION BY RANGE \(year\)",
+        schema,
+    )
+    assert "PARTITION OF episteme.articles DEFAULT" in schema
+    assert re.search(
+        r"articles_bookshelf\s+PARTITION OF episteme\.articles\s+FOR VALUES IN "
+        r"\('bookshelf'\)\s+PARTITION BY RANGE \(year\)",
+        mig2,
+    )
+    assert len(re.findall(r"PARTITION BY RANGE \(year\)", _sql_text())) == 2
+    assert len(_partitions("articles_pmc")) >= 3
+    assert len(_partitions("articles_bookshelf")) >= 3
+    t = doc("08-data-storage-principles.md")
+    assert "`pmc` sub-partitioned `RANGE (year)`" in t
+    assert "`bookshelf` also has a year ladder" in t
+
+
+def test_article_body_is_list_source_only():
+    assert set(_partitions("article_body")) == {
+        "article_body_pmc",
+        "article_body_default",
+        "article_body_bookshelf",
+    }
+    assert re.search(
+        r"CREATE TABLE episteme\.article_body \(.*?\) PARTITION BY LIST \(source\)",
+        _sql_text(),
+        re.S,
+    )
+    t = doc("08-data-storage-principles.md")
+    assert "`LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002)" in t
+
+
+def test_hash_keys_and_bucket_counts_named_in_docs_08_match_schema():
+    sql = _sql_text()
+    t = doc("08-data-storage-principles.md")
+    keys = {
+        "article_cites": "src_pmid",
+        "article_mesh": "pmid",
+        "chunks": "article_id",
+        "article_parts": "container_id",
+    }
+    for tbl, key in keys.items():
+        assert re.search(
+            rf"CREATE TABLE (?:IF NOT EXISTS )?episteme\.{tbl} \(.*?\) PARTITION BY HASH \({key}\)",
+            sql,
+            re.S,
+        ), tbl
+        assert f"| `episteme.{tbl}` | `HASH" in t, tbl
+    for tbl in ("article_cites", "article_mesh", "chunks"):
+        assert f"`HASH ({keys[tbl]})`, 8 buckets" in t, tbl
+        n = len(
+            re.findall(
+                rf"episteme\.{tbl}_h\d PARTITION OF episteme\.{tbl} FOR VALUES WITH \(MODULUS 8",
+                sql,
+            )
+        )
+        assert n == 8, tbl
+    # article_parts: 8 buckets, created in a loop over 0..7
+    assert "FOR i IN 0..7 LOOP" in sql and "MODULUS 8, REMAINDER %s" in sql
+
+
+def test_om_settings_are_consumed_nowhere_outside_config():
+    """docs/08: OM_HOST / OM_JWT are read into Settings but nothing consumes them."""
+    paths = list((REPO / "src").rglob("*.py")) + list((REPO / "scripts").rglob("*.sh"))
+    for p in paths:
+        if p.name == "config.py" and p.parent.name == "episteme":
+            continue
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        for token in ("OM_HOST", "OM_JWT", "om_host", "om_jwt"):
+            assert token not in text, (p, token)
+
+
+def test_graph_builder_derives_cites_and_mesh_for_pmc_only():
+    path = REPO / "src" / "episteme" / "data" / "graph_builder.py"
+    src = path.read_text(encoding="utf-8")
+    build = src.split("\ndef build", 1)[1]
+    before_pmc, rest = build.split('if source == "pmc":', 1)
+    pmc_block = rest.split('if source == "mesh":', 1)[0]
+    assert "_CITES_INSERT" in pmc_block and "_MESH_INSERT" in pmc_block
+    assert "_CITES_INSERT" not in before_pmc and "_MESH_INSERT" not in before_pmc
+    assert "_CITES_INSERT" not in rest.split('if source == "mesh":', 1)[1]
