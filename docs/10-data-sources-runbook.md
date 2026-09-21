@@ -15,7 +15,7 @@ Every command in a code fence below is meant to be pasted as-is from the reposit
 The old dated "quick status board" is gone. Two documents replace it:
 
 - **What exists and how it is licensed:** `docs/12-source-inventory.md` (static: class, stages wired, licence class and basis, cadence, script).
-- **What is on this machine right now:** `scripts/data/source_inventory.sh` (machine-local: last sync stamp and `episteme.articles` row count per source; section 7).
+- **What is on this machine right now:** `scripts/data/source_inventory.sh` (machine-local: newest last sync stamp under the source's raw directory and `episteme.articles` row count per source; section 7).
 
 Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/09-extraction-contract.md`. Storage: `docs/08-data-storage-principles.md`.
 
@@ -122,7 +122,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `PYTHON`, `PSQL` | Interpreter and client overrides for the scripts. |
 | Endpoint keys (`PUBMED_FTP_BASE`, `EUROPEPMC_BASE`, `EUROPEPMC_PREPRINT_BASE`, `CHEMBL_BASE`, `UNIPROT_MIRRORS`, `OPENALEX_S3`, `COSMOS_API_BASE`, ...) | Defaults live in `scripts/data/_lib/sources.env`. Override in `.env` or the environment; never edit a wrapper. |
 
-Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europe PMC feeds: `<raw>/europepmc/<preprints|manuscripts|id_mappings|lite_metadata|abstracts>/`), staging shards in `<processed>/staging/<source>/`, per-file markers under `<processed>/_ops/<source>/`, the audit JSONL mirror in `<processed>/_ops/_audit/`, corpus shards under `<corpus>/`. `last_sync_utc.txt` in a source's raw directory is the stamp `source_inventory.sh` reads.
+Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europe PMC feeds: `<raw>/europepmc/<preprints|manuscripts|id_mappings|lite_metadata|abstracts>/`), staging shards in `<processed>/staging/<source>/`, per-file markers under `<processed>/_ops/<source>/`, the audit JSONL mirror in `<processed>/_ops/_audit/`, corpus shards under `<corpus>/`. `last_sync_utc.txt` under a source's raw directory (possibly in a nested folder, e.g. `<raw>/openalex/data/jsonl/works/`) is the stamp `source_inventory.sh` reads; it reports the newest one found under the source's raw directory.
 
 ### 1.3 The `.env` file rules
 
@@ -613,7 +613,7 @@ Run it after each new download or parser change as the smoke check.
 | Command | What it tells you |
 |---|---|
 | `bash scripts/data/verify_audit_trail.sh` | Recomputes the hash chain. Prints `audit chain OK` and exits 0, or `CHAIN BROKEN at seq [...]` and exits 1 (a `mirror_short` problem prints `[None]`). Needs `EPISTEME_ACTOR` and a reachable database (guarded like any Python connection); exit 2 if the actor is missing. Details and limits: docs/11 section 5. |
-| `bash scripts/data/source_inventory.sh` | Read-only table `source last_sync rows` for every wired source. `last_sync` reads `<raw>/<source>/last_sync_utc.txt`; `rows` is the `episteme.articles` count per source. `n/a` means no stamp or no rows for that source, or (for `rows` on every line) the database is unreachable or refused by the guard. Does not need `EPISTEME_ACTOR`. |
+| `bash scripts/data/source_inventory.sh` | Read-only table `source last_sync rows` for every wired source. `last_sync` is the newest `last_sync_utc.txt` found anywhere under `<raw>/<source>/` (nested folders included); `rows` is the `episteme.articles` count per source. `n/a` means no stamp or no rows for that source, or (for `rows` on every line) the database is unreachable or refused by the guard. Does not need `EPISTEME_ACTOR`. |
 | `bash scripts/data/pubmed/verify_pubmed.sh all` | Local MD5 check of the PubMed set (no network in plain mode). |
 
 ```bash
