@@ -39,12 +39,16 @@ case "$MODE" in
     *)             die "openalex: bad mode '$MODE' (works_jsonl|works_parquet|jsonl|parquet|full)" ;;
 esac
 
-[ -z "$MAX_FILES" ] || log INFO "openalex: --max-files is ignored for an S3 prefix sync"
-
 src="${OPENALEX_S3%/}${suffix:+/$suffix}"
 dst="$(resolve_dest openalex "$suffix")"
 
-if s3_sync "$src" "$dst"; then
+case "$MAX_FILES" in
+    ''|0) fetch=(s3_sync "$src" "$dst") ;;
+    *[!0-9]*) die "openalex: --max-files must be a non-negative integer (got '$MAX_FILES')" 2 ;;
+    *)             fetch=(s3_fetch_first_n "$src" "$dst" "$MAX_FILES") ;;
+esac
+
+if "${fetch[@]}"; then
     if [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
         printf '%s\n' "$MODE" > "$dst/sync_mode.txt"
     fi

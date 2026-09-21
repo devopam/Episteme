@@ -153,6 +153,11 @@ def decide_extract_status(
     return "partial", f"short_text_len={len(t)}"
 
 
+LICENSE_PUBLIC_DOMAIN = "public_domain"
+"""Source-anchored licence code. normalize_license() NEVER returns it; only
+serializers set it as an explicit governance override (SP4.1 spec 3.4)."""
+
+
 def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
     """
     Returns (license, license_url, license_raw).
@@ -163,7 +168,7 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
 
     s = str(raw).strip()
     url = None
-    m = re.search(r"https?://creativecommons\.org/licenses/[^\s)\"']+", s, re.I)
+    m = re.search(r"https?://creativecommons\.org/(?:licenses|publicdomain)/[^\s)\"']+", s, re.I)
     if m:
         url = m.group(0).rstrip(".,;")
 
@@ -183,6 +188,13 @@ def normalize_license(raw: str | None) -> tuple[str, str | None, str | None]:
         return "CC BY-ND", url, s[:300]
     if re.search(r"\bCC\s*BY\b", u) or "CREATIVE COMMONS ATTRIBUTION" in u:
         return "CC BY", url, s[:300]
+    # Bare creativecommons.org URLs (GO/MONDO declare only this). The by-sa/
+    # by-nd/by-nc* URL forms are already caught by the substring arms above.
+    # Like those, these do not understand negation ("not licensed under <url>").
+    if re.search(r"creativecommons\.org/licenses/by/", s, re.I):
+        return "CC BY", url, s[:300]
+    if re.search(r"creativecommons\.org/publicdomain/zero/", s, re.I):
+        return "CC0", url, s[:300]
     if "TEXT MINING" in u or "TEXT-MINING" in u or "FAIR USE" in u:
         return "text_mining", url, s[:300]
     # Permissive OSI licences (Apache-2.0, MIT, BSD, ISC): no share-alike, no
@@ -248,7 +260,14 @@ def _norm_license_key(raw: str) -> str:
 
 
 def subset_from_license(license_code: str, *, default: str = "open_metadata") -> str:
-    if license_code in ("CC0", "CC BY", "CC BY-SA", "CC BY-ND", "permissive"):
+    if license_code in (
+        "CC0",
+        "CC BY",
+        "CC BY-SA",
+        "CC BY-ND",
+        "permissive",
+        LICENSE_PUBLIC_DOMAIN,
+    ):
         return "commercial"
     if license_code.startswith("CC BY-NC") or license_code == "text_mining":
         return "text_mining"

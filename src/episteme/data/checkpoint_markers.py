@@ -111,6 +111,8 @@ def write_run_manifest(
 
 
 def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:
+    """Legacy: dedups by BASENAME — two files sharing a name in different
+    directories collapse to one. New code uses discover_input_files + input_key."""
     files: list[Path] = []
     for pat in patterns:
         files.extend(sorted(raw_glob_root.glob(pat)))
@@ -127,3 +129,45 @@ def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:
         seen.add(key)
         out.append(f)
     return out
+
+
+def input_key(path: Path, raw_root: Path) -> str:
+    """Stable per-input identity: the path relative to ``raw_root``, joined with
+    ``__``. A file directly under ``raw_root`` yields its bare basename, so
+    flat layouts keep the keys (markers, shards, ``source_file``) they had
+    before this helper existed."""
+    p = Path(path).resolve()
+    try:
+        rel = p.relative_to(Path(raw_root).resolve())
+    except ValueError:
+        return p.name
+    return "__".join(rel.parts)
+
+
+def discover_input_files(raw_root: Path, patterns: list[str]) -> list[Path]:
+    """glob + rglob per pattern; dedup by resolved FULL path (never basename)."""
+    root = Path(raw_root)
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for pat in patterns:
+        for f in [*root.glob(pat), *root.rglob(pat)]:
+            if not f.is_file():
+                continue
+            rp = f.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            out.append(f)
+    return sorted(out, key=lambda p: str(p))
+
+
+def find_input_by_key(raw_root: Path, key: str) -> Path | None:
+    """Inverse of :func:`input_key`: the file under ``raw_root`` whose key is ``key``."""
+    root = Path(raw_root)
+    parts = key.split("__")
+    for i in range(len(parts)):
+        name = "__".join(parts[i:])
+        for cand in sorted(root.rglob(name)):
+            if cand.is_file() and input_key(cand, root) == key:
+                return cand
+    return None

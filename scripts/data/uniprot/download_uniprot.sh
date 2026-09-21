@@ -46,8 +46,10 @@ done
 [ -n "$BASE" ] || die "uniprot: no mirror reachable"
 log INFO "uniprot mirror: $BASE"
 
-# U-1: ancillaries first so --max-files 2 grabs the two cheap files.
-files=(reldate.txt LICENSE README uniprot.xsd uniprot_sprot.xml.gz uniprot_sprot.fasta.gz uniprot_sprot.dat.gz uniprot_sprot_varsplic.fasta.gz)
+# U-1: ancillaries first (cheap), then the small 94MB FASTA, then the large files
+# (the 941MB XML last-ish), so a small --max-files (e.g. 4) yields a usable
+# FASTA-only set instead of stalling behind the XML.
+files=(reldate.txt LICENSE README uniprot_sprot.fasta.gz uniprot.xsd uniprot_sprot.dat.gz uniprot_sprot.xml.gz uniprot_sprot_varsplic.fasta.gz)
 
 # C1: --max-files caps the RESOLVED set here, before the --force prune loop —
 # otherwise --force deletes the whole set and only N are re-fetched.

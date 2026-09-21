@@ -16,6 +16,7 @@ regression guards for the fix wave:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -62,6 +63,7 @@ FAST_TOKENS = [
     "hf_corpus",
     "dailymed",
     "aact",
+    "cdisc_bc",
     "europepmc_preprint",
     "europepmc_id_mappings",
     "europepmc_lite",
@@ -97,6 +99,7 @@ def _run(args: list[str], tmp_path: Path, timeout: int) -> subprocess.CompletedP
         "EPISTEME_ACTOR": "episteme_sys_admin",
         "PGDATABASE": "episteme_test",
         "EPISTEME_DATA_ROOT": str(tmp_path),
+        "EPISTEME_RAW_ROOT": str(tmp_path / "01_raw"),
     }
     return subprocess.run(
         [BASH, str(SCRIPT), *args],
@@ -140,6 +143,25 @@ def test_download_dry_run_dispatches(token: str, tmp_path: Path) -> None:
 @pytest.mark.parametrize("token", HEAVY_TOKENS)
 def test_download_dry_run_dispatches_heavy(token: str, tmp_path: Path) -> None:
     _assert_download_dry_run_dispatches(token, tmp_path, HEAVY_TIMEOUT)
+
+
+def test_mesh_download_dry_run_resolves_a_descriptor_release(tmp_path: Path) -> None:
+    # SP4.1 Task 7: the wrapper resolved 0 files against NLM's real layout.
+    try:
+        proc = _run(["mesh", "download", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        pytest.skip("mesh: dry-run exceeded timeout (slow network)")
+    if proc.returncode == 1:
+        pytest.skip(f"mesh: wrapper failed transiently (rc=1): {proc.stderr[-800:]}")
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    if "resolved 0 files" in proc.stderr:
+        codes = re.findall(r"desc\d{4}\.(?:gz|xml)=(\d{3})", proc.stderr)
+        if codes and all(c == "000" for c in codes):
+            pytest.skip("mesh: every probe failed at the network level (NLM unreachable)")
+        pytest.fail(f"NLM reachable but no descriptor release resolved: {proc.stderr[-2000:]}")
+    assert re.search(
+        r"would fetch \S+/desc\d{4}\.gz -> \S+/desc\d{4}\.gz", proc.stderr
+    ), proc.stderr[-2000:]
 
 
 def test_non_download_stage_for_table_source_dies_3(tmp_path: Path) -> None:
@@ -292,3 +314,59 @@ def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
     proc = _run(["pubchem", "extract"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "not in SP2" in proc.stderr or "not wired" in proc.stderr
+
+
+def _run_env(args: list[str], tmp_path: Path, timeout: int, **env_over: str):
+    env = {
+        **os.environ,
+        "EPISTEME_ACTOR": "episteme_sys_admin",
+        "EPISTEME_DATA_ROOT": str(tmp_path),
+        "EPISTEME_RAW_ROOT": str(tmp_path / "01_raw"),
+        **env_over,
+    }
+    return subprocess.run(
+        [BASH, str(SCRIPT), *args],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_restricted_mode_refuses_production_database(tmp_path: Path) -> None:
+    # PGPORT=1: even if the guard were ever broken, no real connection to any
+    # database can be opened by this test.
+    proc = _run_env(
+        ["chembl", "serialize"],
+        tmp_path,
+        FAST_TIMEOUT,
+        PGDATABASE="episteme",
+        EPISTEME_DB_MODE="restricted",
+        PGPORT="1",
+    )
+    assert "Refusing to open a connection to production database" in proc.stderr
+    assert "connection refused" not in proc.stderr.lower()
+
+
+def test_restricted_mode_allows_secondary_target(tmp_path: Path) -> None:
+    proc = _run_env(
+        ["chembl", "serialize"],
+        tmp_path,
+        FAST_TIMEOUT,
+        PGDATABASE="episteme",
+        PGDATABASE_SECONDARY="episteme_test",
+        EPISTEME_DB_TARGET="secondary",
+        EPISTEME_DB_MODE="restricted",
+        PGPORT="1",
+    )
+    assert "Refusing to open a connection to production database" not in proc.stderr
+
+
+@pytest.mark.parametrize("stage", ["serialize", "extract"])
+def test_cdisc_bc_is_download_only(tmp_path, stage):
+    # cdisc_bc is in WRAPPER only (not LIT_SOURCES / STRUCTURED_SOURCES): early validation dies 3.
+    proc = _run(["cdisc_bc", stage], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "unknown source" not in proc.stderr  # registered in WRAPPER, refused for the stage
+    assert f"cdisc_bc {stage} is not in SP" in proc.stderr

@@ -1,4 +1,5 @@
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,8 @@ def fresh_config(tmp_path, monkeypatch):
     """Reload episteme.config with a controlled environment and cwd."""
     env_file = tmp_path / ".env"
     monkeypatch.chdir(tmp_path)
-    for var in list(__import__("os").environ):
+    snapshot = dict(os.environ)  # load_dotenv writes into os.environ; restore on teardown
+    for var in list(os.environ):
         if var.startswith(("EPISTEME_", "PG", "OM_", "NCBI_")):
             monkeypatch.delenv(var, raising=False)
 
@@ -23,7 +25,16 @@ def fresh_config(tmp_path, monkeypatch):
         cfg.get_settings.cache_clear()
         return cfg
 
-    return _load
+    yield _load
+
+    os.environ.clear()
+    os.environ.update(snapshot)
+    try:
+        import episteme.config as cfg
+
+        cfg.get_settings.cache_clear()
+    except Exception:  # pragma: no cover - best effort
+        pass
 
 
 def test_defaults_when_env_absent(fresh_config):
@@ -157,3 +168,21 @@ def test_dotenv_overrides_sources_env(fresh_config, monkeypatch):
     monkeypatch.setenv("CHEMBL_BASE", "https://realenv.example/chembl")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().chembl_base == "https://realenv.example/chembl"
+
+
+class TestFreshConfigNoLeak:
+    """fresh_config must not leak load_dotenv-written vars into os.environ."""
+
+    _SENTINEL = "EPISTEME_DATA_ROOT"
+
+    def test_a_loads_env_file(self, fresh_config):
+        fresh_config("EPISTEME_DATA_ROOT=/mnt/leak\nEPISTEME_RAW_ROOT=/mnt/leak/raw\n")
+        type(self)._loaded = True
+
+    _loaded = False
+
+    def test_b_nothing_leaked_afterwards(self):
+        if not self._loaded:
+            pytest.skip("needs test_a to have run first (file order)")
+        assert "EPISTEME_RAW_ROOT" not in os.environ
+        assert self._SENTINEL not in os.environ

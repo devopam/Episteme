@@ -87,6 +87,7 @@ declare -A WRAPPER=(
     [dailymed]="dailymed/download_dailymed.sh"
     [openfda]="openfda/download_openfda.sh"
     [aact]="aact/download_aact.sh"
+    [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
 )
 
 # SP2 literature sources: the six that get the full extract -> load -> graph
@@ -283,7 +284,7 @@ if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
     log INFO "dry-run: skipping run_start/run_end audit bracket"
 else
     "$PY" -m episteme.audit_trail record run_start --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
-        || log WARN "run_start audit failed; proceeding unaudited (is the DB up?)"
+        || log WARN "run_start audit failed; proceeding unaudited (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
 fi
 
 # M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
@@ -363,6 +364,6 @@ if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
     log INFO "dry-run: audit bracket skipped (no run_end)"
 else
     "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
-        || log WARN "run_end audit failed (is the DB up?)"
+        || log WARN "run_end audit failed (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
 fi
 log INFO "pipeline done: $SOURCE $STAGE"
