@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Episteme SP3 acquisition wrapper: NLM MeSH bulk download. Thin shell over
-# scripts/data/_lib/common.sh — directory listing + size-skip + fetch only.
-# Optional positional YEAR (default: current UTC year). Probes several known NLM
-# layouts; every one that resolves contributes files.
+# scripts/data/_lib/common.sh — descriptor-release probe + size-skip + fetch only.
+# Optional positional YEAR (default: current UTC year). Resolves the current (else previous) year's descriptor release.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
@@ -35,44 +34,31 @@ require_env EPISTEME_ACTOR MESH_BASE MESH_FTP_BASE
 
 dest="$(resolve_dest mesh)"
 
-# Candidate directories, tried in order; every one that lists contributes.
-cand_dirs=(
-    "$MESH_BASE/xmlmesh$YEAR"
-    "$MESH_BASE/ascii$YEAR"
-    "$MESH_BASE/xmlmesh$PREV"
-    "$MESH_BASE/ascii$PREV"
-    "$MESH_FTP_BASE/mesh_data"
-    "$MESH_FTP_BASE/rdf"
-)
-
+# Current NLM layout: one gzipped DescriptorRecordSet per release under
+# $MESH_BASE/MESH_FILES/xmlmesh/desc<year>.gz. Only descriptors are fetched —
+# qualifier/supplemental/pharmacologic files are consumed by no serializer.
+# Probe the current year, then the previous; the first that returns 200 wins.
+# No -L on the probe: a stale path 302-redirects to an HTML error page (current
+# NLM behaviour) that would read as 200 if chased, then be fetched and falsely
+# stamped. Headers only (-I) — never a body download. Runs under --dry-run too.
 planned=()
-for d in "${cand_dirs[@]}"; do
-    seg="${d##*/}"
-    mapfile -t fs < <(list_manifest "$d" '\.(bin|xml|gz|txt|nt|rdf|asc)$')
-    for f in "${fs[@]}"; do
-        [ -n "$f" ] || continue
-        planned+=("$d/$f"$'\t'"$seg/$f")
+tried=()
+for y in "$YEAR" "$PREV"; do
+    for f in "desc$y.gz" "desc$y.xml"; do
+        url="$MESH_BASE/MESH_FILES/xmlmesh/$f"
+        tried+=("$url")
+        code="$(curl -sSI -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 "$url" || true)"
+        if [ "$code" = "200" ]; then
+            planned+=("$url"$'	'"$f")   # flat dest: 01_raw/mesh/desc<year>.gz
+            break
+        fi
     done
+    [ "${#planned[@]}" -gt 0 ] && break
 done
 
-# Fallback: nothing listed -> probe known descriptor filenames with a bare
-# curl http-code check (W-3 allows this). Runs under --dry-run too (cheap).
+# Nothing resolved: a layout change must NOT fail the dry-run sweep.
 if [ "${#planned[@]}" -eq 0 ]; then
-    log WARN "mesh: directory listings resolved nothing — probing known filenames"
-    for y in "$YEAR" "$PREV"; do
-        for f in "desc$y.xml" "qual$y.xml" "supp$y.xml"; do
-            # No -L: a stale path that 302-redirects to an error page (current
-            # NLM behaviour) must read as non-200 and be dropped, not chased to
-            # a 200 error body that would then be fetched and falsely stamped.
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 "$MESH_BASE/xmlmesh$y/$f" || true)"
-            [ "$code" = "200" ] && planned+=("$MESH_BASE/xmlmesh$y/$f"$'\t'"xmlmesh$y/$f")
-        done
-    done
-fi
-
-# Still nothing: a layout change must NOT fail the Task 11 dry-run sweep.
-if [ "${#planned[@]}" -eq 0 ]; then
-    log WARN "mesh: no files resolved — NLM layout may have changed (check $MESH_BASE); resolved 0 files"
+    log WARN "mesh: tried ${tried[*]} — none returned HTTP 200; NLM layout may have changed (check $MESH_BASE); resolved 0 files"
     exit 0
 fi
 
