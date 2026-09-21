@@ -30,7 +30,7 @@ esac
 PREV=$((YEAR - 1))
 
 load_dotenv
-require_env EPISTEME_ACTOR MESH_BASE MESH_FTP_BASE
+require_env EPISTEME_ACTOR MESH_BASE
 
 dest="$(resolve_dest mesh)"
 
@@ -46,10 +46,10 @@ tried=()
 for y in "$YEAR" "$PREV"; do
     for f in "desc$y.gz" "desc$y.xml"; do
         url="$MESH_BASE/MESH_FILES/xmlmesh/$f"
-        tried+=("$url")
         code="$(curl -sSI -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 "$url" || true)"
+        tried+=("$f=${code:-000}")
         if [ "$code" = "200" ]; then
-            planned+=("$url"$'	'"$f")   # flat dest: 01_raw/mesh/desc<year>.gz
+            planned+=("$url"$'\t'"$f")   # flat dest: 01_raw/mesh/desc<year>.gz
             break
         fi
     done
@@ -58,7 +58,7 @@ done
 
 # Nothing resolved: a layout change must NOT fail the dry-run sweep.
 if [ "${#planned[@]}" -eq 0 ]; then
-    log WARN "mesh: tried ${tried[*]} — none returned HTTP 200; NLM layout may have changed (check $MESH_BASE); resolved 0 files"
+    log WARN "mesh: probed $MESH_BASE/MESH_FILES/xmlmesh/ (${tried[*]}) — none returned HTTP 200; NLM layout may have changed (check $MESH_BASE); resolved 0 files"
     exit 0
 fi
 
