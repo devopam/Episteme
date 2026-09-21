@@ -96,6 +96,7 @@ def _run(tmp_path, *args):
         "SHIM_DIR": _msys_path(tmp_path / "bin"),
         "EPISTEME_ACTOR": "episteme_sys_admin",
         "EPISTEME_DATA_ROOT": str(tmp_path),
+        "EPISTEME_RAW_ROOT": str(tmp_path / "01_raw"),
         "PGDATABASE": "episteme_test",
     }
     proc = subprocess.run(
