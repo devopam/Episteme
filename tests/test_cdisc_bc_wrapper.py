@@ -71,13 +71,16 @@ def _fake_curl(bindir: Path, log: Path) -> None:
         '  prev="$a"\n'
         "done\n"
         f'echo "$url" >> "{log.as_posix()}"\n'
-        '[ "$head" = 1 ] && exit 0\n'  # HEAD probe: no content-length -> never size-matched
         'case "$url" in\n'
         '  */contents/export*) body="$(cat "$BIN/contents.json")" ;;\n'
         '  */commits/*) body="$(cat "$BIN/commit.json")" ;;\n'
         '  */LICENSE) body="licence text" ;;\n'
         '  *) body="data of $(basename "$url")" ;;\n'
         "esac\n"
+        'if [ "$head" = 1 ]; then\n'
+        '  printf "content-length: %s\\r\\n" "$(printf "%s\\n" "$body" | wc -c | tr -d " ")"\n'
+        "  exit 0\n"
+        "fi\n"
         'if [ -n "$out" ]; then mkdir -p "$(dirname "$out")"; printf "%s\n" "$body" > "$out"\n'
         'else printf "%s\n" "$body"; fi\n'
     )
@@ -122,7 +125,8 @@ def test_fetches_files_provenance_and_licence(tmp_path):
     prov = (_dest(tmp_path) / "PROVENANCE.txt").read_text(encoding="utf-8")
     assert f"commit_sha: {SHA}" in prov  # top-level sha, not the nested one
     assert "source_repo: https://github.com/cdisc-org/COSMoS" in prov
-    assert "CC-BY-4.0" in prov and "MIT" in prov
+    assert "not stated for export/ data" in prov
+    assert "CC-BY-4.0 (repository content)" not in prov
     assert "retrieved_at: 20" in prov and prov.count("Z") >= 1
     assert (_dest(tmp_path) / "LICENSE").read_text(encoding="utf-8").startswith("licence text")
 
@@ -149,3 +153,21 @@ def test_force_dry_run_deletes_nothing(tmp_path):
     proc, _ = _run(tmp_path, "--dry-run", "--force")
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert (_dest(tmp_path) / "export" / "bc_latest.csv").is_file()
+
+
+def test_up_to_date_run_does_not_rewrite_provenance(tmp_path):
+    proc, _ = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    prov = _dest(tmp_path) / "PROVENANCE.txt"
+    prov.write_text("sentinel\n", encoding="utf-8")
+    proc, _ = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "up to date" in proc.stderr
+    assert prov.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_yaml_positional_dies_unknown_mode(tmp_path):
+    proc, _ = _run(tmp_path, "yaml")
+    assert proc.returncode != 0
+    assert "unknown mode 'yaml'" in proc.stderr
+    assert not _dest(tmp_path).exists()
