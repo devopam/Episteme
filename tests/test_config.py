@@ -177,7 +177,12 @@ class TestFreshConfigNoLeak:
 
     def test_a_loads_env_file(self, fresh_config):
         fresh_config("EPISTEME_DATA_ROOT=/mnt/leak\nEPISTEME_RAW_ROOT=/mnt/leak/raw\n")
+        type(self)._loaded = True
+
+    _loaded = False
 
     def test_b_nothing_leaked_afterwards(self):
+        if not self._loaded:
+            pytest.skip("needs test_a to have run first (file order)")
         assert "EPISTEME_RAW_ROOT" not in os.environ
         assert self._SENTINEL not in os.environ
