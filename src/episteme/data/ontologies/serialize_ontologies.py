@@ -113,18 +113,11 @@ implementation time (2026-09-17, byte-range HTTP GETs against
 declared string through ``normalize_license`` directly, not guessed:
 
   * GO:    ``property_value: terms:license http://creativecommons.org/licenses/by/4.0/``
-    -> ``normalize_license`` -> ``license="unknown"`` -> ``open_metadata``.
-    FLAGGED: the bare CC-BY URL contains neither a literal "CC BY"/"CC-BY"
-    token nor the phrase "creative commons attribution" that
-    ``normalize_license``'s existing CC-BY regex arm requires -- confirmed
-    by running this exact real string through the function directly. A
-    real, genuine licence-resolution gap (this ontology IS openly
-    CC-BY-4.0-licensed in fact; the schema's regex just does not recognise
-    a bare CC URL lacking the textual tag), same posture as pubchem/
-    clinvar/mesh's own flagged gaps -- NOT patched by adding a new
-    ``normalize_license`` arm (spec Sec 8 item 4's own instruction).
+    -> ``normalize_license`` -> ``license="CC BY"`` -> ``commercial`` (SP4.1 Task 10
+    added the bare ``creativecommons.org/licenses/by/`` URL arm; before it, this
+    string resolved to ``unknown``/``open_metadata``).
   * MONDO: ``property_value: terms:license http://creativecommons.org/licenses/by/4.0/``
-    (byte-identical declared string to GO's) -> same resolution, same flag.
+    (byte-identical declared string to GO's) -> same resolution (CC BY/commercial).
   * HPO:   ``property_value: terms:license https://hpo.jax.org/app/license``
     -- a bare project-specific URL, no CC/SPDX token at all -> ``unknown``
     -> ``open_metadata``, exactly as the brief's own instruction to check a
@@ -136,10 +129,9 @@ declared string through ``normalize_license`` directly, not guessed:
     permissive "no restrictions" grant) is NOT checked or extracted here;
     deferred alongside the parser itself.
 
-``article_schema.py`` is NOT touched by this task's diff (no new
-``normalize_license`` arm added) -- all three checked vocabularies'
-real declared licences resolve to ``unknown``/``open_metadata`` via the
-EXISTING machinery, flagged, not forced.
+Historical note: this module's own diff did not touch ``article_schema.py``; GO/MONDO
+now resolve to CC BY/commercial via the SP4.1 Task 10 URL arm, HPO stays
+``unknown``/``open_metadata``.
 
 Ontology terms carry no bibliographic shape beyond a name: ``title`` is
 ``term.name`` (per the brief -- unlike mesh/reactome, which set ``title``
