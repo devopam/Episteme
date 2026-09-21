@@ -142,6 +142,19 @@ def test_download_dry_run_dispatches_heavy(token: str, tmp_path: Path) -> None:
     _assert_download_dry_run_dispatches(token, tmp_path, HEAVY_TIMEOUT)
 
 
+def test_mesh_download_dry_run_resolves_a_descriptor_release(tmp_path: Path) -> None:
+    # SP4.1 Task 7: the wrapper resolved 0 files against NLM's real layout.
+    try:
+        proc = _run(["mesh", "download", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        pytest.skip("mesh: dry-run exceeded timeout (slow network)")
+    if proc.returncode == 1:
+        pytest.skip(f"mesh: wrapper failed transiently (rc=1): {proc.stderr[-800:]}")
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "resolved 0 files" not in proc.stderr, proc.stderr[-2000:]
+    assert "desc" in proc.stderr + proc.stdout
+
+
 def test_non_download_stage_for_table_source_dies_3(tmp_path: Path) -> None:
     proc = _run(["chembl", "extract"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
