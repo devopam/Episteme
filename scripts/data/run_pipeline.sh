@@ -87,6 +87,7 @@ declare -A WRAPPER=(
     [dailymed]="dailymed/download_dailymed.sh"
     [openfda]="openfda/download_openfda.sh"
     [aact]="aact/download_aact.sh"
+    [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
 )
 
 # SP2 literature sources: the six that get the full extract -> load -> graph

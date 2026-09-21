@@ -63,6 +63,7 @@ FAST_TOKENS = [
     "hf_corpus",
     "dailymed",
     "aact",
+    "cdisc_bc",
     "europepmc_preprint",
     "europepmc_id_mappings",
     "europepmc_lite",
@@ -358,3 +359,10 @@ def test_restricted_mode_allows_secondary_target(tmp_path: Path) -> None:
         PGPORT="1",
     )
     assert "Refusing to open a connection to production database" not in proc.stderr
+
+
+@pytest.mark.parametrize("stage", ["serialize", "extract"])
+def test_cdisc_bc_is_download_only(tmp_path, stage):
+    # cdisc_bc is in WRAPPER only (not LIT_SOURCES / STRUCTURED_SOURCES): early validation dies 3.
+    proc = _run(["cdisc_bc", stage], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
