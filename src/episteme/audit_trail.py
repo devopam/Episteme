@@ -306,9 +306,11 @@ def verify(conn: psycopg.Connection) -> list[dict]:
 def mirror_only(event_type: str, **fields: Any) -> None:
     """Best-effort, JSONL-only audit record: NO DB write, NO hash chain.
 
-    For callers with no open transaction to hand ``record()`` -- e.g.
-    ``extract_pmc``'s per-file audit call, which has no ``conn`` because
-    extraction has no DB txn. Same closed-set ``event_type`` check as
+    Best-effort fallback for callers whose ``record()`` attempt failed (DB
+    unreachable, refused by the DB-mode guard, or the insert failed) -- e.g. the
+    extract/serialize stages' ``_best_effort_audit``, which normally calls
+    ``record()`` on a fresh connection and only falls back here.
+    Same closed-set ``event_type`` check as
     ``record()`` (raises ``ValueError`` before anything else). Unlike
     ``record()``, a failure to write the mirror file is logged via
     ``_LOG.exception`` and swallowed rather than re-raised -- this is already
