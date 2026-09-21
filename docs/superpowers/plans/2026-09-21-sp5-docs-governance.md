@@ -32,7 +32,7 @@
 
 | File | Responsibility |
 |---|---|
-| `tests/docs/conftest.py`, `tests/docs/_repo.py` | shared parsers: repo root, WRAPPER table, stage rules, doc text |
+| `tests/docs/__init__.py`, `tests/docs/_repo.py` | shared parsers: repo root, WRAPPER table, stage rules, doc text |
 | `docs/12-source-inventory.md` | static inventory table, one row per WRAPPER key |
 | `src/episteme/data/source_inventory.py`, `scripts/data/source_inventory.sh` | read-only machine-local columns (last sync, row counts) |
 | `docs/11-gxp-data-integrity.md` | GxP-ready posture from the implemented audit trail |
@@ -156,7 +156,7 @@ from ._repo import REPO
 def test_collect_reads_sync_stamp_and_counts(tmp_path):
     d = tmp_path / "chembl"
     d.mkdir()
-    (d / ".last_sync").write_text("2026-09-01T00:00:00Z\n", encoding="utf-8")
+    (d / "last_sync_utc.txt").write_text("2026-09-01T00:00:00Z\n", encoding="utf-8")
     (tmp_path / "mesh").mkdir()
     out = {r["source"]: r for r in collect(tmp_path, ["chembl", "mesh", "uniprot"], {"chembl": 7})}
     assert out["chembl"] == {"source": "chembl", "last_sync": "2026-09-01T00:00:00Z", "rows": 7}
