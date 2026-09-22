@@ -1,3 +1,4 @@
+import gzip
 import importlib
 
 import pytest
@@ -52,6 +53,45 @@ def test_hash_chain_and_tamper_detection(pg_conn, monkeypatch, tmp_path):
         # superuser test conn can UPDATE the append-only table
         cur.execute("UPDATE episteme._audit SET object = 'TAMPERED' WHERE seq = 1")
     assert audit_trail.verify(pg_conn) != []
+
+
+def test_verify_counts_gzipped_mirror_lines(pg_conn, monkeypatch, tmp_path):
+    # scripts/data/rotate_audit_logs.sh gzips mirror files older than 30 days
+    # in place. verify()'s mirror-parity glob must count *.jsonl.gz lines
+    # too, or every rotated day silently stops counting toward mirror_lines
+    # and verify() starts reporting a false "mirror_short".
+    monkeypatch.setenv("EPISTEME_ACTOR", "test-actor")
+    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
+    import episteme.config as cfg
+
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    from episteme import audit_trail
+
+    importlib.reload(audit_trail)
+
+    _setup_schema(pg_conn)
+    audit_trail.record("run_start", conn=pg_conn, object="pmc", run_id="r1")
+    audit_trail.record(
+        "load_commit", conn=pg_conn, object="pmc PMCFIX0001", rows_affected=1, run_id="r1"
+    )
+    pg_conn.commit()
+
+    mdir = tmp_path / "_ops" / "_audit"
+    mirror = next(mdir.glob("audit-*.jsonl"))
+    lines = mirror.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert len(lines) == 2
+
+    # Simulate rotation: keep line 1 in the plain (still-open) mirror file,
+    # move line 2 into a gzip'd file as rotate_audit_logs.sh would produce.
+    mirror.write_text(lines[0], encoding="utf-8")
+    gz_path = mdir / "audit-20200101.jsonl.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as fh:
+        fh.write(lines[1])
+
+    problems = audit_trail.verify(pg_conn)
+    mirror_short = [p for p in problems if p["reason"] == "mirror_short"]
+    assert mirror_short == [], f"gzip'd mirror lines not counted: {mirror_short}"
 
 
 def test_bad_event_type_rejected(pg_conn, monkeypatch):
