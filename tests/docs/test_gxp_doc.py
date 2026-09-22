@@ -47,23 +47,38 @@ def test_boundaries_and_claims():
     assert (REPO / "scripts/data/verify_audit_trail.sh").is_file()
 
 
+def _gap_row(text: str, prefix: str) -> str:
+    """Locate one row of the design-vs-implementation gap table by its
+    Design-statement cell prefix (same exact-match-on-start pattern as
+    ``_event_row`` below, just against that table's first column instead)."""
+    rows = [ln for ln in text.splitlines() if ln.startswith(f"| {prefix}")]
+    assert len(rows) == 1, prefix
+    return rows[0]
+
+
 def test_unimplemented_design_items_are_stated_as_absent():
-    text = doc("11-gxp-data-integrity.md")
     # Monthly partitions via create_audit_partition() must stay described as
     # NOT implemented while the repo lacks it.
+    text = doc("11-gxp-data-integrity.md")
     sql = (REPO / "src/episteme/data/db/schema.sql").read_text(encoding="utf-8")
     assert "not yet" in sql and "create_audit_partition" in sql
-    assert "**Not implemented.**" in text
+    row = _gap_row(text, "Monthly partitions created by a rotation script")
+    assert "**Not implemented.**" in row
 
 
 def test_rotate_audit_logs_is_documented_as_implemented():
-    # rotate_audit_logs.sh landed (SP6 Task 4): the doc must describe it (and
-    # the chattr +a behavior it drives) as implemented, not absent, and
-    # verify()'s mirror-parity glob must cover the .jsonl.gz files it produces.
+    # rotate_audit_logs.sh landed (SP6 Task 4): its own gap-table row must
+    # describe it as implemented, not absent, and verify()'s mirror-parity
+    # glob must cover the .jsonl.gz files it produces.
     text = doc("11-gxp-data-integrity.md")
     assert (REPO / "scripts/data/rotate_audit_logs.sh").is_file()
-    assert "chattr +a" in text and "rotate_audit_logs.sh" in text
-    assert "**Implemented.**" in text
+    row = _gap_row(
+        text, "`scripts/data/rotate_audit_logs.sh` gzips mirror files older than 30 days"
+    )
+    assert "**Implemented.**" in row
+    assert "rotate_audit_logs.sh" in row
+    chattr_row = _gap_row(text, "JSONL mirror is append-only via `chattr +a`")
+    assert "chattr +a" in chattr_row and "rotate_audit_logs.sh" in chattr_row
     src = (REPO / "src/episteme/audit_trail.py").read_text(encoding="utf-8")
     assert 'glob("audit-*.jsonl.gz")' in src
 
