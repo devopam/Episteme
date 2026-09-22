@@ -61,3 +61,90 @@ def test_idempotent_on_already_rotated_file(tmp_path):
 def test_missing_dir_is_a_noop_not_an_error(tmp_path):
     proc = _run(tmp_path / "does_not_exist")
     assert proc.returncode == 0, proc.stderr
+
+
+def test_default_ops_dir_resolves_via_episteme_data_root(tmp_path):
+    # No positional ops_dir: the script must resolve the same default
+    # episteme.audit_trail._mirror_dir() does (processed_root falls back to
+    # <EPISTEME_DATA_ROOT>/02_processed when EPISTEME_PROCESSED_ROOT is
+    # unset -- config.py, not a value the script may hardcode/reimplement).
+    import os
+    import time
+
+    data_root = tmp_path / "data_root"
+    ops_dir = data_root / "02_processed" / "_ops" / "_audit"
+    ops_dir.mkdir(parents=True)
+    old = ops_dir / "audit-20260101.jsonl"
+    old.write_text('{"a": 1}\n', encoding="utf-8")
+    old_ts = time.time() - 40 * 86400
+    os.utime(old, (old_ts, old_ts))
+
+    env = dict(os.environ)
+    env.pop("EPISTEME_PROCESSED_ROOT", None)
+    env["EPISTEME_DATA_ROOT"] = str(data_root)
+
+    proc = subprocess.run(
+        [_bash(), str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not old.exists()
+    assert (ops_dir / "audit-20260101.jsonl.gz").is_file()
+
+
+def _chattr_available() -> bool:
+    import shutil
+
+    return shutil.which("chattr") is not None
+
+
+def _append_only_actually_enforced(probe_dir) -> bool:
+    """True only if chattr +a on THIS filesystem really blocks unlink.
+
+    Some sandboxes (e.g. an NTFS-backed Git-for-Windows bash) have a chattr
+    binary that accepts `+a` and reports success, but the filesystem does
+    not enforce it -- `rm`/unlink still succeeds. Only trust the probe, not
+    chattr's own exit code.
+    """
+    import subprocess as sp
+
+    probe = probe_dir / "probe.txt"
+    probe.write_text("x", encoding="utf-8")
+    sp.run(["chattr", "+a", str(probe)], capture_output=True, text=True)
+    rc = sp.run(["rm", "-f", str(probe)], capture_output=True, text=True).returncode
+    sp.run(["chattr", "-a", str(probe)], capture_output=True, text=True)
+    if probe.exists():
+        probe.unlink()
+    return rc != 0
+
+
+def test_chattrd_eligible_file_still_rotates(tmp_path):
+    # Critical fix: chattr +a (applied to a prior day's file once it becomes
+    # "today's" file) blocks the unlink() gzip needs -- once that file ages
+    # past 30 days, rotation must still succeed (chattr -a before gzip), and
+    # must not be `die`'d if it somehow still failed.
+    if not _chattr_available():
+        pytest.skip("no chattr on this system")
+    probe_dir = tmp_path / "_probe"
+    probe_dir.mkdir()
+    if not _append_only_actually_enforced(probe_dir):
+        pytest.skip("chattr +a is not enforced on this filesystem/sandbox (no CAP_LINUX_IMMUTABLE)")
+
+    import os
+    import time
+
+    audit_dir = tmp_path / "_audit"
+    audit_dir.mkdir()
+    old = audit_dir / "audit-20260101.jsonl"
+    old.write_text('{"a": 1}\n', encoding="utf-8")
+    old_ts = time.time() - 40 * 86400
+    os.utime(old, (old_ts, old_ts))
+    subprocess.run(["chattr", "+a", str(old)], capture_output=True, text=True, check=True)
+
+    proc = _run(audit_dir)
+    assert proc.returncode == 0, proc.stderr
+    assert not old.exists()
+    assert (audit_dir / "audit-20260101.jsonl.gz").is_file()
