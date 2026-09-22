@@ -49,12 +49,23 @@ def test_boundaries_and_claims():
 
 def test_unimplemented_design_items_are_stated_as_absent():
     text = doc("11-gxp-data-integrity.md")
-    # These must stay described as NOT implemented while the repo lacks them.
-    assert not (REPO / "scripts/data/rotate_audit_logs.sh").exists()
-    assert "chattr +a" in text and "rotate_audit_logs.sh" in text
-    assert text.count("**Not implemented.**") >= 3
+    # Monthly partitions via create_audit_partition() must stay described as
+    # NOT implemented while the repo lacks it.
     sql = (REPO / "src/episteme/data/db/schema.sql").read_text(encoding="utf-8")
     assert "not yet" in sql and "create_audit_partition" in sql
+    assert "**Not implemented.**" in text
+
+
+def test_rotate_audit_logs_is_documented_as_implemented():
+    # rotate_audit_logs.sh landed (SP6 Task 4): the doc must describe it (and
+    # the chattr +a behavior it drives) as implemented, not absent, and
+    # verify()'s mirror-parity glob must cover the .jsonl.gz files it produces.
+    text = doc("11-gxp-data-integrity.md")
+    assert (REPO / "scripts/data/rotate_audit_logs.sh").is_file()
+    assert "chattr +a" in text and "rotate_audit_logs.sh" in text
+    assert "**Implemented.**" in text
+    src = (REPO / "src/episteme/audit_trail.py").read_text(encoding="utf-8")
+    assert 'glob("audit-*.jsonl.gz")' in src
 
 
 def _event_row(text: str, ev: str) -> str:
