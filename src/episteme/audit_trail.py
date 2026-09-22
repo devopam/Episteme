@@ -151,6 +151,11 @@ def record(
         raise ValueError(
             f"unknown audit event_type {event_type!r}; must be one of {sorted(EVENT_TYPES)}"
         )
+    # Same ordering discipline as the EVENT_TYPES check above (before
+    # require_actor()/get_settings()/the cursor): manual_correction and
+    # schema_migration must always carry a human-readable reason.
+    if event_type in ("manual_correction", "schema_migration") and not reason:
+        raise ValueError(f"{event_type!r} requires a non-empty reason")
 
     actor = require_actor()
     host = socket.gethostname()

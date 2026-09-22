@@ -60,3 +60,40 @@ def test_bad_event_type_rejected(pg_conn, monkeypatch):
 
     with pytest.raises(ValueError):
         audit_trail.record("not_a_real_event", conn=pg_conn)
+
+
+def test_manual_correction_requires_reason(pg_conn, monkeypatch):
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    from episteme import audit_trail
+
+    with pytest.raises(ValueError, match="reason"):
+        audit_trail.record("manual_correction", conn=pg_conn, reason=None)
+
+
+def test_schema_migration_requires_reason(pg_conn, monkeypatch):
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    from episteme import audit_trail
+
+    with pytest.raises(ValueError, match="reason"):
+        audit_trail.record("schema_migration", conn=pg_conn, reason="")
+
+
+def test_force_override_still_requires_no_new_enforcement_at_record_level(pg_conn, monkeypatch):
+    # record() itself does not enforce reason for force_override (that stays a
+    # CLI-level rule in load_articles.py); this pins that record() does not
+    # newly break the existing force_override call site by demanding a reason
+    # it doesn't otherwise validate at this layer.
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    from episteme import audit_trail
+
+    audit_trail.record("force_override", conn=pg_conn, reason=None)  # must not raise
+    pg_conn.rollback()
