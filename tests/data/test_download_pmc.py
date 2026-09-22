@@ -7,6 +7,8 @@ spacing/underscores, and accepts CC0 / CC BY / CC BY-SA / CC BY-ND (rejecting
 anything containing "NC").
 """
 
+import importlib
+
 from episteme.data.pmc.download_pmc import (
     COMMERCIAL_LICENSE_CODES,
     is_commercial_meta,
@@ -31,3 +33,17 @@ def test_is_commercial_meta_rejects_noncommercial():
 
 def test_is_commercial_meta_rejects_missing_license():
     assert is_commercial_meta({}) is False
+
+
+def test_output_dir_defaults_to_configured_raw_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("EPISTEME_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    from episteme.data.pmc import download_pmc
+
+    importlib.reload(download_pmc)  # re-evaluate the argparse default against the new settings
+    parser = download_pmc.build_parser()
+    args = parser.parse_args([])
+    assert args.output_dir == tmp_path / "01_raw" / "pmc" / "oa_comm"

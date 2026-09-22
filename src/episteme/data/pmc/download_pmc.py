@@ -335,14 +335,16 @@ def collect_ids_from_filelist(path: Path, limit: int) -> list[str]:
     return ids
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    settings = get_settings()
+
     parser = argparse.ArgumentParser(
         description="PMC Commercial OA downloader (filelist or ESearch + metadata verify)"
     )
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=Path("./01_raw/pmc/oa_comm"),
+        default=settings.raw_root / "pmc" / "oa_comm",
         help="Output root",
     )
     parser.add_argument(
@@ -373,7 +375,7 @@ def main() -> None:
     parser.add_argument(
         "--api_key",
         type=str,
-        default=get_settings().ncbi_api_key,
+        default=settings.ncbi_api_key,
         help="NCBI API key (or env NCBI_API_KEY)",
     )
     parser.add_argument(
@@ -382,6 +384,11 @@ def main() -> None:
         default=None,
         help="Use an existing local filelist CSV/TSV instead of downloading/ESearch",
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     formats = []
