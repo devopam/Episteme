@@ -117,6 +117,11 @@ def test_new_partition_denies_update_delete_to_episteme_app(pg_conn):
     # 202609/202610 exists, then confirm episteme_app cannot UPDATE or DELETE
     # it: the REVOKE must be re-applied per new partition, since
     # ALTER DEFAULT PRIVILEGES only grants (never revokes) on future tables.
+    # Non-vacuousness: schema.sql's `ALTER DEFAULT PRIVILEGES FOR ROLE
+    # episteme_sys_admin IN SCHEMA episteme GRANT ... UPDATE, DELETE ...
+    # TO episteme_app` means any table episteme_sys_admin creates (including
+    # a new _audit_YYYYMM partition) grants UPDATE/DELETE to episteme_app
+    # by default -- this assertion would fail without the script's REVOKE.
     _setup_schema(pg_conn)
     proc = _run_script(8)
     assert proc.returncode == 0, proc.stderr
