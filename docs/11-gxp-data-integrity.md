@@ -3,8 +3,9 @@
 Scope: the tamper-evident audit trail (`src/episteme/audit_trail.py`,
 `episteme._audit`), the operator-identity rules around it, and the database-mode
 guard. Every statement below is checked against the implemented code. Where the
-2026-09-01 design (section 3.8) promised more than was built, this document says so
-(see "Design versus implementation gaps" in section 5). Run-book usage lives in
+2026-09-01 design (section 3.8) promised more than was built, this document says so;
+where a gap has since been closed, the row says that instead (see "Design versus
+implementation gaps" in section 5). Run-book usage lives in
 `docs/10-data-sources-runbook.md`.
 
 ## 1. Posture
@@ -21,8 +22,10 @@ Claimed (all verifiable in code):
   the caller's transaction; the per-file extract and serialize events and
   `config_change` write it on their own short connection and commit independently
   (best-effort, see sections 2 and 4).
-- The application role has `REVOKE UPDATE, DELETE` on `_audit` and every existing
-  partition.
+- The application role has `REVOKE UPDATE, DELETE` on `_audit`, the partitions
+  `schema.sql` creates statically, and every partition `ensure_audit_partitions.sh`
+  touches (section 5); a partition created by any other route needs the `REVOKE`
+  applied by hand.
 - A verifier (`episteme.audit_trail.verify`, wrapped by
   `scripts/data/verify_audit_trail.sh`) recomputes hashes and chain links.
 - An operator identity (`EPISTEME_ACTOR`) is mandatory for any audit write.
@@ -53,9 +56,15 @@ The JSONL mirror is written to `<processed_root>/_ops/_audit/audit-YYYYMMDD.json
 - `mirror_only()` is the last-resort fallback, used by the extract and serialize
   stages only when their `record()` attempt fails. It writes a JSONL line only: no DB
   row, no hash chain, a line marked `"chained": false` and `note`
-  `db_unavailable_or_failed`. A write failure there is logged and swallowed, and the
-  caller's second bare `except` swallows anything else. Such lines are not covered by
-  the tamper-evidence in section 5.
+  `db_unavailable_or_failed`. A write failure inside `mirror_only()` itself is logged
+  (`_LOG.exception`) and swallowed there -- it is the last-resort fallback, so there is
+  nowhere further to escalate to. If the fallback call itself raises (the `record()`
+  attempt failed *and* the mirror-only write also failed), the caller's
+  `_best_effort_audit` helper now logs that double failure as a
+  `_LOG.warning(..., exc_info=True)` instead of silently swallowing it -- it still does
+  not raise, so the extract/serialize stage still succeeds (an observability change,
+  not a pipeline-behaviour change; see the "No silent drops" row in section 5). Such
+  lines are not covered by the tamper-evidence in section 5.
 
 ## 3. Audit record schema
 
@@ -115,10 +124,10 @@ exists in `src/`.
 | `load_replace` | a shard load replaced existing rows (delete count recorded) | `postgres_loader` (DB row) |
 | `graph_commit` | graph build output for a source file | `graph_builder` (DB row) |
 | `corpus_materialize` | corpus materialization | `corpus_materializer` (DB row) |
-| `schema_migration` | a schema migration was applied | **no call site**; reserved |
+| `schema_migration` | a schema migration was applied | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record schema_migration --reason ...`; `--reason` is required, section 6) |
 | `force_override` | an operator ran `load_articles --force --reason` | `load_articles` (DB row, with `reason`); emitted for every shard iterated, including shards that have no success marker, so rows are not 1:1 with bypassed markers |
 | `integrity_check` | an integrity check ran | **no call site**; reserved |
-| `manual_correction` | a manual data correction | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record manual_correction --reason ...`) |
+| `manual_correction` | a manual data correction | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record manual_correction --reason ...`; `--reason` is required, section 6) |
 | `config_change` | a configuration change | `enrich_openmetadata` (DB row on its own connection; best-effort, a failure only prints a stderr warning) |
 
 Consequence: in a normal run with a reachable database, `extract_commit` and
@@ -135,10 +144,12 @@ Hash chain and verification:
 - `episteme.audit_trail.verify(conn)` walks the table by `seq`. For each row it
   recomputes `record_hash` (problem `hash_mismatch`) and checks `prev_hash` equals
   the previous stored `record_hash` (problem `chain_break`).
-- It then compares the count of non-blank lines in all `audit-*.jsonl` files against
-  the table row count; fewer mirror lines than rows gives a `mirror_short` problem
-  (`seq` is `None`). More mirror lines than rows is treated as legitimate (for
-  example after a schema recreate).
+- It then compares the count of non-blank lines in all `audit-*.jsonl` files, plus
+  every `audit-*.jsonl.gz` file (opened with `gzip.open(..., "rt")`, so a file rotated
+  by `scripts/data/rotate_audit_logs.sh` still counts), against the table row count;
+  fewer mirror lines than rows gives a `mirror_short` problem (`seq` is `None`). More
+  mirror lines than rows is treated as legitimate (for example after a schema
+  recreate).
 - The check is a line count, not a per-line content comparison of the mirror against
   the table. Lines from `mirror_only()` count towards the total, so they can mask
   missing chained lines.
@@ -153,9 +164,13 @@ Append-only enforcement:
 - `schema.sql` grants `episteme_app` full DML on all tables, then runs
   `REVOKE UPDATE, DELETE` on `episteme._audit`, `_audit_202609`, `_audit_202610`
   and `_audit_default`. The application role can therefore only INSERT and SELECT.
-- The revoke is per partition and static. A partition created later does not appear
-  in `schema.sql`; its privileges follow the default-privileges rule in that file
-  (full DML to `episteme_app`), so the revoke must be repeated for any new partition.
+- The revoke in `schema.sql` is per partition and static: a partition created later
+  does not appear in that file, and its privileges follow the default-privileges rule
+  there (full DML to `episteme_app`), so the revoke must be repeated for any new
+  partition. `scripts/data/db/ensure_audit_partitions.sh` does this automatically for
+  every partition it creates or otherwise touches (section 5); a partition created by
+  any other route (a manual `CREATE TABLE ... PARTITION OF`) still needs the `REVOKE`
+  applied by hand.
 - The table owner (`episteme_sys_admin`) and superusers are not restricted by this.
 
 Design versus implementation gaps (the design text is section 3.8 of
@@ -165,12 +180,12 @@ the code wins):
 | Design statement | Actual state |
 |---|---|
 | JSONL mirror is append-only via `chattr +a` | **Partly.** `scripts/data/rotate_audit_logs.sh` best-effort `chattr +a`'s the current day's still-open mirror file (`2>/dev/null \|\| true`, so a failure is silent) when `chattr` exists -- Linux only, and only on filesystems that support the attribute. It is a no-op on Windows/macOS/non-ext filesystems, and there is no per-write enforcement: an operator (or a scheduler) must invoke the script. |
-| `scripts/data/rotate_audit_logs.sh` gzips mirror files older than 30 days | **Implemented.** The script gzips `audit-*.jsonl` files matched by `find ... -mtime +30` in place, and is idempotent (an already-`.jsonl.gz` file is left alone). `verify()`'s mirror-parity glob matches both `audit-*.jsonl` and `audit-*.jsonl.gz` (opening the latter with `gzip.open(..., "rt")`), so a rotated file still counts toward `mirror_lines`. Not scheduled automatically -- an operator or cron/Task Scheduler must run it. |
-| Monthly partitions created by a rotation script / `create_audit_partition()` | **Not implemented.** `schema.sql` states this is "not yet built". Only `_audit_202609` (Sept 2026), `_audit_202610` (Oct 2026) and `_audit_default` exist. From November 2026 all rows land in the default partition until partitions are added by hand (with a matching `REVOKE`). |
-| Verifier walks the chain across both table and mirror and reports the first divergence | **Partly.** The chain is verified on the table only; the mirror is checked by line count only. It reports all problems, not just the first. |
-| `reason` is required for `force_override`, `manual_correction`, `schema_migration` | **Partly.** See section 6. `record()` itself does not enforce it for any event type. |
+| `scripts/data/rotate_audit_logs.sh` gzips mirror files older than 30 days | **Implemented.** The script gzips `audit-*.jsonl` files matched by `find ... -mtime +30` in place; `-mtime`'s floor comparison means a file becomes eligible only once it is at least 31 days old, not exactly 30 (errs safe). It is idempotent (an already-`.jsonl.gz` file is left alone). Before gzipping each file it best-effort `chattr -a`'s it first, undoing the append-only bit a previous day's `chattr +a` (below) would otherwise have set -- without that clear, gzip's unlink-and-replace would fail forever on a 30-day-old append-only file. A per-file gzip failure is logged as a WARNING and the loop continues to the next file rather than aborting the run. `verify()`'s mirror-parity glob matches both `audit-*.jsonl` and `audit-*.jsonl.gz` (opening the latter with `gzip.open(..., "rt")`), so a rotated file still counts toward `mirror_lines`. Not scheduled automatically -- an operator or cron/Task Scheduler must run it. |
+| Monthly partitions created by a rotation script / `create_audit_partition()` | **Implemented,** as a rotation script (not a `create_audit_partition()` function -- the design text's name for it). `scripts/data/db/ensure_audit_partitions.sh [target_db] [months_ahead]` creates `episteme._audit_YYYYMM` partitions for a rolling window of `months_ahead` calendar months starting this month (default `6`). It is idempotent (`CREATE TABLE IF NOT EXISTS`) and re-applies `REVOKE UPDATE, DELETE ... FROM episteme_app` on every partition it touches that run, not only newly created ones; both behaviours are covered by `tests/data/test_ensure_audit_partitions.py` (pg-marked). It is not invoked automatically by any pipeline stage or scheduler in this repo -- an operator or external scheduler must run it periodically (go-live checklist, section 8). Any month whose partition was never created this way (for example because the script was never run within its rolling window) still lands in `_audit_default`, same as before Task 2. `schema.sql`'s own comment near the `_audit` table still says a rotation script "is not yet built"; that comment is now stale relative to `ensure_audit_partitions.sh`. |
+| Verifier walks the chain across both table and mirror and reports the first divergence | **Partly.** The chain is verified on the table only; the mirror is checked by line count only (both `.jsonl` and `.jsonl.gz`, above). It reports all problems, not just the first. |
+| `reason` is required for `force_override`, `manual_correction`, `schema_migration` | **Partly.** See section 6. `record()` now enforces a non-empty `reason` for `manual_correction` and `schema_migration` -- it raises `ValueError` when `reason` is `None` or empty, checked right after the closed-set `event_type` check and before `require_actor()` or any database work. That covers every caller of `record()`, including the `python -m episteme.audit_trail record` CLI. `force_override`'s reason is still enforced only at the CLI layer (`load_articles --force`); `record()` itself accepts `force_override` with `reason=None` without raising. |
 | Event set of 12 types | The code has 13 (adds `serialize_commit`). Three types have no emitter (section 4). |
-| No silent drops: every event produces an audit record | **Not guaranteed.** The extract and serialize stages and `enrich_openmetadata` treat auditing as best-effort: an audit failure (DB down, connection refused by the DB-mode guard, unwritable mirror) is swallowed and the stage succeeds. The only trace is an unchained JSONL fallback line with `note: db_unavailable_or_failed`, or nothing if the mirror is unwritable too. `run_pipeline.sh` likewise continues past a failed `run_start`/`run_end` (section 6). |
+| No silent drops: every event produces an audit record | **Not guaranteed,** but a double failure is no longer silent. The extract and serialize stages and `enrich_openmetadata` treat auditing as best-effort: an audit failure does not stop or fail the stage. When `record()` fails, the extract/serialize `_best_effort_audit` helpers fall back to `mirror_only()`, writing an unchained JSONL line with `note: db_unavailable_or_failed`; when that fallback call *also* raises, `_best_effort_audit` now logs the double failure with `_LOG.warning(..., exc_info=True)` instead of swallowing it silently -- still non-fatal to the pipeline (the stage still succeeds; this changes observability only, not ingestion behaviour). `run_pipeline.sh` likewise continues past a failed `run_start`/`run_end` (section 6). |
 
 ## 6. Actor and reason rules
 
@@ -193,10 +208,16 @@ Reason:
   reason, for every shard iterated in that run. The emit condition is `--force` plus
   `--reason`, not an actual success-marker bypass, so shards with no marker also get a
   row.
-- For `manual_correction` and `schema_migration` **no code requires a reason**, and
-  neither event has an emitter. `python -m episteme.audit_trail record` accepts
-  `--reason` as optional for every event type. The design rule is therefore a
-  convention that operators must follow, not an enforced control.
+- For `manual_correction` and `schema_migration`, `record()` itself now requires a
+  non-empty `reason`: it raises `ValueError` when `reason` is `None` or empty, checked
+  right after the closed-set `event_type` check and before `require_actor()`, config
+  resolution, or any database work. This applies to every caller of `record()`,
+  including the `python -m episteme.audit_trail record` CLI (`--reason` is still an
+  optional argument there, but omitting it for these two event types now raises).
+  Neither event has a production emitter in `src/` (section 4); the CLI is the only
+  way to write one today. `force_override`'s reason is still enforced only in
+  `load_articles` (the CLI argument parser, above), not inside `record()` itself --
+  `record()` accepts `force_override` with `reason=None` without raising.
 - `run_pipeline.sh` also passes `--reason` on the failure `run_end` record.
 
 Degraded operation to be aware of: `run_pipeline.sh` treats a failed `run_start` or
@@ -241,11 +262,24 @@ What it does and does not check:
    `EPISTEME_PRODUCTION_DATABASE`, `EPISTEME_DB_TARGET`. Do not copy it into tickets
    or logs; it holds credentials.
 3. Run `scripts/data/verify_audit_trail.sh` and confirm `audit chain OK` (exit 0).
-4. Confirm audit partitions exist for the current and coming months; add any that are
-   missing with the matching `REVOKE UPDATE, DELETE ... FROM episteme_app`.
+4. Run `scripts/data/db/ensure_audit_partitions.sh [target_db] [months_ahead]`
+   (default `months_ahead` is `6`) to ensure monthly `_audit` partitions exist for the
+   current and coming months, with the matching `REVOKE UPDATE, DELETE ... FROM
+   episteme_app` re-applied on every partition it touches. It connects as
+   `episteme_sys_admin`, not the application role, and needs `PGHOST`, `PGPORT` and
+   `EPISTEME_SYS_ADMIN_PASSWORD` set (`target_db` defaults to
+   `${PGDATABASE:-episteme}`). It is idempotent and safe to run repeatedly, but this
+   repo does not schedule it automatically -- an operator or external scheduler
+   (cron/Task Scheduler) must invoke it periodically.
 5. Confirm the mirror directory (`<processed_root>/_ops/_audit/`) is on retained
-   storage, backed up, and permission-restricted; decide whether to apply host-level
-   append-only protection (not provided by this repository).
+   storage, backed up, and permission-restricted. Schedule
+   `scripts/data/rotate_audit_logs.sh [ops_dir]` periodically (for example daily from
+   cron): it gzips mirror files older than ~30 days in place and best-effort
+   `chattr +a`'s the current day's open mirror file. That `chattr +a` only takes effect
+   on Linux with a filesystem that supports the attribute, fails silently by design
+   when it can't be applied, and is not a per-write enforcement (it is a no-op on
+   Windows/macOS); decide whether to apply any further host-level append-only
+   protection beyond that best-effort mechanism.
 6. Confirm the server identity and version for the target database by hand.
 
 ## 9. Out of scope and procedural
