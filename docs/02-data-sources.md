@@ -1,8 +1,9 @@
 # Data Sources — Episteme (Full Catalog)
 
-**Last updated:** 2026-09-02  
-**Purpose:** Exhaustive *working inventory* of sources for **Stream 1** (parametric / SFT) and **Stream 2** (RAG / structured / incremental). Used to plan induction pipelines, rights posture, and pre-SSD sample work.  
-**Related:** `09-extraction-contract.md` (articles schema), `10-data-sources-runbook.md` (ops for sources already wired), `11-data-roadmap.md` (sequencing — optional; this file is the master *list*).
+**Last updated:** 2026-09-02
+**Purpose:** Exhaustive *working inventory* of sources for **Stream 1** (parametric / SFT) and **Stream 2** (RAG / structured / incremental). Used to plan induction pipelines, rights posture, and pre-SSD sample work.
+**Related:** `09-extraction-contract.md` (articles schema), `10-data-sources-runbook.md` (ops for sources already wired), `12-source-inventory.md` (live per-source inventory of what is wired), `superpowers/specs/2026-09-02-phase0-data-roadmap.md` (sequencing — subordinate; this file is the master *list*).
+**Status note:** the *Induction status* cells below are a 2026-09-02 snapshot and are only partly refreshed. `12-source-inventory.md` is authoritative for which sources are wired and at which stages; where a cell says *Not started* or *Candidate* for a source listed there, docs/12 governs.
 
 ---
 
@@ -17,9 +18,9 @@ Episteme uses a **bimodal** data strategy:
 
 **Rules of thumb**
 
-- **NC (Non-Commercial)** → not in commercial parametric mixes; optional research track only.  
-- **Paid / affiliate licenses** (MedDRA, WHODrug, many SNOMED deployments) → **Stream 2 only**, and only when the *deployer* holds a license — not in public open-induction bulk by default.  
-- **Real patient notes** → red-list.  
+- **NC (Non-Commercial)** → not in commercial parametric mixes; optional research track only.
+- **Paid / affiliate licenses** (MedDRA, WHODrug, many SNOMED deployments) → **Stream 2 only**, and only when the *deployer* holds a license — not in public open-induction bulk by default.
+- **Real patient notes** → red-list.
 - Induction before SSD: build **download + sample extract** for each source; full volume after disk arrives (~2026-09-08).
 
 ---
@@ -34,18 +35,18 @@ Episteme uses a **bimodal** data strategy:
 | **PMC OA Commercial (`oa_comm`)** | Full text CC0 / CC BY / BY-SA / BY-ND | Commercial-friendly OA only | AWS Open Data `pmc-oa-opendata` | **Sample done**; full on SSD |
 | **PMC OA non-commercial / other** | Extra full text | NC or mixed — **exclude from commercial train** | Same bucket families | Track separately if research-only |
 | **Europe PMC preprints** | Full-text preprints | Per-article CC; filter NC | EBI FTP | **Done** (5 archives) |
-| **Europe PMC author manuscripts** | Accepted manuscripts | Text-mining / copyright notices | EPMC FTP | Raw partial; extractor optional |
+| **Europe PMC author manuscripts** | Accepted manuscripts | Text-mining / copyright notices | EPMC FTP | **Wired** (download, extract, load, graph) — see docs/12 |
 | **Europe PMC OA journals** | Overlap with PMC; EU-weighted | License-filter | EPMC / NCBI | Prefer NCBI `oa_comm` to avoid dup |
-| **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Not started** — strong metadata/KG candidate |
+| **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Wired** (download, serialize, load) — see docs/12; strong metadata/KG candidate |
 | **Semantic Scholar Open Research Corpus / abstracts** | Extra abstract coverage | Check current ToS/license | API / releases | Candidate |
-| **PubChem** (serialized to NL) | Chemistry taxonomy & structure–name language | Public domain (US gov) | PubChem FTP/API | **Not started** — serialize JSON→sentences |
+| **PubChem** (serialized to NL) | Chemistry taxonomy & structure–name language | Public domain (US gov) | PubChem FTP/API | **Wired** (download, serialize, load) — see docs/12 |
 | **Europe PMC / PMC ID mappings** | PMID–PMCID–DOI joins | Open | EPMC FTP | **Re-download integrity**; load `id_map` |
 
 ### 1.2 Guidelines & educational text
 
 | Source | What it contributes | Rights posture | Bulk / access | Induction status |
 |--------|---------------------|----------------|---------------|------------------|
-| **EPFL Meditron guidelines** | Clinical practice guideline prose (WHO, CDC, NICE mixes — verify each) | Corpus license on HF; **per-source** restrictions may apply (e.g. NICE outside UK) | `epfl-llm/guidelines` | **Not started** — sample + license audit |
+| **EPFL Meditron guidelines** | Clinical practice guideline prose (WHO, CDC, NICE mixes — verify each) | Corpus license on HF; **per-source** restrictions may apply (e.g. NICE outside UK) | `epfl-llm/guidelines` | **Wired** (download, extract, load, graph) — see docs/12; license audit remains open |
 | **OpenMedText** | MDPI CC BY articles + open textbooks | CC BY; **exclude NC subdirs** | Project release | **Not started** |
 | **WHO guidelines (where CC/open)** | Public health guidance | Mixed — only explicitly open items | WHO IR / publications | Selective |
 | **CDC / open government guidance (US)** | Public domain US federal text where applicable | Public domain (US) | cdc.gov / FTP | Selective |
@@ -75,7 +76,7 @@ Episteme uses a **bimodal** data strategy:
 
 | Source | What it contributes | Rights posture | Access | Induction status |
 |--------|---------------------|----------------|--------|------------------|
-| **UniProtKB Swiss-Prot** | Curated protein function, names, annotation narrative | UniProt license — generally open with attribution | `ftp.uniprot.org` | **Next strong candidate** (still maintained 2026) |
+| **UniProtKB Swiss-Prot** | Curated protein function, names, annotation narrative | UniProt license — generally open with attribution | `ftp.uniprot.org` | **Wired** as `uniprot` (download, serialize, load) — see docs/12 |
 | **UniProtKB TrEMBL** (selective) | Broader sequences/annotation | Same family; prefer reference proteomes post-2026 reshaping | FTP | Later / selective |
 | **Gene Ontology** (annotations + definitions) | Function vocabulary in text form | CC BY 4.0 (GO) | geneontology.org | Candidate |
 | **Reactome** (pathway summaries) | Pathway biology language | CC0 / open (confirm current) | reactome.org | Candidate |
@@ -92,7 +93,7 @@ Episteme uses a **bimodal** data strategy:
 
 | Source | What it contributes | Update pattern | Access | Induction status |
 |--------|---------------------|----------------|--------|------------------|
-| **ChEMBL** | Bioactivities, structures, assays | Periodic Postgres dumps | EBI FTP | **Not started** — dump → Postgres/Parquet |
+| **ChEMBL** | Bioactivities, structures, assays | Periodic Postgres dumps | EBI FTP | **Wired** (download, serialize, load) — see docs/12 |
 | **SureChEMBL** | Patent chemistry | Parquet / periodic | EBI | Candidate |
 | **PubChem** (structured) | Compounds, assays, synonyms | Frequent | NCBI | API + bulk |
 | **UniProt** (structured cross-refs) | Accession graphs, features | ~8-week releases | FTP | Pair with Swiss-Prot text |
@@ -220,7 +221,8 @@ Work that **does not need the full 8 TB** — build scripts + **small subset** e
 | **This file (`02-data-sources.md`)** | **Master catalog** — what exists and why |
 | `10-data-sources-runbook.md` | How we download/operate sources already implemented |
 | `09-extraction-contract.md` | Schema/ops for literature-like extracts |
-| `11-data-roadmap.md` | Suggested sequencing; **subordinate** to this catalog |
+| `12-source-inventory.md` | Live per-source inventory: which sources are wired, at which stages |
+| `superpowers/specs/2026-09-02-phase0-data-roadmap.md` | Suggested sequencing; **subordinate** to this catalog |
 
 When a new source is added, update **this file first**, then runbook + extractor.
 
