@@ -54,3 +54,39 @@ def test_b_probe_is_gone_after_teardown():
     if not _ran:
         pytest.skip("needs test_a to have run first (file order)")
     assert _PROBE_KEY not in os.environ
+
+
+class TestMonkeypatchAfterDirectWriteDoesNotReintroduce:
+    """Pins the hookwrapper pair's actual justification (review finding on Task 8).
+
+    test_a_sets_probe_directly_without_monkeypatch above proves the simpler
+    case -- direct mutation, no monkeypatch involved -- which the autouse
+    fixture alone already catches. It does NOT exercise the specific failure
+    mode that made the fixture alone insufficient: a direct write to
+    os.environ (mirroring what load_dotenv does) followed, in the SAME test,
+    by monkeypatch.setenv on that same key. monkeypatch's own finalizer
+    remembers and restores the pre-monkeypatch value (the direct write), and
+    if that finalizer runs after _isolate_os_environ's restore, the direct
+    write survives past this test's teardown -- exactly the shape of
+    tests/test_config.py::test_dotenv_overrides_sources_env. Without the
+    pytest_runtest_setup/teardown hookwrapper pair, test_b below would fail.
+    """
+
+    _MARK_KEY = "EPISTEME_TEST_ENV_ISOLATION_MONKEYPATCH_PROBE"
+    _DIRECT_VALUE = "direct-write-should-not-survive"
+    _ran = False
+
+    def test_a_direct_write_then_monkeypatch_same_key(self, monkeypatch):
+        assert self._MARK_KEY not in os.environ, "probe leaked in from an earlier run"
+        os.environ[self._MARK_KEY] = self._DIRECT_VALUE  # mirrors load_dotenv's direct write
+        monkeypatch.setenv(self._MARK_KEY, "overridden-by-monkeypatch")
+        assert os.environ[self._MARK_KEY] == "overridden-by-monkeypatch"
+        type(self)._ran = True
+        # monkeypatch's finalizer runs at this test's teardown and will try to
+        # restore _DIRECT_VALUE (the value it observed before setenv) -- the
+        # hookwrapper pair must win over that restore.
+
+    def test_b_neither_value_survives_teardown(self):
+        if not self._ran:
+            pytest.skip("needs test_a to have run first (file order)")
+        assert self._MARK_KEY not in os.environ
