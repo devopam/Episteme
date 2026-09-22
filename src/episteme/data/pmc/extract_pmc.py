@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 import threading
@@ -53,6 +54,8 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "pmc"
 
@@ -276,7 +279,9 @@ def process_one(
                         run_id=get_settings().run_id,
                     )
                 except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                    pass
+                    _LOG.warning(
+                        "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                    )
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(

@@ -155,6 +155,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import logging
 import re
 import sys
 import threading
@@ -188,6 +189,8 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     write_run_manifest,
 )
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "openalex"
 
@@ -472,7 +475,9 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                     run_id=get_settings().run_id,
                 )
             except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                pass
+                _LOG.warning(
+                    "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                )
 
 
 def process_one(
