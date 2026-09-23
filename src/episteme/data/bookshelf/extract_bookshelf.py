@@ -74,6 +74,8 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
     mark_failed,
     mark_success,
@@ -280,11 +282,15 @@ def _find_nxml_member(tar: tarfile.TarFile, nbk: str) -> tarfile.TarInfo:
     return members[0]
 
 
-def parse_book_archive(path: Path) -> list[dict[str, Any]]:
+def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     """One ``.tar.gz`` book package -> ``[book_row, *kept_part_rows]``, each a
     finalized ``episteme.articles`` row."""
     nbk = _accession_from_filename(path)
-    source_file = path.name
+    # input_key, not path.name: two packages sharing a basename in different
+    # hash-bucket subdirectories under raw_dir (the real LitArch
+    # packages/<rel> tree -- see discover_bookshelf_files/process_one below)
+    # must not collapse to the same source_file value.
+    source_file = input_key(path, raw_dir)
 
     with tarfile.open(path, "r:gz") as tar:
         member = _find_nxml_member(tar, nbk)
@@ -418,13 +424,22 @@ def parse_book_archive(path: Path) -> list[dict[str, Any]]:
 
 
 def discover_bookshelf_files(raw_dir: Path) -> list[Path]:
-    """``*.tar.gz`` book packages under ``raw_dir``.
+    """``*.tar.gz`` book packages under ``raw_dir``, deduped by resolved full
+    path (never by basename) via ``checkpoint_markers.discover_input_files``.
 
-    ``rglob`` (not a flat ``glob``) -- the real download layout
-    (``download_bookshelf.sh``) nests packages under ``packages/<rel-path>``
-    from NCBI's hashed LitArch tree, not directly under ``raw_dir``.
+    The real download layout (``download_bookshelf.sh``) nests packages under
+    ``packages/<rel-path>`` from NCBI's hashed LitArch tree, not directly
+    under ``raw_dir`` -- and, because that tree is bucketed by a hash with no
+    usable directory listing, nothing rules out two packages sharing an
+    identical basename under different buckets (e.g. a re-released package
+    landing in a new bucket while the old one is still on disk). Sorting by
+    ``input_key`` (not raw path string) keeps discovery order deterministic
+    the same way it keys checkpoint markers/``source_file`` in ``process_one``
+    below -- mirrors ``extract_pmc.discover_meta_files`` (Task 9).
     """
-    return sorted({p for p in raw_dir.rglob("*.tar.gz") if p.is_file()}, key=lambda p: str(p))
+    files = discover_input_files(raw_dir, ["*.tar.gz"])
+    files.sort(key=lambda p: input_key(p, raw_dir))
+    return files
 
 
 def _best_effort_audit(basename: str, n_rows: int) -> None:
@@ -465,16 +480,17 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
     t0 = time.time()
     try:
-        rows = parse_book_archive(path)
+        rows = parse_book_archive(path, raw_dir)
         status_counts: Counter[str] = Counter(str(r.get("extract_status")) for r in rows)
 
         write_info = write_rows(
@@ -549,14 +565,16 @@ def extract_bookshelf(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -657,7 +675,7 @@ def _run_report(raw_dir: Path, max_files: int) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        rows.extend(parse_book_archive(fp))
+        rows.extend(parse_book_archive(fp, raw_dir))
     print(_render_field_shape(rows, len(files)), end="")
     return 0
 
