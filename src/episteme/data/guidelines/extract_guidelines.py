@@ -68,6 +68,36 @@ force=False, workers=1, verbose=False) -> dict``. ``main()`` is the thin CLI
 wrapper; ``--report`` parses in memory and prints a field-shape table without
 writing any shard, marker, manifest or audit row.
 
+**Phase C.3 identity migration (Task 15, SP6 hardening) -- id-construction
+risk, checked and NOT activated:** ``iter_rows_from_file``'s per-row ``id``
+is ``f"{SOURCE}:{rec_id}"`` when the file carries an ``id``/``doc_id``/``uid``
+column (content-derived, safe), else
+``f"{SOURCE}:{source_file}:{idx}"`` -- this fallback branch DOES embed
+``source_file`` directly, the same shape Task 12 flagged as a real
+duplication risk for apollo (and Task 13 for europepmc_manuscript) if the
+migration from ``path.name`` to ``input_key(path, raw_dir)`` ever changes
+``source_file``'s value for a real file. For ``guidelines`` specifically:
+(1) the public HF datasets API for ``epfl-llm/guidelines`` was queried
+directly for this task and confirms the real corpus is exactly ONE file
+(``open_guidelines.jsonl``) at the repo root -- see ``discover()``'s
+docstring; (2) that same API response's ``dataset_info.features`` confirms
+an ``id`` column of dtype ``string`` is part of the declared schema, i.e. the
+explicit-id (safe) branch is the one real data takes, not the fallback; (3)
+even setting that aside, ``input_key`` returns the bare basename for a file
+directly under ``raw_dir`` (its own contract), so ``source_file`` is
+byte-for-byte unchanged by this migration for the one real file regardless
+of which id branch fires. **Conclusion: this migration does not change
+`source_file`'s value, and therefore does not change `id`, for any real,
+reachable guidelines file -- the fallback branch's source_file-embedding
+risk stays latent, structurally unreachable in production (single root-level
+file, flat non-recursive `discover()`), same disposition as apollo/
+europepmc_manuscript, but with stronger (API-verified, not inferred)
+evidence for why.** See ``tests/data/test_extract_guidelines.py``'s
+collision tests for what happens to ``id`` when this scenario IS
+synthetically forced (via a direct ``process_one`` call on two same-basename
+files in different subdirectories, which ``discover()`` itself would never
+surface).
+
 Roadmap CLI (§4.7):
   python -m episteme.data.guidelines.extract_guidelines \\
     --raw-dir ./01_raw/guidelines \\
@@ -106,6 +136,7 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    input_key,
     is_success,
     mark_failed,
     mark_success,
@@ -199,12 +230,20 @@ def _parse_year(v: Any) -> int | None:
         return None
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield one ``article_schema`` row per record in one guidelines file.
 
     Yields nothing (never raises) for a QA-shaped split, or a file with no
     recognisable text column -- both are "skip the whole file", logged by the
     caller, not an error.
+
+    ``source_file`` -- optional keyword, defaulting to ``path.name`` when
+    omitted (matches the convention already used by pubmed/apollo/europepmc
+    and every SP4 structured serializer). ``process_one`` passes the
+    ``input_key(path, raw_dir)``-derived identity here so the row's own
+    ``source_file`` field (and, for the id-fallback branch below, ``id``
+    itself) are attached under the SAME string used for the checkpoint
+    marker -- not silently recomputed as the bare basename.
     """
     lf = _scan(path)
     columns = lf.collect_schema().names()
@@ -226,7 +265,7 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
     )
     df = lf.select(select_cols).collect()
 
-    source_file = path.name
+    source_file = source_file or path.name
     for idx, rec in enumerate(df.iter_rows(named=True)):
         text = _clean_str(rec.get(text_col))
         title = _clean_str(rec.get(title_col)) if title_col else None
@@ -275,7 +314,32 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def discover(raw_dir: Path) -> list[Path]:
-    """One unit of work per HF dataset file (parquet or jsonl)."""
+    """One unit of work per HF dataset file (parquet or jsonl).
+
+    **UNCHANGED, deliberately, by the Phase C.3 identity migration** (Task 15):
+    stays a flat, non-recursive ``raw_dir.glob(...)`` -- no ``rglob``. This is
+    the same judgment call Tasks 13/14 made for the two europepmc modules,
+    re-verified independently for guidelines rather than inherited: the
+    download path is ``scripts/data/guidelines/download_guidelines.sh`` ->
+    generic ``hf_fetch`` -> ``hf download <repo> --local-dir <dest>
+    --repo-type dataset``, which mirrors the upstream HF repo tree
+    byte-for-byte (same generic mechanism apollo's downloader uses, where
+    Task 12 could NOT confirm flatness empirically). For ``epfl-llm/
+    guidelines`` specifically, the public HF datasets API
+    (``https://huggingface.co/api/datasets/epfl-llm/guidelines``) was queried
+    directly for this task and its ``siblings`` list is exactly
+    ``.gitattributes``, ``LICENSE``, ``README.md``, ``open_guidelines.jsonl``,
+    ``sources.png`` -- all five files at the repo ROOT, zero subdirectories,
+    exactly one file matching ``*.jsonl``/``*.parquet``. This is stronger,
+    directly-verified evidence than either Task 13's shell-comment
+    ("Flat EBI directory") or Task 14's structural-write-path argument: it is
+    an empirical confirmation of the real upstream repo's actual file tree,
+    not an inference from the downloader's code. Only the per-file identity
+    computation in ``process_one`` moves from ``path.name`` to
+    ``input_key(path, raw_dir)`` -- per ``input_key``'s own contract, a file
+    directly under ``raw_root`` yields its bare basename, so this is a
+    zero-observable-effect change for the real, single-file corpus.
+    """
     raw_dir = Path(raw_dir)
     return sorted(raw_dir.glob("*.parquet")) + sorted(raw_dir.glob("*.jsonl"))
 
@@ -318,10 +382,17 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # input_key(path, raw_dir): a file directly under raw_dir yields its bare
+    # basename (identical to the old `path.name`) -- see discover()'s
+    # docstring for why the real, single-file corpus never observes a
+    # difference. Threaded into BOTH the checkpoint marker AND
+    # iter_rows_from_file's source_file so the marker and the row content
+    # (and the id-fallback branch, see module docstring) agree.
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -329,7 +400,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -415,14 +486,16 @@ def extract_guidelines(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -526,7 +599,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
                 print(f"  skip {fp.name}: QA-shaped columns {sorted(columns)}", file=sys.stderr)
                 n_skipped += 1
                 continue
-            file_rows = list(iter_rows_from_file(fp))
+            file_rows = list(iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)))
             if not file_rows:
                 print(
                     f"  skip {fp.name}: no recognisable text column {sorted(columns)}",
