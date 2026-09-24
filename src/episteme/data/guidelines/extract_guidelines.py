@@ -76,27 +76,32 @@ column (content-derived, safe), else
 ``source_file`` directly, the same shape Task 12 flagged as a real
 duplication risk for apollo (and Task 13 for europepmc_manuscript) if the
 migration from ``path.name`` to ``input_key(path, raw_dir)`` ever changes
-``source_file``'s value for a real file. For ``guidelines`` specifically:
-(1) the public HF datasets API for ``epfl-llm/guidelines`` was queried
-directly for this task and confirms the real corpus is exactly ONE file
-(``open_guidelines.jsonl``) at the repo root -- see ``discover()``'s
-docstring; (2) that same API response's ``dataset_info.features`` confirms
-an ``id`` column of dtype ``string`` is part of the declared schema, i.e. the
-explicit-id (safe) branch is the one real data takes, not the fallback; (3)
-even setting that aside, ``input_key`` returns the bare basename for a file
-directly under ``raw_dir`` (its own contract), so ``source_file`` is
-byte-for-byte unchanged by this migration for the one real file regardless
-of which id branch fires. **Conclusion: this migration does not change
+``source_file``'s value for a real file. The CONCLUSIVE argument for
+``guidelines``: the public HF datasets API for ``epfl-llm/guidelines`` was
+queried directly for this task and confirms the real corpus is exactly ONE
+file (``open_guidelines.jsonl``) at the repo root -- see ``discover()``'s
+docstring -- and ``input_key`` returns the bare basename for a file directly
+under ``raw_dir`` (its own contract), so ``source_file`` is byte-for-byte
+unchanged by this migration for that one real file, **regardless of which
+id branch fires**. It is therefore not necessary to also show the fallback
+branch is unreached. As corroborating (NOT load-bearing) context: the same
+API response's ``dataset_info.features`` declares an ``id`` column of dtype
+``string`` in the schema, suggesting the explicit-id branch is the common
+case -- but this is indicative only, since the module's own quirk above
+(the literal string ``"None"``, normalised to NULL by ``_clean_str``) means
+a declared column does not guarantee every row's value is usable, so a real
+row could still take the fallback branch; the conclusion above does not
+depend on ruling that out. **Conclusion: this migration does not change
 `source_file`'s value, and therefore does not change `id`, for any real,
 reachable guidelines file -- the fallback branch's source_file-embedding
 risk stays latent, structurally unreachable in production (single root-level
 file, flat non-recursive `discover()`), same disposition as apollo/
-europepmc_manuscript, but with stronger (API-verified, not inferred)
-evidence for why.** See ``tests/data/test_extract_guidelines.py``'s
-collision tests for what happens to ``id`` when this scenario IS
-synthetically forced (via a direct ``process_one`` call on two same-basename
-files in different subdirectories, which ``discover()`` itself would never
-surface).
+europepmc_manuscript, but resting on a conclusive layout+input_key argument
+rather than an inference about branch frequency.** See
+``tests/data/test_extract_guidelines.py``'s collision tests for what happens
+to ``id`` when this scenario IS synthetically forced (via a direct
+``process_one`` call on two same-basename files in different
+subdirectories, which ``discover()`` itself would never surface).
 
 Roadmap CLI (§4.7):
   python -m episteme.data.guidelines.extract_guidelines \\
