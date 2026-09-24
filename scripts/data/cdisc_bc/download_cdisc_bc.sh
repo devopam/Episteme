@@ -7,6 +7,14 @@
 # Licence: the repo LICENSE is MIT (repository code). The README grants CC-BY-4.0 to
 # documentation/minutes only and states no licence for the export/ data files - verify
 # before redistribution. PROVENANCE.txt + LICENSE are stored beside the data.
+# No serializer exists or is planned for cdisc_bc until CDISC confirms a licence for the
+# export/ data files directly; this source is excluded from any training corpus in its
+# current state.
+# CDISC's site-wide Terms and Conditions (https://www.cdisc.org/terms-and-conditions) grant a
+# compensation-free licence for use "solely within Your Organization" and exclude derivative
+# works and external copying/distribution - but that page is written about "CDISC standards
+# in document format"; whether it covers this repo's export/ data files is unconfirmed
+# either way.
 # Re-fetch: size-skip cannot detect a same-size change under a new commit; after a repo
 # update use --force (with --reason) to re-fetch.
 # --dry-run still makes the two GitHub API calls (commit + listing); they count against
@@ -90,6 +98,7 @@ if [ "${EPISTEME_DRY_RUN:-0}" != "1" ] && { [ "${#lines[@]}" -gt 0 ] || [ ! -f "
         printf 'commit_sha: %s\n' "$sha"
         printf 'retrieved_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'content_licence: not stated for export/ data; see LICENSE (MIT, repository code); README grants CC-BY-4.0 to documentation/minutes only - verify before redistribution\n'
+        printf 'corpus_status: excluded - no serializer exists or is planned for cdisc_bc until CDISC confirms a licence for the export/ data files directly; excluded from any training corpus in its current state\n'
     } > "$dest/PROVENANCE.txt"
 fi
 write_sync_stamp "$dest"

@@ -69,6 +69,9 @@ def test_uniprot_override_and_cdisc_note():
     sec = _section(doc(DOC), "### 6.3", "\n---")
     assert "`uniprot`" in sec and "`text_mining` (hardcoded)" in sec
     assert "`cdisc_bc`" in sec and "UNVERIFIED".lower() in sec.lower() and "download-only" in sec
+    row = next(line for line in sec.splitlines() if line.startswith("| `cdisc_bc`"))
+    assert "until CDISC confirms" in row
+    assert "training corpus" in row
     # ontologies: GO/MONDO -> commercial via the bare CC BY URL, HPO stays unknown
     go = "http://creativecommons.org/licenses/by/4.0/"
     assert normalize_license(go)[0] == "CC BY"

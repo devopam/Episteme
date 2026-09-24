@@ -446,7 +446,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_abstracts d
 
 ### 5.2 Structured databases (download, serialize, load)
 
-Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`: for `mesh`, `pubchem` and `clinvar` the serializer sets `public_domain` as an explicit, source-anchored governance override (decision 2026-09-19; `license_raw` keeps the upstream text; see docs/09 and docs/12). The `cdisc_bc` licence is UNVERIFIED (section 5.5).
+Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`: for `mesh`, `pubchem` and `clinvar` the serializer sets `public_domain` as an explicit, source-anchored governance override (decision 2026-09-19; `license_raw` keeps the upstream text; see docs/09 and docs/12). The `cdisc_bc` licence is UNVERIFIED and no serializer is planned until CDISC confirms it (section 5.5).
 
 | Source | Download modes (positional) | Notes |
 |---|---|---|
@@ -556,7 +556,7 @@ CDISC Biomedical Concepts and SDTM dataset specialisations from the public GitHu
 
 - **Pinned to one commit.** Each run resolves the latest commit SHA of `main` first, then lists and fetches `export/` at that SHA, so one run is internally consistent.
 - **`PROVENANCE.txt`** is written beside the data in `<raw>/cdisc_bc/`: source repo URL, `commit_sha`, `retrieved_at`, and the licence note. The repository `LICENSE` file is stored beside it and does not count against `--max-files`.
-- **Licence: UNVERIFIED.** The repository `LICENSE` is MIT (repository code); the README grants CC-BY-4.0 to documentation and minutes only and states nothing for the `export/` data files. Verify before any redistribution or training use (docs/12).
+- **Licence: UNVERIFIED.** The repository `LICENSE` is MIT (repository code); the README grants CC-BY-4.0 to documentation and minutes only and states nothing for the `export/` data files. No serializer exists or is planned until CDISC confirms a licence for `export/` directly; this source is excluded from any training corpus in its current state. Verify before any redistribution (docs/12).
 - **Re-fetch:** size-matched files are skipped and a same-size change under a new commit is not detected, so after an upstream update run with `--force --reason "..."`.
 - Even `--dry-run` makes two GitHub API calls (commit and listing). Unauthenticated GitHub allows 60 requests per hour; hitting the limit fails the stage (rc 1 through the dispatcher) with `cannot resolve the latest commit ... (GitHub API rate limit?)`.
 
