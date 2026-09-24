@@ -62,8 +62,9 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
@@ -318,17 +319,41 @@ def record_to_row(rec: Any, source_file: str, idx: int) -> dict[str, Any]:
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
-    """Stream one ``article_schema`` row per ApolloCorpus document in ``path``."""
-    source_file = path.name
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
+    """Stream one ``article_schema`` row per ApolloCorpus document in ``path``.
+
+    ``source_file`` defaults to ``path.name`` when omitted (existing
+    positional callers keep working), but callers with a ``raw_dir`` in scope
+    must pass ``input_key(path, raw_dir)`` explicitly -- two input files
+    sharing a basename in different subdirectories under ``raw_dir`` must not
+    collapse to the same ``source_file`` value on the rows themselves.
+    """
+    source_file = source_file or path.name
     for idx, rec in enumerate(_load_records(path)):
         yield record_to_row(rec, source_file, idx)
 
 
 def discover_apollo_files(raw_dir: Path) -> list[Path]:
-    files = list_input_files(raw_dir, ["*.jsonl", "*.json"])
+    """``*.jsonl``/``*.json`` ApolloCorpus files under ``raw_dir``, deduped by
+    resolved full path (never by basename) via
+    ``checkpoint_markers.discover_input_files``.
+
+    ``download_apollo.sh`` builds no subpath of its own -- unlike
+    pmc/bookshelf/pubmed's downloaders, it delegates entirely to
+    ``hf download --local-dir <raw_dir>``, which mirrors the
+    ``FreedomIntelligence/ApolloCorpus`` HF repo's own directory tree
+    byte-for-byte. Whether that upstream tree is flat or nested by
+    split/config/language is therefore outside this script's control, so
+    ``list_input_files``'s basename-only dedup (the pre-migration behaviour)
+    was never actually safe here either -- two same-basename files under
+    different upstream subdirectories would have silently collapsed to one
+    discovered file. Mirrors ``extract_pmc.discover_meta_files`` /
+    ``extract_bookshelf.discover_bookshelf_files`` / ``extract_pubmed.
+    discover_pubmed_files`` (Tasks 9/10/11).
+    """
+    files = discover_input_files(raw_dir, ["*.jsonl", "*.json"])
     out = [f for f in files if not any(s in f.name.lower() for s in _SKIP_NAME_SUBSTRINGS)]
-    out.sort(key=lambda p: (0 if p.name.endswith(".jsonl") else 1, p.name))
+    out.sort(key=lambda p: (0 if p.name.endswith(".jsonl") else 1, input_key(p, raw_dir)))
     return out
 
 
@@ -370,10 +395,16 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # input_key, not path.name: two apollo *.json(l) files sharing a basename
+    # in different subdirectories under raw_dir (download_apollo.sh does not
+    # control the layout -- it mirrors whatever tree the upstream HF repo
+    # has, see discover_apollo_files) must not collapse to the same
+    # marker/source_file identity.
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -381,7 +412,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -458,14 +489,16 @@ def extract_apollo(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -565,7 +598,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        rows.extend(iter_rows_from_file(fp))
+        rows.extend(iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)))
     print(_render_field_shape(rows, len(files)), end="")
     return 0
 
