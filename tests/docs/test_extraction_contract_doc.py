@@ -95,7 +95,43 @@ def test_input_key_rule_matches_code(tmp_path):
     assert input_key(nested, tmp_path) == "sub__a.xml"  # joined with "__"
     assert input_key(flat, tmp_path) == "b.xml"  # flat layouts keep the basename
     sec = _section(doc(DOC), "### 4.3", "### 4.4")
-    assert "`__`" in sec and "basename" in sec and "deferred" in sec
+    assert "`__`" in sec and "basename" in sec
+    assert "deferred" not in sec  # SP6 closed the migration; pin the new truth, not the old gap
+
+
+def test_literature_extractors_key_on_input_key():
+    """All seven SP2 literature extractors now key marker + source_file on
+    input_key (docs/09 SP6 rewrite); four discover recursively via
+    discover_input_files, three deliberately stay flat/non-recursive."""
+    sec = _section(doc(DOC), "### 4.3", "### 4.4")
+    lit_extractors = {
+        "pmc": "src/episteme/data/pmc/extract_pmc.py",
+        "bookshelf": "src/episteme/data/bookshelf/extract_bookshelf.py",
+        "pubmed": "src/episteme/data/pubmed/extract_pubmed.py",
+        "apollo": "src/episteme/data/apollo/extract_apollo.py",
+        "europepmc_manuscript": (
+            "src/episteme/data/europepmc/manuscripts/extract_europepmc_manuscripts.py"
+        ),
+        "europepmc_preprint": (
+            "src/episteme/data/europepmc/preprints/extract_europepmc_preprints.py"
+        ),
+        "guidelines": "src/episteme/data/guidelines/extract_guidelines.py",
+    }
+    recursive = {"pmc", "bookshelf", "pubmed", "apollo"}
+    flat = {"europepmc_manuscript", "europepmc_preprint", "guidelines"}
+    assert recursive | flat == set(lit_extractors)
+    for name, rel in lit_extractors.items():
+        assert f"`{name}`" in sec, name
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert "input_key(" in text, name  # every one keys source_file on input_key now
+        # "(" pins an actual call, not the flat three's docstrings, which name
+        # discover_input_files only to say they deliberately do NOT call it.
+        if name in recursive:
+            assert "discover_input_files(" in text, name
+        else:
+            assert "discover_input_files(" not in text, name
+            assert "non-recursive" in text, name  # each says so in its own discovery docstring
+    assert "list_input_files" in sec  # pubmed/apollo's prior legacy call, named for history
 
 
 def test_section_4_describes_postgres_not_iceberg():
