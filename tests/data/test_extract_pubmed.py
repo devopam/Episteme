@@ -173,10 +173,16 @@ def test_discover_pubmed_files_keeps_distinct_paths_same_basename(tmp_path):
     """Regression: the old ``list_input_files`` deduped by *basename* -- two
     files literally named ``pubmed_dup.xml.gz`` in different subdirectories
     would collapse to a single discovered file. ``discover_pubmed_files`` must
-    now discover both (dedup is by resolved full path), even though pubmed's
-    real download layout (``download_pubmed.py``) is flat and never actually
-    produces this shape -- the test proves the code path is correct
-    regardless of today's actual layout (SP4.1 Task 3 discipline)."""
+    now discover both (dedup is by resolved full path).
+
+    ``batch_a``/``batch_b`` here are synthetic, but the underlying shape is
+    not purely hypothetical: the real downloader
+    (``scripts/data/pubmed/download_pubmed.sh``) writes into exactly two
+    sibling subdirectories, ``<raw_dir>/baseline/`` and
+    ``<raw_dir>/updates/``, with no cross-mode pruning between separate
+    ``baseline``/``updates`` invocations against the same ``raw_dir`` -- so a
+    same-basename collision across those two real subdirectories is
+    layout-reachable, not something this test invents out of thin air."""
     raw = tmp_path / "01_raw" / "pubmed"
     dir_a = raw / "batch_a"
     dir_b = raw / "batch_b"
@@ -194,11 +200,14 @@ def test_discover_pubmed_files_keeps_distinct_paths_same_basename(tmp_path):
 def test_same_basename_different_subdirs_both_processed_with_distinct_content(tmp_path):
     """Checkpoint-collision regression test (Task 11): two ``pubmed*.xml.gz``
     files sharing an identical basename in different subdirectories under
-    raw_dir -- not how ``download_pubmed.py`` lays files out today (its real
-    layout is flat), but nothing in the pre-migration ``list_input_files``
-    basename dedup enforced that, and the code path must be correct
-    regardless of today's actual layout (SP4.1 Task 3 discipline, and the
-    same standard Tasks 9/10 were held to for pmc/bookshelf).
+    raw_dir. The real downloader (``scripts/data/pubmed/download_pubmed.sh``)
+    writes into exactly two sibling subdirectories, ``baseline/`` and
+    ``updates/``, with no cross-mode pruning between separate invocations --
+    so this shape is layout-reachable in practice, not purely synthetic --
+    and nothing in the pre-migration ``list_input_files`` basename dedup
+    enforced any particular layout regardless. The code path must be correct
+    either way (SP4.1 Task 3 discipline, and the same standard Tasks 9/10
+    were held to for pmc/bookshelf).
 
     Proves distinct markers AND distinct, correctly-attached content -- not
     just marker existence (the exact gap Tasks 9/10's reviews flagged):
@@ -260,3 +269,28 @@ def test_same_basename_different_subdirs_both_processed_with_distinct_content(tm
     assert "TOKEN_B" in row_b["abstract"]
     assert "TOKEN_A" not in row_b["title"]
     assert "TOKEN_A" not in row_b["abstract"]
+
+
+def test_discover_pubmed_files_baseline_still_sorts_first_under_real_nested_layout(tmp_path):
+    """The baseline-before-updates ordering must survive the discovery-dedup
+    migration: swapping the sort tiebreak from ``p.name`` to
+    ``input_key(p, raw_dir)`` must not disturb the outer
+    ``0 if "baseline" in str(p).lower() else 1`` priority. Exercised against
+    the REAL nested layout (``<raw_dir>/baseline/`` + ``<raw_dir>/updates/``,
+    per ``scripts/data/pubmed/download_pubmed.sh``), not the flat fixture
+    copies ``test_pubmed_report_respects_max_files`` uses (which never
+    exercise the tiebreak, since a flat file's ``input_key`` equals its
+    ``.name``)."""
+    raw = tmp_path / "01_raw" / "pubmed"
+    update_file = raw / "updates" / "pubmed24n1220.xml.gz"
+    baseline_file = raw / "baseline" / "pubmed24n0001.xml.gz"
+    # Write updates' file first so a name-only sort would NOT happen to put
+    # baseline first by coincidence.
+    _pubmed_xml_gz(update_file, pmid="20000001", title="Update", token="UPD")
+    _pubmed_xml_gz(baseline_file, pmid="20000002", title="Baseline", token="BASE")
+
+    files = discover_pubmed_files(raw)
+
+    assert len(files) == 2
+    assert files[0].resolve() == baseline_file.resolve()
+    assert files[1].resolve() == update_file.resolve()
