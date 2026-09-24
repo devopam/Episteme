@@ -23,6 +23,10 @@ def _text() -> str:
     return doc(RUNBOOK)
 
 
+def _section(text: str, start: str, end: str) -> str:
+    return text.split(start)[1].split(end)[0]
+
+
 def _fenced_lines() -> list[str]:
     """Logical command lines inside ``` fences (backslash continuations joined)."""
     out: list[str] = []
@@ -195,6 +199,13 @@ def test_guard_and_go_live_are_documented():
     ):
         assert term in t, term
     assert "EPISTEME_DB_MODE=restricted" in t
+
+
+def test_cdisc_bc_corpus_lockdown_is_documented():
+    sec = _section(_text(), "### 5.5", "\n---")
+    assert "until CDISC confirms a licence for `export/` directly" in sec
+    assert "excluded from any training corpus in its current state" in sec
+    assert "cdisc.org/terms-and-conditions" not in sec  # URL belongs to the wrapper comment only
 
 
 def test_known_hazards_are_documented():

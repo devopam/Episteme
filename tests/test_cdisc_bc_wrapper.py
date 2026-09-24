@@ -128,6 +128,8 @@ def test_fetches_files_provenance_and_licence(tmp_path):
     assert "source_repo: https://github.com/cdisc-org/COSMoS" in prov
     assert "not stated for export/ data" in prov
     assert "CC-BY-4.0 (repository content)" not in prov
+    assert "until CDISC confirms a licence for the export/ data files directly" in prov
+    assert "excluded from any training corpus in its current state" in prov
     assert "retrieved_at: 20" in prov and prov.count("Z") >= 1
     assert (_dest(tmp_path) / "LICENSE").read_text(encoding="utf-8").startswith("licence text")
 
