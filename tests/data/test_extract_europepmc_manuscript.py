@@ -28,8 +28,10 @@ from pathlib import Path
 
 from episteme.data import article_schema
 from episteme.data.europepmc.manuscripts.extract_europepmc_manuscripts import (
+    discover,
     extract_europepmc_manuscripts,
     main,
+    process_one,
 )
 
 FX = Path(__file__).resolve().parents[1] / "fixtures" / "sp2" / "europepmc_manuscript"
@@ -187,3 +189,87 @@ def test_manuscript_id_disambiguates_txt_vs_xml_same_pmcid(tmp_path):
     ids = {r["id"] for r in rows}
     assert len(ids) == 2, f"expected two distinct ids, got a collision: {ids}"
     assert ids == {"europepmc_manuscript:PMC9999999:txt", "europepmc_manuscript:PMC9999999:xml"}
+
+
+def _make_archive(path: Path, *, token: str) -> None:
+    """A minimal one-``.txt``-member archive whose body embeds ``token``, long
+    enough to clear the ``ok`` text-length gate."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = f"Manuscript body for {token}. ".encode() * 20
+    with tarfile.open(path, "w:gz") as tar:
+        info = tarfile.TarInfo(name="PMC0000042.txt")
+        info.size = len(body)
+        tar.addfile(info, io.BytesIO(body))
+
+
+def test_discover_stays_flat_ignores_nested_tar_gz(tmp_path):
+    """Task 13 judgment call, pinned as a regression guard: ``discover()``
+    deliberately keeps the pre-migration flat ``raw_dir.glob("*.tar.gz")``
+    scope (NOT ``checkpoint_markers.discover_input_files``, which also
+    ``rglob``s) -- ``download_europepmc_manuscript.sh`` states outright
+    ("Flat EBI directory") that the real upstream layout has no
+    subdirectories, so widening discovery here would be a real behavioural
+    change with no known layout that needs it (unlike apollo's HF-mirrored,
+    layout-uncontrolled downloader). A ``.tar.gz`` placed in a subdirectory
+    must NOT be discovered.
+    """
+    raw = tmp_path / "01_raw" / "europepmc_manuscript"
+    top_level = raw / "top_level.tar.gz"
+    nested = raw / "batch_a" / "nested.tar.gz"
+    _make_archive(top_level, token="TOP")
+    _make_archive(nested, token="NESTED")
+
+    files = discover(raw)
+
+    assert [f.resolve() for f in files] == [top_level.resolve()]
+
+
+def test_same_basename_different_subdirs_distinct_markers_and_content(tmp_path):
+    """Checkpoint-collision regression test (Task 13), proving the identity
+    migration to ``input_key`` even though ``discover()`` itself stays flat
+    (see the judgment call recorded on ``discover()`` and in the commit
+    message): two archives sharing an identical basename in different
+    subdirectories under ``raw_dir``, driven directly through ``process_one``
+    (the layer that DOES need to be collision-safe, since nothing about
+    ``input_key``'s correctness should depend on whether ``discover()``
+    happens to find a given path today).
+
+    Proves distinct markers AND distinct, correctly-attached content -- not
+    just marker existence: each archive's own token must land on its OWN
+    row, never the sibling same-basename archive's.
+    """
+    raw = tmp_path / "01_raw" / "europepmc_manuscript"
+    file_a = raw / "batch_a" / "dup.tar.gz"
+    file_b = raw / "batch_b" / "dup.tar.gz"
+    _make_archive(file_a, token="TOKEN_A")
+    _make_archive(file_b, token="TOKEN_B")
+
+    processed = tmp_path / "02_processed"
+    res_a = process_one(file_a, raw_dir=raw, processed_dir=processed, force=False)
+    res_b = process_one(file_b, raw_dir=raw, processed_dir=processed, force=False)
+
+    assert res_a["ok"] is True
+    assert res_b["ok"] is True
+    assert res_a["source_file"] != res_b["source_file"]
+    assert res_a["source_file"] == "batch_a__dup.tar.gz"
+    assert res_b["source_file"] == "batch_b__dup.tar.gz"
+
+    # Distinct, non-colliding checkpoint markers.
+    marks = sorted(
+        p.name for p in (processed / "_ops" / "europepmc_manuscript" / "success").glob("*.ok")
+    )
+    assert marks == ["batch_a__dup.tar.gz.ok", "batch_b__dup.tar.gz.ok"]
+
+    # Two distinct shard files, not one clobbering the other.
+    shard_dir = processed / "staging" / "europepmc_manuscript"
+    shards = list(shard_dir.glob("*.parquet")) or list(shard_dir.glob("*.jsonl"))
+    assert len(shards) == 2
+
+    rows = _all_rows(shard_dir)
+    assert len(rows) == 2
+    row_a = next(r for r in rows if r["source_file"] == "batch_a__dup.tar.gz")
+    row_b = next(r for r in rows if r["source_file"] == "batch_b__dup.tar.gz")
+    assert "TOKEN_A" in row_a["body_text"]
+    assert "TOKEN_B" not in row_a["body_text"]
+    assert "TOKEN_B" in row_b["body_text"]
+    assert "TOKEN_A" not in row_b["body_text"]

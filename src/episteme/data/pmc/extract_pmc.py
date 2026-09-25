@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 import threading
@@ -46,6 +47,8 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
     mark_failed,
     mark_success,
@@ -53,6 +56,8 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "pmc"
 
@@ -88,7 +93,10 @@ def find_xml_for_meta(meta_path: Path, raw_dir: Path, version_id: str) -> Path |
 
 def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    source_file = meta_path.name
+    # input_key, not meta_path.name: two metadata files sharing a basename in
+    # different subdirectories under raw_dir must not collapse to the same
+    # source_file value (see discover_meta_files / process_one below).
+    source_file = input_key(meta_path, raw_dir)
     version_id = meta_path.stem  # PMC13525915.1
 
     pmcid = meta.get("pmcid") or ""
@@ -186,24 +194,48 @@ def row_from_meta_and_xml(meta_path: Path, raw_dir: Path) -> dict[str, Any]:
 
 
 def discover_meta_files(raw_dir: Path) -> list[Path]:
-    files: list[Path] = []
-    meta_dir = raw_dir / "metadata"
-    if meta_dir.is_dir():
-        files.extend(meta_dir.rglob("PMC*.json"))
-    files.extend(raw_dir.rglob("PMC*.json"))
-    # unique by name
-    seen: set[str] = set()
-    out: list[Path] = []
-    for f in sorted(files, key=lambda p: p.name):
-        if not f.is_file():
-            continue
-        if f.name in ("sync_meta.txt",):
-            continue
-        if f.name in seen:
-            continue
-        seen.add(f.name)
-        out.append(f)
-    return out
+    """``PMC*.json`` files under ``raw_dir``, deduped by resolved full path
+    (never by basename).
+
+    The old implementation combined ``(raw_dir / "metadata").rglob(...)``
+    and ``raw_dir.rglob(...)`` into one list, then deduped by *name* -- a
+    step that was doing double duty as both a same-file dedup and an
+    unintentional "collapse distinct files that happen to share a name"
+    step. That second behaviour was the bug this migration fixes (Task 9):
+    two real, distinct metadata files named ``PMC1.json`` in different
+    subdirectories (e.g. two download batches) would silently collapse to
+    one discovered file, and downstream, to one checkpoint marker -- so the
+    second file's success would be misreported as an already-done skip and
+    its row would never be written.
+
+    The explicit ``meta_dir``-specific branch is also redundant once dedup
+    is path-based: ``meta_dir`` (``raw_dir / "metadata"``) is a subdirectory
+    of ``raw_dir``, and PMC's real download layout
+    (``download_pmc.py::process_one`` writes metadata only to
+    ``output_dir / "metadata" / f"{version_id}.json"``, never elsewhere
+    under ``raw_dir``) never puts a *different* JSON file at the same
+    relative path outside ``metadata/``. ``discover_input_files(raw_dir,
+    ["PMC*.json"])`` already walks ``raw_dir`` recursively via
+    ``root.rglob(pat)``, so it finds every file the old ``meta_dir.rglob``
+    branch found -- literally the same files, same resolved paths -- making
+    that branch pure duplication, not a source of files the single-root
+    walk would otherwise miss under the normal (non-symlinked) layout
+    ``download_pmc.py`` actually creates via plain ``mkdir(parents=True)``.
+    One narrow exception: ``Path.rglob`` does not descend into a directory
+    *symlink* by default (``recurse_symlinks=False``), so if some external
+    ops setup ever replaced ``raw_dir / "metadata"`` with a symlink to a
+    separate volume, a single ``raw_dir.rglob(...)`` walk would miss files
+    under it where the old dedicated ``meta_dir.rglob(...)`` branch (rooted
+    directly at the symlink) would not. Not a real risk for this codebase's
+    own downloader, so not special-cased here, but flagged for whoever next
+    touches this function. (The old ``sync_meta.txt`` exclusion is also
+    dropped here: that file is a plain ``.txt`` summary written by
+    ``download_pmc.py::main``, which the ``PMC*.json`` glob pattern was
+    never going to match in the first place.)
+    """
+    files = discover_input_files(raw_dir, ["PMC*.json"])
+    files.sort(key=lambda p: input_key(p, raw_dir))
+    return files
 
 
 def process_one(
@@ -213,7 +245,7 @@ def process_one(
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = meta_path.name
+    basename = input_key(meta_path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -276,7 +308,9 @@ def process_one(
                         run_id=get_settings().run_id,
                     )
                 except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                    pass
+                    _LOG.warning(
+                        "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                    )
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(

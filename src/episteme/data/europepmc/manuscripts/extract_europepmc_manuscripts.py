@@ -76,6 +76,7 @@ Roadmap CLI (§4.7):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import sys
@@ -103,6 +104,7 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    input_key,
     is_success,
     mark_failed,
     mark_success,
@@ -110,6 +112,8 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "europepmc_manuscript"
 
@@ -241,11 +245,19 @@ def _row_from_xml(tmp_path: Path, *, source_file: str, member_name: str) -> dict
     return finalize_row(row)
 
 
-def iter_rows_from_archive(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_archive(
+    path: Path, *, source_file: str | None = None
+) -> Iterator[dict[str, Any]]:
     """Yield one row per ``.txt``/``.xml`` member of one manuscript
     ``.tar.gz`` archive. Other member kinds (directories, filelists, etc.) are
-    skipped."""
-    source_file = path.name
+    skipped.
+
+    ``source_file`` defaults to ``path.name`` when omitted (existing
+    positional callers, e.g. the tests, keep working), but callers with a
+    ``raw_dir`` in scope must pass ``input_key(path, raw_dir)`` explicitly --
+    see ``process_one``.
+    """
+    source_file = source_file or path.name
     with tarfile.open(path, "r:gz") as tar:
         members = sorted(
             (m for m in tar.getmembers() if m.isfile()),
@@ -277,7 +289,22 @@ def iter_rows_from_archive(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def discover(raw_dir: Path) -> list[Path]:
-    """One unit of work per archive."""
+    """One unit of work per archive.
+
+    Deliberately stays a flat, non-recursive ``raw_dir.glob(...)`` -- NOT
+    ``checkpoint_markers.discover_input_files`` (which also ``rglob``s).
+    ``download_europepmc_manuscript.sh`` says outright ("Flat EBI directory")
+    that the real upstream layout is flat, one archive per top-level file --
+    unlike ``apollo``'s downloader, which mirrors an upstream HF tree of
+    unknown/uncontrolled shape (Task 13's judgment call: this module and its
+    ``europepmc_preprint`` sibling, Task 14, keep discovery scope unchanged
+    and migrate ONLY the identity computation below, since here -- unlike
+    apollo -- switching to ``rglob`` would be a real behavioural widening
+    with no known layout that needs it, not just a dedup-safety fix). See
+    ``process_one`` for the identity change that DOES apply regardless of
+    layout flatness (``input_key`` instead of ``path.name``, for
+    defense-in-depth consistency with the shared scheme).
+    """
     return sorted(p for p in raw_dir.glob("*.tar.gz") if p.is_file())
 
 
@@ -311,16 +338,25 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                     run_id=get_settings().run_id,
                 )
             except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                pass
+                _LOG.warning(
+                    "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                )
 
 
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # input_key, not path.name: brings this identity computation in line with
+    # the shared scheme (checkpoint_markers.input_key) even though today's
+    # real, flat EBI layout means the two are identical for every
+    # currently-reachable file (input_key's own docstring: "A file directly
+    # under raw_root yields its bare basename") -- see discover()'s docstring
+    # for why discovery scope itself stays flat/unchanged.
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -328,7 +364,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_archive(path):
+        for row in iter_rows_from_archive(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -407,14 +443,16 @@ def extract_europepmc_manuscripts(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -512,7 +550,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     rows: list[dict[str, Any]] = []
     for fp in files:
         try:
-            rows.extend(iter_rows_from_archive(fp))
+            rows.extend(iter_rows_from_archive(fp, source_file=input_key(fp, raw_dir)))
         except Exception as e:  # noqa: BLE001 — report is best-effort per file
             print(f"  WARN: could not parse {fp.name}: {e}", file=sys.stderr)
     print(_render_field_shape(rows, len(files)), end="")

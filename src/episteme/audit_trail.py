@@ -18,6 +18,7 @@ this module never reads ``os.environ`` directly.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
@@ -151,6 +152,11 @@ def record(
         raise ValueError(
             f"unknown audit event_type {event_type!r}; must be one of {sorted(EVENT_TYPES)}"
         )
+    # Same ordering discipline as the EVENT_TYPES check above (before
+    # require_actor()/get_settings()/the cursor): manual_correction and
+    # schema_migration must always carry a human-readable reason.
+    if event_type in ("manual_correction", "schema_migration") and not reason:
+        raise ValueError(f"{event_type!r} requires a non-empty reason")
 
     actor = require_actor()
     host = socket.gethostname()
@@ -281,14 +287,19 @@ def verify(conn: psycopg.Connection) -> list[dict]:
             problems.append({"seq": seq, "reason": "chain_break"})
         expected_prev = rec["record_hash"]
 
-    # Mirror parity: total non-blank lines across every audit-*.jsonl vs table
-    # row count. One-sided -- mirror > table is legitimate (e.g. after a schema
-    # recreate that truncates the table but leaves the mirror files).
+    # Mirror parity: total non-blank lines across every audit-*.jsonl (and its
+    # rotated audit-*.jsonl.gz form -- scripts/data/rotate_audit_logs.sh
+    # gzips mirror files older than 30 days in place) vs table row count.
+    # One-sided -- mirror > table is legitimate (e.g. after a schema recreate
+    # that truncates the table but leaves the mirror files).
     mirror_lines = 0
     mdir = _mirror_dir()
     if mdir.is_dir():
         for path in mdir.glob("audit-*.jsonl"):
             with open(path, encoding="utf-8") as fh:
+                mirror_lines += sum(1 for line in fh if line.strip())
+        for path in mdir.glob("audit-*.jsonl.gz"):
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
                 mirror_lines += sum(1 for line in fh if line.strip())
     if mirror_lines < len(rows):
         problems.append(

@@ -190,3 +190,204 @@ def test_bookshelf_report_writes_nothing(tmp_path, capsys):
     # no shard / marker / manifest written
     assert not (tmp_path / "staging").exists()
     assert not (tmp_path / "_ops").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint-collision regression test (Task 10)
+#
+# The REAL bookshelf download layout (scripts/data/bookshelf/download_bookshelf.sh)
+# writes every package to ``<raw_dir>/packages/<rel>`` where ``<rel>`` is the
+# path exactly as listed in NCBI LitArch's file_list.txt -- a hashed tree with
+# no usable directory listing (see the script's own header comment). Nothing
+# stops two hash buckets from each holding a package with the identical
+# basename (e.g. a re-released/updated package landing in a new bucket while
+# the old one is still on disk). ``discover_bookshelf_files`` must discover
+# both, and their checkpoint markers/``source_file`` identity must not
+# collapse to one -- the exact bug class ``discover_input_files``/
+# ``input_key`` (checkpoint_markers.py) exist to fix, mirroring Task 9's
+# ``discover_meta_files`` migration for pmc.
+# --------------------------------------------------------------------------- #
+
+
+def _bucket_archive_nxml(title: str, part_title: str, body_token: str, abstract_token: str) -> str:
+    """A minimal real-shape (``<book-part-wrapper>`` root, see
+    ``_REAL_SHAPE_NXML`` above) BITS-book NXML, parameterized so two archives
+    sharing a basename can carry distinct, independently-verifiable content."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<book-part-wrapper id="toc" content-type="toc" dtd-version="2.0">
+  <book-meta>
+    <book-id book-id-type="pmcid">tr-{body_token}</book-id>
+    <book-title-group>
+      <book-title>{title}</book-title>
+    </book-title-group>
+    <pub-date publication-format="electronic" date-type="pub">
+      <year>2023</year>
+    </pub-date>
+    <abstract>
+      <title>Summary</title>
+      <p>{abstract_token} book-level abstract text, long enough to clear the
+      minimum ok-text-length threshold used by the extract status rule for
+      this checkpoint-collision regression test fixture.</p>
+    </abstract>
+  </book-meta>
+  <book-part book-part-type="section">
+    <book-part-meta>
+      <book-part-id book-part-id-type="pmcid">toc</book-part-id>
+      <title-group>
+        <title>{part_title}</title>
+      </title-group>
+    </book-part-meta>
+    <body>
+      <p>{body_token} part body text runs on at some length here so it
+      comfortably clears the two-hundred character minimum the extract status
+      rule checks for, covering fixture detail nobody will ever read closely
+      but the extractor still has to hash, store and report on faithfully.</p>
+    </body>
+  </book-part>
+</book-part-wrapper>
+"""
+
+
+def _write_bucket_archive(raw_dir: Path, rel_subdir: str, nxml: str) -> Path:
+    """Write ``NBK1.tar.gz`` (same basename every call) under
+    ``raw_dir/packages/<rel_subdir>/``, mirroring
+    ``download_bookshelf.sh``'s ``packages/<rel>`` layout."""
+    pkg_dir = raw_dir / "packages" / rel_subdir
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = pkg_dir / "NBK1.tar.gz"
+    data = nxml.encode("utf-8")
+    with tarfile.open(tar_path, "w:gz") as tar:
+        info = tarfile.TarInfo(name="NBK1/NBK1.nxml")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return tar_path
+
+
+def test_discover_bookshelf_files_keeps_distinct_paths_same_basename(tmp_path):
+    """Regression: a naive rglob dedup keyed by basename would collapse two
+    real ``packages/<bucket>/NBK1.tar.gz`` packages under different hash
+    buckets into one discovered file. ``discover_bookshelf_files`` must
+    discover both (dedup is by resolved full path, via
+    ``checkpoint_markers.discover_input_files``)."""
+    from episteme.data.bookshelf.extract_bookshelf import discover_bookshelf_files
+
+    raw = tmp_path / "01_raw" / "bookshelf"
+    tar_a = _write_bucket_archive(
+        raw, "aa/11", _bucket_archive_nxml("Book A", "Part A", "TOKEN-A", "Bucket-A")
+    )
+    tar_b = _write_bucket_archive(
+        raw, "bb/22", _bucket_archive_nxml("Book B", "Part B", "TOKEN-B", "Bucket-B")
+    )
+
+    files = discover_bookshelf_files(raw)
+
+    assert len(files) == 2
+    assert {f.resolve() for f in files} == {tar_a.resolve(), tar_b.resolve()}
+
+
+def test_same_basename_different_buckets_both_processed_with_distinct_content(tmp_path):
+    """Checkpoint-collision regression test (Task 10): two ``NBK1.tar.gz``
+    packages with the *identical basename*, under different hash-bucket
+    subdirectories of the real ``packages/`` tree, must each get their own
+    discovery hit, checkpoint marker, and shard row -- not collapse into one,
+    either at discovery (basename dedup) or at the success-marker check
+    (basename identity).
+
+    Also proves the stronger claim Task 9's review flagged marker-existence
+    alone as insufficient for: each archive's OWN title/abstract/part-body
+    text ends up attached to its OWN ``source_file``-keyed row, not the
+    sibling bucket's -- i.e. no read/write cross-contamination between the
+    two same-named archives.
+
+    Note: because both archives are literally named ``NBK1.tar.gz``,
+    ``_accession_from_filename`` derives the SAME accession ("NBK1") for
+    both, so both book rows carry the SAME native id (``bookshelf:NBK1``)
+    despite being distinct source archives with distinct content -- an
+    id-under-a-different-source_file scenario ``postgres_loader.
+    load_source_file``'s "(d0) id-collision guard" *touches* at load time,
+    but does NOT resolve into two preserved books: (d0) deletes whichever
+    row's source_file doesn't match the incoming shard's, so loading these
+    two shards one after the other leaves only the LAST-loaded book's row in
+    Postgres (last-writer-wins), not both -- see the Task 10 report for why
+    that is a pre-existing, out-of-scope id-collision risk this task does
+    not fix. This test covers only the extractor: both archives are
+    discovered, processed independently, and produce independently correct
+    content under distinct ``source_file`` keys and distinct shard files.
+    """
+    from episteme.data.bookshelf.extract_bookshelf import extract_bookshelf
+
+    raw = tmp_path / "01_raw" / "bookshelf"
+    _write_bucket_archive(
+        raw, "aa/11", _bucket_archive_nxml("Book A", "Part A", "TOKEN-A", "Bucket-A")
+    )
+    _write_bucket_archive(
+        raw, "bb/22", _bucket_archive_nxml("Book B", "Part B", "TOKEN-B", "Bucket-B")
+    )
+
+    processed = tmp_path / "02_processed"
+    res = extract_bookshelf(raw, processed, workers=1)
+
+    assert res["inputs"] == 2
+    assert res["ok"] == 2
+    assert res["failed"] == 0
+
+    marks = sorted(p.name for p in (processed / "_ops" / "bookshelf" / "success").glob("*.ok"))
+    assert len(marks) == 2
+    assert marks[0] != marks[1]
+    assert any("aa" in m and "11" in m for m in marks)
+    assert any("bb" in m and "22" in m for m in marks)
+
+    import polars as pl
+
+    shard_dir = processed / "staging" / "bookshelf"
+    shards = sorted(shard_dir.glob("*.*"))
+    assert len(shards) == 2  # one shard per archive -- distinct source_file keys
+
+    rows = []
+    for shard in shards:
+        rows.extend(
+            (
+                pl.read_parquet(shard) if shard.suffix == ".parquet" else pl.read_ndjson(shard)
+            ).to_dicts()
+        )
+
+    books = [r for r in rows if r["container_id"] is None]
+    parts = [r for r in rows if r["container_id"] is not None]
+    assert len(books) == 2
+    assert len(parts) == 2
+
+    # Both books share the SAME native id (see docstring) -- the id-collision
+    # this nested layout can produce, deliberately exercised here.
+    assert {b["id"] for b in books} == {"bookshelf:NBK1"}
+
+    # source_file distinguishes the two rows even though id does not, and
+    # each carries its bucket subdirectory (never collapsing to bare "NBK1.tar.gz").
+    source_files = {b["source_file"] for b in books}
+    assert len(source_files) == 2
+    assert any("aa" in sf and "11" in sf for sf in source_files)
+    assert any("bb" in sf and "22" in sf for sf in source_files)
+
+    by_source_file = {b["source_file"]: b for b in books}
+    book_a = next(b for sf, b in by_source_file.items() if "aa" in sf)
+    book_b = next(b for sf, b in by_source_file.items() if "bb" in sf)
+
+    # No cross-contamination: each book's own title/abstract text, not its
+    # sibling bucket's.
+    assert book_a["title"] == "Book A"
+    assert book_b["title"] == "Book B"
+    assert "Bucket-A" in (book_a["text"] or "")
+    assert "Bucket-B" not in (book_a["text"] or "")
+    assert "Bucket-B" in (book_b["text"] or "")
+    assert "Bucket-A" not in (book_b["text"] or "")
+
+    parts_by_container_sf = {p["source_file"]: p for p in parts}
+    part_a = next(p for sf, p in parts_by_container_sf.items() if "aa" in sf)
+    part_b = next(p for sf, p in parts_by_container_sf.items() if "bb" in sf)
+    assert part_a["container_id"] == "bookshelf:NBK1"
+    assert part_b["container_id"] == "bookshelf:NBK1"
+    assert part_a["title"] == "Part A"
+    assert part_b["title"] == "Part B"
+    assert "TOKEN-A" in (part_a["text"] or "")
+    assert "TOKEN-B" not in (part_a["text"] or "")
+    assert "TOKEN-B" in (part_b["text"] or "")
+    assert "TOKEN-A" not in (part_b["text"] or "")
