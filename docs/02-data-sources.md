@@ -154,6 +154,17 @@ Episteme uses a **bimodal** data strategy:
 | **Hetionet** | Integrated network | Open | Candidate |
 | **DrugBank open subsets** (if any remain open) | Drug targets | Much of DrugBank is licensed — audit |
 
+### 2.6 Clinical data standards (CDISC)
+
+*Each item below has its own licence. Verified 2026-09-25. Only the controlled terminology is cleared for Stream 1.*
+
+| Source | What it contributes | License notes | Induction status |
+|--------|---------------------|---------------|------------------|
+| **CDISC Controlled Terminology** (via NCI EVS) | Codelists and terms for SDTM, CDASH, ADaM, SEND and the therapeutic-area standards; quarterly dated releases | NCI states CDISC Terminology is free to use without licensing restrictions (maintained inside NCIt) | **Stream 1 candidate** — structured, stable, serializable like MeSH/ontologies; **not started** |
+| **CDISC Biomedical Concepts** (COSMoS `export/`, incl. SDTM dataset specializations) | Granular clinical-observation concepts and their SDTM mappings | COSMoS README: code MIT, "documentation and minutes" CC-BY-4.0; **no licence stated for `export/` data** | **Wired as `cdisc_bc`, download-only**; no serializer and no corpus inclusion until CDISC confirms (see `12-source-inventory.md`) |
+| **USDM** (Unified Study Definitions Model, `cdisc-org/DDF-RA`) | Study-definition model, API spec, implementation guide | Same README pattern as COSMoS: code MIT, "documentation and minutes" CC-BY-4.0; **model files not explicitly covered** | **Unverified** — treat like `cdisc_bc` (download-only at most) until confirmed; not started |
+| **SDTM** model and Implementation Guide | Tabulation model and implementation rules | CDISC standard licence: use **within your organization only**, **no derivative works**, no copying/distribution; machine-readable metadata via CDISC Library (membership) | **Stream 2 only**, deployer-licensed, like MedDRA/WHODrug; never in the open training corpus |
+
 ---
 
 ## Red-list (prohibited / avoid for open Episteme)
@@ -166,6 +177,7 @@ Episteme uses a **bimodal** data strategy:
 | **NICE full commercial reuse outside allowed use** | Licensing |
 | **BiMediX / ArSyra-type NC corpora** for commercial weights | NC / paid |
 | **MedDRA / WHODrug / SNOMED dumps in public training corpus** | License |
+| **CDISC standard documents (SDTM IG and similar) in public training corpus** | CDISC standard licence: organization-internal use, no derivative works |
 | **Any source with unclear commercial ML rights** | Until counsel/docs clear |
 
 ---
@@ -193,7 +205,10 @@ Work that **does not need the full 8 TB** — build scripts + **small subset** e
 | P2 | **ClinVar** | One VCF/XML slice | Stream 2 |
 | P2 | SFT packs (MedMCQA, PubMedQA, …) | Full (usually small) | JSONL → SFT store |
 | P2 | Author manuscripts | One baseline tar | JATS like preprints |
+| P2 | **CDISC Controlled Terminology** | One quarterly SDTM release (NCI EVS, text/ODM) | Serialize codelists → `articles` (Stream 1) |
 | Later | MedDRA/WHODrug/SNOMED | **Only with customer license packs** | RBAC RAG connectors |
+| Blocked | **Biomedical Concepts / USDM** | Download-only (`cdisc_bc` exists; USDM not started) | Serializer only after CDISC confirms data licence |
+| Later | **SDTM model / IG** | **Only with a deployer CDISC licence** | Stream 2 RAG connector |
 
 ---
 
@@ -234,3 +249,4 @@ When a new source is added, update **this file first**, then runbook + extractor
 |---------|------|-------|
 | Aug 2026 | Prior | Original Stream 1 / 2 architecture notes |
 | 2026-09-02 | Enrichment | Full catalog; induction status; DME/IME/UCUM; pre-SSD backlog; licensed vs open clarified; Swiss-Prot not sole focus |
+| 2026-09-25 | CDISC standards | Added §2.6 (Controlled Terminology, Biomedical Concepts, USDM, SDTM) with per-item licence status; backlog and red-list rows |
