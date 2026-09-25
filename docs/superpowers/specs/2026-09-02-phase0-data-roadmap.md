@@ -363,3 +363,4 @@ marker written. Retry replaces prior rows for that `source_file` (`DELETE WHERE 
 | Version | Date | Notes |
 |---|---|---|
 | v1 | 2026-09-02 | Initial roadmap from the Phase-0 data brainstorm. |
+| v1.1 | 2026-09-25 | Addendum: CDISC clinical data standards added to the source catalog (`docs/02-data-sources.md` §2.6). CDISC Controlled Terminology (NCI EVS, unrestricted) is a Stream 1 structured-serialize candidate for a future sub-plan; Biomedical Concepts (`cdisc_bc`) and USDM stay download-only pending CDISC licence confirmation; SDTM model/IG is Stream 2 only (deployer licence). The catalog governs; this roadmap stays subordinate. |
