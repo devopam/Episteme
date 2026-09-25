@@ -45,6 +45,7 @@ Roadmap CLI (§4.7):
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import threading
 import time
@@ -71,12 +72,15 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    input_key,
     is_success,
     mark_failed,
     mark_success,
     write_run_manifest,
 )
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "europepmc_preprint"
 
@@ -195,29 +199,56 @@ def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any
     return finalize_row(row)
 
 
-def iter_articles(path: Path) -> Iterator[dict[str, Any]]:
+def iter_articles(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Yield one row per ``<article>`` in a per-ID preprint XML file.
 
     A preprint file is single-article JATS; if the root is not ``<article>`` and
     carries no ``<article>`` descendant, the root itself is parsed (still yields
     a — most likely metadata-only — row).
+
+    ``source_file`` defaults to ``path.name`` when omitted (existing positional
+    callers, e.g. the tests, keep working), but callers with a ``raw_dir`` in
+    scope must pass ``input_key(path, raw_dir)`` explicitly -- see
+    ``process_one`` and ``_run_report``. ``stem`` (``path.stem`` -- the bare
+    ``PPR{n}`` filename stem, never directory-qualified) is unaffected by this
+    and still drives ``source_record_id`` / the ``id`` fallback -- see
+    ``parse_article``.
     """
+    source_file = source_file or path.name
     stem = path.stem
     root = ET.parse(path).getroot()
     if _local(root.tag) == "article":
-        yield parse_article(root, path.name, stem)
+        yield parse_article(root, source_file, stem)
         return
     found = False
     for el in root.iter():
         if _local(el.tag) == "article":
             found = True
-            yield parse_article(el, path.name, stem)
+            yield parse_article(el, source_file, stem)
     if not found:
-        yield parse_article(root, path.name, stem)
+        yield parse_article(root, source_file, stem)
 
 
 def discover(raw_dir: Path) -> list[Path]:
-    """Per-ID preprint XML only — ``PPR*.xml`` (bulk range archives are gone)."""
+    """Per-ID preprint XML only — ``PPR*.xml`` (bulk range archives are gone).
+
+    Deliberately stays a flat, non-recursive ``raw_dir.glob(...)`` -- NOT
+    ``checkpoint_markers.discover_input_files`` (which also ``rglob``s), same
+    judgment call as ``europepmc_manuscript`` (Task 13) for consistency between
+    the two EPMC modules. Verified directly against this module's own
+    downloader, not just this docstring: ``download_europepmc_preprints.py``'s
+    ``download_preprints()`` writes every fetched preprint with
+    ``(raw_dir / f"{ppr_id}.xml").write_bytes(body)`` -- a bare join of
+    ``raw_dir`` and the id, with no subdirectory component anywhere in the
+    write path. That is even stronger than ``europepmc_manuscript``'s evidence
+    (a shell ``http_fetch`` that happens to always write ``basename(url)``):
+    here it is structurally impossible for the acquisition side to ever place a
+    file anywhere but directly under ``raw_dir``, so widening discovery to
+    ``rglob`` would add scope with no corresponding real layout to justify it.
+    See ``process_one`` for the identity change that DOES apply regardless of
+    layout flatness (``input_key`` instead of ``path.name``, for
+    defense-in-depth consistency with the shared scheme).
+    """
     return sorted(p for p in raw_dir.glob("PPR*.xml") if p.is_file())
 
 
@@ -250,16 +281,25 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                     run_id=get_settings().run_id,
                 )
             except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                pass
+                _LOG.warning(
+                    "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                )
 
 
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # input_key, not path.name: brings this identity computation in line with
+    # the shared scheme (checkpoint_markers.input_key) even though today's
+    # real, flat REST-harvest layout means the two are identical for every
+    # currently-reachable file (input_key's own docstring: "A file directly
+    # under raw_root yields its bare basename") -- see discover()'s docstring
+    # for why discovery scope itself stays flat/unchanged.
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -267,7 +307,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_articles(path):
+        for row in iter_articles(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -345,14 +385,16 @@ def extract_europepmc_preprints(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -450,7 +492,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     rows: list[dict[str, Any]] = []
     for fp in files:
         try:
-            rows.extend(iter_articles(fp))
+            rows.extend(iter_articles(fp, source_file=input_key(fp, raw_dir)))
         except Exception as e:  # noqa: BLE001 — report is best-effort per file
             print(f"  WARN: could not parse {fp.name}: {e}", file=sys.stderr)
     print(_render_field_shape(rows, len(files)), end="")

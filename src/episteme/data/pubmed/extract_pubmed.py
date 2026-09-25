@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import logging
 import re
 import sys
 import threading
@@ -58,13 +59,16 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    discover_input_files,
+    input_key,
     is_success,
-    list_input_files,
     mark_failed,
     mark_success,
     write_run_manifest,
 )
 from episteme.data.staging_writer import write_rows  # noqa: E402
+
+_LOG = logging.getLogger(__name__)
 
 SOURCE = "pubmed"
 
@@ -247,15 +251,21 @@ def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
     return finalize_row(row)
 
 
-def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
+def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
     """Stream ``<PubmedArticle>`` rows from one ``pubmed*.xml(.gz)`` file.
 
     ``events=("start", "end")`` so the root ``<PubmedArticleSet>`` can be
     cleared after every record — otherwise it retains a reference to every
     drained child and memory grows for the whole (19 MB+) file.
+
+    ``source_file`` defaults to ``path.name`` when omitted (existing
+    positional callers keep working), but callers with a ``raw_dir`` in scope
+    must pass ``input_key(path, raw_dir)`` explicitly -- two input files
+    sharing a basename in different subdirectories under ``raw_dir`` must not
+    collapse to the same ``source_file`` value on the rows themselves.
     """
     opener = gzip.open if path.name.endswith(".gz") else open
-    source_file = path.name
+    source_file = source_file or path.name
     with opener(path, "rb") as f:
         it = _safe_iterparse(f, events=("start", "end"))
         _, root = next(it)
@@ -270,9 +280,35 @@ def iter_rows_from_file(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def discover_pubmed_files(raw_dir: Path) -> list[Path]:
-    files = list_input_files(raw_dir, ["pubmed*.xml.gz", "pubmed*.xml"])
-    # Prefer baseline-looking paths first.
-    files.sort(key=lambda p: (0 if "baseline" in str(p).lower() else 1, p.name))
+    """``pubmed*.xml(.gz)`` files under ``raw_dir``, deduped by resolved full
+    path (never by basename) via ``checkpoint_markers.discover_input_files``.
+
+    pubmed's real download layout (``scripts/data/pubmed/download_pubmed.sh``,
+    the actual downloader -- ``download_pubmed.py`` is a stub) is NOT flat: it
+    writes into ``<raw_dir>/baseline/<file>`` and ``<raw_dir>/updates/<file>``
+    (``resolve_dest pubmed`` == ``raw_root/pubmed``, matching this module's
+    own ``--raw-dir`` default). So ``input_key`` diverges from the old
+    ``path.name`` for every real file post-migration (e.g.
+    ``baseline__pubmed24n0001.xml.gz``), not just a hypothetical -- existing
+    markers/shards under a live ``processed_root`` are orphaned by this
+    change (see the Task 11 report's "operational impact" section, mirroring
+    Task 10's bookshelf finding). Nothing in ``list_input_files``'s
+    basename-only dedup (the pre-migration behaviour) enforced any particular
+    layout either way: two files sharing a basename in different
+    subdirectories would have silently collapsed to one discovered file. This
+    mirrors ``extract_pmc.discover_meta_files`` / ``extract_bookshelf.
+    discover_bookshelf_files`` (Tasks 9/10).
+
+    The baseline-before-updates ordering is preserved and given priority over
+    the ``input_key`` tiebreak: baseline files establish PMID records that a
+    later "update" file's <PubmedArticle> for the same PMID is meant to
+    revise, so baseline must sort (and, when run single-threaded, process)
+    first regardless of path-derived identity.
+    """
+    files = discover_input_files(raw_dir, ["pubmed*.xml.gz", "pubmed*.xml"])
+    # Prefer baseline-looking paths first; input_key (not raw path/name) as
+    # the tiebreak, consistent with the marker/source_file identity below.
+    files.sort(key=lambda p: (0 if "baseline" in str(p).lower() else 1, input_key(p, raw_dir)))
     return files
 
 
@@ -306,16 +342,24 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                     run_id=get_settings().run_id,
                 )
             except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                pass
+                _LOG.warning(
+                    "audit mirror_only fallback also failed for %s", basename, exc_info=True
+                )
 
 
 def process_one(
     path: Path,
     *,
+    raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    basename = path.name
+    # input_key, not path.name: two pubmed*.xml(.gz) files sharing a basename
+    # in different subdirectories under raw_dir (not how download_pubmed.py
+    # lays files out today, but not something the old basename-keyed dedup
+    # enforced either -- see discover_pubmed_files) must not collapse to the
+    # same marker/source_file identity.
+    basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
@@ -323,7 +367,7 @@ def process_one(
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
     try:
-        for row in iter_rows_from_file(path):
+        for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
             rows.append(row)
 
@@ -399,14 +443,16 @@ def extract_pubmed(
 
     if workers == 1:
         for fp in files:
-            result = process_one(fp, processed_dir=processed_dir, force=force)
+            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
             results.append(result)
             if verbose:
                 _print_verbose(result)
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
-                ex.submit(process_one, fp, processed_dir=processed_dir, force=force): fp
+                ex.submit(
+                    process_one, fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force
+                ): fp
                 for fp in files
             }
             for fut in as_completed(futs):
@@ -503,7 +549,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
-        for row in iter_rows_from_file(fp):
+        for row in iter_rows_from_file(fp, source_file=input_key(fp, raw_dir)):
             rows.append(row)
     print(_render_field_shape(rows, len(files)), end="")
     return 0

@@ -31,3 +31,36 @@ def test_is_commercial_meta_rejects_noncommercial():
 
 def test_is_commercial_meta_rejects_missing_license():
     assert is_commercial_meta({}) is False
+
+
+def test_output_dir_defaults_to_configured_raw_root(tmp_path, monkeypatch):
+    # EPISTEME_RAW_ROOT overrides EPISTEME_DATA_ROOT in Settings' own resolution
+    # order (config.py: raw_root = EPISTEME_RAW_ROOT or data_root / "01_raw") --
+    # an operator .env that happens to set it would silently make this assertion
+    # depend on the machine it runs on, not just tmp_path. delenv alone is not
+    # enough: get_settings() calls load_dotenv() on cache-miss with the default
+    # override=False, which *fills in* any var missing from os.environ straight
+    # back out of that same .env -- undoing the delenv. Block dotenv from being
+    # read at all instead, same pattern as tests/test_db_guard.py's
+    # clean_settings fixture.
+    monkeypatch.setattr("episteme.config._find_project_dotenv", lambda: None)
+    monkeypatch.delenv("EPISTEME_RAW_ROOT", raising=False)
+    monkeypatch.setenv("EPISTEME_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    try:
+        # No importlib.reload needed: build_parser() calls get_settings() at
+        # call time (download_pmc.py line ~339), not as a module-level
+        # argparse default frozen at import time, so a plain cache_clear()
+        # already makes it see the monkeypatched settings.
+        from episteme.data.pmc import download_pmc
+
+        parser = download_pmc.build_parser()
+        args = parser.parse_args([])
+        assert args.output_dir == tmp_path / "01_raw" / "pmc" / "oa_comm"
+    finally:
+        # Otherwise the next test to call get_settings() (without its own
+        # monkeypatch) inherits this test's tmp_path-scoped Settings from cache.
+        cfg.get_settings.cache_clear()

@@ -51,6 +51,9 @@ def test_stage_column_matches_the_dispatcher_rules():
 
 def test_licence_caveats_are_recorded_per_row():
     rows = _rows()
-    assert "UNVERIFIED" in " ".join(rows["cdisc_bc"])  # cdisc_bc data licence
+    row = " ".join(rows["cdisc_bc"])
+    assert "UNVERIFIED" in row  # cdisc_bc data licence
+    assert "until CDISC confirms" in row
+    assert "training corpus" in row
     for src in ("mesh", "pubchem", "clinvar"):
         assert "governance override" in " ".join(rows[src]), src
