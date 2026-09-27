@@ -95,6 +95,47 @@ def _audit_partition_names(pg_conn) -> set[str]:
         return {r[0] for r in cur.fetchall()}
 
 
+def test_all_audit_partitions_have_explicit_utc_month_boundaries(pg_conn):
+    # schema.sql's static _audit_202609/_audit_202610 partitions and every
+    # partition ensure_audit_partitions.sh creates must sit on the SAME UTC
+    # month boundaries, independent of the connecting session's/server's
+    # default TimeZone. schema.sql's FOR VALUES FROM ('2026-09-01') TO
+    # ('2026-10-01') literals carry no offset, so Postgres parses them as
+    # midnight in whichever TimeZone happened to be active when schema.sql
+    # was loaded -- on a server whose default TimeZone isn't UTC (this dev
+    # server's default is Asia/Calcutta, not UTC), that produces an
+    # IST-midnight partition instead of a UTC one. If the script were then
+    # pinned to a DIFFERENT TimeZone than schema.sql's loading session, its
+    # UTC month boundaries would not meet schema.sql's non-UTC ones exactly,
+    # producing a gap (silently routed to _audit_default) or an overlap
+    # (CREATE TABLE dies). Normalising the session to UTC before reading
+    # pg_get_expr makes the assertion itself TimeZone-invariant, so this
+    # fails identically on any server regardless of its own default.
+    _setup_schema(pg_conn)
+    proc = _run_script(3)
+    assert proc.returncode == 0, proc.stderr
+
+    with pg_conn.cursor() as cur:
+        cur.execute("SET LOCAL TIME ZONE 'UTC'")
+        cur.execute(
+            "select c.relname, pg_get_expr(c.relpartbound, c.oid) "
+            "from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where n.nspname = 'episteme' and c.relname ~ '^_audit_2[0-9]{5}$' "
+            "order by c.relname"
+        )
+        rows = cur.fetchall()
+    assert rows, "expected at least one _audit_YYYYMM partition"
+    for name, bound in rows:
+        yyyymm = name.removeprefix("_audit_")
+        year, month = int(yyyymm[:4]), int(yyyymm[4:])
+        next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+        expected = (
+            f"FOR VALUES FROM ('{year:04d}-{month:02d}-01 00:00:00+00') "
+            f"TO ('{next_year:04d}-{next_month:02d}-01 00:00:00+00')"
+        )
+        assert bound == expected, f"{name}: {bound!r} is not a UTC month boundary"
+
+
 def test_creates_future_partitions_and_is_idempotent(pg_conn):
     _setup_schema(pg_conn)
     proc = _run_script(8)

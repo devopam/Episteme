@@ -42,7 +42,21 @@ if [ -z "$PSQL" ]; then
 fi
 [ -n "$PSQL" ] || die "psql not found (set PSQL=/path/to/psql)"
 
-sa_psql() { PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "$PSQL" -X -v ON_ERROR_STOP=1 -q \
+# PGTZ=UTC pins every statement this script sends -- including the bare
+# `$start`/`$end` date literals below -- to UTC session TimeZone.
+# recorded_at is timestamptz, so Postgres parses a bare date literal as
+# midnight in whatever TimeZone the session happens to have; this script
+# itself always computes bounds via `date -u` (UTC month starts), matching
+# schema.sql's own two static `_audit_202609`/`_audit_202610` partitions,
+# which carry an explicit '+00' offset for the same reason (see schema.sql's
+# comment above its `_audit` table). Without this pin, a different operator
+# PGTZ (or system/server default) here than schema.sql's explicit UTC
+# offset would parse these bare date strings to a different UTC instant
+# than the existing partitions expect, producing overlapping or gapped
+# bounds instead of a clean CREATE TABLE IF NOT EXISTS no-op -- reproduced
+# empirically on this dev server, whose own default session TimeZone is
+# Asia/Calcutta, not UTC.
+sa_psql() { PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" PGTZ=UTC "$PSQL" -X -v ON_ERROR_STOP=1 -q \
     -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$TARGET_DB" "$@"; }
 
 log INFO "ensure_audit_partitions.sh: target=$TARGET_DB months_ahead=$MONTHS_AHEAD"
