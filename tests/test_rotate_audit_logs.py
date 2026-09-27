@@ -68,7 +68,32 @@ def test_default_ops_dir_resolves_via_episteme_data_root(tmp_path):
     # episteme.audit_trail._mirror_dir() does (processed_root falls back to
     # <EPISTEME_DATA_ROOT>/02_processed when EPISTEME_PROCESSED_ROOT is
     # unset -- config.py, not a value the script may hardcode/reimplement).
+    #
+    # This must NOT depend on the operator's real .env: popping
+    # EPISTEME_PROCESSED_ROOT from this subprocess's env dict does not stop
+    # the script's own load_dotenv (scripts/data/_lib/common.sh) from
+    # re-filling it from <repo-root>/.env if that file defines it -- and
+    # common.sh resolves <repo-root> from ITS OWN on-disk location
+    # (BASH_SOURCE), not from cwd/HOME, so no cwd/HOME arrangement run from
+    # the real script path can hide a real .env from it. Instead, run copies
+    # of rotate_audit_logs.sh + _lib/common.sh from a directory with no
+    # pyproject.toml ancestor: _common_repo_root() then fails to find a repo
+    # root at all, and load_dotenv() takes its documented "no pyproject.toml
+    # ancestor, skipping" no-op branch -- guaranteed .env-independent
+    # without ever reading .env. PYTHON is pointed at the real interpreter
+    # (sys.executable) so the script's `_mirror_dir()` call still resolves
+    # against the real, installed episteme package (editable install, works
+    # from any cwd) rather than a copied one.
+    #
+    # The `_mirror_dir()` subprocess's own .env lookup is covered too:
+    # episteme.config._find_project_dotenv() searches from Path.cwd() (not
+    # __file__), and `cwd=str(isolated)` below (also outside any
+    # pyproject.toml ancestor) makes it return None -- confirmed directly by
+    # running `_find_project_dotenv()` with this exact cwd arrangement --
+    # so get_settings() cannot load a real .env at that layer either.
     import os
+    import shutil
+    import sys
     import time
 
     data_root = tmp_path / "data_root"
@@ -79,17 +104,25 @@ def test_default_ops_dir_resolves_via_episteme_data_root(tmp_path):
     old_ts = time.time() - 40 * 86400
     os.utime(old, (old_ts, old_ts))
 
+    isolated = tmp_path / "isolated_scripts"
+    (isolated / "_lib").mkdir(parents=True)
+    shutil.copy(SCRIPT, isolated / SCRIPT.name)
+    shutil.copy(REPO / "scripts" / "data" / "_lib" / "common.sh", isolated / "_lib" / "common.sh")
+
     env = dict(os.environ)
     env.pop("EPISTEME_PROCESSED_ROOT", None)
     env["EPISTEME_DATA_ROOT"] = str(data_root)
+    env["PYTHON"] = sys.executable
 
     proc = subprocess.run(
-        [_bash(), str(SCRIPT)],
+        [_bash(), str(isolated / SCRIPT.name)],
         capture_output=True,
         text=True,
         timeout=30,
         env=env,
+        cwd=str(isolated),
     )
+    assert "load_dotenv: no pyproject.toml ancestor, skipping" in proc.stderr, proc.stderr
     assert proc.returncode == 0, proc.stderr
     assert not old.exists()
     assert (ops_dir / "audit-20260101.jsonl.gz").is_file()

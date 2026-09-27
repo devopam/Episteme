@@ -185,6 +185,34 @@ def test_same_basename_different_subdirs_distinct_markers_and_content(tmp_path):
     assert row_a["id"] != row_b["id"]
 
 
+def test_root_level_file_keeps_bare_source_file_and_fallback_id(tmp_path):
+    """Regression pin for the REACHABLE case (SP6 close-out item 5): the real
+    epfl-llm/guidelines corpus is exactly one file at raw_dir's root (see
+    module docstring / discover()'s docstring), so input_key(path, raw_dir)
+    returns the bare basename there -- unlike the two tests above, which only
+    exercise the fallback-id branch through a synthetic, discover()-
+    unreachable nested-subdir collision. This pins the actual production
+    shape directly: a root-level file with no id/doc_id/uid column keeps
+    source_file == "<name>.jsonl" (unchanged by the input_key migration) and
+    its fallback id is f"guidelines:<name>.jsonl:0" -- so the equality does
+    not rest solely on input_key's contract being read correctly elsewhere.
+    """
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    raw_dir.mkdir(parents=True)
+
+    root_file = raw_dir / "open_guidelines_sample.jsonl"
+    root_file.write_text(json.dumps({"clean_text": "TOKEN_ROOT"}) + "\n", encoding="utf-8")
+
+    res = process_one(root_file, raw_dir=raw_dir, processed_dir=processed_dir, force=False)
+    assert res["ok"] and not res["skipped"]
+    assert res["source_file"] == "open_guidelines_sample.jsonl"
+
+    rows = _shard_rows(processed_dir / "staging" / "guidelines")
+    row = next(r for r in rows if r["source_file"] == "open_guidelines_sample.jsonl")
+    assert row["id"] == "guidelines:open_guidelines_sample.jsonl:0"
+
+
 def test_fallback_id_across_same_basename_subdirs_not_broken_by_migration(tmp_path):
     """Task 12's warning, applied to guidelines' fallback id branch
     (``f"{SOURCE}:{source_file}:{idx}"``, no id/doc_id/uid column present).
