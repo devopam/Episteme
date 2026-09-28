@@ -55,6 +55,7 @@ SOURCES = (
     "mesh",
     "ontologies",
     "openalex",
+    "cdisc_ct",
 )
 
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")

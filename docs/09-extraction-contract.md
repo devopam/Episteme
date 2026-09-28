@@ -109,7 +109,7 @@ Logical table: **`episteme.articles`**
 | Column | Type | Required | Description |
 |--------|------|----------|-------------|
 | `id` | string | yes | Canonical ID: `pmid:<n>`, `pmcid:PMC<n>`, `doi:<…>`, `apollo:<…>`, etc. |
-| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
+| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
 | `source_file` | string | yes | Input identity, the unit-of-work key (§4.3): the raw-dir-relative path joined with `__` (structured serializers), or the input basename (literature extractors) |
 | `source_record_id` | string | no | Native id inside the file |
 | `pmid` | string | no | PubMed ID |
