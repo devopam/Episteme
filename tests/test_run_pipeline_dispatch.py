@@ -64,6 +64,7 @@ FAST_TOKENS = [
     "dailymed",
     "aact",
     "cdisc_bc",
+    "cdisc_ct",
     "europepmc_preprint",
     "europepmc_id_mappings",
     "europepmc_lite",

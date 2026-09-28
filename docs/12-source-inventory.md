@@ -31,6 +31,7 @@ Conventions: "not stated" means neither the code nor `docs/02` / `docs/10` state
 | `openfda` | volatile (Stream 2) | download | not stated | API / bulk (docs/02 s2.2) | `openfda/download_openfda.sh` |
 | `aact` | volatile (Stream 2) | download | not stated | monthly / daily dumps (docs/02 s2.2) | `aact/download_aact.sh` |
 | `cdisc_bc` | volatile (Stream 2) | download (no serializer) | **UNVERIFIED**: the repo README says code is MIT and only docs/minutes are CC-BY-4.0; nothing is stated for the `export/` data files (`download_cdisc_bc.sh` header); until CDISC confirms, this source stays out of any training corpus | not stated (pinned per run to one commit) | `cdisc_bc/download_cdisc_bc.sh` |
+| `cdisc_ct` | structured | download | `public_domain` **governance override** (decision 2026-09-28): NCI EVS states CDISC Terminology is "free to use without licensing restrictions"; recorded in each release folder's `PROVENANCE.txt` (`download_cdisc_ct.sh`) | quarterly, per package (release date from `Last-Modified`) | `cdisc_ct/download_cdisc_ct.sh` |
 
 Notes on the licence column: `public_domain` never comes from `normalize_license()`; only serializers set it, as an explicit governance override, and `license_raw` keeps the real upstream text. `subset_from_license` maps it to `commercial`.
 

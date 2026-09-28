@@ -232,7 +232,7 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 | Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
 | `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
 | `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
-| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc` | yes | no | no | no | no | no | no | download only |
+| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc`, `cdisc_ct` | yes | no | no | no | no | no | no | download only |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
 
 Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
@@ -572,6 +572,22 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --f
 ```
 
 Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN that it was not found and downloads fall back to sequential `curl`; that is expected. The run ends with `write_sync_stamp: ./01_raw/cdisc_bc/last_sync_utc.txt` and `pipeline done: cdisc_bc download`, and `<raw>/cdisc_bc/` then holds `LICENSE`, `PROVENANCE.txt`, `export/` and `last_sync_utc.txt`.
+
+### 5.6 CDISC Controlled Terminology (`cdisc_ct`)
+
+CDISC Controlled Terminology as published by NCI EVS, one tab-separated file per package (SDTM, SEND, ADaM, Define-XML, Protocol, in that order; `--max-files N` takes the first N packages). Only `download` is wired in the dispatcher so far; `serialize` and `load` are documented here once they are. Downloads need `evs.nci.nih.gov` reachable.
+
+- **Layout:** `<raw>/cdisc_ct/<Package>/<YYYY-MM-DD>/<Package>_Terminology.txt`, the date taken from the file's `Last-Modified` (release dates differ per package). Each release folder also holds `PROVENANCE.txt` (URL, `Last-Modified`, `retrieved_at`, NCI's licence statement) and `last_sync_utc.txt`. Older release folders are never deleted.
+- **Missing package:** NCI's site answers a missing path with an HTML page and HTTP 200, so a package whose `Content-Type` is not `text/plain` is logged as a WARN and skipped (exit 0). A downloaded file whose first line is not the expected 8-column header is removed with a WARN.
+- **Licence:** `public_domain` governance override (decision 2026-09-28): NCI states CDISC Terminology is free to use without licensing restrictions (docs/12).
+
+```bash
+# preview (HEAD requests only; writes nothing)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_ct download --dry-run
+
+# fetch every package's current release
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_ct download
+```
 
 ---
 

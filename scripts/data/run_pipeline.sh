@@ -88,6 +88,7 @@ declare -A WRAPPER=(
     [openfda]="openfda/download_openfda.sh"
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
+    [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
 )
 
 # SP2 literature sources: the six that get the full extract -> load -> graph
