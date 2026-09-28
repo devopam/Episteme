@@ -46,6 +46,9 @@ def _fake_curl(bindir: Path, log: Path) -> None:
 
     FAKE_SEND_MISSING=1 -> any SEND URL answers text/html (NCI's JS-app fallback page).
     FAKE_BAD_BODY=1     -> downloads return text without the 8-column header line.
+    FAKE_GET_FAIL=1     -> downloads fail (curl rc 22, nothing written).
+    FAKE_HEAD_FAIL=1    -> HEAD requests fail (curl rc 6, as for a DNS error).
+    FAKE_LASTMOD=<v>    -> Last-Modified override; "none" omits the header.
     Each call is logged as `HEAD <url>` or `GET <url>`.
     """
     bindir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +67,7 @@ def _fake_curl(bindir: Path, log: Path) -> None:
         'if [ "${FAKE_BAD_BODY:-0}" = 1 ]; then src="$BIN/bad.txt"; else src="$BIN/good.txt"; fi\n'
         'if [ "$head" = 1 ]; then\n'
         f'  echo "HEAD $url" >> "{log.as_posix()}"\n'
+        '  [ "${FAKE_HEAD_FAIL:-0}" = 1 ] && { echo "curl: (6) no host" >&2; exit 6; }\n'
         '  printf "HTTP/1.1 200 OK\\r\\n"\n'
         '  case "$url" in\n'
         '    *SEND*) if [ "${FAKE_SEND_MISSING:-0}" = 1 ]; then\n'
@@ -77,10 +81,13 @@ def _fake_curl(bindir: Path, log: Path) -> None:
         "  esac\n"
         '  printf "Content-Type: text/plain\\r\\n"\n'
         '  printf "Content-Length: %s\\r\\n" "$(wc -c < "$src" | tr -d " ")"\n'
-        '  printf "Last-Modified: %s\\r\\n\\r\\n" "$lm"\n'
+        '  [ -n "${FAKE_LASTMOD:-}" ] && lm="$FAKE_LASTMOD"\n'
+        '  [ "$lm" = none ] || printf "Last-Modified: %s\\r\\n" "$lm"\n'
+        '  printf "\\r\\n"\n'
         "  exit 0\n"
         "fi\n"
         f'echo "GET $url" >> "{log.as_posix()}"\n'
+        '[ "${FAKE_GET_FAIL:-0}" = 1 ] && { echo "curl: (22) error" >&2; exit 22; }\n'
         'if [ -n "$out" ]; then mkdir -p "$(dirname "$out")"; cat "$src" > "$out"\n'
         'else cat "$src"; fi\n'
     )
@@ -212,3 +219,41 @@ def test_bad_header_after_download_is_rejected(tmp_path):
     assert not (rel / "SDTM_Terminology.txt").exists()
     assert not (rel / "PROVENANCE.txt").exists()
     assert not (rel / "last_sync_utc.txt").exists()
+
+
+def test_force_with_failed_fetch_keeps_existing_file_and_provenance(tmp_path):
+    proc, _ = _run(tmp_path, "--max-files", "1")
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rel = _dest(tmp_path) / "SDTM" / "2026-09-25"
+    before = {n: (rel / n).read_bytes() for n in ("SDTM_Terminology.txt", "PROVENANCE.txt")}
+    proc, calls = _run(tmp_path, "--max-files", "1", "--force", extra_env={"FAKE_GET_FAIL": "1"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert any(c.startswith("GET ") for c in calls)
+    assert "SDTM fetch failed" in proc.stderr
+    for name, data in before.items():
+        assert (rel / name).read_bytes() == data, name
+    assert not (rel / "SDTM_Terminology.txt.part").exists()
+
+
+def test_first_fetch_failure_leaves_no_folder(tmp_path):
+    proc, _ = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_GET_FAIL": "1"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert not (_dest(tmp_path) / "SDTM").exists()
+
+
+@pytest.mark.parametrize("lastmod", ["none", "not a date"])
+def test_missing_or_unparseable_last_modified_skips_package(tmp_path, lastmod):
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_LASTMOD": lastmod})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM has no parseable Last-Modified" in proc.stderr
+    assert not _dest(tmp_path).exists()  # never a folder dated today
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+def test_unreachable_head_warns_and_skips(tmp_path):
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_HEAD_FAIL": "1"})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "could not reach NCI for SDTM" in proc.stderr
+    assert "Content-Type 'none'" not in proc.stderr
+    assert not _dest(tmp_path).exists()
+    assert not any(c.startswith("GET ") for c in calls)

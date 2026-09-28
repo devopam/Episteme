@@ -61,7 +61,11 @@ failed=0
 for pkg in "${packages[@]}"; do
     url="$CDISC_CT_BASE/$pkg/$pkg%20Terminology.txt"
     # Headers only (-I) — never a body. No -L: runs under --dry-run too.
-    hdr="$(curl -sSI --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"
+    # pipefail: a curl failure (DNS, timeout, refused) is the pipeline's status.
+    if ! hdr="$(curl -sSI --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"; then
+        log WARN "cdisc_ct: could not reach NCI for $pkg ($url); skipping"
+        continue
+    fi
     ctype="$(printf '%s\n' "$hdr" | _header_value content-type)"
     case "$ctype" in
         text/plain*) ;;
@@ -69,6 +73,7 @@ for pkg in "${packages[@]}"; do
            continue ;;
     esac
 
+    # The -n guard is load-bearing: `date -u -d ""` prints TODAY's date.
     lastmod="$(printf '%s\n' "$hdr" | _header_value last-modified)"
     rdate=""
     [ -n "$lastmod" ] && rdate="$(date -u -d "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
@@ -81,10 +86,11 @@ for pkg in "${packages[@]}"; do
     reldir="$dest/$pkg/$rdate"
     fname="${pkg}_Terminology.txt"
     out="$reldir/$fname"
+    part="$out.part"
 
-    # --force re-fetches — but never deletes real files during a --dry-run preview.
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$out"; fi
-    if size_match_skip "$out" "$url"; then
+    # --force skips the size check; the existing file is only replaced after a
+    # validated download (below), never deleted up front.
+    if [ "$FORCE" != "1" ] && size_match_skip "$out" "$url"; then
         log INFO "cdisc_ct: $pkg release $rdate up to date"
         continue
     fi
@@ -94,23 +100,33 @@ for pkg in "${packages[@]}"; do
         continue
     fi
 
-    # A size mismatch means a partial or stale copy: remove it so curl's resume
-    # (-C -) in http_fetch cannot append to it.
-    rm -f "$out"
+    # Atomic replace: fetch to <file>.part in the same folder (http_fetch writes
+    # to DEST_DIR/<relpath>), validate, then mv over <file>. A stale .part is
+    # removed first so curl's resume (-C -) cannot append to it. On any failure
+    # only the .part goes; an existing good file and its PROVENANCE.txt stay.
+    rm -f "$part"
     # Pipeline => subshell: a `die` inside http_fetch fails this package only.
-    if ! printf '%s\t%s\n' "$url" "$fname" | http_fetch "$reldir"; then
+    if ! printf '%s\t%s\n' "$url" "$fname.part" | http_fetch "$reldir" || [ ! -s "$part" ]; then
         log WARN "cdisc_ct: $pkg fetch failed ($url)"
-        rm -f "$out"
+        rm -f "$part"
+        rmdir "$reldir" "$dest/$pkg" 2>/dev/null || true   # only if left empty
         failed=1
         continue
     fi
 
-    first="$(head -n1 "$out" 2>/dev/null | tr -d '\r')"
+    first="$(head -n1 "$part" 2>/dev/null | tr -d '\r')"
     first="${first#$'\xef\xbb\xbf'}"   # tolerate a UTF-8 BOM
     if [ "$first" != "$EXPECTED_HEADER" ]; then
-        log WARN "cdisc_ct: $pkg unexpected header in $out; removing it"
-        rm -f "$out"
+        log WARN "cdisc_ct: $pkg unexpected header in downloaded $fname; discarding it"
+        rm -f "$part"
         rmdir "$reldir" "$dest/$pkg" 2>/dev/null || true   # only if left empty
+        continue
+    fi
+
+    if ! mv -f "$part" "$out"; then
+        log WARN "cdisc_ct: $pkg could not move $part into place"
+        rm -f "$part"
+        failed=1
         continue
     fi
 
