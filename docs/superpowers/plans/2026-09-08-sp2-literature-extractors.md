@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Branch:** `sp2-literature-extractors` (already checked out; the spec landed on it as `93e8375`). Base `main` @ `84860ab`.
+- **Branch:** `sp2-literature-extractors` (already checked out; the spec landed on it as `cffe845`). Base `main` @ `b66c7af`.
 - **`config.py` is the ONLY module in `src/episteme/` that reads `os.environ` / `os.getenv`.** Audit run-id comes from `get_settings().run_id` (`EPISTEME_RUN_ID`), never a direct env read in an extractor.
 - **`article_schema.ARTICLE_COLUMNS` is append-only.** New columns (`container_id`, `book_meta`) go at the END; existing sources' COPY column order is unchanged. `SCHEMA_VERSION` → `"1.4"`.
 - **Download only for non-pmc-non-literature.** SP2 flips `run_pipeline.sh` to a full stage chain for the SIX literature sources only; every other non-pmc source keeps `die "… SP2 / SP4" 3`.

@@ -31,7 +31,7 @@ Optimise for **low rework later**. Ceremony now buys correctness during the sign
 
 ---
 
-## 2. Current state (post-pull, commit `a6f10cd`)
+## 2. Current state (post-pull, commit `790169d`)
 
 - **Two parallel `src` trees.** New `src/episteme/data/{apollo,epmc,pmc,pubmed}/` (extract-only,
   from upstream) sits next to the old `src/episteme/data_pipeline/` (download, dedup,

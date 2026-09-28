@@ -23,7 +23,7 @@ spec-delta) — refines `docs/superpowers/specs/2026-09-02-phase0-data-roadmap.m
 
 ## Global Constraints
 
-- **Branch:** `sp3-acquisition-layer` (already checked out; the spec landed on it as `67650b4`).
+- **Branch:** `sp3-acquisition-layer` (already checked out; the spec landed on it as `96ed825`).
 - **`config.py` is the ONLY module in `src/episteme/` that reads `os.environ` / `os.getenv`.** SP3's only Python change is `config.py`'s load order.
 - **Every endpoint default lives in `scripts/data/_lib/sources.env` and NOWHERE else** — not duplicated in `config.py`, `common.sh`, or any wrapper. `grep -REn 'ftp\.|s3://|https?://' scripts/data/` must hit only `sources.env` (and code comments).
 - **Load order, both sides, last wins:** `sources.env` → `.env` → real environment. A var already set in the real environment is never clobbered.

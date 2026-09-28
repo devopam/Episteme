@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Branch `sp4-1-hardening` (base `main`@`2482216`; spec committed on it). Local `.gitignore` shows an unrelated unstaged `.gstack/` line — leave it unstaged, never `git add` it.
+- Branch `sp4-1-hardening` (base `main`@`228f868`; spec committed on it). Local `.gitignore` shows an unrelated unstaged `.gstack/` line — leave it unstaged, never `git add` it.
 - **`.env` holds live secrets.** Only Task 1 edits it, only by *appending* the three lines given there. Never `cat`/print/echo it or any value from it; never stage it. If `.env` ever shows in `git status` as staged, stop.
 - **Every command you run that touches this codebase's Python/bash entrypoints — `run_pipeline.sh` (any stage, including `download`), `python -m episteme.*` (including `--report`), serializers, loaders — must be prefixed `PGDATABASE=episteme_test`.** Those entrypoints open a best-effort audit connection even when they look DB-free, and the local `.env` points `PGDATABASE` at the real `episteme` DB. SP4 wrote 18 stray audit rows this way. Automated `pg`-marked tests are safe (they use `TEST_PG_DSN`); run them as `set -a; . ./.env; set +a; .venv/Scripts/python.exe -m pytest …`. Once Task 1 lands, `EPISTEME_DB_TARGET=secondary` is an equivalent prefix, but keep using `PGDATABASE=episteme_test`.
 - `src/episteme/config.py` stays the only `os.environ` reader. `article_schema.ARTICLE_COLUMNS` is untouched. Endpoint URLs live only in `scripts/data/_lib/sources.env` (the grep gate: `grep -REn 'ftp\.|s3://|https?://' scripts/data/ | grep -v _lib/sources.env | grep -vE ':[0-9]+:\s*#'` must stay empty).
