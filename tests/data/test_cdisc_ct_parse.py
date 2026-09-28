@@ -34,8 +34,10 @@ def test_parses_codelists_and_terms():
 
 def test_term_before_header_still_attaches():
     lists, _ = parse_ct_file(FX)
-    # the fixture places one term row above its codelist header (Step 1)
-    assert all(c.terms for c in lists if c.code == "C141657")
+    # the fixture's first data row is term TENMW104, placed above its codelist
+    # header (C141657); it must still attach to that codelist
+    tc = next(c for c in lists if c.code == "C141657")
+    assert "TENMW104" in [t.submission_value for t in tc.terms]
 
 
 def test_double_quotes_do_not_break_columns():
