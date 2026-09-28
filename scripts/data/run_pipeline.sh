@@ -98,7 +98,7 @@ declare -A WRAPPER=(
 LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex"
+STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
 _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Early validation — *before* anything that touches the DB (the run_start audit

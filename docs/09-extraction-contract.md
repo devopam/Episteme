@@ -214,15 +214,15 @@ Idempotency is delete plus `COPY`, never `ON CONFLICT`, because the table has no
 
 ### 4.4 Structured-source serialisation contract
 
-Applies to `serialize_<src>` for `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`. Their importable entry point takes `(raw_dir, processed_dir, ...)`.
+Applies to `serialize_<src>` for `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct`. Their importable entry point takes `(raw_dir, processed_dir, ...)`.
 
 | Element | Contract (verified in the serializers) |
 |---------|----------|
 | Return value | A dict with the keys `inputs`, `ok`, `failed`, `rows` (file-level counters). `openalex` adds `n_records_seen`, `n_accepted_biomedical`, `n_rejected_non_biomedical`. |
-| Row id | `id = f"{source}:{native_id}"`; `source_record_id` is the native id. For `ontologies` the native id is the term CURIE, used verbatim after the `ontologies:` prefix. |
+| Row id | `id = f"{source}:{native_id}"`; `source_record_id` is the native id. For `ontologies` the native id is the term CURIE, used verbatim after the `ontologies:` prefix. `cdisc_ct` is `f"{source}:{package}:{code}:p{i}"` (package + NCI codelist code + 1-based text-part index; built in `ct_parse.build_rows`, not `serialize_cdisc_ct.py` itself). |
 | Audit event | `serialize_commit` (not `extract_commit`), best-effort: a failure to audit does not fail the file (`docs/11`). |
 | Identity | `source_file`, the marker name and the shard name are `input_key(path, raw_dir)`. |
-| Records with no native id | `chembl`, `clinvar`, `pubchem`, `reactome` and `openalex` skip the record and count it as `skipped_no_id` in the per-file result (surfaced with `--verbose`, and in the per-file marker stats), **not** in the four-key summary. `mesh` silently drops a descriptor with an empty UI (no counter). `uniprot` does not skip: a malformed header or empty accession raises `ValueError` and fails the file. `ontologies` has no id-less case (`term.id` is always present). |
+| Records with no native id | `chembl`, `clinvar`, `pubchem`, `reactome`, `openalex` and `cdisc_ct` skip the record and count it as `skipped_no_id` in the per-file result (surfaced with `--verbose`, and in the per-file marker stats), **not** in the four-key summary. `mesh` silently drops a descriptor with an empty UI (no counter). `uniprot` does not skip: a malformed header or empty accession raises `ValueError` and fails the file. `ontologies` has no id-less case (`term.id` is always present). |
 
 **Doc-versus-code gaps found while reconciling (the code wins):**
 

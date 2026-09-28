@@ -46,6 +46,10 @@ Roadmap CLI (Sec 4.7-shaped, SP4 Sec 5 precedent):
     --processed-dir ./02_processed \\
     --max-files 20 \\
     [--force]
+
+Row id (docs/09-extraction-contract.md sec 4.4): built by ``ct_parse.build_rows``,
+not here -- ``id = f"{SOURCE}:{package}:{code}:p{i}"`` (package + NCI codelist
+code + 1-based text-part index).
 """
 
 from __future__ import annotations

@@ -229,10 +229,10 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 |---|---|---|---|---|---|---|---|---|
 | `pmc` | yes | yes | no (exit 3) | yes | yes | yes | yes | download, extract, load, graph, materialize, enrich |
 | Literature: `pubmed`, `apollo`, `europepmc_preprint`, `europepmc_manuscript`, `guidelines`, `bookshelf` | yes | yes | no | yes | yes | no | no | download, extract, load, graph |
-| Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
+| Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
 | `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
 | `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
-| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc`, `cdisc_ct` | yes | no | no | no | no | no | no | download only |
+| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc` | yes | no | no | no | no | no | no | download only |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
 
 Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
@@ -575,7 +575,7 @@ Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN
 
 ### 5.6 CDISC Controlled Terminology (`cdisc_ct`)
 
-CDISC Controlled Terminology as published by NCI EVS, one tab-separated file per package (SDTM, SEND, ADaM, Define-XML, Protocol, in that order; `--max-files N` takes the first N packages). Only `download` is wired in the dispatcher so far; `serialize` and `load` are documented here once they are. Downloads need `evs.nci.nih.gov` reachable.
+CDISC Controlled Terminology as published by NCI EVS, one tab-separated file per package (SDTM, SEND, ADaM, Define-XML, Protocol, in that order; `--max-files N` takes the first N packages). `download`, `serialize` and `load` are wired in the dispatcher (section 4.2); full `serialize`/`load`/retire usage examples land in a later task. Downloads need `evs.nci.nih.gov` reachable.
 
 - **Layout:** `<raw>/cdisc_ct/<Package>/<YYYY-MM-DD>/<Package>_Terminology.txt`, the date taken from the file's `Last-Modified` (release dates differ per package). Each release folder also holds `PROVENANCE.txt` (URL, `Last-Modified`, `retrieved_at`, NCI's licence statement) and `last_sync_utc.txt`. Older release folders are never deleted.
 - **Missing package:** NCI's site answers a missing path with an HTML page and HTTP 200, so a package whose `Content-Type` is not `text/plain` is logged as a WARN and skipped (exit 0). A downloaded file whose first line is not the expected 8-column header is removed with a WARN.
