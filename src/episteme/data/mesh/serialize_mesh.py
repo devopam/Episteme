@@ -15,7 +15,7 @@ compressed sibling ``desc2025.gz`` is 16,840,289 bytes). ``download_mesh.sh``
 this real layout: its candidate directories (``$MESH_BASE/xmlmesh$YEAR``,
 ``$MESH_BASE/ascii$YEAR``, ...) no longer existed -- NLM's current real layout
 is ``$MESH_BASE/<year>/xmlmesh/desc<year>.xml``. That SP3 gap was FIXED in
-SP4.1 (commit e238997, ``download_mesh.sh`` now resolves the current NLM
+SP4.1 (commit f2da650, ``download_mesh.sh`` now resolves the current NLM
 descriptor release). This task's original real end-to-end (task-10-report.md,
 written before that fix) fetched the real ``desc2025.gz`` directly instead,
 decompressed it, and ran the full ``serialize -> load -> graph`` chain against

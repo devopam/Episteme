@@ -147,7 +147,7 @@ def test_manuscript_pmcid_ignores_directory_prefix(tmp_path):
 
 
 def test_manuscript_id_disambiguates_txt_vs_xml_same_pmcid(tmp_path):
-    """Regression (code review on 3b06a39): EBI ships this source as two
+    """Regression (code review on 9e0f8bd): EBI ships this source as two
     parallel archive families over the *same* accession ranges
     (``author_manuscript_txt.*`` / ``author_manuscript_xml.*`` -- see
     ``download_europepmc_manuscript.sh``'s ``FMT`` argument). Before this

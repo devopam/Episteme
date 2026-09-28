@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-21
 **Status:** Draft for user review
-**Charter:** `docs/superpowers/specs/2026-09-02-phase0-data-roadmap.md` §SP5 (this spec refines it against the tree as shipped by SP1–SP4.1, `main`@`4bb1f32`).
+**Charter:** `docs/superpowers/specs/2026-09-02-phase0-data-roadmap.md` §SP5 (this spec refines it against the tree as shipped by SP1–SP4.1, `main`@`a899074`).
 **Depends on:** SP1–SP4.1 merged. ADR-0001/0002 already landed.
 
 ## 1. Goal

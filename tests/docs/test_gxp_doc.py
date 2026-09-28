@@ -97,7 +97,7 @@ def test_rotate_audit_logs_is_documented_as_implemented():
     assert "rotate_audit_logs.sh" in row
     # find's -mtime +30 is a floor comparison: a file is eligible only once
     # it is at least 31 days old. The chattr -a-before-gzip fix (Task 4
-    # follow-up, commit e2310b8) must be described, and a per-file gzip
+    # follow-up, commit c93ea59) must be described, and a per-file gzip
     # failure must be documented as a WARN-and-continue, not a `die`.
     assert "31" in row
     assert "chattr -a" in row
