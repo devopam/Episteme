@@ -39,6 +39,9 @@ fi
 
 only_args=()
 while IFS= read -r shard; do
+    # Windows Python ends printed lines with \r\n; strip the \r or no --only
+    # name would match a real shard and nothing would load.
+    shard="${shard%$'\r'}"
     [ -n "$shard" ] && only_args+=(--only "$shard")
 done < <("$PY" -m episteme.data.cdisc_ct.retire --print-current-shards)
 

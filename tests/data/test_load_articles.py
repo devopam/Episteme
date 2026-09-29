@@ -35,10 +35,12 @@ def test_filter_only_keeps_named_shards_and_drops_the_rest(tmp_path):
 
 
 def test_only_filters_before_any_db_connection_is_opened(tmp_path, capsys):
-    """When --only excludes every discovered shard, main() must print the
-    same "no shards" message and return 0 without ever reaching `connection()`
-    -- proven here by NOT patching a DB at all (a stray connection attempt
-    would raise/hang, not quietly succeed)."""
+    """When --only names shards that don't exist, main() must fail loudly
+       (rc 1, an error naming the requested shard) without ever reaching
+       `connection()` -- proven here by NOT patching a DB at all. Silently
+       returning 0 hid a real Windows bug: a trailing
+    on every name made
+       load_cdisc_ct.sh load nothing while reporting "no shards"."""
     from episteme.data import load_articles
 
     staging = tmp_path / "staging" / "cdisc_ct"
@@ -56,9 +58,9 @@ def test_only_filters_before_any_db_connection_is_opened(tmp_path, capsys):
             "nonexistent.parquet",
         ]
     )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "no shards under" in out
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "nonexistent.parquet" in err
 
 
 def _prep(monkeypatch, tmp_path):

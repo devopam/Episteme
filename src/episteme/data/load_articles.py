@@ -115,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
 
     staging_dir = processed_dir / "staging" / source
     shards = _filter_only(_discover_shards(staging_dir), args.only)
+    if not shards and args.only:
+        # The caller named specific shards and none exist: a caller bug (e.g. a
+        # stray \r in the name), not an empty source -- fail loudly.
+        print(
+            f"error: none of the --only shard(s) {sorted(args.only)!r} exist under {staging_dir}",
+            file=sys.stderr,
+        )
+        return 1
     if not shards:
         print(f"no shards under {staging_dir}")
         return 0
