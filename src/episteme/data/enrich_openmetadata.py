@@ -9,8 +9,9 @@ Steps:
      (``json.dumps(..., indent=2, sort_keys=True)``);
   4. re-validate the file that was just written;
   5. best-effort audit: record a ``config_change`` event -- any failure
-     (DB down, actor unset, mirror error) prints a ``warning:`` line and is
-     swallowed so the file write never depends on the DB;
+     (DB down, actor unset, mirror error) logs a WARNING (module logger,
+     ``exc_info=True``) and is swallowed so the file write never depends on
+     the DB;
   6. print the path, exit 0.
 """
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -26,6 +28,8 @@ import jsonschema
 from episteme.config import get_settings
 from episteme.data import article_schema
 from episteme.data.openmetadata_manifest import _SCHEMA, build_manifest
+
+_LOG = logging.getLogger(__name__)
 
 _DEFAULT_TABLES = "articles,article_body,article_cites,article_mesh,id_map"
 
@@ -94,8 +98,8 @@ def _best_effort_audit(source: str) -> None:
                 run_id=get_settings().run_id or f"om-{source}",
             )
             conn.commit()
-    except Exception as exc:  # noqa: BLE001 - the file write must not depend on the DB
-        print(f"warning: audit record skipped ({exc!r})", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - the file write must not depend on the DB
+        _LOG.warning("audit record skipped for om-manifest %s", source, exc_info=True)
 
 
 if __name__ == "__main__":  # pragma: no cover
