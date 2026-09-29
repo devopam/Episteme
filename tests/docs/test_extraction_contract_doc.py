@@ -52,13 +52,19 @@ def test_public_domain_is_documented_as_override():
 
 
 def test_public_domain_sources_match_the_code():
-    """The three sources the doc names are exactly the serializers that set the override."""
+    """The four sources the doc names are exactly the ones whose source
+    directory sets the override. Three set it directly in their
+    ``serialize_*.py``; ``cdisc_ct`` sets it in ``ct_parse.build_rows``
+    (imported and called by ``serialize_cdisc_ct.py``, which does not repeat
+    the assignment itself -- see that module's own docstring), so the scan
+    covers every ``.py`` file under each source's directory, not only
+    ``serialize_*.py``."""
     setters = {
         p.parent.name
-        for p in (REPO / "src" / "episteme" / "data").glob("*/serialize_*.py")
+        for p in (REPO / "src" / "episteme" / "data").glob("*/*.py")
         if "lic = LICENSE_PUBLIC_DOMAIN" in p.read_text(encoding="utf-8")
     }
-    assert setters == {"mesh", "pubchem", "clinvar"}
+    assert setters == {"mesh", "pubchem", "clinvar", "cdisc_ct"}
     sec = _section(doc(DOC), "### 6.3", "\n---")
     row = next(line for line in sec.splitlines() if "`public_domain` -> `commercial`" in line)
     assert all(f"`{s}`" in row for s in setters)

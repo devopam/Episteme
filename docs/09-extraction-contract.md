@@ -287,13 +287,13 @@ subset = 'commercial' AND extract_status = 'ok'
 
 ### 6.3 Structured-source licences and the `public_domain` override
 
-`public_domain` is a **source-anchored governance override** (decision 2026-09-19). `normalize_license` never returns it: it is set explicitly by `serialize_mesh`, `serialize_pubchem` and `serialize_clinvar`, and `subset_from_license("public_domain")` is `commercial`. `normalize_license` itself returns `unknown` for the real upstream text of those three sources; `license_raw` keeps that real text, so the override is auditable.
+`public_domain` is a **source-anchored governance override** (decision 2026-09-19; extended to `cdisc_ct` 2026-09-28). `normalize_license` never returns it: it is set explicitly by `serialize_mesh`, `serialize_pubchem` and `serialize_clinvar`, and — for `cdisc_ct` — by `ct_parse.build_rows` (not `serialize_cdisc_ct.py` itself, which only calls it); `subset_from_license("public_domain")` is `commercial`. `normalize_license` itself returns `unknown` for the real upstream text of all four sources; `license_raw` keeps that real text, so the override is auditable.
 
 Caveat for PubChem and ClinVar: they carry contributor-submitted content whose submitters may assert their own terms, so `public_domain` there is a governance ruling for the source, not a per-record legal determination.
 
 | Source | `license` -> `subset` | Basis |
 |--------|----------------|-------|
-| `mesh`, `pubchem`, `clinvar` | `public_domain` -> `commercial` | governance override, above |
+| `mesh`, `pubchem`, `clinvar`, `cdisc_ct` | `public_domain` -> `commercial` | governance override, above (`mesh`/`pubchem`/`clinvar`: 2026-09-19; `cdisc_ct`: 2026-09-28, set in `ct_parse.build_rows`) |
 | `chembl` | `CC BY-SA` -> `commercial` | ChEMBL's stated release licence, via `normalize_license` |
 | `reactome`, `openalex` | `CC0` -> `commercial` | via `normalize_license` (openalex: the dataset-level metadata licence, not per-work OA licences) |
 | `ontologies` | GO and MONDO `CC BY` -> `commercial`; HPO `unknown` -> `open_metadata` | GO and MONDO declare a `creativecommons.org/licenses/by/` URL, which `normalize_license` now recognises; HPO declares only a licence page URL |
