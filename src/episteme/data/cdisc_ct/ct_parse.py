@@ -131,6 +131,10 @@ def parse_ct_file(path: Path) -> tuple[list[Codelist], dict[str, int]]:
 
             if not codelist_code:
                 # codelist header row
+                if code in codelists:
+                    raise CTFormatError(
+                        f"duplicate codelist header row for code {code!r} (line {n})"
+                    )
                 codelists[code] = Codelist(
                     code=code,
                     name=name,

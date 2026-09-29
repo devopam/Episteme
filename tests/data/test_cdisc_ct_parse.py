@@ -59,6 +59,20 @@ def test_wrong_column_count_raises(tmp_path):
         parse_ct_file(p)
 
 
+def test_duplicate_codelist_header_raises(tmp_path):
+    header = "\t".join(EXPECTED_HEADER)
+    p = _write(
+        tmp_path,
+        [
+            header,
+            "C1\t\tNo\tList One\tSV1\t\tDef1\tPT1",
+            "C1\t\tNo\tList One Again\tSV1\t\tDef1\tPT1",
+        ],
+    )
+    with pytest.raises(CTFormatError, match="C1"):
+        parse_ct_file(p)
+
+
 def test_header_only_file_yields_nothing(tmp_path):
     p = _write(tmp_path, ["\t".join(EXPECTED_HEADER)])
     lists, counts = parse_ct_file(p)
