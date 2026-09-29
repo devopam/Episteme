@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -129,3 +130,55 @@ def _block_real_db_audit(request, monkeypatch):
     monkeypatch.setattr("episteme.data.db.connection.connection", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.get_pool", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.dsn_from_settings", _no_db, raising=True)
+
+
+@pytest.fixture(autouse=True)
+def _redirect_audit_mirror(request, monkeypatch, tmp_path_factory):
+    """Stop non-``pg`` tests from appending ``mirror_only`` lines to the
+    real, developer-machine audit mirror (``02_processed/_ops/_audit/``).
+
+    ``episteme.audit_trail._mirror_dir()`` (the sole chokepoint every
+    mirror read/write in that module goes through -- ``record()``,
+    ``verify()``, ``mirror_only()``) is ``get_settings().processed_root /
+    "_ops" / "_audit"``. Many extractor tests pass their own ``tmp_path`` as
+    an explicit ``processed_dir`` *argument* to the function under test, but
+    that argument is never threaded into ``get_settings()`` -- so
+    ``audit_trail``'s mirror keeps resolving against the session-wide
+    cached ``Settings.processed_root`` (usually the repo's real
+    ``./02_processed``, via ``.env`` or its default), independent of
+    whatever ``processed_dir`` the test itself used. Every non-``pg``
+    extractor test that reaches the ``mirror_only`` fallback (which
+    ``_block_real_db_audit`` above forces for all of them) therefore
+    silently appends a junk line to that real, shared file.
+
+    Patches ``_mirror_dir`` with a lazy function -- it reads
+    ``get_settings()`` only when actually CALLED (never at fixture setup,
+    so it never forces a premature ``get_settings()`` cache fill for tests
+    that don't need one): if the currently-configured ``processed_root`` is
+    already inside this pytest session's own tmp tree (i.e. a test pointed
+    it there itself, e.g. via ``monkeypatch.setenv("EPISTEME_PROCESSED_ROOT",
+    str(tmp_path))`` + ``cfg.get_settings.cache_clear()``), the normal
+    ``processed_root / "_ops" / "_audit"`` path is kept unchanged -- those
+    tests must keep working exactly as before. Otherwise (the common case:
+    no test-local override, so ``processed_root`` is whatever the real
+    environment resolved to) the mirror is redirected to a throwaway
+    directory under this fixture's own ``tmp_path_factory`` mount instead.
+
+    ``pg``-marked tests are left alone, same as ``_block_real_db_audit``.
+    """
+    if "pg" in request.keywords:
+        return
+
+    import episteme.audit_trail as _audit_trail
+
+    redirect_dir = tmp_path_factory.mktemp("audit_mirror")
+    base = tmp_path_factory.getbasetemp().resolve()
+    _real_mirror_dir = _audit_trail._mirror_dir
+
+    def _mirror_dir():
+        root = Path(_audit_trail.get_settings().processed_root).resolve()
+        if root == base or base in root.parents:
+            return _real_mirror_dir()
+        return redirect_dir
+
+    monkeypatch.setattr(_audit_trail, "_mirror_dir", _mirror_dir, raising=True)
