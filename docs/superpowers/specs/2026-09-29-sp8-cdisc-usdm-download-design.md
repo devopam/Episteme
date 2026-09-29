@@ -51,7 +51,7 @@ Add CDISC's Unified Study Definitions Model (USDM, repository `cdisc-org/DDF-RA`
 
 - `docs/02-data-sources.md` §2.6: the USDM row becomes "Wired as `cdisc_usdm`, download-only", licence facts as in §3; backlog row updated; changelog row.
 - `docs/09-extraction-contract.md`: a `cdisc_usdm` row beside `cdisc_bc` (no serializer, no rows, licence unverified, excluded from any corpus).
-- `docs/10-data-sources-runbook.md`: new §5.6 "CDISC USDM (`cdisc_usdm`)" modelled on §5.5 (what is fetched, folder layout, provenance, bounded run, dry run, forced re-fetch, expected success output); `cdisc_usdm` added to the download-only row of the stage table and to the `--dry-run` network note; the "On upstream release" row mentions it.
+- `docs/10-data-sources-runbook.md`: new §5.7 "CDISC USDM (`cdisc_usdm`)" modelled on §5.5 (what is fetched, folder layout, provenance, bounded run, dry run, forced re-fetch, expected success output); `cdisc_usdm` added to the download-only row of the stage table and to the `--dry-run` network note; the "On upstream release" row mentions it.
 - `docs/12-source-inventory.md`: a `cdisc_usdm` row.
 - `CLAUDE.md`: the `cdisc_bc` download-only hard rule extends to `cdisc_usdm`.
 - `docs/project-incubation-baseline.md`: SP8 entry.
