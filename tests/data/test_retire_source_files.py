@@ -163,6 +163,113 @@ def test_records_load_replace_audit(pg_conn, monkeypatch, tmp_path):
         assert run_id == "r1"
 
 
+SEND_OLD_SF = "SEND__2026-06-26__SEND_Terminology.txt"
+SEND_NEW_SF = "SEND__2026-09-25__SEND_Terminology.txt"
+
+
+def _count(conn, source_file):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles WHERE source='cdisc_ct' AND source_file=%s",
+            (source_file,),
+        )
+        return cur.fetchone()[0]
+
+
+def test_scope_prefix_leaves_other_packages_alone(pg_conn, monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    from episteme.data import postgres_loader
+
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1:v2", source="cdisc_ct", source_file=NEW_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SEND:C1:p1", source="cdisc_ct", source_file=SEND_OLD_SF)
+    pg_conn.commit()
+
+    deleted = postgres_loader.retire_source_files(
+        pg_conn, source="cdisc_ct", keep_source_files=[NEW_SF], run_id="r1", scope_prefix="SDTM__"
+    )
+    assert deleted == 1
+    assert _count(pg_conn, OLD_SF) == 0
+    assert _count(pg_conn, NEW_SF) == 1
+    assert _count(pg_conn, SEND_OLD_SF) == 1  # another package: out of scope, untouched
+
+
+def _raw_release(raw, package, date):
+    d = raw / package / date
+    d.mkdir(parents=True)
+    f = d / f"{package}_Terminology.txt"
+    f.write_text("placeholder\n", encoding="utf-8")
+    return f
+
+
+def _mark_loaded(processed, source_file):
+    from episteme.data import checkpoint_markers
+
+    m = checkpoint_markers.load_success_marker_path(processed, "cdisc_ct", f"{source_file}.parquet")
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text("{}", encoding="utf-8")
+
+
+def _run_retire_cli(monkeypatch, raw, processed):
+    import episteme.data.db.connection as conn_mod
+    from episteme.data.cdisc_ct import retire
+
+    # connection.py may hold a get_settings object from before another test's
+    # importlib.reload(episteme.config); clear the one it actually calls (see
+    # tests/test_db_guard.py::test_read_only_mode_blocks_writes).
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
+    try:
+        return retire.main(["--raw-dir", str(raw), "--processed-dir", str(processed)])
+    finally:
+        if conn_mod._POOL is not None:
+            conn_mod._POOL.close()
+        conn_mod.get_settings.cache_clear()
+
+
+def test_cli_never_touches_package_absent_locally(pg_conn, monkeypatch, tmp_path):
+    # Regression for SP7 Task 4 review round 1: only SDTM is present in the
+    # local raw tree (e.g. a --max-files 1 download); SEND rows loaded earlier
+    # must survive the retire run.
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    raw, processed = tmp_path / "raw", tmp_path / "processed"
+    _raw_release(raw, "SDTM", "2026-09-25")
+    _mark_loaded(processed, NEW_SF)
+
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1:v2", source="cdisc_ct", source_file=NEW_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SEND:C1:p1", source="cdisc_ct", source_file=SEND_NEW_SF)
+    pg_conn.commit()
+
+    assert _run_retire_cli(monkeypatch, raw, processed) == 0
+    pg_conn.rollback()  # see rows committed by the CLI's own connection
+    assert _count(pg_conn, OLD_SF) == 0
+    assert _count(pg_conn, NEW_SF) == 1
+    assert _count(pg_conn, SEND_NEW_SF) == 1
+
+
+def test_cli_skips_unloaded_package_but_retires_loaded_one(pg_conn, monkeypatch, tmp_path):
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    raw, processed = tmp_path / "raw", tmp_path / "processed"
+    _raw_release(raw, "SDTM", "2026-09-25")
+    _raw_release(raw, "SEND", "2026-09-25")
+    _mark_loaded(processed, NEW_SF)  # SDTM loaded; SEND's new release not loaded yet
+
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1:v2", source="cdisc_ct", source_file=NEW_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SEND:C1:p1", source="cdisc_ct", source_file=SEND_OLD_SF)
+    pg_conn.commit()
+
+    assert _run_retire_cli(monkeypatch, raw, processed) == 0
+    pg_conn.rollback()
+    assert _count(pg_conn, OLD_SF) == 0  # SDTM old release retired
+    assert _count(pg_conn, NEW_SF) == 1
+    assert _count(pg_conn, SEND_OLD_SF) == 1  # SEND old kept until its new release loads
+
+
 def test_empty_keep_set_raises_and_deletes_nothing(pg_conn, monkeypatch, tmp_path):
     _prep(monkeypatch, tmp_path)
     _setup_schema(pg_conn)
