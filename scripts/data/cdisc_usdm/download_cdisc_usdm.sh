@@ -43,9 +43,12 @@ _api() { # _api PATH -> response body with CR stripped; empty on failure
     curl -fsS --connect-timeout 30 --max-time 120 "$USDM_API_BASE/$1" 2>/dev/null | tr -d '\r'
 }
 
-_raw_url() { # _raw_url REL -> raw URL at the pinned SHA, with % space # ? percent-encoded
+_raw_url() { # _raw_url REL -> raw URL at the pinned SHA, with % space # ? [ ] { } percent-encoded
     local u="${1//\%/%25}"
     u="${u// /%20}"; u="${u//\#/%23}"; u="${u//\?/%3F}"
+    # curl treats [ ] { } in URLs as glob syntax; encode them so paths carrying those
+    # characters (e.g. CORE rules filenames) are fetched literally.
+    u="${u//\[/%5B}"; u="${u//\]/%5D}"; u="${u//\{/%7B}"; u="${u//\}/%7D}"
     printf '%s/%s/%s' "$USDM_RAW_BASE" "$sha" "$u"
 }
 
@@ -65,16 +68,20 @@ fi
 
 dest="$(resolve_dest cdisc_usdm "$tag")"
 
-# One JSON object per tree entry, one field per line ("path" precedes "type"); emit the path
-# of every blob under Deliverables/.
+# One JSON object per tree entry (field order not assumed); emit the path of every blob
+# under Deliverables/. path/type are tracked per-entry: reset at each object-open line,
+# recorded independently as seen, emitted at the matching object-close line so a reordered
+# field (or a reordered GitHub response) cannot pair a path with the wrong entry's type.
 planned=()
 while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     _safe_rel "$rel" || { log WARN "cdisc_usdm: rejecting unsafe path '$rel'"; continue; }
     planned+=("$(_raw_url "$rel")"$'\t'"$rel")
 done < <(printf '%s\n' "$tree" | awk '
-    /^ *"path":/ { p=$0; sub(/^ *"path": *"/, "", p); sub(/",? *$/, "", p) }
-    /^ *"type":/ { if ($0 ~ /"blob"/ && p ~ /^Deliverables\//) print p; p="" }')
+    /^ *\{ *$/ { path=""; type="" }
+    /^ *"path":/ { p=$0; sub(/^ *"path": *"/, "", p); sub(/",? *$/, "", p); path=p }
+    /^ *"type":/ { t=$0; sub(/^ *"type": *"/, "", t); sub(/",? *$/, "", t); type=t }
+    /^ *\},? *$/ { if (type == "blob" && path ~ /^Deliverables\//) print path }')
 [ "${#planned[@]}" -gt 0 ] || die "cdisc_usdm: no files resolved under Deliverables/ in release $tag"
 
 # --max-files caps the RESOLVED data-file set here, before the --force prune loop.
@@ -104,7 +111,10 @@ else
     log INFO "cdisc_usdm: up to date ($tag)"
 fi
 
-if [ "${EPISTEME_DRY_RUN:-0}" != "1" ] && { [ "${#lines[@]}" -gt 0 ] || [ ! -f "$dest/PROVENANCE.txt" ]; }; then
+if [ "${EPISTEME_DRY_RUN:-0}" != "1" ] && {
+    [ "${#lines[@]}" -gt 0 ] || [ ! -f "$dest/PROVENANCE.txt" ] \
+        || ! grep -qx "commit_sha: $sha" "$dest/PROVENANCE.txt"
+}; then
     mkdir -p "$dest"
     {
         printf 'source_repo: %s\n' "$USDM_REPO_URL"

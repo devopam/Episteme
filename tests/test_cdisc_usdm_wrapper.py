@@ -39,11 +39,36 @@ def _entry(path: str, kind: str) -> dict:
     return e
 
 
+def _entry_type_first(path: str, kind: str) -> dict:
+    # Same fields as _entry but with "type" emitted before "path", to prove the awk tree
+    # parser pairs path/type per entry rather than by "last path seen, next type wins".
+    e = {
+        "type": kind,
+        "mode": "100644" if kind == "blob" else "040000",
+        "path": path,
+        "sha": "0" * 40,
+    }
+    if kind == "blob":
+        e["size"] = 10
+    e["url"] = "https://api.github.com/x"
+    return e
+
+
 def _tree(paths: list[tuple[str, str]], truncated: bool = False) -> str:
     body = {
         "sha": SHA,
         "url": "https://api.github.com/x",
         "tree": [_entry(p, k) for p, k in paths],
+        "truncated": truncated,
+    }
+    return json.dumps(body, indent=2) + "\n"
+
+
+def _tree_type_first(paths: list[tuple[str, str]], truncated: bool = False) -> str:
+    body = {
+        "sha": SHA,
+        "url": "https://api.github.com/x",
+        "tree": [_entry_type_first(p, k) for p, k in paths],
         "truncated": truncated,
     }
     return json.dumps(body, indent=2) + "\n"
@@ -204,14 +229,74 @@ def test_second_run_is_up_to_date_and_force_refetches(tmp_path):
     proc, _ = _run(tmp_path)
     assert proc.returncode == 0, proc.stderr[-2000:]
     prov = _rel(tmp_path) / "PROVENANCE.txt"
-    prov.write_text("sentinel\n", encoding="utf-8")
+    # An up-to-date sentinel must already record this run's SHA on its own line, or the
+    # stale-commit_sha rewrite (grep -qx "commit_sha: $sha") would legitimately touch it.
+    sentinel = f"sentinel\ncommit_sha: {SHA}\n"
+    prov.write_text(sentinel, encoding="utf-8")
     proc, _ = _run(tmp_path)
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "up to date" in proc.stderr
-    assert prov.read_text(encoding="utf-8") == "sentinel\n"
+    assert prov.read_text(encoding="utf-8") == sentinel
     proc, _ = _run(tmp_path, "--force", "--reason", "test")
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert f"commit_sha: {SHA}" in prov.read_text(encoding="utf-8")
+
+
+def test_stale_commit_sha_is_rewritten_on_up_to_date_run(tmp_path):
+    proc, _ = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    prov = _rel(tmp_path) / "PROVENANCE.txt"
+    text = prov.read_text(encoding="utf-8")
+    assert f"commit_sha: {SHA}" in text
+    stale_sha = "b" * 40
+    prov.write_text(
+        text.replace(f"commit_sha: {SHA}", f"commit_sha: {stale_sha}"), encoding="utf-8"
+    )
+    proc, _ = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "up to date" in proc.stderr  # same-size files: nothing was re-fetched
+    rewritten = prov.read_text(encoding="utf-8")
+    assert f"commit_sha: {SHA}" in rewritten
+    assert stale_sha not in rewritten
+
+
+def test_url_glob_chars_are_percent_encoded(tmp_path):
+    special_path = "Deliverables/RULES/Rules[1]{a}.xlsx"
+    tree = _tree(
+        [
+            ("Deliverables", "tree"),
+            ("Deliverables/RULES", "tree"),
+            (special_path, "blob"),
+            ("LICENSE", "blob"),
+            ("README.md", "blob"),
+        ]
+    )
+    proc, calls = _run(tmp_path, tree=tree)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    expected_url = RAW + "/Deliverables/RULES/Rules%5B1%5D%7Ba%7D.xlsx"
+    assert expected_url in calls
+    assert (_rel(tmp_path) / "Deliverables" / "RULES" / "Rules[1]{a}.xlsx").is_file()
+
+
+def test_awk_tree_parser_pairs_path_and_type_per_entry(tmp_path):
+    # "type" precedes "path" in every entry here (the reverse of GitHub's usual field
+    # order); a parser that remembers "last path seen, next type wins" mis-pairs across
+    # entries. It must still fetch exactly the Deliverables/ blobs and skip the tree entry.
+    tree = _tree_type_first(
+        [
+            ("Deliverables", "tree"),
+            ("Deliverables/API", "tree"),
+            ("Deliverables/API/USDM_API.json", "blob"),
+            ("Deliverables/CT/USDM_CT.xlsx", "blob"),
+            ("LICENSE", "blob"),
+            ("README.md", "blob"),
+        ]
+    )
+    proc, _ = _run(tmp_path, tree=tree)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert _data_files(tmp_path) == sorted(
+        ["Deliverables/API/USDM_API.json", "Deliverables/CT/USDM_CT.xlsx"]
+    )
 
 
 def test_older_release_folder_is_untouched(tmp_path):
