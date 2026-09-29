@@ -134,6 +134,10 @@ def test_only_loads_the_newer_sdtm_shard_and_never_the_older(
     import episteme.data.db.connection as conn_mod
     from episteme.data import load_articles
 
+    # load_articles binds `connection` at import time. If a non-pg test in the
+    # same session imported it first, that binding is tests/conftest.py's
+    # blocked stand-in; reload so this pg test gets the real one.
+    importlib.reload(load_articles)
     conn_mod.get_settings.cache_clear()
     monkeypatch.setattr(conn_mod, "_POOL", None)
     try:
