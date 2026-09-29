@@ -1,0 +1,14 @@
+Code	Codelist Code	Codelist Extensible (Yes/No)	Codelist Name	CDISC Submission Value	CDISC Synonym(s)	CDISC Definition	NCI Preferred Term
+C141701	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW104	TENMW1-Test Grade	10-Meter Walk/Run - Test grade.	10-Meter Walk/Run - Test Grade
+C141657		No	10-Meter Walk/Run Functional Test Test Code	TENMW1TC	10-Meter Walk/Run Functional Test Test Code	10-Meter Walk/Run test code.	CDISC Functional Test 10-Meter Walk/Run Test Code Terminology
+C174106	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW101	TENMW1-Was Walk/Run Performed	10-Meter Walk/Run - Was the 10-meter walk/run performed?	10-Meter Walk/Run - Was Walk/Run Performed
+C141700	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW102	TENMW1-Time to Walk/Run 10 Meters	10-Meter Walk/Run - If yes, time to walk or run 10 meters.	10-Meter Walk/Run - Time to Walk/Run 10 Meters
+C147592	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW103	TENMW1-Wear Orthoses	10-Meter Walk/Run - If yes, did subject wear orthoses?	10-Meter Walk/Run - Wear Orthoses
+C199001	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW105	TENMW1-Timed Up And Go	Measured by "timed up and go" test.	10-Meter Walk/Run - Timed Up And Go
+	C141657		10-Meter Walk/Run Functional Test Test Code	TENMW1XX	TENMW1-Placeholder	Row intentionally missing a Code value.	Placeholder Preferred Term
+C199002	C999999		Orphan Codelist Placeholder	ORPHAN01	Orphan Synonym	Row referencing a codelist code with no header row anywhere in this file.	Orphan Preferred Term
+C141656		No	10-Meter Walk/Run Functional Test Test Name	TENMW1TN	10-Meter Walk/Run Functional Test Test Name	10-Meter Walk/Run test name.	CDISC Functional Test 10-Meter Walk/Run Test Name Terminology
+C141701	C141656		10-Meter Walk/Run Functional Test Test Name	TENMW1-Test Grade	TENMW1-Test Grade	10-Meter Walk/Run - Test grade.	10-Meter Walk/Run - Test Grade
+C141700	C141656		10-Meter Walk/Run Functional Test Test Name	TENMW1-Time to Walk/Run 10 Meters	TENMW1-Time to Walk/Run 10 Meters	10-Meter Walk/Run - If yes, time to walk or run 10 meters.	10-Meter Walk/Run - Time to Walk/Run 10 Meters
+C174106	C141656		10-Meter Walk/Run Functional Test Test Name	TENMW1-Was Walk/Run Performed	TENMW1-Was Walk/Run Performed	10-Meter Walk/Run - Was the 10-meter walk/run performed?	10-Meter Walk/Run - Was Walk/Run Performed
+C147592	C141656		10-Meter Walk/Run Functional Test Test Name	TENMW1-Wear Orthoses	TENMW1-Wear Orthoses	10-Meter Walk/Run - If yes, did subject wear orthoses?	10-Meter Walk/Run - Wear Orthoses

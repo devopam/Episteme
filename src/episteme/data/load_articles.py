@@ -1,13 +1,25 @@
 """CLI: walk a source's staging shards and load each into Postgres.
 
     python -m episteme.data.load_articles --source pmc [--processed-dir DIR] \\
-        [--force --reason "..."] [--workers N]
+        [--force --reason "..."] [--workers N] [--only NAME ...]
 
 One pooled connection for the whole run. ``run_start`` / ``run_end`` audit
 events bracket the run; each shard is its own committed transaction via
 ``postgres_loader.load_source_file`` + ``conn.commit()``. A shard whose
 ``load_success`` marker already exists is skipped unless ``--force`` (which
 requires ``--reason`` and emits a ``force_override`` audit event).
+
+``--only NAME`` (repeatable, generic, backwards-compatible -- default is no
+filtering) restricts the run to shards whose file name is in the given set;
+every other discovered shard is neither loaded nor reported as failed, as if
+it were never discovered. Added for SP7's cdisc_ct (I1, whole-branch review
+Ruling FW7-1): ``load_cdisc_ct.sh`` computes each package's newest,
+already-serialized shard name via
+``python -m episteme.data.cdisc_ct.retire --print-current-shards`` and
+forwards those names here, so an older release's shard sitting in the same
+staging directory (left over from before the newest release was
+discovered/serialized) can never load after -- or instead of -- the newest
+one, even under ``--force`` or after a transient retry.
 
 Config comes from ``episteme.config`` -- this module never reads ``os.environ``.
 """
@@ -54,6 +66,17 @@ def _discover_shards(staging_dir: Path) -> list[Path]:
     return sorted(staging_dir.glob("*.parquet")) + sorted(staging_dir.glob("*.jsonl"))
 
 
+def _filter_only(shards: list[Path], only: list[str] | None) -> list[Path]:
+    """``--only`` filter, factored out for direct testing (I1). ``only`` is
+    ``None``/empty -> no filtering (backwards compatible); otherwise keep only
+    the shards whose ``.name`` is in ``only`` -- everything else is dropped as
+    if it had never been discovered (not loaded, not reported as failed)."""
+    if not only:
+        return shards
+    keep = set(only)
+    return [s for s in shards if s.name in keep]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m episteme.data.load_articles",
@@ -71,6 +94,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--reason", type=str, default=None, help="required with --force (audited)")
     parser.add_argument("--workers", type=int, default=1, help="reserved; loading stays sequential")
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "load only the shard(s) whose file name is NAME (repeatable); "
+            "any other discovered shard is neither loaded nor reported as failed"
+        ),
+    )
     args = parser.parse_args(argv)
 
     source: str = args.source
@@ -81,7 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     staging_dir = processed_dir / "staging" / source
-    shards = _discover_shards(staging_dir)
+    shards = _filter_only(_discover_shards(staging_dir), args.only)
+    if not shards and args.only:
+        # The caller named specific shards and none exist: a caller bug (e.g. a
+        # stray \r in the name), not an empty source -- fail loudly.
+        print(
+            f"error: none of the --only shard(s) {sorted(args.only)!r} exist under {staging_dir}",
+            file=sys.stderr,
+        )
+        return 1
     if not shards:
         print(f"no shards under {staging_dir}")
         return 0

@@ -88,6 +88,7 @@ declare -A WRAPPER=(
     [openfda]="openfda/download_openfda.sh"
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
+    [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
 )
 
 # SP2 literature sources: the six that get the full extract -> load -> graph
@@ -97,7 +98,7 @@ declare -A WRAPPER=(
 LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex"
+STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
 _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Early validation — *before* anything that touches the DB (the run_start audit

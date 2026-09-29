@@ -109,7 +109,7 @@ Logical table: **`episteme.articles`**
 | Column | Type | Required | Description |
 |--------|------|----------|-------------|
 | `id` | string | yes | Canonical ID: `pmid:<n>`, `pmcid:PMC<n>`, `doi:<…>`, `apollo:<…>`, etc. |
-| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
+| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
 | `source_file` | string | yes | Input identity, the unit-of-work key (§4.3): the raw-dir-relative path joined with `__` (structured serializers), or the input basename (literature extractors) |
 | `source_record_id` | string | no | Native id inside the file |
 | `pmid` | string | no | PubMed ID |
@@ -214,15 +214,15 @@ Idempotency is delete plus `COPY`, never `ON CONFLICT`, because the table has no
 
 ### 4.4 Structured-source serialisation contract
 
-Applies to `serialize_<src>` for `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`. Their importable entry point takes `(raw_dir, processed_dir, ...)`.
+Applies to `serialize_<src>` for `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct`. Their importable entry point takes `(raw_dir, processed_dir, ...)`.
 
 | Element | Contract (verified in the serializers) |
 |---------|----------|
 | Return value | A dict with the keys `inputs`, `ok`, `failed`, `rows` (file-level counters). `openalex` adds `n_records_seen`, `n_accepted_biomedical`, `n_rejected_non_biomedical`. |
-| Row id | `id = f"{source}:{native_id}"`; `source_record_id` is the native id. For `ontologies` the native id is the term CURIE, used verbatim after the `ontologies:` prefix. |
+| Row id | `id = f"{source}:{native_id}"`; `source_record_id` is the native id. For `ontologies` the native id is the term CURIE, used verbatim after the `ontologies:` prefix. `cdisc_ct` is `f"{source}:{package}:{code}:p{i}"` (package + NCI codelist code + 1-based text-part index; built in `ct_parse.build_rows`, not `serialize_cdisc_ct.py` itself). |
 | Audit event | `serialize_commit` (not `extract_commit`), best-effort: a failure to audit does not fail the file (`docs/11`). |
 | Identity | `source_file`, the marker name and the shard name are `input_key(path, raw_dir)`. |
-| Records with no native id | `chembl`, `clinvar`, `pubchem`, `reactome` and `openalex` skip the record and count it as `skipped_no_id` in the per-file result (surfaced with `--verbose`, and in the per-file marker stats), **not** in the four-key summary. `mesh` silently drops a descriptor with an empty UI (no counter). `uniprot` does not skip: a malformed header or empty accession raises `ValueError` and fails the file. `ontologies` has no id-less case (`term.id` is always present). |
+| Records with no native id | `chembl`, `clinvar`, `pubchem`, `reactome`, `openalex` and `cdisc_ct` skip the record and count it as `skipped_no_id` in the per-file result (surfaced with `--verbose`, and in the per-file marker stats), **not** in the four-key summary. `mesh` silently drops a descriptor with an empty UI (no counter). `uniprot` does not skip: a malformed header or empty accession raises `ValueError` and fails the file. `ontologies` has no id-less case (`term.id` is always present). |
 
 **Doc-versus-code gaps found while reconciling (the code wins):**
 
@@ -287,13 +287,13 @@ subset = 'commercial' AND extract_status = 'ok'
 
 ### 6.3 Structured-source licences and the `public_domain` override
 
-`public_domain` is a **source-anchored governance override** (decision 2026-09-19). `normalize_license` never returns it: it is set explicitly by `serialize_mesh`, `serialize_pubchem` and `serialize_clinvar`, and `subset_from_license("public_domain")` is `commercial`. `normalize_license` itself returns `unknown` for the real upstream text of those three sources; `license_raw` keeps that real text, so the override is auditable.
+`public_domain` is a **source-anchored governance override** (decision 2026-09-19; extended to `cdisc_ct` 2026-09-28). `normalize_license` never returns it: it is set explicitly by `serialize_mesh`, `serialize_pubchem` and `serialize_clinvar`, and — for `cdisc_ct` — by `ct_parse.build_rows` (not `serialize_cdisc_ct.py` itself, which only calls it); `subset_from_license("public_domain")` is `commercial`. `normalize_license` itself returns `unknown` for the real upstream text of all four sources; `license_raw` keeps that real text, so the override is auditable.
 
 Caveat for PubChem and ClinVar: they carry contributor-submitted content whose submitters may assert their own terms, so `public_domain` there is a governance ruling for the source, not a per-record legal determination.
 
 | Source | `license` -> `subset` | Basis |
 |--------|----------------|-------|
-| `mesh`, `pubchem`, `clinvar` | `public_domain` -> `commercial` | governance override, above |
+| `mesh`, `pubchem`, `clinvar`, `cdisc_ct` | `public_domain` -> `commercial` | governance override, above (`mesh`/`pubchem`/`clinvar`: 2026-09-19; `cdisc_ct`: 2026-09-28, set in `ct_parse.build_rows`) |
 | `chembl` | `CC BY-SA` -> `commercial` | ChEMBL's stated release licence, via `normalize_license` |
 | `reactome`, `openalex` | `CC0` -> `commercial` | via `normalize_license` (openalex: the dataset-level metadata licence, not per-work OA licences) |
 | `ontologies` | GO and MONDO `CC BY` -> `commercial`; HPO `unknown` -> `open_metadata` | GO and MONDO declare a `creativecommons.org/licenses/by/` URL, which `normalize_license` now recognises; HPO declares only a licence page URL |

@@ -229,7 +229,7 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 |---|---|---|---|---|---|---|---|---|
 | `pmc` | yes | yes | no (exit 3) | yes | yes | yes | yes | download, extract, load, graph, materialize, enrich |
 | Literature: `pubmed`, `apollo`, `europepmc_preprint`, `europepmc_manuscript`, `guidelines`, `bookshelf` | yes | yes | no | yes | yes | no | no | download, extract, load, graph |
-| Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
+| Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
 | `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
 | `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
 | `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc` | yes | no | no | no | no | no | no | download only |
@@ -446,7 +446,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_abstracts d
 
 ### 5.2 Structured databases (download, serialize, load)
 
-Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`: for `mesh`, `pubchem` and `clinvar` the serializer sets `public_domain` as an explicit, source-anchored governance override (decision 2026-09-19; `license_raw` keeps the upstream text; see docs/09 and docs/12). The `cdisc_bc` licence is UNVERIFIED and no serializer is planned until CDISC confirms it (section 5.5).
+Structured sources are serialized into declarative-prose rows in `episteme.articles`. `serialize` is the structured counterpart of `extract` and takes `--max-files N` and `--force`. `--max-files` on `serialize` bounds the number of input files parsed, so bound the download first (it decides which files exist). Licence overrides are recorded in `docs/12-source-inventory.md`: for `mesh`, `pubchem`, `clinvar` and `cdisc_ct` the serializer sets `public_domain` as an explicit, source-anchored governance override (decision 2026-09-19; extended to `cdisc_ct` 2026-09-28 — set in `ct_parse.build_rows`, called by `serialize_cdisc_ct.py`; `license_raw` keeps the upstream text; see docs/09 and docs/12). The `cdisc_bc` licence is UNVERIFIED and no serializer is planned until CDISC confirms it (section 5.5).
 
 | Source | Download modes (positional) | Notes |
 |---|---|---|
@@ -573,6 +573,57 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_bc download --f
 
 Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN that it was not found and downloads fall back to sequential `curl`; that is expected. The run ends with `write_sync_stamp: ./01_raw/cdisc_bc/last_sync_utc.txt` and `pipeline done: cdisc_bc download`, and `<raw>/cdisc_bc/` then holds `LICENSE`, `PROVENANCE.txt`, `export/` and `last_sync_utc.txt`.
 
+### 5.6 CDISC Controlled Terminology (`cdisc_ct`)
+
+CDISC Controlled Terminology as published quarterly by NCI EVS: one tab-separated file per package (fixed order SDTM, SEND, ADaM, Define-XML, Protocol). `--max-files N` on `download` takes the first N packages of that fixed order; on `serialize` it takes the first N packages **present locally** (`discover_cdisc_ct_files` only ever considers packages actually found under `<raw>/cdisc_ct/`, in that same fixed order) — not a fixed set of five, since a prior bounded `download` may not have fetched every package. `download`, `serialize` and `load` are wired in the dispatcher (section 4.2); there is no `graph` stage. Downloads need `evs.nci.nih.gov` reachable — there is no offline path for this source.
+
+- **Layout:** `<raw>/cdisc_ct/<Package>/<YYYY-MM-DD>/<Package>_Terminology.txt`, the date taken from the file's `Last-Modified` header (release dates differ per package — SDTM/SEND/ADaM/Define-XML and Protocol are not guaranteed to land on the same date). Each release folder also holds `PROVENANCE.txt` (source URL, `Last-Modified`, `retrieved_at`, NCI's licence statement) and `last_sync_utc.txt`. Older release folders are **never deleted** from disk (retire only removes database rows, below); they stay for provenance and a re-run does not re-fetch a size-matched file.
+- **Content-Type gate, not HTTP status:** NCI's download site is a JavaScript app — a missing path answers **HTTP 200** with a small `text/html` fallback page, not a 404. The wrapper `HEAD`s each package's URL first and requires `Content-Type: text/plain`; anything else (including the HTML fallback), an unreachable host, or a downloaded file whose first line is not the exact 8-column header is a WARN naming the package, and the wrapper moves on leaving that package's raw tree untouched — **none of these set the run's exit code to failure**, only an actual fetch or move-into-place failure does (below). If `evs.nci.nih.gov` is unreachable, every package WARNs this way and the stage still exits 0 having fetched nothing; on a first run this only surfaces later, at `serialize` (`ERROR: no CDISC CT release files under <dir>`); on a quarterly re-run it is a silent no-op — `serialize` and `load` skip via their existing markers and `retire` keeps the old release. Treat an all-WARN download the same as `--dry-run` output on `europepmc_preprint` (section 0.3): a `0`/nothing-fetched result is a problem to check, not nothing to do.
+- **Atomic download:** each file is fetched to `<Package>_Terminology.txt.part` in the release folder and only `mv`'d into place (as `<Package>_Terminology.txt`) after the header check passes; a stale `.part` is removed before a retry so `curl`'s resume can't append to it. A failed or discarded fetch leaves no partial file at the real path and removes an empty release/package directory it may have just created.
+- **Serialize:** discovers, per package, only the **newest** `YYYY-MM-DD` release directory (older ones are ignored, never re-parsed). One row per codelist per package (large codelists split into parts of at most 200 terms, each part repeating the codelist header). `--report` prints a field-shape table without writing a shard, marker, manifest or audit row (section 6.3).
+- **Licence:** `public_domain` governance override (decision 2026-09-28): NCI states CDISC Terminology is free to use without licensing restrictions; `license_raw` keeps that statement, `subset` resolves to `commercial`. Set in `ct_parse.build_rows`, not `serialize_cdisc_ct.py` (docs/09 section 6.3, docs/12).
+- **Load (per package's newest shard only):** `load_cdisc_ct.sh` first runs `python -m episteme.data.cdisc_ct.retire --print-current-shards`, which prints one staging shard file name per package — the shard belonging to that package's newest **locally discovered and already-serialized** release. Those names are forwarded to `python -m episteme.data.load_articles --source cdisc_ct` as repeated `--only NAME`, so an older release's shard sitting in the same staging directory (left over from before the newest one was discovered/serialized) is never loaded, even under `--force` or after a retry — loading it would let the older release's stable ids briefly overwrite the newer release's rows. If no current shard is found for any package, nothing is loaded and the wrapper says so, then still runs retire.
+- **Retire (per package, DB-verified):** only if the load step exits 0 does `load_cdisc_ct.sh` run `python -m episteme.data.cdisc_ct.retire`. Retire looks at every package it can currently find under the local raw tree and handles each **independently**:
+  - a package present locally **and** whose newest release has already loaded (a `load_success` marker for its staging shard exists) is then further **verified against the database itself** before anything is deleted: (a) `select count(*) from episteme.articles where source='cdisc_ct' and source_file=<kept file>` must equal the row count recorded in that release's `load_success` marker (or be greater than zero, if the marker carries no usable count), and (b) the database must hold no row for that package dated **newer** than the kept release. Either check failing skips the package (prints a warning naming it, deletes nothing) — this guards against a local raw tree/marker that is stale or wrong relative to what is actually in the database. Once verified, the package's older releases' rows are deleted from `episteme.articles`/`article_body` (scoped to that package's own `source_file` prefix, so one package's retire can never touch another's rows), in one `load_replace` audit event per package;
+  - a package present locally but whose newest release has **not** loaded yet: skipped for this run, with a printed reason — its old rows stay in place until the new ones are in;
+  - a package **absent** from the local raw tree (for example after a `--max-files`-bounded download on this machine, or one that has never been fetched here) is **never touched** — its existing rows, if any, are left alone.
+
+  A quarter therefore fully replaces the previous one per package, not as one all-or-nothing swap across all five packages.
+
+```bash
+# preview (HEAD requests only; writes nothing)
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct download --dry-run
+
+# first time: fetch every package's current release, then serialize and load (which also retires)
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct download
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct serialize
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct load
+
+# bounded first try: SDTM only (first package in fixed order)
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct download --max-files 1
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct serialize --max-files 1
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct load
+
+# quarterly re-run once NCI publishes new releases: same commands: download lands the
+# new dated folders (packages whose Last-Modified is unchanged are size-skipped),
+# serialize picks up each package's newest release, and load's retire step then
+# deletes each package's previous release once its new one has loaded
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct download
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct serialize
+PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh cdisc_ct load
+```
+
+What each prints: `download` logs one `cdisc_ct: <Package> release <date> fetched` line per package fetched (or `... up to date` when size-matched, or a WARN naming the reason for a skipped package — unreachable host, non-`text/plain` Content-Type, or unexpected header), then exits 0 unless a package's fetch or the final move into place actually failed, in which case it exits 1 after trying the remaining packages. A WARN-only run (nothing reachable) still exits 0 with nothing fetched. `serialize` prints `schema=... source=cdisc_ct`, then `done inputs=<n> ok=<n> failed=0 rows=<n>` (`inputs` is the number of packages whose newest release was discovered, capped by `--max-files`). `load` first prints, if there is nothing current to load, `cdisc_ct: no current (locally discovered + serialized) shards to load`; otherwise one `ok <shard> rows=... event=load_commit` line per package's newest shard only (an older shard in the same staging directory is never mentioned — it is neither loaded nor reported as a failure). Then the retire step's own lines: `<Package>: <basename> not loaded yet (no load_success marker) -- skipped` for a package it is not yet safe to retire, `<Package>: skipped -- <reason>` when the local raw tree/marker disagrees with the database itself (the DB row count for the kept release doesn't match its marker, or is zero; or the database holds a release for that package dated newer than the local newest), `<Package>: retired <n> article(s); kept <basename>` for a package it did retire, and a final `retired <total> article(s) across <n> package(s)` (or `no CDISC CT release files under <dir>; nothing to retire` when the local raw tree is empty, or `no loaded CDISC CT release to retire against; nothing retired` when every discovered package is still unloaded).
+
+| Issue | Mitigation |
+|---|---|
+| A package logged as `not available (Content-Type '...')` | Normal for a package NCI has not published under that exact path right now; rerun later or check `CDISC_CT_BASE` in `scripts/data/_lib/sources.env` |
+| `could not reach NCI for <Package>` on every package, download exits 0 | `evs.nci.nih.gov` is unreachable from this machine; nothing was fetched even though the stage reported success — check network access and retry before trusting a "done" download. On a quarterly run treat this the same way as `--dry-run`'s "would harvest 0 ids" (section 0.3): `0` fetched is a problem, not nothing to do |
+| `<Package>: <basename> not loaded yet (no load_success marker) -- skipped` from retire | Its `load` step for that package's shard has not succeeded yet in this environment; rerun `load` once the shard is present under `<processed>/staging/cdisc_ct/` |
+| `<Package>: skipped -- db row count ... marker recorded ...` or `... db holds a newer release ...` from retire | The database disagrees with the local raw tree/marker for that package (stale local state, a marker from a different environment, or a newer release loaded elsewhere) — re-download and re-serialize that package's current release before retrying, or investigate why the database's row count/newest date differs from what is local |
+| `no CDISC CT release files under <dir>; nothing to retire` | Nothing has been downloaded and serialized into a shard yet for any package on this machine |
+| Retire ran but an older release's rows are still there for one package | Check that package's newest release actually has a `load_success` marker (section 4.4) and that the database-verification checks above pass; a `--max-files`-bounded run only lands and loads the packages it capped to, so the others are correctly left alone |
+
 ---
 
 ## 6. Materialize, ingest and field-shape checks
@@ -597,7 +648,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.load_articles
 
 ### 6.3 Field-shape `--report` (parse only, writes nothing)
 
-Every extractor and serializer (`apollo`, `bookshelf`, `europepmc_manuscript`, `europepmc_preprint`, `guidelines`, `pubmed`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`) has a `--report` mode that parses in memory and prints a field-shape table with no shard, marker, manifest or audit row. The dispatcher does not forward `--report`; call the wrapper directly. On Windows set `PYTHONIOENCODING=utf-8` (known on Windows: the default `cp1252` console encoding has crashed this mode on non-ASCII text; the variable is a precaution and harmless elsewhere):
+Every extractor and serializer (`apollo`, `bookshelf`, `europepmc_manuscript`, `europepmc_preprint`, `guidelines`, `pubmed`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct`) has a `--report` mode that parses in memory and prints a field-shape table with no shard, marker, manifest or audit row. The dispatcher does not forward `--report`; call the wrapper directly. On Windows set `PYTHONIOENCODING=utf-8` (known on Windows: the default `cp1252` console encoding has crashed this mode on non-ASCII text; the variable is a precaution and harmless elsewhere):
 
 ```bash
 PYTHONIOENCODING=utf-8 bash scripts/data/uniprot/serialize_uniprot.sh --report --max-files 1

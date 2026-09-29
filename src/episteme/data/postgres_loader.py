@@ -235,3 +235,109 @@ def load_source_file(
         "event": event,
         "staging_path": str(staging_path),
     }
+
+
+def retire_source_files(
+    conn,
+    *,
+    source: str,
+    keep_source_files: list[str],
+    run_id: str | None = None,
+    scope_prefix: str | None = None,
+) -> int:
+    """Delete every ``source``-scoped row whose ``source_file`` is NOT in
+    ``keep_source_files`` -- the retire step for a structured source whose
+    raw tree only ever surfaces the CURRENT release per package (SP7's
+    ``discover_cdisc_ct_files``). ``load_source_file`` only ever DELETE+COPYs
+    the source_file(s) it is called with, so a superseded release's rows are
+    never touched by an ordinary load -- this function is what actively
+    retires them once the caller has confirmed the new release loaded.
+
+    One transaction; the caller commits. Deletes episteme.article_body rows
+    (by the retired articles.id, scoped by source) THEN episteme.articles
+    rows (``WHERE source = %s AND NOT (source_file = ANY(keep_source_files))``),
+    records one ``load_replace`` audit event, and returns the count of
+    deleted ``episteme.articles`` rows. Every delete below is scoped
+    ``source = %s`` -- this never touches another source's rows, even one
+    sharing a ``source_file`` basename or an ``id`` (source_file basenames
+    and ids are not guaranteed globally unique across sources).
+
+    ``scope_prefix``, when given, additionally restricts BOTH deletes to
+    ``source_file`` values starting with it (``starts_with()``, not
+    ``LIKE`` -- a ``source_file`` may contain ``_``, which ``LIKE`` would
+    treat as a wildcard). This is what makes a per-package retire safe for a
+    multi-package source like ``cdisc_ct``: without it, a ``keep_source_files``
+    covering only ONE package's current release (e.g. because only that
+    package was re-downloaded on this machine) would delete every OTHER
+    package's rows too, since they are equally "not in the keep set" -- a
+    real data-loss bug fixed here (SP7 Task 4 review round 1). The caller
+    (``cdisc_ct.retire``) passes one package's ``f"{package}__"`` prefix and
+    that package's own current ``source_file`` as the sole keep entry, once
+    per discovered package, so a package never touched by a given retire run
+    is scoped out entirely rather than relying on it happening to be absent
+    from ``keep_source_files``.
+
+    Raises ``ValueError`` if ``keep_source_files`` is empty -- an empty
+    keep-set would retire (delete) EVERY row of ``source`` (within
+    ``scope_prefix``, if given), almost certainly a caller bug (e.g.
+    discovery finding nothing due to a raw-dir typo) than an intentional
+    full wipe. Raised before touching the connection at all, so nothing is
+    deleted.
+    """
+    if not keep_source_files:
+        raise ValueError(
+            "keep_source_files must not be empty (refusing to retire every " f"{source!r} row)"
+        )
+
+    scope_sql = ""
+    scope_params: tuple = ()
+    if scope_prefix is not None:
+        scope_sql = " AND starts_with(source_file, %s)"
+        scope_params = (scope_prefix,)
+
+    with conn.cursor() as cur:
+        # article_body first (its PK is (article_id, source), no source_file
+        # column) -- delete the body of every retired article, EXCEPT an id
+        # that also appears under a KEPT source_file for this source (belt-
+        # and-braces: load_source_file's own id-collision guard already
+        # prevents this in the cdisc_ct pipeline, since an id shared across
+        # releases gets replaced under the new source_file before retire ever
+        # runs, but retire_source_files is general-purpose and must not ever
+        # delete a kept row's only body). scope_sql narrows the "candidates
+        # for deletion" subquery only -- the EXCEPT (kept ids) subquery needs
+        # no scoping, since it is already exactly keep_source_files.
+        cur.execute(
+            f"""
+            DELETE FROM episteme.article_body
+             WHERE source = %s
+               AND article_id IN (
+                     SELECT id FROM episteme.articles
+                      WHERE source = %s AND NOT (source_file = ANY(%s)){scope_sql}
+                     EXCEPT
+                     SELECT id FROM episteme.articles
+                      WHERE source = %s AND source_file = ANY(%s)
+                   )
+            """,
+            (source, source, keep_source_files, *scope_params, source, keep_source_files),
+        )
+
+        # articles: everything not in the keep set (and, if scoped, not in
+        # scope_prefix -- so an out-of-scope package's stale rows are simply
+        # never candidates, regardless of keep_source_files).
+        cur.execute(
+            "DELETE FROM episteme.articles"
+            f" WHERE source = %s AND NOT (source_file = ANY(%s)){scope_sql}",
+            (source, keep_source_files, *scope_params),
+        )
+        deleted = cur.rowcount
+
+    # audit -- in conn's transaction, no commit.
+    audit_trail.record(
+        "load_replace",
+        conn=conn,
+        object=f"{source} retire" + (f" {scope_prefix}" if scope_prefix else ""),
+        rows_affected=deleted,
+        run_id=run_id,
+    )
+
+    return deleted
