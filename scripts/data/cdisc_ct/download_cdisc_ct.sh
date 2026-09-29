@@ -113,14 +113,16 @@ for pkg in "${packages[@]}"; do
     fi
 
     # Atomic replace: fetch to <file>.part in the same folder (http_fetch writes
-    # to DEST_DIR/<relpath>), validate, then mv over <file>. A stale .part is
-    # removed first so curl's resume (-C -) cannot append to it. On any failure
-    # only the .part goes; an existing good file and its PROVENANCE.txt stay.
-    rm -f "$part"
+    # to DEST_DIR/<relpath>), validate, then mv over <file>. A stale .part (and
+    # any aria2 control file beside it) is removed first so curl's resume (-C -)
+    # cannot append to it and aria2c cannot resume from a mismatched state. On
+    # any failure only the .part/.part.aria2 go; an existing good file and its
+    # PROVENANCE.txt stay.
+    rm -f "$part" "$part.aria2"
     # Pipeline => subshell: a `die` inside http_fetch fails this package only.
     if ! printf '%s\t%s\n' "$url" "$fname.part" | http_fetch "$reldir" || [ ! -s "$part" ]; then
         log WARN "cdisc_ct: $pkg fetch failed ($url)"
-        rm -f "$part"
+        rm -f "$part" "$part.aria2"
         rmdir "$reldir" "$dest/$pkg" 2>/dev/null || true   # only if left empty
         failed=1
         continue

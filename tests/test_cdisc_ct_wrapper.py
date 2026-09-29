@@ -303,6 +303,22 @@ def test_first_fetch_failure_leaves_no_folder(tmp_path):
     assert not (_dest(tmp_path) / "SDTM").exists()
 
 
+def test_fetch_failure_removes_aria2_control_file(tmp_path):
+    # aria2c leaves a `<file>.part.aria2` control file behind on an interrupted
+    # transfer; simulate that leftover (the fake curl fallback here never
+    # produces one itself) and confirm the wrapper removes it along with
+    # `.part` so the empty release folder can still be cleaned up.
+    rel = _dest(tmp_path) / "SDTM" / "2026-09-25"
+    rel.mkdir(parents=True)
+    (rel / "SDTM_Terminology.txt.part.aria2").write_bytes(b"aria2 control file\n")
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_GET_FAIL": "1"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert any(c.startswith("GET ") for c in calls)
+    assert not (rel / "SDTM_Terminology.txt.part.aria2").exists()
+    assert not (rel / "SDTM_Terminology.txt.part").exists()
+    assert not (_dest(tmp_path) / "SDTM").exists()
+
+
 @pytest.mark.parametrize("lastmod", ["none", "not a date"])
 def test_missing_or_unparseable_last_modified_skips_package(tmp_path, lastmod):
     proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_LASTMOD": lastmod})
