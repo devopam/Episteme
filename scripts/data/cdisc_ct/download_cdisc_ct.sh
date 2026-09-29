@@ -60,9 +60,13 @@ _header_value() { # _header_value NAME <<< "$hdr" -> last value of a (case-insen
 failed=0
 for pkg in "${packages[@]}"; do
     url="$CDISC_CT_BASE/$pkg/$pkg%20Terminology.txt"
-    # Headers only (-I) — never a body. No -L: runs under --dry-run too.
+    # Headers only (-I), following redirects (-L) — never a body; -I/-L together
+    # never fetch one, so this is safe under --dry-run too. With -L, curl prints
+    # one header block per hop; _header_value scans the whole concatenated text
+    # and keeps the LAST match of each name, so Content-Type/Last-Modified are
+    # always read from the final response, never an intermediate redirect's.
     # pipefail: a curl failure (DNS, timeout, refused) is the pipeline's status.
-    if ! hdr="$(curl -sSI --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"; then
+    if ! hdr="$(curl -sSI -L --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"; then
         log WARN "cdisc_ct: could not reach NCI for $pkg ($url); skipping"
         continue
     fi
@@ -74,9 +78,17 @@ for pkg in "${packages[@]}"; do
     esac
 
     # The -n guard is load-bearing: `date -u -d ""` prints TODAY's date.
+    # GNU `date -u -d` first; BSD/macOS date has no `-d`, so fall back to its
+    # `-j -f` form. Never let an empty/garbage value fall through to either
+    # form and become today's date (the -n guard covers both attempts).
     lastmod="$(printf '%s\n' "$hdr" | _header_value last-modified)"
     rdate=""
-    [ -n "$lastmod" ] && rdate="$(date -u -d "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+    if [ -n "$lastmod" ]; then
+        rdate="$(date -u -d "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+        if [ -z "$rdate" ]; then
+            rdate="$(date -u -j -f "%a, %d %b %Y %H:%M:%S GMT" "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+        fi
+    fi
     case "$rdate" in
         [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
         *) log WARN "cdisc_ct: $pkg has no parseable Last-Modified ('${lastmod:-none}'); skipping"
@@ -101,14 +113,16 @@ for pkg in "${packages[@]}"; do
     fi
 
     # Atomic replace: fetch to <file>.part in the same folder (http_fetch writes
-    # to DEST_DIR/<relpath>), validate, then mv over <file>. A stale .part is
-    # removed first so curl's resume (-C -) cannot append to it. On any failure
-    # only the .part goes; an existing good file and its PROVENANCE.txt stay.
-    rm -f "$part"
+    # to DEST_DIR/<relpath>), validate, then mv over <file>. A stale .part (and
+    # any aria2 control file beside it) is removed first so curl's resume (-C -)
+    # cannot append to it and aria2c cannot resume from a mismatched state. On
+    # any failure only the .part/.part.aria2 go; an existing good file and its
+    # PROVENANCE.txt stay.
+    rm -f "$part" "$part.aria2"
     # Pipeline => subshell: a `die` inside http_fetch fails this package only.
     if ! printf '%s\t%s\n' "$url" "$fname.part" | http_fetch "$reldir" || [ ! -s "$part" ]; then
         log WARN "cdisc_ct: $pkg fetch failed ($url)"
-        rm -f "$part"
+        rm -f "$part" "$part.aria2"
         rmdir "$reldir" "$dest/$pkg" 2>/dev/null || true   # only if left empty
         failed=1
         continue

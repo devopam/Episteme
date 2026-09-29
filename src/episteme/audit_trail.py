@@ -292,13 +292,30 @@ def verify(conn: psycopg.Connection) -> list[dict]:
     # gzips mirror files older than 30 days in place) vs table row count.
     # One-sided -- mirror > table is legitimate (e.g. after a schema recreate
     # that truncates the table but leaves the mirror files).
+    # Each day's mirror file is authoritative in exactly one form. If a
+    # rotate_audit_logs.sh run's `gzip file` writes audit-X.jsonl.gz but
+    # then fails to unlink audit-X.jsonl (e.g. `chattr -a` couldn't clear
+    # the append-only bit without root/CAP_LINUX_IMMUTABLE -- docs/10
+    # section 7), both forms are left on disk for that day; the NEXT run's
+    # `gzip "$f"` then finds that same-named .gz already present and
+    # refuses to overwrite it non-interactively, so both forms persist
+    # indefinitely. record() only ever appends to the plain file, so
+    # whenever a plain file exists for a day it is that day's complete,
+    # authoritative copy (whether still open for today or a rotation-
+    # failure leftover); the .gz form is only used once the plain file has
+    # actually been removed (rotation succeeded). Count each day from
+    # exactly one form, or a stale coexisting .gz would double-count that
+    # day's lines and could hide a real mirror_short shortfall.
     mirror_lines = 0
     mdir = _mirror_dir()
     if mdir.is_dir():
+        plain_names = {path.name for path in mdir.glob("audit-*.jsonl")}
         for path in mdir.glob("audit-*.jsonl"):
             with open(path, encoding="utf-8") as fh:
                 mirror_lines += sum(1 for line in fh if line.strip())
         for path in mdir.glob("audit-*.jsonl.gz"):
+            if path.name[: -len(".gz")] in plain_names:
+                continue
             with gzip.open(path, "rt", encoding="utf-8") as fh:
                 mirror_lines += sum(1 for line in fh if line.strip())
     if mirror_lines < len(rows):

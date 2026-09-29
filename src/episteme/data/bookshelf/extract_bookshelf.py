@@ -268,6 +268,34 @@ def _accession_from_filename(path: Path) -> str:
     return m.group(0) if m else stem
 
 
+def _id_key_from_filename(path: Path, raw_dir: Path) -> str:
+    """The token used to build this archive's row ``id`` (and its parts'
+    ``container_id``): the ``NBK\\d+`` accession when the filename carries
+    one -- same value as ``_accession_from_filename`` for that case, id
+    unchanged -- otherwise ``checkpoint_markers.input_key(path, raw_dir)``
+    with a trailing ``.tar.gz`` stripped.
+
+    ``_accession_from_filename`` falls back to the bare filename stem when no
+    NBK token is present, which two unrelated archives sharing a basename in
+    different subfolders (there is no such guarantee under the real hashed
+    LitArch ``packages/<rel>`` tree) collapse onto identically -- and
+    ``postgres_loader``'s (d0) id-collision guard then keeps only the
+    last-loaded one at load time. ``input_key`` is already unique per
+    subfolder (it is the path relative to ``raw_dir``, joined with ``__``),
+    so using it here instead of the bare stem keeps NBK-less archives from
+    colliding on ``id`` without touching the NBK branch at all.
+    """
+    name = path.name
+    stem = name[: -len(".tar.gz")] if name.endswith(".tar.gz") else Path(name).stem
+    m = _NBK_RE.search(stem)
+    if m:
+        return m.group(0)
+    key = input_key(path, raw_dir)
+    if key.endswith(".tar.gz"):
+        key = key[: -len(".tar.gz")]
+    return key
+
+
 def _find_nxml_member(tar: tarfile.TarFile, nbk: str) -> tarfile.TarInfo:
     members = [
         m for m in tar.getmembers() if m.isfile() and m.name.lower().endswith((".nxml", ".xml"))
@@ -286,6 +314,11 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     """One ``.tar.gz`` book package -> ``[book_row, *kept_part_rows]``, each a
     finalized ``episteme.articles`` row."""
     nbk = _accession_from_filename(path)
+    # id_key drives the row `id` / part `container_id`, kept distinct from
+    # `nbk` (the accession used for member lookup and source_record_id
+    # below): see _id_key_from_filename for why the two diverge for
+    # NBK-less filenames.
+    id_key = _id_key_from_filename(path, raw_dir)
     # input_key, not path.name: two packages sharing a basename in different
     # hash-bucket subdirectories under raw_dir (the real LitArch
     # packages/<rel> tree -- see discover_bookshelf_files/process_one below)
@@ -364,7 +397,7 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
         part_rows.append(
             finalize_row(
                 {
-                    "id": f"bookshelf:{nbk}:{bp_id}",
+                    "id": f"bookshelf:{id_key}:{bp_id}",
                     "source": SOURCE,
                     "source_file": source_file,
                     "source_record_id": bp_id,
@@ -387,7 +420,7 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
                     "license_url": p_lic_url,
                     "license_raw": p_lic_raw,
                     "subset": p_subset,
-                    "container_id": f"bookshelf:{nbk}",
+                    "container_id": f"bookshelf:{id_key}",
                     "book_meta": None,
                 }
             )
@@ -397,7 +430,7 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
 
     book_row = finalize_row(
         {
-            "id": f"bookshelf:{nbk}",
+            "id": f"bookshelf:{id_key}",
             "source": SOURCE,
             "source_file": source_file,
             "source_record_id": nbk,

@@ -252,10 +252,22 @@ CREATE TABLE episteme._lineage (
 -- -----------------------------------------------------------------------------
 -- episteme._audit -- append-only hash-chained audit trail, RANGE (recorded_at)
 --   with monthly partitions. episteme_app gets INSERT + SELECT only (grants
---   below). episteme.create_audit_partition() / a rotation script is not yet
---   built (ADR-0002 names it; tracked as a follow-up) -- the DEFAULT
---   partition below absorbs inserts for any month that hasn't had its
---   partition created yet.
+--   below). ADR-0002 names episteme.create_audit_partition() as the
+--   partition-creation mechanism; that was never built as a plpgsql
+--   function -- scripts/data/db/ensure_audit_partitions.sh is the actual
+--   rotation/partition-creation script (run periodically by an operator or
+--   external scheduler, see docs/11 section 8) -- the DEFAULT partition
+--   below absorbs inserts for any month that hasn't had its partition
+--   created yet (script never run, or run outside its rolling window).
+--   The two static partition bounds below carry an explicit '+00' (UTC)
+--   offset, not a bare date -- a bare date literal is parsed as midnight in
+--   whatever TimeZone the session loading this file happens to have (this
+--   dev server's own default is Asia/Calcutta, not UTC), which would give
+--   these two partitions a different UTC instant than every later partition
+--   ensure_audit_partitions.sh creates (that script pins PGTZ=UTC), leaving
+--   a gap or an overlap right at the seam between them. Pinning both to an
+--   explicit UTC offset here removes the loading session's TimeZone as a
+--   variable entirely.
 -- -----------------------------------------------------------------------------
 CREATE TABLE episteme._audit (
     seq                 bigserial,
@@ -278,9 +290,9 @@ CREATE TABLE episteme._audit (
 ) PARTITION BY RANGE (recorded_at);
 
 CREATE TABLE episteme._audit_202609 PARTITION OF episteme._audit
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+    FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 CREATE TABLE episteme._audit_202610 PARTITION OF episteme._audit
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+    FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 CREATE TABLE episteme._audit_default PARTITION OF episteme._audit DEFAULT;
 
 

@@ -94,6 +94,66 @@ def test_verify_counts_gzipped_mirror_lines(pg_conn, monkeypatch, tmp_path):
     assert mirror_short == [], f"gzip'd mirror lines not counted: {mirror_short}"
 
 
+def test_verify_does_not_double_count_same_day_plain_and_gz(pg_conn, monkeypatch, tmp_path):
+    # rotate_audit_logs.sh runs `gzip "$f"`, which writes the .gz then
+    # unlinks the source in one step; if that unlink fails (e.g. `chattr -a`
+    # couldn't clear the append-only bit without root/CAP_LINUX_IMMUTABLE),
+    # both forms are left on disk, and the NEXT run's `gzip "$f"` then finds
+    # that same-named .gz already present and refuses to overwrite it
+    # non-interactively -- so both the plain audit-X.jsonl and
+    # audit-X.jsonl.gz persist for that day. verify() must count that day
+    # once, not once per file, or a coexisting stale .gz can silently
+    # double-count a day and hide a real mirror_short shortfall.
+    monkeypatch.setenv("EPISTEME_ACTOR", "test-actor")
+    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
+    import episteme.config as cfg
+
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
+    from episteme import audit_trail
+
+    importlib.reload(audit_trail)
+
+    _setup_schema(pg_conn)
+    audit_trail.record("run_start", conn=pg_conn, object="pmc", run_id="r1")
+    audit_trail.record(
+        "load_commit", conn=pg_conn, object="pmc PMCFIX0001", rows_affected=1, run_id="r1"
+    )
+    audit_trail.record(
+        "load_commit", conn=pg_conn, object="pmc PMCFIX0002", rows_affected=1, run_id="r1"
+    )
+    pg_conn.commit()
+
+    mdir = tmp_path / "_ops" / "_audit"
+    mirror = next(mdir.glob("audit-*.jsonl"))
+    lines = mirror.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert len(lines) == 3
+
+    # Real shortfall: only the first 2 of 3 mirrored lines actually survive
+    # (the 3rd was lost some other way, unrelated to this bug). Simulate a
+    # stale same-day .gz coexisting with the plain file by writing the exact
+    # same 2 surviving lines into audit-X.jsonl.gz too (the recurring
+    # real-world case: a previous run's gzip succeeded, a later run's
+    # `gzip "$f"` found that .gz already present and refused to overwrite,
+    # so the plain file -- unchanged -- and its .gz both hold the same 2
+    # lines).
+    mirror.write_text("".join(lines[:2]), encoding="utf-8")
+    gz_path = mdir / (mirror.name + ".gz")
+    with gzip.open(gz_path, "wt", encoding="utf-8") as fh:
+        fh.writelines(lines[:2])
+
+    problems = audit_trail.verify(pg_conn)
+    mirror_short = [p for p in problems if p["reason"] == "mirror_short"]
+    assert len(mirror_short) == 1, (
+        f"expected a real mirror_short (2 lines survive vs 3 table rows), " f"got: {problems}"
+    )
+    assert mirror_short[0]["mirror"] == 2, (
+        "same-day plain+gz coexistence must count that day once (2 lines), "
+        f"not double-count it: {mirror_short[0]}"
+    )
+    assert mirror_short[0]["table"] == 3
+
+
 def test_bad_event_type_rejected(pg_conn, monkeypatch):
     monkeypatch.setenv("EPISTEME_ACTOR", "x")
     from episteme import audit_trail

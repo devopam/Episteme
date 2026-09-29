@@ -49,6 +49,12 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     FAKE_GET_FAIL=1     -> downloads fail (curl rc 22, nothing written).
     FAKE_HEAD_FAIL=1    -> HEAD requests fail (curl rc 6, as for a DNS error).
     FAKE_LASTMOD=<v>    -> Last-Modified override; "none" omits the header.
+    FAKE_REDIRECT=1     -> HEAD answers a 301 (text/html, Location) hop first; the
+                           final 200 block is only emitted when -L was passed (so
+                           the test fails if the wrapper stops following it).
+    FAKE_REDIRECT_FINAL_HTML=1 -> with FAKE_REDIRECT=1, the FINAL (post-redirect)
+                           block is text/html instead of text/plain, so the package
+                           must be skipped on the final response, not the 301's.
     Each call is logged as `HEAD <url>` or `GET <url>`.
     """
     bindir.mkdir(parents=True, exist_ok=True)
@@ -58,16 +64,23 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     body = (
         "#!/usr/bin/env bash\n"
         f'BIN="{bindir.as_posix()}"\n'
-        "out=''; url=''; head=0; prev=''\n"
+        "out=''; url=''; head=0; follow=0; prev=''\n"
         'for a in "$@"; do\n'
         '  [ "$prev" = "-o" ] || [ "$prev" = "--output" ] && out="$a"\n'
-        '  case "$a" in --*) ;; -*I*) head=1 ;; http*) url="$a" ;; esac\n'
+        '  case "$a" in --*) ;; -*I*) head=1 ;; -*L*) follow=1 ;; http*) url="$a" ;; esac\n'
         '  prev="$a"\n'
         "done\n"
         'if [ "${FAKE_BAD_BODY:-0}" = 1 ]; then src="$BIN/bad.txt"; else src="$BIN/good.txt"; fi\n'
         'if [ "$head" = 1 ]; then\n'
         f'  echo "HEAD $url" >> "{log.as_posix()}"\n'
         '  [ "${FAKE_HEAD_FAIL:-0}" = 1 ] && { echo "curl: (6) no host" >&2; exit 6; }\n'
+        '  if [ "${FAKE_REDIRECT:-0}" = 1 ]; then\n'
+        '    printf "HTTP/1.1 301 Moved Permanently\\r\\n"\n'
+        '    printf "Location: %s?redirected=1\\r\\n" "$url"\n'
+        '    printf "Content-Type: text/html\\r\\n"\n'
+        '    printf "Content-Length: 42\\r\\n\\r\\n"\n'
+        '    [ "$follow" = 1 ] || exit 0\n'
+        "  fi\n"
         '  printf "HTTP/1.1 200 OK\\r\\n"\n'
         '  case "$url" in\n'
         '    *SEND*) if [ "${FAKE_SEND_MISSING:-0}" = 1 ]; then\n'
@@ -79,9 +92,16 @@ def _fake_curl(bindir: Path, log: Path) -> None:
         '    */Protocol/*) lm="Sat, 11 Jul 2026 23:27:50 GMT" ;;\n'
         '    *) lm="Fri, 25 Sep 2026 15:43:39 GMT" ;;\n'
         "  esac\n"
+        '  [ -n "${FAKE_LASTMOD:-}" ] && lm="$FAKE_LASTMOD"\n'
+        '  if [ "${FAKE_REDIRECT_FINAL_HTML:-0}" = 1 ]; then\n'
+        '    printf "Content-Type: text/html\\r\\n"\n'
+        '    printf "Content-Length: 99\\r\\n"\n'
+        '    [ "$lm" = none ] || printf "Last-Modified: %s\\r\\n" "$lm"\n'
+        '    printf "\\r\\n"\n'
+        "    exit 0\n"
+        "  fi\n"
         '  printf "Content-Type: text/plain\\r\\n"\n'
         '  printf "Content-Length: %s\\r\\n" "$(wc -c < "$src" | tr -d " ")"\n'
-        '  [ -n "${FAKE_LASTMOD:-}" ] && lm="$FAKE_LASTMOD"\n'
         '  [ "$lm" = none ] || printf "Last-Modified: %s\\r\\n" "$lm"\n'
         '  printf "\\r\\n"\n'
         "  exit 0\n"
@@ -95,11 +115,53 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     script.chmod(0o755)
 
 
-def _run(tmp_path, *args, extra_env=None):
+def _fake_date(bindir: Path) -> None:
+    """BSD-style `date` shim: rejects GNU `-d`, honors `-j -f INFMT VALUE OUTFMT`.
+
+    Delegates the actual conversion to the real (GNU) date found via PATH before
+    this shim's bindir was prepended, so the test runs unmodified on Windows Git
+    Bash and on Linux.
+    """
+    real_date = shutil.which("date")
+    if not real_date:
+        pytest.skip("no real `date` on PATH to back the fake BSD date shim")
+    bindir.mkdir(parents=True, exist_ok=True)
+    script = bindir / "date"
+    body = (
+        "#!/usr/bin/env bash\n"
+        f'REAL_DATE="{_msys_path(Path(real_date))}"\n'
+        'have_d=0; have_j=0; value=""; outfmt=""\n'
+        'args=("$@"); i=0\n'
+        'while [ "$i" -lt "${#args[@]}" ]; do\n'
+        '  a="${args[$i]}"\n'
+        '  case "$a" in\n'
+        "    -d) have_d=1 ;;\n"
+        "    -j) have_j=1 ;;\n"
+        '    -f) i=$((i + 1)); i=$((i + 1)); value="${args[$i]}" ;;\n'
+        '    +*) outfmt="$a" ;;\n'
+        "  esac\n"
+        "  i=$((i + 1))\n"
+        "done\n"
+        'if [ "$have_d" = 1 ] && [ "$have_j" != 1 ]; then\n'
+        '  echo "date: illegal option -- d (fake BSD date)" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ "$have_j" = 1 ]; then\n'
+        '  exec "$REAL_DATE" -u -d "$value" "$outfmt"\n'
+        "fi\n"
+        'exec "$REAL_DATE" "$@"\n'
+    )
+    script.write_bytes(body.encode())  # LF endings: a CRLF shebang breaks bash on Windows
+    script.chmod(0o755)
+
+
+def _run(tmp_path, *args, extra_env=None, fake_date=False):
     log = tmp_path / "curl.log"
     if log.exists():
         log.unlink()
     _fake_curl(tmp_path / "bin", log)
+    if fake_date:
+        _fake_date(tmp_path / "bin")
     env = {
         **os.environ,
         "SHIM_DIR": _msys_path(tmp_path / "bin"),
@@ -241,12 +303,80 @@ def test_first_fetch_failure_leaves_no_folder(tmp_path):
     assert not (_dest(tmp_path) / "SDTM").exists()
 
 
+def test_fetch_failure_removes_aria2_control_file(tmp_path):
+    # aria2c leaves a `<file>.part.aria2` control file behind on an interrupted
+    # transfer; simulate that leftover (the fake curl fallback here never
+    # produces one itself) and confirm the wrapper removes it along with
+    # `.part` so the empty release folder can still be cleaned up.
+    rel = _dest(tmp_path) / "SDTM" / "2026-09-25"
+    rel.mkdir(parents=True)
+    (rel / "SDTM_Terminology.txt.part.aria2").write_bytes(b"aria2 control file\n")
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_GET_FAIL": "1"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert any(c.startswith("GET ") for c in calls)
+    assert not (rel / "SDTM_Terminology.txt.part.aria2").exists()
+    assert not (rel / "SDTM_Terminology.txt.part").exists()
+    assert not (_dest(tmp_path) / "SDTM").exists()
+
+
 @pytest.mark.parametrize("lastmod", ["none", "not a date"])
 def test_missing_or_unparseable_last_modified_skips_package(tmp_path, lastmod):
     proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_LASTMOD": lastmod})
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "SDTM has no parseable Last-Modified" in proc.stderr
     assert not _dest(tmp_path).exists()  # never a folder dated today
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+def test_lastmod_parses_via_bsd_date_fallback(tmp_path):
+    # A fake `date` rejects GNU `-d` first, forcing the wrapper's BSD `-j -f`
+    # fallback; the shim delegates that to the real date so the release date
+    # still comes out right. --dry-run's logged path proves the parse worked
+    # without the empty/garbage guard turning it into today's date.
+    proc, calls = _run(tmp_path, "--dry-run", "--max-files", "1", fake_date=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM/2026-09-25/SDTM_Terminology.txt" in proc.stderr
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+@pytest.mark.parametrize("lastmod", ["none", "not a date"])
+def test_missing_or_unparseable_last_modified_skips_package_bsd_date(tmp_path, lastmod):
+    # Same guard as test_missing_or_unparseable_last_modified_skips_package, but
+    # with the BSD-only `date` shim: both the GNU attempt and the BSD fallback
+    # must fail cleanly on empty/garbage input, never producing today's date.
+    proc, calls = _run(
+        tmp_path, "--max-files", "1", extra_env={"FAKE_LASTMOD": lastmod}, fake_date=True
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM has no parseable Last-Modified" in proc.stderr
+    assert not _dest(tmp_path).exists()
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+def test_head_follows_redirect_and_uses_final_headers(tmp_path):
+    # The fake curl only emits the post-redirect 200 block when it actually saw
+    # -L; without it, the wrapper would stall on the 301's text/html headers and
+    # skip the package. FAKE_REDIRECT_FINAL_HTML is unset, so the final block is
+    # the normal text/plain terminology file.
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_REDIRECT": "1"})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert (_dest(tmp_path) / "SDTM" / "2026-09-25" / "SDTM_Terminology.txt").is_file()
+    assert any(c.startswith("GET ") for c in calls)
+
+
+def test_head_follows_redirect_final_html_is_skipped(tmp_path):
+    # The 301 hop's own Content-Type is text/html too, so this also proves the
+    # skip decision is keyed off the FINAL block, not merely "any html seen".
+    proc, calls = _run(
+        tmp_path,
+        "--max-files",
+        "1",
+        extra_env={"FAKE_REDIRECT": "1", "FAKE_REDIRECT_FINAL_HTML": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM not available" in proc.stderr
+    assert "text/html" in proc.stderr
+    assert not (_dest(tmp_path) / "SDTM").exists()
     assert not any(c.startswith("GET ") for c in calls)
 
 

@@ -61,13 +61,18 @@ def test_ensure_audit_partitions_is_documented_as_implemented():
     # must now describe monthly partition auto-creation as implemented (via
     # a rotation script), not absent, and must name the actual default
     # months_ahead so the doc and the script cannot silently drift apart.
-    # schema.sql's own comment near the _audit table still says a rotation
-    # script "is not yet built" (it was not touched by Task 2) -- pin that
-    # premise too, so a future fix to that comment fails this test loudly
-    # instead of leaving the doc's "now stale" claim quietly wrong.
+    # schema.sql's own comment near the _audit table (SP6 close-out item 6)
+    # now points at ensure_audit_partitions.sh instead of saying a rotation
+    # script "is not yet built" -- pin that it names the real script, so a
+    # future re-introduction of the stale wording fails this test loudly.
     text = doc("11-gxp-data-integrity.md")
     sql = (REPO / "src/episteme/data/db/schema.sql").read_text(encoding="utf-8")
-    assert "not yet" in sql and "create_audit_partition" in sql
+    m_comment = re.search(r"-- episteme\._audit --.*?\nCREATE TABLE episteme\._audit \(", sql, re.S)
+    assert m_comment, "_audit table's header comment block not found in schema.sql"
+    audit_comment = m_comment.group(0)
+    assert "create_audit_partition" in audit_comment
+    assert "ensure_audit_partitions.sh" in audit_comment
+    assert "is not yet" not in audit_comment
 
     script = REPO / "scripts/data/db/ensure_audit_partitions.sh"
     assert script.is_file()
