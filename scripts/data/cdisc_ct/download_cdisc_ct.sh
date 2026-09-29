@@ -74,9 +74,17 @@ for pkg in "${packages[@]}"; do
     esac
 
     # The -n guard is load-bearing: `date -u -d ""` prints TODAY's date.
+    # GNU `date -u -d` first; BSD/macOS date has no `-d`, so fall back to its
+    # `-j -f` form. Never let an empty/garbage value fall through to either
+    # form and become today's date (the -n guard covers both attempts).
     lastmod="$(printf '%s\n' "$hdr" | _header_value last-modified)"
     rdate=""
-    [ -n "$lastmod" ] && rdate="$(date -u -d "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+    if [ -n "$lastmod" ]; then
+        rdate="$(date -u -d "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+        if [ -z "$rdate" ]; then
+            rdate="$(date -u -j -f "%a, %d %b %Y %H:%M:%S GMT" "$lastmod" +%Y-%m-%d 2>/dev/null || true)"
+        fi
+    fi
     case "$rdate" in
         [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
         *) log WARN "cdisc_ct: $pkg has no parseable Last-Modified ('${lastmod:-none}'); skipping"

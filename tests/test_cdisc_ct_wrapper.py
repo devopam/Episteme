@@ -95,11 +95,53 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     script.chmod(0o755)
 
 
-def _run(tmp_path, *args, extra_env=None):
+def _fake_date(bindir: Path) -> None:
+    """BSD-style `date` shim: rejects GNU `-d`, honors `-j -f INFMT VALUE OUTFMT`.
+
+    Delegates the actual conversion to the real (GNU) date found via PATH before
+    this shim's bindir was prepended, so the test runs unmodified on Windows Git
+    Bash and on Linux.
+    """
+    real_date = shutil.which("date")
+    if not real_date:
+        pytest.skip("no real `date` on PATH to back the fake BSD date shim")
+    bindir.mkdir(parents=True, exist_ok=True)
+    script = bindir / "date"
+    body = (
+        "#!/usr/bin/env bash\n"
+        f'REAL_DATE="{_msys_path(Path(real_date))}"\n'
+        'have_d=0; have_j=0; value=""; outfmt=""\n'
+        'args=("$@"); i=0\n'
+        'while [ "$i" -lt "${#args[@]}" ]; do\n'
+        '  a="${args[$i]}"\n'
+        '  case "$a" in\n'
+        "    -d) have_d=1 ;;\n"
+        "    -j) have_j=1 ;;\n"
+        '    -f) i=$((i + 1)); i=$((i + 1)); value="${args[$i]}" ;;\n'
+        '    +*) outfmt="$a" ;;\n'
+        "  esac\n"
+        "  i=$((i + 1))\n"
+        "done\n"
+        'if [ "$have_d" = 1 ] && [ "$have_j" != 1 ]; then\n'
+        '  echo "date: illegal option -- d (fake BSD date)" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ "$have_j" = 1 ]; then\n'
+        '  exec "$REAL_DATE" -u -d "$value" "$outfmt"\n'
+        "fi\n"
+        'exec "$REAL_DATE" "$@"\n'
+    )
+    script.write_bytes(body.encode())  # LF endings: a CRLF shebang breaks bash on Windows
+    script.chmod(0o755)
+
+
+def _run(tmp_path, *args, extra_env=None, fake_date=False):
     log = tmp_path / "curl.log"
     if log.exists():
         log.unlink()
     _fake_curl(tmp_path / "bin", log)
+    if fake_date:
+        _fake_date(tmp_path / "bin")
     env = {
         **os.environ,
         "SHIM_DIR": _msys_path(tmp_path / "bin"),
@@ -247,6 +289,31 @@ def test_missing_or_unparseable_last_modified_skips_package(tmp_path, lastmod):
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "SDTM has no parseable Last-Modified" in proc.stderr
     assert not _dest(tmp_path).exists()  # never a folder dated today
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+def test_lastmod_parses_via_bsd_date_fallback(tmp_path):
+    # A fake `date` rejects GNU `-d` first, forcing the wrapper's BSD `-j -f`
+    # fallback; the shim delegates that to the real date so the release date
+    # still comes out right. --dry-run's logged path proves the parse worked
+    # without the empty/garbage guard turning it into today's date.
+    proc, calls = _run(tmp_path, "--dry-run", "--max-files", "1", fake_date=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM/2026-09-25/SDTM_Terminology.txt" in proc.stderr
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+@pytest.mark.parametrize("lastmod", ["none", "not a date"])
+def test_missing_or_unparseable_last_modified_skips_package_bsd_date(tmp_path, lastmod):
+    # Same guard as test_missing_or_unparseable_last_modified_skips_package, but
+    # with the BSD-only `date` shim: both the GNU attempt and the BSD fallback
+    # must fail cleanly on empty/garbage input, never producing today's date.
+    proc, calls = _run(
+        tmp_path, "--max-files", "1", extra_env={"FAKE_LASTMOD": lastmod}, fake_date=True
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM has no parseable Last-Modified" in proc.stderr
+    assert not _dest(tmp_path).exists()
     assert not any(c.startswith("GET ") for c in calls)
 
 
