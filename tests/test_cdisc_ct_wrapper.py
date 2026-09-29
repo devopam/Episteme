@@ -49,6 +49,12 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     FAKE_GET_FAIL=1     -> downloads fail (curl rc 22, nothing written).
     FAKE_HEAD_FAIL=1    -> HEAD requests fail (curl rc 6, as for a DNS error).
     FAKE_LASTMOD=<v>    -> Last-Modified override; "none" omits the header.
+    FAKE_REDIRECT=1     -> HEAD answers a 301 (text/html, Location) hop first; the
+                           final 200 block is only emitted when -L was passed (so
+                           the test fails if the wrapper stops following it).
+    FAKE_REDIRECT_FINAL_HTML=1 -> with FAKE_REDIRECT=1, the FINAL (post-redirect)
+                           block is text/html instead of text/plain, so the package
+                           must be skipped on the final response, not the 301's.
     Each call is logged as `HEAD <url>` or `GET <url>`.
     """
     bindir.mkdir(parents=True, exist_ok=True)
@@ -58,16 +64,23 @@ def _fake_curl(bindir: Path, log: Path) -> None:
     body = (
         "#!/usr/bin/env bash\n"
         f'BIN="{bindir.as_posix()}"\n'
-        "out=''; url=''; head=0; prev=''\n"
+        "out=''; url=''; head=0; follow=0; prev=''\n"
         'for a in "$@"; do\n'
         '  [ "$prev" = "-o" ] || [ "$prev" = "--output" ] && out="$a"\n'
-        '  case "$a" in --*) ;; -*I*) head=1 ;; http*) url="$a" ;; esac\n'
+        '  case "$a" in --*) ;; -*I*) head=1 ;; -*L*) follow=1 ;; http*) url="$a" ;; esac\n'
         '  prev="$a"\n'
         "done\n"
         'if [ "${FAKE_BAD_BODY:-0}" = 1 ]; then src="$BIN/bad.txt"; else src="$BIN/good.txt"; fi\n'
         'if [ "$head" = 1 ]; then\n'
         f'  echo "HEAD $url" >> "{log.as_posix()}"\n'
         '  [ "${FAKE_HEAD_FAIL:-0}" = 1 ] && { echo "curl: (6) no host" >&2; exit 6; }\n'
+        '  if [ "${FAKE_REDIRECT:-0}" = 1 ]; then\n'
+        '    printf "HTTP/1.1 301 Moved Permanently\\r\\n"\n'
+        '    printf "Location: %s?redirected=1\\r\\n" "$url"\n'
+        '    printf "Content-Type: text/html\\r\\n"\n'
+        '    printf "Content-Length: 42\\r\\n\\r\\n"\n'
+        '    [ "$follow" = 1 ] || exit 0\n'
+        "  fi\n"
         '  printf "HTTP/1.1 200 OK\\r\\n"\n'
         '  case "$url" in\n'
         '    *SEND*) if [ "${FAKE_SEND_MISSING:-0}" = 1 ]; then\n'
@@ -79,9 +92,16 @@ def _fake_curl(bindir: Path, log: Path) -> None:
         '    */Protocol/*) lm="Sat, 11 Jul 2026 23:27:50 GMT" ;;\n'
         '    *) lm="Fri, 25 Sep 2026 15:43:39 GMT" ;;\n'
         "  esac\n"
+        '  [ -n "${FAKE_LASTMOD:-}" ] && lm="$FAKE_LASTMOD"\n'
+        '  if [ "${FAKE_REDIRECT_FINAL_HTML:-0}" = 1 ]; then\n'
+        '    printf "Content-Type: text/html\\r\\n"\n'
+        '    printf "Content-Length: 99\\r\\n"\n'
+        '    [ "$lm" = none ] || printf "Last-Modified: %s\\r\\n" "$lm"\n'
+        '    printf "\\r\\n"\n'
+        "    exit 0\n"
+        "  fi\n"
         '  printf "Content-Type: text/plain\\r\\n"\n'
         '  printf "Content-Length: %s\\r\\n" "$(wc -c < "$src" | tr -d " ")"\n'
-        '  [ -n "${FAKE_LASTMOD:-}" ] && lm="$FAKE_LASTMOD"\n'
         '  [ "$lm" = none ] || printf "Last-Modified: %s\\r\\n" "$lm"\n'
         '  printf "\\r\\n"\n'
         "  exit 0\n"
@@ -314,6 +334,33 @@ def test_missing_or_unparseable_last_modified_skips_package_bsd_date(tmp_path, l
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "SDTM has no parseable Last-Modified" in proc.stderr
     assert not _dest(tmp_path).exists()
+    assert not any(c.startswith("GET ") for c in calls)
+
+
+def test_head_follows_redirect_and_uses_final_headers(tmp_path):
+    # The fake curl only emits the post-redirect 200 block when it actually saw
+    # -L; without it, the wrapper would stall on the 301's text/html headers and
+    # skip the package. FAKE_REDIRECT_FINAL_HTML is unset, so the final block is
+    # the normal text/plain terminology file.
+    proc, calls = _run(tmp_path, "--max-files", "1", extra_env={"FAKE_REDIRECT": "1"})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert (_dest(tmp_path) / "SDTM" / "2026-09-25" / "SDTM_Terminology.txt").is_file()
+    assert any(c.startswith("GET ") for c in calls)
+
+
+def test_head_follows_redirect_final_html_is_skipped(tmp_path):
+    # The 301 hop's own Content-Type is text/html too, so this also proves the
+    # skip decision is keyed off the FINAL block, not merely "any html seen".
+    proc, calls = _run(
+        tmp_path,
+        "--max-files",
+        "1",
+        extra_env={"FAKE_REDIRECT": "1", "FAKE_REDIRECT_FINAL_HTML": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "SDTM not available" in proc.stderr
+    assert "text/html" in proc.stderr
+    assert not (_dest(tmp_path) / "SDTM").exists()
     assert not any(c.startswith("GET ") for c in calls)
 
 

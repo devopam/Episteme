@@ -60,9 +60,13 @@ _header_value() { # _header_value NAME <<< "$hdr" -> last value of a (case-insen
 failed=0
 for pkg in "${packages[@]}"; do
     url="$CDISC_CT_BASE/$pkg/$pkg%20Terminology.txt"
-    # Headers only (-I) — never a body. No -L: runs under --dry-run too.
+    # Headers only (-I), following redirects (-L) — never a body; -I/-L together
+    # never fetch one, so this is safe under --dry-run too. With -L, curl prints
+    # one header block per hop; _header_value scans the whole concatenated text
+    # and keeps the LAST match of each name, so Content-Type/Last-Modified are
+    # always read from the final response, never an intermediate redirect's.
     # pipefail: a curl failure (DNS, timeout, refused) is the pipeline's status.
-    if ! hdr="$(curl -sSI --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"; then
+    if ! hdr="$(curl -sSI -L --connect-timeout 20 --max-time 60 "$url" 2>/dev/null | tr -d '\r')"; then
         log WARN "cdisc_ct: could not reach NCI for $pkg ($url); skipping"
         continue
     fi
