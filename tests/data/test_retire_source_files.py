@@ -17,8 +17,10 @@ pytestmark = pytest.mark.pg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-OLD_SF = "SDTM__2026-06-26__SDTM_Terminology.txt"
-NEW_SF = "SDTM__2026-09-25__SDTM_Terminology.txt"
+# I3 (whole-branch review): obviously fake release names, so a test row can
+# never be mistaken for -- or collide with -- a real quarterly release.
+OLD_SF = "SDTM__1999-01-01__SDTM_Terminology.txt"
+NEW_SF = "SDTM__1999-04-01__SDTM_Terminology.txt"
 
 
 def _setup_schema(conn):
@@ -163,8 +165,8 @@ def test_records_load_replace_audit(pg_conn, monkeypatch, tmp_path):
         assert run_id == "r1"
 
 
-SEND_OLD_SF = "SEND__2026-06-26__SEND_Terminology.txt"
-SEND_NEW_SF = "SEND__2026-09-25__SEND_Terminology.txt"
+SEND_OLD_SF = "SEND__1999-01-01__SEND_Terminology.txt"
+SEND_NEW_SF = "SEND__1999-04-01__SEND_Terminology.txt"
 
 
 def _count(conn, source_file):
@@ -235,7 +237,7 @@ def test_cli_never_touches_package_absent_locally(pg_conn, monkeypatch, tmp_path
     _prep(monkeypatch, tmp_path)
     _setup_schema(pg_conn)
     raw, processed = tmp_path / "raw", tmp_path / "processed"
-    _raw_release(raw, "SDTM", "2026-09-25")
+    _raw_release(raw, "SDTM", "1999-04-01")
     _mark_loaded(processed, NEW_SF)
 
     _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
@@ -254,8 +256,8 @@ def test_cli_skips_unloaded_package_but_retires_loaded_one(pg_conn, monkeypatch,
     _prep(monkeypatch, tmp_path)
     _setup_schema(pg_conn)
     raw, processed = tmp_path / "raw", tmp_path / "processed"
-    _raw_release(raw, "SDTM", "2026-09-25")
-    _raw_release(raw, "SEND", "2026-09-25")
+    _raw_release(raw, "SDTM", "1999-04-01")
+    _raw_release(raw, "SEND", "1999-04-01")
     _mark_loaded(processed, NEW_SF)  # SDTM loaded; SEND's new release not loaded yet
 
     _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
@@ -268,6 +270,60 @@ def test_cli_skips_unloaded_package_but_retires_loaded_one(pg_conn, monkeypatch,
     assert _count(pg_conn, OLD_SF) == 0  # SDTM old release retired
     assert _count(pg_conn, NEW_SF) == 1
     assert _count(pg_conn, SEND_OLD_SF) == 1  # SEND old kept until its new release loads
+
+
+def test_cli_skips_package_when_kept_release_has_zero_db_rows(
+    pg_conn, monkeypatch, tmp_path, capsys
+):
+    # I2 (whole-branch review): the local raw tree + load_success marker say
+    # NEW_SF is current and loaded, but the DB holds no rows for it at all --
+    # retire must refuse to delete OLD_SF's rows on that mismatch.
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    raw, processed = tmp_path / "raw", tmp_path / "processed"
+    _raw_release(raw, "SDTM", "1999-04-01")
+    _mark_loaded(processed, NEW_SF)
+
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
+    pg_conn.commit()
+
+    assert _run_retire_cli(monkeypatch, raw, processed) == 0
+    pg_conn.rollback()
+    assert _count(pg_conn, OLD_SF) == 1  # nothing retired: the package was skipped
+    assert _count(pg_conn, NEW_SF) == 0
+    out = capsys.readouterr().out
+    assert "SDTM" in out and "skipped" in out
+
+
+def test_cli_skips_package_when_db_holds_a_newer_dated_release_than_local(
+    pg_conn, monkeypatch, tmp_path, capsys
+):
+    # I2 (whole-branch review): the DB holds a release for this package dated
+    # AFTER the local newest -- e.g. this machine's raw tree is stale relative
+    # to another machine's more recent load. Retire must refuse to delete
+    # anything for the package rather than trust the local "newest" blindly.
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    raw, processed = tmp_path / "raw", tmp_path / "processed"
+    _raw_release(raw, "SDTM", "1999-04-01")  # local newest == NEW_SF
+    _mark_loaded(processed, NEW_SF)
+
+    newer_elsewhere = "SDTM__1999-07-01__SDTM_Terminology.txt"  # newer than NEW_SF, not local
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1", source="cdisc_ct", source_file=OLD_SF)
+    _insert_article(pg_conn, id_="cdisc_ct:SDTM:C1:p1:v2", source="cdisc_ct", source_file=NEW_SF)
+    _insert_article(
+        pg_conn, id_="cdisc_ct:SDTM:C1:p1:v3", source="cdisc_ct", source_file=newer_elsewhere
+    )
+    pg_conn.commit()
+
+    assert _run_retire_cli(monkeypatch, raw, processed) == 0
+    pg_conn.rollback()
+    # nothing retired for SDTM: the DB holds a release newer than the local newest
+    assert _count(pg_conn, OLD_SF) == 1
+    assert _count(pg_conn, NEW_SF) == 1
+    assert _count(pg_conn, newer_elsewhere) == 1
+    out = capsys.readouterr().out
+    assert "SDTM" in out and "skipped" in out
 
 
 def test_empty_keep_set_raises_and_deletes_nothing(pg_conn, monkeypatch, tmp_path):

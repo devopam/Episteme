@@ -80,6 +80,12 @@ def test_keep_set_uses_shard_filename_with_extension_for_the_marker(tmp_path, mo
         "episteme.data.cdisc_ct.retire.connection",
         lambda: _FakeConnCtx(),
     )
+    # This test is about the marker-filename-extension logic, not I2's DB
+    # verification (which needs a real cursor) -- stub it out as confirmed.
+    monkeypatch.setattr(
+        "episteme.data.cdisc_ct.retire._verify_before_retire",
+        lambda conn, **kw: (True, ""),
+    )
 
     rc = retire.main(["--raw-dir", str(raw), "--processed-dir", str(processed)])
     assert rc == 0
