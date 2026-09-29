@@ -86,6 +86,14 @@ def test_uniprot_override_and_cdisc_note():
     assert "HPO" in sec and "`unknown`" in sec
 
 
+def test_cdisc_usdm_row_is_download_only():
+    sec = _section(doc(DOC), "### 6.3", "\n---")
+    row = next(line for line in sec.splitlines() if line.startswith("| `cdisc_usdm`"))
+    assert "download-only" in row
+    assert "until CDISC confirms" in row
+    assert "training corpus" in row
+
+
 def test_identity_and_storage_terms_present():
     text = doc(DOC)
     for term in ("input_key", "delete-by-`source_file`", "episteme.articles"):

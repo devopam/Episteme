@@ -234,14 +234,14 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 | Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
 | `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
 | `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
-| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc` | yes | no | no | no | no | no | no | download only |
+| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc`, `cdisc_usdm` | yes | no | no | no | no | no | no | download only |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
 
 Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
 
 ### 4.3 Flags
 
-- **`--dry-run`** is supported on `download` only; any other stage (including `all`) exits 3 with `... writes the DB - --dry-run is supported on 'download' only`. A dry run writes no files and skips the whole audit bracket (`dry-run: skipping run_start/run_end audit bracket`). It is **not** always offline: most wrappers still list or probe the upstream over the network (`curl` listings, mirror and release probes; `cdisc_bc` makes two GitHub API calls that count against the unauthenticated 60 requests per hour limit). The Hugging Face wrappers (`apollo`, `guidelines`, `hf_corpus`) only echo what they would do. `hf_corpus` with no repo id is a soft no-op (exit 0) under `--dry-run` and an error otherwise.
+- **`--dry-run`** is supported on `download` only; any other stage (including `all`) exits 3 with `... writes the DB - --dry-run is supported on 'download' only`. A dry run writes no files and skips the whole audit bracket (`dry-run: skipping run_start/run_end audit bracket`). It is **not** always offline: most wrappers still list or probe the upstream over the network (`curl` listings, mirror and release probes; `cdisc_bc` makes two GitHub API calls and `cdisc_usdm` makes three, all counting against the unauthenticated 60 requests per hour limit). The Hugging Face wrappers (`apollo`, `guidelines`, `hf_corpus`) only echo what they would do. `hf_corpus` with no repo id is a soft no-op (exit 0) under `--dry-run` and an error otherwise.
 - **`--max-files N`** bounds the run; the meaning is per stage:
   - `download`: caps the resolved file set (`pmc` translates it to `--limit`; default `--limit 10` when absent, `0` means all). Honoured by every source except `apollo`, `guidelines` and `hf_corpus` (the Hugging Face CLI resumes by itself; the flag is ignored with an INFO line).
   - `extract` and `serialize`: caps the number of input files parsed (default from `EPISTEME_SAMPLE_LIMIT`, `0` = all).
@@ -626,6 +626,29 @@ What each prints: `download` logs one `cdisc_ct: <Package> release <date> fetche
 | `no CDISC CT release files under <dir>; nothing to retire` | Nothing has been downloaded and serialized into a shard yet for any package on this machine |
 | Retire ran but an older release's rows are still there for one package | Check that package's newest release actually has a `load_success` marker (section 4.4) and that the database-verification checks above pass; a `--max-files`-bounded run only lands and loads the packages it capped to, so the others are correctly left alone |
 
+### 5.7 CDISC USDM (`cdisc_usdm`)
+
+CDISC's Unified Study Definitions Model from the public GitHub repository `cdisc-org/DDF-RA`: the `Deliverables/` folder of the latest release (OpenAPI spec, USDM controlled terminology, implementation guide PDF, CORE rules, UML model and data dictionary; about 15 MB for `v4.0.0`). **Download-only; there is no serializer.** No modes; a stray positional token makes the wrapper die (rc 1 through the dispatcher).
+
+- **Pinned to one release.** Each run resolves the latest release tag, then that tag's commit SHA, then lists the whole tree at that SHA in one call; every file is fetched at the SHA. Files land in `<raw>/cdisc_usdm/<release-tag>/`, for example `<raw>/cdisc_usdm/v4.0.0/Deliverables/API/USDM_API.json`. A new release gets its own folder; older release folders are never touched.
+- **`PROVENANCE.txt`** is written in the release folder: `source_repo`, `release_tag`, `commit_sha`, `retrieved_at`, and the licence and corpus-status notes. The repository `LICENSE` and `README.md` (which carries the licence wording) are stored beside it and do not count against `--max-files`.
+- **Licence: UNVERIFIED.** The README grants MIT to code and scripts and CC-BY-4.0 to content files like documentation and minutes; the USDM model files are named in neither. No serializer exists or is planned until CDISC confirms a licence for the model files; this source is excluded from any training corpus. Verify before any redistribution (docs/12).
+- **Re-fetch:** size-matched files are skipped, so a same-size change under a moved tag is not detected; run with `--force --reason "..."` in that case. If a release tag is moved or re-published, always use `--force --reason "..."` — otherwise a size-mismatched file is resumed onto the old local copy rather than replaced.
+- Every run, `--dry-run` included, makes three GitHub API calls (release, commit, tree). Unauthenticated GitHub allows 60 requests per hour; hitting the limit fails the stage (rc 1 through the dispatcher) with `cannot resolve ... (GitHub API rate limit?)`.
+
+```bash
+# bounded first run: two data files plus LICENSE, README.md and PROVENANCE.txt
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_usdm download --max-files 2
+
+# preview (network: GitHub API only; writes nothing)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_usdm download --dry-run
+
+# force a refetch of the current release
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_usdm download --force --reason "refetch USDM release"
+```
+
+Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN that it was not found and downloads fall back to sequential `curl`; that is expected. The run ends with `write_sync_stamp: ./01_raw/cdisc_usdm/last_sync_utc.txt` and `pipeline done: cdisc_usdm download`, and `<raw>/cdisc_usdm/<release-tag>/` then holds `Deliverables/`, `LICENSE`, `README.md` and `PROVENANCE.txt`.
+
 ---
 
 ## 6. Materialize, ingest and field-shape checks
@@ -689,7 +712,7 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | Daily | `pubmed download updates`, then `extract` and `load`; PMC delta if running continuous sync; author-manuscript incrementals (`europepmc_manuscript download incr`) when Europe PMC is up |
 | Weekly | `europepmc_lite download` then `enrich`; review failed markers under `<processed>/_ops/<source>/` |
 | Monthly | `europepmc_id_mappings download` (after the `head` integrity check) then `load`; `europepmc_abstracts download` |
-| On upstream release | Rerun `download` for the structured sources; `serialize` and `load`; `cdisc_bc` with `--force --reason` |
+| On upstream release | Rerun `download` for the structured sources; `serialize` and `load`; `cdisc_bc` with `--force --reason`; `cdisc_usdm` on a new USDM release (no `--force` needed: a new tag gets a new folder) |
 | After each major pull | `--report` field-shape smoke check (section 6.3); `source_inventory.sh` |
 | Before and after any production or go-live change | `verify_audit_trail.sh`; the docs/11 section 8 checklist |
 | When SSD is ready | Full `pmc all`; consolidate `<raw>` |
