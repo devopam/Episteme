@@ -248,16 +248,18 @@ def _bucket_archive_nxml(title: str, part_title: str, body_token: str, abstract_
 """
 
 
-def _write_bucket_archive(raw_dir: Path, rel_subdir: str, nxml: str) -> Path:
-    """Write ``NBK1.tar.gz`` (same basename every call) under
+def _write_bucket_archive(
+    raw_dir: Path, rel_subdir: str, nxml: str, basename: str = "NBK1"
+) -> Path:
+    """Write ``<basename>.tar.gz`` (same basename every call by default) under
     ``raw_dir/packages/<rel_subdir>/``, mirroring
     ``download_bookshelf.sh``'s ``packages/<rel>`` layout."""
     pkg_dir = raw_dir / "packages" / rel_subdir
     pkg_dir.mkdir(parents=True, exist_ok=True)
-    tar_path = pkg_dir / "NBK1.tar.gz"
+    tar_path = pkg_dir / f"{basename}.tar.gz"
     data = nxml.encode("utf-8")
     with tarfile.open(tar_path, "w:gz") as tar:
-        info = tarfile.TarInfo(name="NBK1/NBK1.nxml")
+        info = tarfile.TarInfo(name=f"{basename}/{basename}.nxml")
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
     return tar_path
@@ -391,3 +393,86 @@ def test_same_basename_different_buckets_both_processed_with_distinct_content(tm
     assert "TOKEN-B" not in (part_a["text"] or "")
     assert "TOKEN-B" in (part_b["text"] or "")
     assert "TOKEN-A" not in (part_b["text"] or "")
+
+
+def test_same_basename_no_nbk_token_gets_distinct_ids(tmp_path):
+    """Fallback-id regression (SP6/SP7 drift log close-out): when the archive
+    filename carries NO ``NBK\\d+`` token, two archives sharing an identical
+    basename in different subfolders must NOT collide on ``id`` (the
+    ``postgres_loader`` (d0) id-collision guard would otherwise keep only the
+    last-loaded one). The id must instead be derived from
+    ``checkpoint_markers.input_key(path, raw_dir)``, which is unique per
+    subfolder -- unlike the NBK-branch collision the sibling test above
+    documents as a pre-existing, accepted, out-of-scope risk."""
+    from episteme.data.bookshelf.extract_bookshelf import extract_bookshelf
+
+    raw = tmp_path / "01_raw" / "bookshelf"
+    _write_bucket_archive(
+        raw,
+        "aa/11",
+        _bucket_archive_nxml("Book A", "Part A", "TOKEN-A", "Bucket-A"),
+        basename="book",
+    )
+    _write_bucket_archive(
+        raw,
+        "bb/22",
+        _bucket_archive_nxml("Book B", "Part B", "TOKEN-B", "Bucket-B"),
+        basename="book",
+    )
+
+    processed = tmp_path / "02_processed"
+    res = extract_bookshelf(raw, processed, workers=1)
+
+    assert res["inputs"] == 2
+    assert res["ok"] == 2
+    assert res["failed"] == 0
+
+    import polars as pl
+
+    shard_dir = processed / "staging" / "bookshelf"
+    shards = sorted(shard_dir.glob("*.*"))
+    rows = []
+    for shard in shards:
+        rows.extend(
+            (
+                pl.read_parquet(shard) if shard.suffix == ".parquet" else pl.read_ndjson(shard)
+            ).to_dicts()
+        )
+
+    books = [r for r in rows if r["container_id"] is None]
+    parts = [r for r in rows if r["container_id"] is not None]
+    assert len(books) == 2
+    assert len(parts) == 2
+
+    # No-NBK id collision must be resolved: two distinct book ids.
+    book_ids = {b["id"] for b in books}
+    assert len(book_ids) == 2, f"expected distinct ids, got {book_ids}"
+
+    # Each part's container_id must point at its own book's id.
+    by_id = {b["id"]: b for b in books}
+    for p in parts:
+        assert p["container_id"] in by_id
+
+    part_ids = {p["id"] for p in parts}
+    assert len(part_ids) == 2, f"expected distinct part ids, got {part_ids}"
+
+
+def test_nbk_named_archive_id_unchanged(tmp_path):
+    """The NBK branch of the fallback-id fix must not change: an
+    NBK-accession-named archive keeps its ``bookshelf:<NBK...>`` id exactly
+    as before."""
+    from episteme.data.bookshelf.extract_bookshelf import extract_bookshelf
+
+    raw_dir = _write_real_shape_archive(tmp_path / "src")
+    out_dir = tmp_path / "out"
+    res = extract_bookshelf(raw_dir, out_dir)
+    assert res["ok"] == 1
+
+    import polars as pl
+
+    shard = sorted((out_dir / "staging" / "bookshelf").glob("*.*"))[0]
+    rows = (
+        pl.read_parquet(shard) if shard.suffix == ".parquet" else pl.read_ndjson(shard)
+    ).to_dicts()
+    book = [r for r in rows if r["container_id"] is None][0]
+    assert book["id"] == "bookshelf:NBK599773"
