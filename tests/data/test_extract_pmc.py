@@ -1,7 +1,8 @@
 import json
+import logging
 from pathlib import Path
 
-from episteme.data.pmc.extract_pmc import discover_meta_files, extract_pmc
+from episteme.data.pmc.extract_pmc import discover_meta_files, extract_pmc, find_xml_for_meta
 
 FIX = Path(__file__).parent / "fixtures" / "pmc"
 
@@ -117,20 +118,23 @@ def test_same_basename_different_subdirs_both_processed(tmp_path):
 
     Also proves that, for this colocated-XML layout, the same-name
     collision does not cross-contaminate XML resolution: each metadata
-    file's colocated XML (``meta_path.with_suffix(".xml")``, the fallback
-    candidate in ``find_xml_for_meta``) is matched to its own row, not the
-    sibling directory's file. This is NOT the same as proving XML
-    resolution is collision-safe in general: ``find_xml_for_meta`` also
-    tries ``raw_dir / "xml" / f"{version_id}.xml"`` (a single shared
-    directory keyed only by ``version_id = meta_path.stem``, which two
-    same-basename metas share), so a raw_dir carrying that layout instead
-    -- e.g. a real ``download_pmc.py`` output tree merged from two runs,
-    both dropping XML into the one shared ``xml/`` dir -- would still
-    resolve both same-named metas to whichever one XML file happens to be
-    there. That is a separate, pre-existing ambiguity in
-    ``find_xml_for_meta``'s shared-``xml/``-dir candidates, not something
-    this task's basename-identity migration introduces or fixes; see the
-    task-9 report for the full reasoning.
+    file's colocated XML (``meta_path.with_suffix(".xml")``, now the FIRST
+    -- most specific -- candidate ``find_xml_for_meta`` checks, per the
+    SP6/SP7 drift-log close-out ordering fix) is matched to its own row,
+    not the sibling directory's file. This is NOT the same as proving XML
+    resolution is collision-safe in general: absent a colocated file,
+    ``find_xml_for_meta`` still falls through to ``raw_dir / "xml" /
+    f"{version_id}.xml"`` (a single shared directory keyed only by
+    ``version_id = meta_path.stem``, which two same-basename metas share),
+    so a raw_dir carrying that layout instead -- e.g. a real
+    ``download_pmc.py`` output tree merged from two runs, both dropping XML
+    into the one shared ``xml/`` dir with no colocated copy -- would still
+    resolve both same-named metas to that one shared file. Two or more
+    *distinct* files found only via the ``rglob`` fallback are now treated
+    as ambiguous (logged, ``None`` returned) rather than picked
+    arbitrarily; a single shared path hit by exact name is not covered by
+    that ambiguity check and is intentionally left as pre-existing,
+    documented behaviour -- see the task-9 report for the full reasoning.
     """
     raw = tmp_path / "01_raw" / "pmc" / "oa_comm"
     dir_a = raw / "metadata" / "batch_a"
@@ -180,3 +184,63 @@ def test_same_basename_different_subdirs_both_processed(tmp_path):
     assert by_pmcid["PMC2"]["pmid"] == "40000002"
     assert by_pmcid["PMC1"]["doi"] == "10.0/a"
     assert by_pmcid["PMC2"]["doi"] == "10.0/b"
+
+
+# --------------------------------------------------------------------------- #
+# find_xml_for_meta ordering regression (SP6/SP7 drift log close-out)
+# --------------------------------------------------------------------------- #
+
+
+def test_find_xml_for_meta_prefers_colocated_over_shared(tmp_path):
+    """Colocated XML (meta_path.with_suffix('.xml')) must win over a shared
+    raw_dir/xml/<version_id>.xml, otherwise two different metadata files
+    sharing the same version_id could both attach the same shared XML --
+    the most specific candidate must be checked first."""
+    raw = tmp_path / "raw"
+    batch_dir = raw / "batchA"
+    batch_dir.mkdir(parents=True)
+    meta_path = batch_dir / "PMC1.1.json"
+    meta_path.write_text(_meta("PMC1", 111, "10.1/a"), encoding="utf-8")
+
+    colocated_xml = batch_dir / "PMC1.1.xml"
+    colocated_xml.write_text(_xml("PMC1", 111, "10.1/a"), encoding="utf-8")
+
+    # A shared raw_dir/xml/<version_id>.xml with DIFFERENT content -- must
+    # lose to the colocated file above.
+    shared_dir = raw / "xml"
+    shared_dir.mkdir(parents=True)
+    shared_xml = shared_dir / "PMC1.1.xml"
+    shared_xml.write_text(_xml("PMC1", 999, "10.1/shared"), encoding="utf-8")
+
+    result = find_xml_for_meta(meta_path, raw, "PMC1.1")
+
+    assert result == colocated_xml
+
+
+def test_find_xml_for_meta_ambiguous_rglob_returns_none_and_logs_warning(tmp_path, caplog):
+    raw = tmp_path / "raw"
+    meta_dir = raw / "batchA"
+    meta_dir.mkdir(parents=True)
+    meta_path = meta_dir / "PMC1.1.json"
+    meta_path.write_text(_meta("PMC1", 111, "10.1/a"), encoding="utf-8")
+
+    # No colocated, no batch-own, no shared raw_dir/xml or raw_dir/xml/all
+    # candidate -- only two ambiguous matches deeper under raw_dir/xml.
+    sub_a = raw / "xml" / "subA"
+    sub_b = raw / "xml" / "subB"
+    sub_a.mkdir(parents=True)
+    sub_b.mkdir(parents=True)
+    (sub_a / "PMC1.1.xml").write_text(_xml("PMC1", 111, "10.1/a"), encoding="utf-8")
+    (sub_b / "PMC1.1.xml").write_text(_xml("PMC1", 222, "10.1/b"), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="episteme.data.pmc.extract_pmc"):
+        result = find_xml_for_meta(meta_path, raw, "PMC1.1")
+
+    assert result is None
+    warnings = [
+        r
+        for r in caplog.records
+        if r.name == "episteme.data.pmc.extract_pmc" and r.levelno == logging.WARNING
+    ]
+    assert warnings, "expected a WARNING logged for the ambiguous rglob match"
+    assert "PMC1.1" in warnings[0].getMessage()

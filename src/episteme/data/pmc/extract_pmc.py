@@ -72,22 +72,49 @@ _AUDIT_LOCK = threading.Lock()
 
 
 def find_xml_for_meta(meta_path: Path, raw_dir: Path, version_id: str) -> Path | None:
+    """Locate the JATS XML for one metadata file, most specific match first.
+
+    Order matters: two different metadata files can share the same
+    ``version_id`` (e.g. re-downloaded/re-batched inputs), so a shared
+    ``raw_dir/xml`` (or ``raw_dir/xml/all``) directory must never be checked
+    before the XML colocated with -- or scoped to the same batch as -- the
+    metadata file itself, or both metadata files would silently attach the
+    same shared XML.
+
+      (a) colocated with the metadata file (``meta_path.with_suffix(".xml")``)
+      (b) this batch's own ``xml/`` folder (``meta_path.parent.parent / "xml"``)
+      (c) the shared ``raw_dir/xml`` and ``raw_dir/xml/all`` directories
+      (d) an ``raw_dir/xml`` rglob fallback -- only when it finds EXACTLY ONE
+          match; two or more is an unresolvable ambiguity, logged as a
+          warning naming the version_id, and ``None`` is returned rather than
+          silently picking one.
+
+    For the normal single-download layout (``download_pmc.py`` writes
+    ``metadata/`` and ``xml/`` side by side under one ``raw_dir``), (a) is
+    absent and (b)/(c) resolve to the same file, so behaviour is unchanged.
+    """
     candidates = [
+        meta_path.with_suffix(".xml"),
         meta_path.parent.parent / "xml" / f"{version_id}.xml",
         raw_dir / "xml" / f"{version_id}.xml",
         raw_dir / "xml" / "all" / f"{version_id}.xml",
-        meta_path.with_suffix(".xml"),
     ]
-    # version_id may be PMC123.1 — also try without path tricks
     for c in candidates:
         if c.is_file():
             return c
-    # search under raw_dir/xml
+    # search under raw_dir/xml -- only an unambiguous single match is usable.
     xml_root = raw_dir / "xml"
     if xml_root.is_dir():
         hits = list(xml_root.rglob(f"{version_id}.xml"))
-        if hits:
+        if len(hits) == 1:
             return hits[0]
+        if len(hits) > 1:
+            _LOG.warning(
+                "ambiguous XML match for version_id=%s under %s: %d candidates, skipping",
+                version_id,
+                xml_root,
+                len(hits),
+            )
     return None
 
 
