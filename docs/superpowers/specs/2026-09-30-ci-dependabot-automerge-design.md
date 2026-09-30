@@ -14,7 +14,7 @@ When Dependabot opens a pull request because a CVE was found, the fix merges int
 
 - **Auto-merge scope:** CVE (security) updates only, any size of version jump, gated by CI.
 - **Routine updates:** weekly, one pull request per package, merged by the user.
-- **Model libraries:** CI installs the full dev set (including `torch`, `transformers`, `accelerate`, `peft`, `trl`) and runs an import smoke test of the model scripts.
+- **Model libraries:** CI installs the full dev set (including `torch`, `transformers`, `accelerate`, `peft`, `trl`) and runs the model smoke tests (see §4.3).
 - **Detecting a CVE pull request:** a Dependabot group that applies only to security updates; the auto-merge workflow acts only on that group. No personal access token.
 - The five `pip`-ecosystem pull requests (#15–#19) were closed with comments and the six CodeQL alerts dismissed with reasons (done 2026-09-30, outside this spec).
 
@@ -24,7 +24,8 @@ When Dependabot opens a pull request because a CVE was found, the fix merges int
 - The only workflow is `.github/workflows/shellcheck.yml` (path-filtered to `scripts/**`). Nothing runs the Python tests on pull requests.
 - The ruleset "default protection" targets `~DEFAULT_BRANCH` with rules `deletion`, `non_fast_forward`, `copilot_code_review`; no bypass actors.
 - The project is managed with `uv` (`uv.lock`, a `[dependency-groups] dev` group with ruff `<0.7`, pytest, bandit, pre-commit). Extras: `data`, `model`, `dev` (= `data` + `model` + pytest + jsonschema).
-- No test imports the model libraries; only `src/episteme/model/{evaluate_benchmarks,train_continual_pretraining,train_preference_optimization,train_supervised_finetuning}.py` do, and each does its work only under `if __name__ == "__main__"`, so importing them is side-effect free.
+- `tests/model/test_model_smoke.py` already imports the four `src/episteme/model/` scripts and runs each one's `main()` as a `--dry_run` against the tiny Hugging Face model `HuggingFaceM4/tiny-random-LlamaForCausalLM` (network needed). It is not `pg`- or `slow`-marked, so `pytest -m "not pg"` runs it. *(Correction 2026-09-30: the chat design said no test touched the model libraries; that missed this file, which imports them through `episteme.model`.)*
+- `ruff format --check .` and `ruff check .` (ruff 0.6.9, the version `uv.lock` pins) fail on the current tree: 8 files would be reformatted and 84 lint errors, all in `src/episteme/data/_legacy_download.py`, `src/episteme/data/curate/{deduplicate_corpus,serialize_structured_sources}.py`, the four `src/episteme/model/` scripts and `tests/model/test_model_smoke.py`. `uv lock --check` passes.
 - `pyyaml` is in `uv.lock` only as a transitive dependency.
 - The `pip`-ecosystem `dependabot.yml` produced pull requests that changed `pyproject.toml` only, never `uv.lock`.
 - `tests/test_run_pipeline_dispatch.py` needs the network and takes about 13 minutes (real `--dry-run` of every source).
@@ -49,6 +50,10 @@ groups:
 
 No group applies to version updates, so routine updates stay one pull request per package. Security updates for each ecosystem arrive as one grouped pull request named after `security-fixes`.
 
+### 4.1a Lint baseline
+
+Before CI can gate anything, the eight files in §3 are brought to a clean `ruff format --check .` and `ruff check .`: `ruff format`, `ruff check --fix`, then hand fixes (long lines wrapped; unused imports removed, except optional-dependency probes such as `import deepspeed` inside `try`, which keep a `# noqa: F401` with a reason; unused locals removed while keeping any call whose side effect matters). No behaviour change; the full non-`pg` suite, including `tests/model/test_model_smoke.py`, must pass before and after.
+
 ### 4.2 CI — `.github/workflows/ci.yml`
 
 - Triggers: `pull_request` (all branches) and `push` to `main`. `permissions: contents: read`. `concurrency` cancels superseded runs of the same pull request.
@@ -57,11 +62,11 @@ No group applies to version updates, so routine updates stay one pull request pe
 - `--locked` makes CI fail if `uv.lock` does not match `pyproject.toml` — the failure the old `pip` pull requests would have caused.
 - The network dispatch smoke test stays a manual, local check (documented in docs/10).
 
-### 4.3 Model import smoke test — `tests/test_model_imports.py`
+### 4.3 Model smoke tests — existing `tests/model/test_model_smoke.py`
 
-- Imports each of the four `episteme.model.*` modules with `importlib.import_module`, parametrised by module name.
-- Not skipped when a library is missing: in CI the full dev set is installed, so a missing or broken model library must fail the run. Locally the `dev` extra is installed as well.
-- Catches broken releases, removed or renamed imports, and install failures; it does not prove training behaviour.
+- No new test. The existing smoke tests import the four `episteme.model.*` scripts and dry-run each `main()` on a tiny model, which exercises the model libraries' loading paths — more than an import check would.
+- CI must run them: the pytest command must not deselect `slow` or ignore `tests/model`.
+- They catch broken releases, removed or renamed APIs and install failures; they do not prove full training behaviour.
 
 ### 4.4 Auto-merge — `.github/workflows/dependabot-auto-merge.yml`
 
@@ -91,10 +96,10 @@ No group applies to version updates, so routine updates stay one pull request pe
 
 ## 5. Tests
 
-- `tests/test_model_imports.py` (§4.3).
 - `tests/test_ci_config.py`, reading the YAML files with `yaml.safe_load` (`pyyaml` added explicitly to the `[dependency-groups] dev` group and to the `dev` extra, `uv.lock` updated):
   - `dependabot.yml`: exactly the `uv` and `github-actions` ecosystems, both weekly, both with group `security-fixes` whose `applies-to` is `security-updates`, and no group with `applies-to: version-updates`.
-  - `ci.yml`: a job `tests`; its steps include `uv sync --locked`, `ruff format --check`, `ruff check`, and a pytest run with `-m "not pg"` and `--ignore=tests/test_run_pipeline_dispatch.py`; `permissions` is read-only.
+  - `ci.yml`: a job `tests`; its steps include `uv sync --locked`, `ruff format --check`, `ruff check`, and a pytest run with `-m "not pg"` and `--ignore=tests/test_run_pipeline_dispatch.py`, that neither ignores `tests/model` nor deselects `slow`; `permissions` is read-only.
+  - PyYAML reads the workflow key `on:` as the boolean `True`; the tests must look up both.
   - `dependabot-auto-merge.yml`: triggered by `pull_request` (not `pull_request_target`); the job condition names `dependabot[bot]`; a step uses `dependabot/fetch-metadata`; the merge step's `if` checks `dependency-group` against `security-fixes`; its command contains `gh pr merge --auto`; no step uses `actions/checkout`.
 - CI itself proves the rest: this change's own pull request must show a green `tests` run before the ruleset step (§4.5).
 
