@@ -717,6 +717,15 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | Before and after any production or go-live change | `verify_audit_trail.sh`; the docs/11 section 8 checklist |
 | When SSD is ready | Full `pmc all`; consolidate `<raw>` |
 
+### 8.1 CI and Dependabot
+
+- **CI** (`.github/workflows/ci.yml`, check `tests`) runs on every pull request and every push to `main`: `uv sync --locked --extra dev`, `ruff format --check .`, `ruff check .`, and `pytest -m "not pg"` without `tests/test_run_pipeline_dispatch.py`. It includes the model smoke tests in `tests/model/`, which download a tiny Hugging Face model. The `pg` tests and the network dispatch smoke test stay local-only; run them before merging changes that touch the database or `run_pipeline.sh`.
+- **`main` requires the `tests` check.** Every change reaches `main` through a pull request; direct pushes (including GitHub web-editor commits) are refused.
+- **Dependabot** checks weekly for `uv` and GitHub Actions updates. Routine updates arrive one pull request per package and wait for a person. Security updates arrive grouped as `security-fixes`; `.github/workflows/dependabot-auto-merge.yml` enables auto-merge on them, so they merge by themselves once `tests` passes.
+- **A security pull request that did not merge** has a failed `tests` run: open its Checks tab, fix the break on the Dependabot branch (or wait for a newer Dependabot push), and it merges when `tests` goes green.
+- **Keep the required check.** Auto-merge relies on `main` requiring `tests`. Removing or renaming that check (in the ruleset or the workflow) turns auto-merge into an immediate merge of every Dependabot security pull request.
+- **Commits added to a Dependabot branch ride along.** Anyone with write access who pushes to a Dependabot security branch gets that commit auto-merged once `tests` passes; review such pushes as you would any change.
+
 ---
 
 ## 9. Document control

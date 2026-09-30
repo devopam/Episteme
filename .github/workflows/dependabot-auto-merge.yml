@@ -1,0 +1,28 @@
+# Enables auto-merge on Dependabot SECURITY pull requests (group `security-fixes`).
+# The merge happens only after the required `tests` check passes (ruleset on main).
+# Never checks out or runs pull-request code.
+name: dependabot-auto-merge
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable auto-merge for security fixes
+        if: steps.meta.outputs.dependency-group == 'security-fixes'
+        run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

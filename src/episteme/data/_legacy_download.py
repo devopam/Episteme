@@ -10,18 +10,19 @@ Not imported anywhere. Its per-source functions are ported in Plan 3:
 Kept for reference + git history until each function has a real home.
 """
 
-import os
-import sys
 import argparse
-import urllib.request
 import ftplib
 import hashlib
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
+
 import requests
 from datasets import load_dataset
+from tqdm import tqdm
 
-# We import pyeuropepmc dynamically if needed, since it might not be fully configured in all test setups
+# We import pyeuropepmc dynamically if needed, since it might not be fully configured in all
+# test setups
 try:
     import pyeuropepmc
 except ImportError:
@@ -44,12 +45,11 @@ def download_file(url, output_path, dry_run=False):
         return True
 
     temp_path = output_path + ".tmp"
-    headers = {}
-    
+
     # Check if a partial download exists to resume
     file_exists = os.path.exists(output_path)
     temp_exists = os.path.exists(temp_path)
-    
+
     if file_exists:
         print(f"File already exists: {output_path}")
         return True
@@ -58,31 +58,34 @@ def download_file(url, output_path, dry_run=False):
     existing_size = 0
     if temp_exists:
         existing_size = os.path.getsize(temp_path)
-        resume_header = {'Range': f'bytes={existing_size}-'}
+        resume_header = {"Range": f"bytes={existing_size}-"}
         print(f"Resuming download of {output_path} from byte {existing_size}")
 
     try:
         response = requests.get(url, headers=resume_header, stream=True, timeout=30)
-        
+
         # If server does not support range queries, restart download
-        mode = 'ab' if (response.status_code == 206 and temp_exists) else 'wb'
-        if mode == 'wb':
+        mode = "ab" if (response.status_code == 206 and temp_exists) else "wb"
+        if mode == "wb":
             existing_size = 0
 
-        total_size = int(response.headers.get('content-length', 0)) + existing_size
-        
-        with open(temp_path, mode) as f, tqdm(
-            desc=os.path.basename(output_path),
-            total=total_size,
-            unit='iB',
-            unit_scale=True,
-            unit_divisor=1024,
-            initial=existing_size
-        ) as bar:
+        total_size = int(response.headers.get("content-length", 0)) + existing_size
+
+        with (
+            open(temp_path, mode) as f,
+            tqdm(
+                desc=os.path.basename(output_path),
+                total=total_size,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+                initial=existing_size,
+            ) as bar,
+        ):
             for data in response.iter_content(chunk_size=8192):
                 size = f.write(data)
                 bar.update(size)
-                
+
         os.replace(temp_path, output_path)
         return True
     except Exception as e:
@@ -96,11 +99,11 @@ def download_pubmed(output_dir, num_threads=4, dry_run=False, sample_only=False)
     os.makedirs(output_dir, exist_ok=True)
     ftp_host = "ftp.ncbi.nlm.nih.gov"
     ftp_path = "pubmed/baseline"
-    
+
     if dry_run:
         print(f"[DRY-RUN] Would connect to {ftp_host}/{ftp_path} and download XML gz files.")
         return
-        
+
     try:
         ftp = ftplib.FTP(ftp_host)
         ftp.login()
@@ -114,18 +117,23 @@ def download_pubmed(output_dir, num_threads=4, dry_run=False, sample_only=False)
             # Generate local mock file for testing
             mock_file = os.path.join(output_dir, files[0])
             with open(mock_file, "w") as f:
-                f.write("<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID><Article><ArticleTitle>Sample title</ArticleTitle><Abstract><AbstractText>Sample abstract text</AbstractText></Abstract></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>")
+                f.write(
+                    "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID>"
+                    "<Article><ArticleTitle>Sample title</ArticleTitle>"
+                    "<Abstract><AbstractText>Sample abstract text</AbstractText></Abstract>"
+                    "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+                )
             print(f"Created mock sample PubMed file at {mock_file}")
             return
 
     if sample_only:
         files = files[:2]
-        
+
     urls = [f"https://{ftp_host}/{ftp_path}/{f}" for f in files]
-    
+
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
-        for url, filename in zip(urls, files):
+        for url, filename in zip(urls, files, strict=False):
             out_path = os.path.join(output_dir, filename)
             futures.append(executor.submit(download_file, url, out_path, dry_run))
         for f in futures:
@@ -135,28 +143,23 @@ def download_pubmed(output_dir, num_threads=4, dry_run=False, sample_only=False)
 def download_pmc_oa(output_dir, num_threads=4, dry_run=False, sample_only=False):
     """Download PMC Open Access commercial subset."""
     print("=== Downloading PMC Open Access Commercial Subset ===")
-    
+
     # Locate project root and scripts directory to import the new downloader
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     scripts_dir = os.path.join(project_root, "scripts")
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
-        
+
     try:
         from download_pmc_oa_comm import download_pmc_commercial
     except ImportError as e:
         print(f"Error: Could not import download_pmc_commercial from scripts: {e}")
         return
-        
+
     limit = 10 if sample_only else 0
     download_pmc_commercial(
-        output_dir=output_dir,
-        formats=["xml"],
-        limit=limit,
-        threads=num_threads,
-        dry_run=dry_run
+        output_dir=output_dir, formats=["xml"], limit=limit, threads=num_threads, dry_run=dry_run
     )
-
 
 
 def download_europe_pmc(output_dir, dry_run=False, sample_only=False):
@@ -170,7 +173,9 @@ def download_europe_pmc(output_dir, dry_run=False, sample_only=False):
         if not dry_run:
             response = requests.get(url, timeout=30)
             if response.status_code == 200:
-                with open(os.path.join(output_dir, "europe_pmc_sample.json"), "w", encoding="utf-8") as f:
+                with open(
+                    os.path.join(output_dir, "europe_pmc_sample.json"), "w", encoding="utf-8"
+                ) as f:
                     f.write(response.text)
                 print("Downloaded Europe PMC REST query sample.")
         else:
@@ -185,7 +190,10 @@ def download_europe_pmc(output_dir, dry_run=False, sample_only=False):
                 results = pyeuropepmc.search("SRC:PPR AND (COVID-19 OR SARS-CoV-2)", limit=10)
                 # Save results
                 import json
-                with open(os.path.join(output_dir, "europe_pmc_preprints.json"), "w", encoding="utf-8") as f:
+
+                with open(
+                    os.path.join(output_dir, "europe_pmc_preprints.json"), "w", encoding="utf-8"
+                ) as f:
                     json.dump(list(results), f, indent=2)
                 print("Europe PMC preprints fetched and saved.")
             except Exception as e:
@@ -196,16 +204,18 @@ def download_chembl(output_dir, dry_run=False, sample_only=False):
     """Download ChEMBL database release SQLite dump and SureChEMBL sample."""
     print("=== Downloading ChEMBL Database ===")
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # SQLite version is lightweight compared to PostgreSQL and perfect for local pipelines
     chembl_version = "34"
     url = f"ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/releases/chembl_{chembl_version}/chembl_{chembl_version}_sqlite.tar.gz"
-    
+
     if sample_only:
         print("Sample only requested. Writing mock ChEMBL structures for pipeline verification.")
         mock_db_path = os.path.join(output_dir, "mock_chembl.csv")
         with open(mock_db_path, "w", encoding="utf-8") as f:
-            f.write("chembl_id,canonical_smiles,standard_type,standard_value,standard_units,target_chembl_id,target_pref_name\n")
+            f.write(
+                "chembl_id,canonical_smiles,standard_type,standard_value,standard_units,target_chembl_id,target_pref_name\n"
+            )
             f.write("CHEMBL25,CHEMBL25_SMILES,IC50,5.4,nM,CHEMBL1827,Acetylcholinesterase\n")
             f.write("CHEMBL123,CHEMBL123_SMILES,Ki,10.2,uM,CHEMBL1828,Butyrylcholinesterase\n")
         print(f"Created mock ChEMBL file at {mock_db_path}")
@@ -220,14 +230,17 @@ def download_uniprot(output_dir, dry_run=False, sample_only=False):
     """Download UniProt (Swiss-Prot / TrEMBL) datasets."""
     print("=== Downloading UniProt Database ===")
     os.makedirs(output_dir, exist_ok=True)
-    
+
     swiss_prot_url = "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz"
-    
+
     if sample_only:
         print("Sample only requested. Writing mock UniProt FASTA file for pipeline verification.")
         mock_fasta = os.path.join(output_dir, "mock_uniprot_sprot.fasta")
         with open(mock_fasta, "w", encoding="utf-8") as f:
-            f.write(">sp|P68871|HBB_HUMAN Hemoglobin subunit beta OS=Homo sapiens OX=9606 GN=HBB PE=1 SV=2\n")
+            f.write(
+                ">sp|P68871|HBB_HUMAN Hemoglobin subunit beta OS=Homo sapiens "
+                "OX=9606 GN=HBB PE=1 SV=2\n"
+            )
             f.write("VHLTPEEKSAVTALWGKVNVDEVGGEALGRLLVVYPWTQRFFESFGDLSTPDAVMGNPKV\n")
             f.write("KAHGKKVLGAFSDGLAHLDNLKGTFATLSELHCDKLHVDPENFRLLGNVLVCVLAHHFGK\n")
             f.write("EFTPPVQAAYQKVVAGVANALAHKYH\n")
@@ -242,18 +255,18 @@ def download_hf_datasets(output_dir, dry_run=False, sample_only=False):
     """Download EPFL Meditron Guidelines, MedMCQA, and PubMedQA datasets from Hugging Face."""
     print("=== Downloading Hugging Face Datasets ===")
     os.makedirs(output_dir, exist_ok=True)
-    
+
     datasets_to_fetch = {
         "guidelines": "epfl-llm/guidelines",
         "pubmedqa": "qiaojin/pubmedqa",
-        "medmcqa": "openlifescienceai/medmcqa"
+        "medmcqa": "openlifescienceai/medmcqa",
     }
-    
+
     if dry_run:
         for name, path in datasets_to_fetch.items():
             print(f"[DRY-RUN] Would download dataset: {path} and save to {output_dir}/{name}")
         return
-        
+
     for name, path in datasets_to_fetch.items():
         print(f"Downloading HF dataset: {path}")
         try:
@@ -262,7 +275,7 @@ def download_hf_datasets(output_dir, dry_run=False, sample_only=False):
                 dataset = load_dataset(path, "pqa_labeled")
             else:
                 dataset = load_dataset(path)
-            
+
             # Save local copies
             dataset.save_to_disk(os.path.join(output_dir, name))
             print(f"Successfully saved {path} to disk.")
@@ -284,51 +297,52 @@ def main():
         type=str,
         choices=["all", "pubmed", "pmc", "europe_pmc", "chembl", "uniprot", "hf"],
         default="all",
-        help="Target dataset to download"
+        help="Target dataset to download",
     )
     parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./data",
-        help="Directory to save downloaded files"
+        "--output_dir", type=str, default="./data", help="Directory to save downloaded files"
     )
     parser.add_argument(
-        "--threads",
-        type=int,
-        default=4,
-        help="Number of concurrent download threads"
+        "--threads", type=int, default=4, help="Number of concurrent download threads"
     )
     parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="Simulate download process without fetching files"
+        "--dry_run", action="store_true", help="Simulate download process without fetching files"
     )
     parser.add_argument(
         "--sample_only",
         action="store_true",
         default=True,
-        help="Download/create small sample datasets for validation purposes (default is True to save space/time)"
+        help=(
+            "Download/create small sample datasets for validation purposes "
+            "(default is True to save space/time)"
+        ),
     )
 
     args = parser.parse_args()
-    
+
     print(f"Output directory set to: {os.path.abspath(args.output_dir)}")
-    
+
     if args.dataset in ["all", "pubmed"]:
-        download_pubmed(os.path.join(args.output_dir, "pubmed"), args.threads, args.dry_run, args.sample_only)
-        
+        download_pubmed(
+            os.path.join(args.output_dir, "pubmed"), args.threads, args.dry_run, args.sample_only
+        )
+
     if args.dataset in ["all", "pmc"]:
-        download_pmc_oa(os.path.join(args.output_dir, "pmc"), args.threads, args.dry_run, args.sample_only)
-        
+        download_pmc_oa(
+            os.path.join(args.output_dir, "pmc"), args.threads, args.dry_run, args.sample_only
+        )
+
     if args.dataset in ["all", "europe_pmc"]:
-        download_europe_pmc(os.path.join(args.output_dir, "europe_pmc"), args.dry_run, args.sample_only)
-        
+        download_europe_pmc(
+            os.path.join(args.output_dir, "europe_pmc"), args.dry_run, args.sample_only
+        )
+
     if args.dataset in ["all", "chembl"]:
         download_chembl(os.path.join(args.output_dir, "chembl"), args.dry_run, args.sample_only)
-        
+
     if args.dataset in ["all", "uniprot"]:
         download_uniprot(os.path.join(args.output_dir, "uniprot"), args.dry_run, args.sample_only)
-        
+
     if args.dataset in ["all", "hf"]:
         download_hf_datasets(os.path.join(args.output_dir, "hf"), args.dry_run, args.sample_only)
 
