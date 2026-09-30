@@ -187,7 +187,7 @@ def test_dependabot_groups_security_updates_only():
 
 # --- ci.yml -----------------------------------------------------------------
 
-def _ci_job() -> dict:
+def _ci_job() -> tuple[dict, dict]:
     wf = _load(GH / "workflows" / "ci.yml")
     return wf, wf["jobs"]["tests"]
 
@@ -356,7 +356,7 @@ jobs:
 - [ ] **Step 7: Run the config tests to verify they pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_ci_config.py -q`
-Expected: `9 passed`.
+Expected: `8 passed`.
 
 - [ ] **Step 8: Docs**
 
@@ -395,7 +395,7 @@ Run:
 .venv/Scripts/python.exe -m pytest -m "not pg" -q --ignore=tests/test_run_pipeline_dispatch.py
 uv lock --check
 ```
-Expected: ruff clean; pytest `0 failed` (Task 1's count plus 9); `uv lock --check` succeeds.
+Expected: ruff clean; pytest `0 failed` (Task 1's count plus 8); `uv lock --check` succeeds.
 
 - [ ] **Step 10: Commit**
 
