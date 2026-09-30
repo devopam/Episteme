@@ -4,7 +4,7 @@
 
 **Goal:** Every pull request runs lint and the non-database tests in CI; Dependabot security-update pull requests merge themselves once that CI run passes.
 
-**Architecture:** First bring the repository to a clean `ruff` baseline (Task 1). Then add three GitHub files — `dependabot.yml` (uv + github-actions, security-only group `security-fixes`), `ci.yml` (job `tests`), `dependabot-auto-merge.yml` (auto-merge only for that group) — with config tests that read the YAML, plus docs (Task 2). After the branch merges and CI has reported once, the controller adds a required `tests` status check to the `main` ruleset (post-merge step, not a task).
+**Architecture:** First bring the repository to a clean `ruff` baseline (Task 1). Then add three GitHub files — `dependabot.yml` (uv + github-actions, security-only group `security-fixes`), `ci.yml` (job `tests`), `dependabot-auto-merge.yml` (auto-merge only for that group) — with config tests that read the YAML, plus docs (Task 2). Once this PR's own `tests` run is green, the controller adds a required `tests` status check to the `main` ruleset before merging (ruleset step, not a task).
 
 **Tech Stack:** GitHub Actions, Dependabot, `uv` (0.11.x locally), ruff 0.6.9, pytest, PyYAML.
 
@@ -112,7 +112,7 @@ If a pre-commit hook (ruff, bandit) fails, fix the cause and commit again; never
 
 **Interfaces:**
 - Consumes: Task 1's clean ruff baseline.
-- Produces: a CI check run named `tests` (job id `tests` in workflow `ci`), which the post-merge ruleset step requires.
+- Produces: a CI check run named `tests` (job id `tests` in workflow `ci`), which the pre-merge ruleset step requires.
 
 - [ ] **Step 1: Add PyYAML explicitly to the dev dependencies**
 
@@ -410,9 +410,9 @@ Claude-Session: https://claude.ai/code/session_01XrLEbkf9BAxrqFTBfcU48z"
 
 ---
 
-## Post-merge step (controller, after the user merges)
+## Ruleset step (controller, once this PR's CI `tests` run is green — before merging)
 
-1. Confirm the `ci` workflow ran on `main` after the merge and its `tests` check passed: `gh run list --workflow ci --branch main --limit 1`.
+1. Confirm this PR's `tests` check is green: `gh pr checks <PR number>`.
 2. Add the required status check to the ruleset, keeping the existing rules:
 
 ```bash
@@ -428,7 +428,7 @@ cat > "$TEMP/ruleset-v2.json" <<'EOF'
     { "type": "copilot_code_review", "parameters": { "review_on_push": false, "review_draft_pull_requests": false } },
     { "type": "required_status_checks", "parameters": {
         "strict_required_status_checks_policy": false,
-        "required_status_checks": [ { "context": "tests" } ] } }
+        "required_status_checks": [ { "context": "tests", "integration_id": 15368 } ] } }
   ]
 }
 EOF
@@ -436,3 +436,5 @@ gh api -X PUT repos/devopam/Episteme/rulesets/24230442 --input "$TEMP/ruleset-v2
 gh api repos/devopam/Episteme/rules/branches/main --jq '.[].type'
 ```
 Expected: the four rule types, including `required_status_checks`.
+
+Why before merge, not after: until the ruleset requires `tests`, `gh pr merge --auto` merges a clean Dependabot pull request immediately, so the rule must exist before the auto-merge workflow's first run reaches `main`.

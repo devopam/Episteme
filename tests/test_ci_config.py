@@ -100,6 +100,30 @@ def test_ci_runs_model_smoke_tests():
     assert "slow" not in cmd
 
 
+def test_ci_removes_aria2_before_pytest():
+    _, job = _ci_job()
+    runs = _run_lines(job)
+    aria2_idx = next(i for i, r in enumerate(runs) if "apt-get remove -y aria2" in r)
+    pytest_idx = next(i for i, r in enumerate(runs) if "pytest" in r)
+    assert aria2_idx < pytest_idx
+
+
+def test_actions_run_on_current_majors():
+    wf, job = _ci_job()
+    uses = _uses(job)
+    assert "actions/checkout@v7" in uses
+    setup_uv = [u for u in uses if u.startswith("astral-sh/setup-uv@v10.")]
+    assert len(setup_uv) == 1
+    setup_uv_step = next(
+        s for s in job["steps"] if s.get("uses", "").startswith("astral-sh/setup-uv@v10.")
+    )
+    assert setup_uv_step["with"]["prune-cache"] is True
+
+    _, am_job = _am()
+    am_uses = _uses(am_job)
+    assert any(u == "dependabot/fetch-metadata@v3" for u in am_uses)
+
+
 # --- dependabot-auto-merge.yml -----------------------------------------------
 
 

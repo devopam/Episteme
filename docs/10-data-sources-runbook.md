@@ -723,6 +723,8 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 - **`main` requires the `tests` check.** Every change reaches `main` through a pull request; direct pushes (including GitHub web-editor commits) are refused.
 - **Dependabot** checks weekly for `uv` and GitHub Actions updates. Routine updates arrive one pull request per package and wait for a person. Security updates arrive grouped as `security-fixes`; `.github/workflows/dependabot-auto-merge.yml` enables auto-merge on them, so they merge by themselves once `tests` passes.
 - **A security pull request that did not merge** has a failed `tests` run: open its Checks tab, fix the break on the Dependabot branch (or wait for a newer Dependabot push), and it merges when `tests` goes green.
+- **Keep the required check.** Auto-merge relies on `main` requiring `tests`. Removing or renaming that check (in the ruleset or the workflow) turns auto-merge into an immediate merge of every Dependabot security pull request.
+- **Commits added to a Dependabot branch ride along.** Anyone with write access who pushes to a Dependabot security branch gets that commit auto-merged once `tests` passes; review such pushes as you would any change.
 
 ---
 

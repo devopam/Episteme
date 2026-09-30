@@ -58,7 +58,7 @@ Before CI can gate anything, the eight files in §3 are brought to a clean `ruff
 
 - Triggers: `pull_request` (all branches) and `push` to `main`. `permissions: contents: read`. `concurrency` cancels superseded runs of the same pull request.
 - One job, id and name `tests`, `runs-on: ubuntu-latest`, timeout 30 minutes.
-- Steps: checkout; `astral-sh/setup-uv` with caching enabled and Python 3.13; `uv sync --locked --extra dev` (the locked versions, including the Linux `torch` build `uv.lock` pins; the uv cache keeps repeat runs fast); `uv run ruff format --check .`; `uv run ruff check .`; `uv run pytest -m "not pg" -q --ignore=tests/test_run_pipeline_dispatch.py`.
+- Steps: `actions/checkout@v7`; `astral-sh/setup-uv@v10.2.0` with caching enabled, `prune-cache: true`, and Python 3.13; `uv sync --locked --extra dev` (the locked versions, including the Linux `torch` build `uv.lock` pins); `uv run ruff format --check .`; `uv run ruff check .`; remove aria2 from the runner (the downloader tests shim curl; aria2c present would make them skip); `uv run pytest -m "not pg" -q --ignore=tests/test_run_pipeline_dispatch.py`.
 - `--locked` makes CI fail if `uv.lock` does not match `pyproject.toml` — the failure the old `pip` pull requests would have caused.
 - The network dispatch smoke test stays a manual, local check (documented in docs/10).
 
@@ -72,15 +72,15 @@ Before CI can gate anything, the eight files in §3 are brought to a clean `ruff
 
 - Trigger: `pull_request` (`opened`, `synchronize`, `reopened`). Job condition: `github.event.pull_request.user.login == 'dependabot[bot]'`.
 - `permissions: contents: write, pull-requests: write` (job-level; the default token of a Dependabot-triggered run is read-only otherwise).
-- Steps: `dependabot/fetch-metadata@v2` (id `meta`); then, only if `steps.meta.outputs.dependency-group == 'security-fixes'`, run `gh pr merge --auto --merge "$PR_URL"` with `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `PR_URL: ${{ github.event.pull_request.html_url }}`.
+- Steps: `dependabot/fetch-metadata@v3` (id `meta`); then, only if `steps.meta.outputs.dependency-group == 'security-fixes'`, run `gh pr merge --auto --merge "$PR_URL"` with `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `PR_URL: ${{ github.event.pull_request.html_url }}`.
 - It never checks out or runs pull-request code, and it uses `pull_request`, not `pull_request_target`.
 - Merge method: a merge commit, as for every other merge in this repository.
 - A merge made with the workflow token does not start new workflow runs on `main`; the pull request's own CI run is the gate.
 
 ### 4.5 Ruleset — required status check
 
-- Add to "default protection" (id 24230442) a `required_status_checks` rule: context `tests` (the CI job), `strict_required_status_checks_policy: false` (a pull request need not be rebased onto the latest `main` before merging; Dependabot rebases its own pull requests when needed).
-- Applied with `gh api -X PUT repos/devopam/Episteme/rulesets/24230442` carrying the full existing rule set plus the new rule, **after** the CI workflow is on `main` and has reported `tests` at least once (otherwise every pull request, including this one, would wait on a check that never runs).
+- Add to "default protection" (id 24230442) a `required_status_checks` rule: context `tests` with `integration_id: 15368` (the GitHub Actions app), `strict_required_status_checks_policy: false` (a pull request need not be rebased onto the latest `main` before merging; Dependabot rebases its own pull requests when needed).
+- Applied with `gh api -X PUT repos/devopam/Episteme/rulesets/24230442` carrying the full existing rule set plus the new rule, **once this PR's own `tests` run is green, before it is merged** (not after — otherwise `gh pr merge --auto` would merge a clean Dependabot pull request immediately, since the auto-merge workflow does not wait on a ruleset that does not yet require `tests`; the rule must exist before the auto-merge workflow reaches `main`).
 - Effect: nothing merges into `main` unless `tests` passed, and commits can no longer be pushed straight to `main` (for example from GitHub's web editor); every change goes through a pull request.
 
 ### 4.6 Failure path
@@ -115,5 +115,5 @@ Before CI can gate anything, the eight files in §3 are brought to a clean `ruff
 - **A security fix that breaks behaviour the tests do not cover** (the `pg` tests, real training runs) merges anyway. Accepted by the user; local runs and the drift log catch it later.
 - **A malicious release of a dependency** published as a "security fix" would be auto-merged once tests pass. Mitigated only by GitHub's advisory database being the trigger (security updates come from reviewed advisories, not arbitrary releases).
 - **Grouped security pull request:** if one of several fixes breaks CI, all of them wait together.
-- **Large install:** the Linux `torch` build makes the first CI run slow (several minutes); the uv cache speeds up later runs.
+- **Large install:** the Linux `torch` build makes every CI run slow (several minutes). With `prune-cache: true`, the uv cache stores only the uv-built wheels, not the ~4 GB of CUDA wheels in `uv.lock`; the torch/CUDA download itself repeats on every run (slow but bounded), trading a smaller, cheaper cache for a repeat download.
 - **Direct pushes to `main` are blocked** after §4.5; the user's web-editor edits must become pull requests.
