@@ -483,9 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: no PMC*.json under {raw_dir}", file=sys.stderr)
         return 1
 
-    print(
-        f"done inputs={res['inputs']} ok={res['ok']} " f"failed={res['failed']} rows={res['rows']}"
-    )
+    print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
     return 1 if res["failed"] else 0
 
 

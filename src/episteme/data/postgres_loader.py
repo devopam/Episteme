@@ -286,7 +286,7 @@ def retire_source_files(
     """
     if not keep_source_files:
         raise ValueError(
-            "keep_source_files must not be empty (refusing to retire every " f"{source!r} row)"
+            f"keep_source_files must not be empty (refusing to retire every {source!r} row)"
         )
 
     scope_sql = ""

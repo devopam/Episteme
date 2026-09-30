@@ -145,7 +145,7 @@ def test_verify_does_not_double_count_same_day_plain_and_gz(pg_conn, monkeypatch
     problems = audit_trail.verify(pg_conn)
     mirror_short = [p for p in problems if p["reason"] == "mirror_short"]
     assert len(mirror_short) == 1, (
-        f"expected a real mirror_short (2 lines survive vs 3 table rows), " f"got: {problems}"
+        f"expected a real mirror_short (2 lines survive vs 3 table rows), got: {problems}"
     )
     assert mirror_short[0]["mirror"] == 2, (
         "same-day plain+gz coexistence must count that day once (2 lines), "

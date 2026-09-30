@@ -148,8 +148,12 @@ def test_header_only_file_yields_nothing(tmp_path):
 
 def test_build_rows_ids_licence_and_text():
     lists, _ = parse_ct_file(FX)
-    rows = build_rows(lists, package="SDTM", release_date="2026-09-25",
-                      source_file="SDTM__2026-09-25__SDTM_Terminology.txt")
+    rows = build_rows(
+        lists,
+        package="SDTM",
+        release_date="2026-09-25",
+        source_file="SDTM__2026-09-25__SDTM_Terminology.txt",
+    )
     r = next(r for r in rows if r["id"] == "cdisc_ct:SDTM:C141657:p1")
     assert r["source"] == "cdisc_ct"
     assert r["source_record_id"] == "SDTM:C141657:p1"
@@ -163,8 +167,9 @@ def test_large_codelist_splits_with_repeated_header():
     lists, _ = parse_ct_file(FX)
     big = lists[0]
     big.terms = big.terms * 150  # > 200 terms
-    rows = build_rows([big], package="SDTM", release_date="2026-09-25",
-                      source_file="f", max_terms=200)
+    rows = build_rows(
+        [big], package="SDTM", release_date="2026-09-25", source_file="f", max_terms=200
+    )
     n = -(-len(big.terms) // 200)
     assert [r["id"] for r in rows] == [f"cdisc_ct:SDTM:{big.code}:p{i}" for i in range(1, n + 1)]
     assert all(big.name in r["text"] for r in rows)
@@ -280,7 +285,11 @@ def test_bad_file_is_marked_failed_not_partial(tmp_path):
     (d / "SDTM_Terminology.txt").write_text("<html>fallback</html>\n", encoding="utf-8")
     res = serialize_cdisc_ct(raw, out)
     assert res["failed"] == 1 and res["rows"] == 0
-    assert not list((out / "staging" / "cdisc_ct").glob("*")) if (out / "staging" / "cdisc_ct").exists() else True
+    assert (
+        not list((out / "staging" / "cdisc_ct").glob("*"))
+        if (out / "staging" / "cdisc_ct").exists()
+        else True
+    )
 ```
 
 Adjust the staging path assertion to the staging writer's real layout (read `src/episteme/data/staging_writer.py` first; SP4 serializer tests show the pattern) — do not guess.
@@ -291,6 +300,7 @@ Adjust the staging path assertion to the staging writer's real layout (read `src
   - discovery:
     ```python
     _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
     def discover_cdisc_ct_files(raw_dir: Path) -> list[Path]:
         out: list[Path] = []
@@ -328,17 +338,30 @@ Adjust the staging path assertion to the staging writer's real layout (read `src
 
   Tests:
   ```python
-  def test_writes_per_package_dated_folders(tmp_path): ...
+  def test_writes_per_package_dated_folders(tmp_path):
+      ...
       # raw/cdisc_ct/SDTM/2026-09-25/SDTM_Terminology.txt exists; Protocol under 2026-07-11;
       # each release folder has PROVENANCE.txt containing the source URL and "free to use without licensing restrictions"
-  def test_html_fallback_package_is_skipped_others_download(tmp_path): ...
+
+
+  def test_html_fallback_package_is_skipped_others_download(tmp_path):
+      ...
       # FAKE_SEND_MISSING=1 -> rc 0, stderr warns about SEND, no SEND folder, SDTM present
+
+
   def test_dry_run_writes_nothing(tmp_path): ...
-  def test_max_files_limits_packages_in_order(tmp_path): ...
+  def test_max_files_limits_packages_in_order(tmp_path):
+      ...
       # --max-files 2 -> only SDTM and SEND folders
-  def test_rerun_same_release_skips_download(tmp_path): ...
+
+
+  def test_rerun_same_release_skips_download(tmp_path):
+      ...
       # second run makes no GET (only HEADs) per the shim's call log
-  def test_bad_header_after_download_is_rejected(tmp_path): ...
+
+
+  def test_bad_header_after_download_is_rejected(tmp_path):
+      ...
       # shim returns text/plain but a body without the header -> file removed, warning, rc 0
   ```
   Write each as a full test (same helper style as `tests/test_cdisc_bc_wrapper.py`), not stubs.

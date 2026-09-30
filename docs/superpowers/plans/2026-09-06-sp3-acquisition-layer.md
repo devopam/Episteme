@@ -183,12 +183,15 @@ def test_sources_env_load_order(tmp_path, monkeypatch):
     # sources.env default is visible
     import importlib
     import episteme.config as cfg
+
     monkeypatch.delenv("CHEMBL_BASE", raising=False)
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
     s = cfg.get_settings()
-    assert getattr(s, "chembl_base", None) == \
-        "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest"
+    assert (
+        getattr(s, "chembl_base", None)
+        == "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest"
+    )
 
     # real environment overrides sources.env
     monkeypatch.setenv("CHEMBL_BASE", "https://mirror.example/chembl")

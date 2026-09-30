@@ -187,10 +187,7 @@ def download_preprints(
         else:
             errors += 1
 
-    print(
-        f"europepmc_preprint: ids={len(ids)} fetched={fetched} "
-        f"skipped={skipped} errors={errors}"
-    )
+    print(f"europepmc_preprint: ids={len(ids)} fetched={fetched} skipped={skipped} errors={errors}")
     return {"ids": len(ids), "fetched": fetched, "skipped": skipped, "errors": errors}
 
 

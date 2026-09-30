@@ -99,20 +99,17 @@ def test_data_root_derives_the_three_roots(fresh_config):
 
 
 def test_explicit_root_overrides_data_root(fresh_config):
-    cfg = fresh_config(
-        "EPISTEME_DATA_ROOT=/mnt/ssd\n"
-        "EPISTEME_RAW_ROOT=/other/raw\n"
-    )
+    cfg = fresh_config("EPISTEME_DATA_ROOT=/mnt/ssd\nEPISTEME_RAW_ROOT=/other/raw\n")
     s = cfg.get_settings()
-    assert s.raw_root == Path("/other/raw")            # explicit wins
-    assert s.processed_root == Path("/mnt/ssd/02_processed")   # derived
+    assert s.raw_root == Path("/other/raw")  # explicit wins
+    assert s.processed_root == Path("/mnt/ssd/02_processed")  # derived
 
 
 def test_data_root_defaults_to_dot(fresh_config):
     cfg = fresh_config("")
     s = cfg.get_settings()
     assert s.data_root == Path(".")
-    assert s.raw_root == Path("01_raw")               # Path(".") / "01_raw"
+    assert s.raw_root == Path("01_raw")  # Path(".") / "01_raw"
 ```
 
 - [ ] **Step 2: Run them, watch them fail**
@@ -201,10 +198,22 @@ In `src/episteme/data/article_schema.py`:
 - Replace the `SOURCES = (...)` tuple with the roadmap §4.2 list:
   ```python
   SOURCES = (
-      "pubmed", "pmc", "bookshelf",
-      "europepmc_preprint", "europepmc_manuscript", "europepmc_lite",
-      "apollo", "guidelines",
-      "chembl", "uniprot", "pubchem", "clinvar", "reactome", "mesh", "ontologies", "openalex",
+      "pubmed",
+      "pmc",
+      "bookshelf",
+      "europepmc_preprint",
+      "europepmc_manuscript",
+      "europepmc_lite",
+      "apollo",
+      "guidelines",
+      "chembl",
+      "uniprot",
+      "pubchem",
+      "clinvar",
+      "reactome",
+      "mesh",
+      "ontologies",
+      "openalex",
   )
   ```
 - Bump `SCHEMA_VERSION = "1.1"` → `SCHEMA_VERSION = "1.2"` and add, directly under it:
@@ -241,12 +250,16 @@ def test_build_text_joins_present_parts_only():
 
 
 def test_extract_status_ok_when_abstract_present_even_if_text_short():
-    status, notes = decide_extract_status(text="short", abstract="a real abstract", body_text=None, has_id=True)
+    status, notes = decide_extract_status(
+        text="short", abstract="a real abstract", body_text=None, has_id=True
+    )
     assert status == "ok"
 
 
 def test_extract_status_partial_for_title_only_short_text():
-    status, notes = decide_extract_status(text="x" * (MIN_OK_TEXT_LEN - 1), abstract=None, body_text=None, has_id=True)
+    status, notes = decide_extract_status(
+        text="x" * (MIN_OK_TEXT_LEN - 1), abstract=None, body_text=None, has_id=True
+    )
     assert status == "partial"
 
 
@@ -469,8 +482,10 @@ def _row(**kw):
 
 
 def test_write_rows_parquet_one_shard_per_file(tmp_path):
-    rows = [_row(id="pmc:PMC1", source="pmc", text="hello world", year=2024),
-            _row(id="pmc:PMC2", source="pmc", text="another", year=None)]
+    rows = [
+        _row(id="pmc:PMC1", source="pmc", text="hello world", year=2024),
+        _row(id="pmc:PMC2", source="pmc", text="another", year=None),
+    ]
     res = write_rows(rows, tmp_path, source="pmc", source_file="PMC_batch_01.xml")
     assert res["format"] in ("parquet", "jsonl")
     assert res["n_rows"] == 2
@@ -481,7 +496,10 @@ def test_write_rows_parquet_one_shard_per_file(tmp_path):
 
 def test_write_rows_jsonl_fallback_roundtrips(tmp_path, monkeypatch):
     import episteme.data.staging_writer as sw
-    monkeypatch.setattr(sw, "write_parquet_shard", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no pyarrow")))
+
+    monkeypatch.setattr(
+        sw, "write_parquet_shard", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no pyarrow"))
+    )
     rows = [_row(id="pmc:PMC1", source="pmc", text="hi")]
     res = write_rows(rows, tmp_path, source="pmc", source_file="f.xml")
     assert res["format"] == "jsonl"
@@ -627,12 +645,14 @@ def test_extract_pmc_produces_one_ok_row(tmp_path):
 
 def test_extract_pmc_row_fields(tmp_path):
     import json
+
     processed = tmp_path / "02_processed"
     extract_pmc(FIX, processed, max_files=1)
     shard = next((processed / "staging" / "pmc").glob("*"))
     # read the shard back (parquet or jsonl)
     if shard.suffix == ".parquet":
         import pyarrow.parquet as pq
+
         rows = pq.read_table(shard).to_pylist()
     else:
         rows = [json.loads(l) for l in shard.read_text().splitlines()]

@@ -250,7 +250,7 @@ def _synth_title(body: str) -> str | None:
     line = (body or "").strip().split("\n", 1)[0].strip()
     if not line:
         return None
-    m = re.match(r".{1,%d}?[.!?](?:\s|$)" % APOLLO_TITLE_MAXLEN, line)
+    m = re.match(rf".{{1,{APOLLO_TITLE_MAXLEN}}}?[.!?](?:\s|$)", line)
     if m:
         return m.group(0).strip()
     if len(line) <= APOLLO_TITLE_MAXLEN:
@@ -653,9 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: no apollo *.json(l) under {raw_dir}", file=sys.stderr)
         return 1
 
-    print(
-        f"done inputs={res['inputs']} ok={res['ok']} " f"failed={res['failed']} rows={res['rows']}"
-    )
+    print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
     return 1 if res["failed"] else 0
 
 

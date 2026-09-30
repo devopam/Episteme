@@ -554,8 +554,7 @@ def _pgq_available(conn) -> bool:
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class "
-                "WHERE relname = 'episteme_graph')"
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'episteme_graph')"
             )
             return bool(cur.fetchone()[0])
     except psycopg.Error:
@@ -572,7 +571,7 @@ def _neighbours_pgq(conn, pmid: str, hops: int) -> list[str]:
     """
     query = (
         "SELECT dst FROM GRAPH_TABLE (episteme_graph "
-        "MATCH (a WHERE a.pmid = %s) -[c]->" + "{1,%d}" % int(hops) + " (b) "
+        "MATCH (a WHERE a.pmid = %s) -[c]->" + f"{{1,{int(hops)}}}" + " (b) "
         "COLUMNS (b.pmid AS dst))"
     )
     try:

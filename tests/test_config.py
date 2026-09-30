@@ -85,7 +85,7 @@ def test_data_root_derives_the_three_roots(fresh_config):
 
 
 def test_explicit_root_overrides_data_root(fresh_config):
-    cfg = fresh_config("EPISTEME_DATA_ROOT=/mnt/ssd\n" "EPISTEME_RAW_ROOT=/other/raw\n")
+    cfg = fresh_config("EPISTEME_DATA_ROOT=/mnt/ssd\nEPISTEME_RAW_ROOT=/other/raw\n")
     s = cfg.get_settings()
     assert s.raw_root == Path("/other/raw")  # explicit wins
     assert s.processed_root == Path("/mnt/ssd/02_processed")  # derived

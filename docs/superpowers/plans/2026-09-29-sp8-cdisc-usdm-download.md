@@ -95,7 +95,12 @@ DATA_FILES = [
 
 
 def _entry(path: str, kind: str) -> dict:
-    e = {"path": path, "mode": "100644" if kind == "blob" else "040000", "type": kind, "sha": "0" * 40}
+    e = {
+        "path": path,
+        "mode": "100644" if kind == "blob" else "040000",
+        "type": kind,
+        "sha": "0" * 40,
+    }
     if kind == "blob":
         e["size"] = 10
     e["url"] = "https://api.github.com/x"
@@ -126,7 +131,9 @@ DEFAULT_TREE = _tree(
 
 
 def _release(tag: str) -> str:
-    return json.dumps({"url": "https://api.github.com/x", "id": 1, "tag_name": tag}, indent=2) + "\n"
+    return (
+        json.dumps({"url": "https://api.github.com/x", "id": 1, "tag_name": tag}, indent=2) + "\n"
+    )
 
 
 COMMIT = json.dumps({"sha": SHA, "node_id": "x", "commit": {"sha": "f" * 40}}, indent=2) + "\n"
@@ -214,7 +221,9 @@ def _rel(tmp_path) -> Path:
 
 def _data_files(tmp_path) -> list[str]:
     base = _rel(tmp_path)
-    return sorted(p.relative_to(base).as_posix() for p in (base / "Deliverables").rglob("*") if p.is_file())
+    return sorted(
+        p.relative_to(base).as_posix() for p in (base / "Deliverables").rglob("*") if p.is_file()
+    )
 
 
 def test_fetches_deliverables_licence_readme_and_provenance(tmp_path):

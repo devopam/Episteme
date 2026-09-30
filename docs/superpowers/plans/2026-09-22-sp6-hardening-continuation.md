@@ -142,6 +142,7 @@
       # a partition ~8 months out from "now" (whatever "now" is when this runs) must exist
       assert any(names), "no monthly _audit partitions found after running the script"
 
+
   @pytest.mark.pg
   def test_new_partition_denies_update_delete_to_episteme_app(pg_conn):
       # After Step 1's run, pick any _audit_YYYYMM partition created by it (not the
@@ -206,6 +207,7 @@
       with pytest.raises(ValueError, match="reason"):
           audit_trail.record("manual_correction", conn=pg_conn, reason=None)
 
+
   def test_schema_migration_requires_reason(pg_conn, monkeypatch):
       monkeypatch.setenv("EPISTEME_ACTOR", "x")
       import episteme.config as cfg
@@ -215,6 +217,7 @@
 
       with pytest.raises(ValueError, match="reason"):
           audit_trail.record("schema_migration", conn=pg_conn, reason="")
+
 
   def test_force_override_still_requires_no_new_enforcement_at_record_level(pg_conn, monkeypatch):
       # record() itself does not enforce reason for force_override (that stays a
@@ -407,7 +410,9 @@
       from episteme.data.pmc import download_pmc
 
       importlib.reload(download_pmc)  # re-evaluate the argparse default against the new settings
-      parser = download_pmc.build_parser()  # or however main() constructs its ArgumentParser -- read main() first
+      parser = (
+          download_pmc.build_parser()
+      )  # or however main() constructs its ArgumentParser -- read main() first
       args = parser.parse_args([])
       assert args.output_dir == tmp_path / "01_raw" / "pmc" / "oa_comm"
   ```
