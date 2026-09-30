@@ -79,6 +79,7 @@ def test_id_collision_across_source_files_is_replaced(pg_conn, tmp_path, monkeyp
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
     import importlib
     import episteme.config as cfg
+
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
 
@@ -89,17 +90,21 @@ def test_id_collision_across_source_files_is_replaced(pg_conn, tmp_path, monkeyp
     from episteme.data.staging_writer import write_rows
 
     # release A: chembl_35.db carries chembl:CHEMBL25
-    row_a = finalize_row({
-        **empty_article_row(),
-        "id": "chembl:CHEMBL25",
-        "source": "chembl",
-        "source_file": "chembl_35.db",
-        "source_record_id": "CHEMBL25",
-        "text": "Compound CHEMBL25 exhibits binding activity old-value.",
-        "license": "CC BY-SA",
-        "subset": "commercial",
-    })
-    write_a = write_rows([row_a], tmp_path / "02_processed", source="chembl", source_file="chembl_35.db")
+    row_a = finalize_row(
+        {
+            **empty_article_row(),
+            "id": "chembl:CHEMBL25",
+            "source": "chembl",
+            "source_file": "chembl_35.db",
+            "source_record_id": "CHEMBL25",
+            "text": "Compound CHEMBL25 exhibits binding activity old-value.",
+            "license": "CC BY-SA",
+            "subset": "commercial",
+        }
+    )
+    write_a = write_rows(
+        [row_a], tmp_path / "02_processed", source="chembl", source_file="chembl_35.db"
+    )
     postgres_loader.load_source_file(
         pg_conn, source="chembl", staging_path=Path(write_a["paths"][0]), run_id="rA"
     )
@@ -111,17 +116,21 @@ def test_id_collision_across_source_files_is_replaced(pg_conn, tmp_path, monkeyp
 
     # release B: chembl_36.db -- a NEW source_file, but the SAME native id,
     # with different content (the normal shape of a re-release).
-    row_b = finalize_row({
-        **empty_article_row(),
-        "id": "chembl:CHEMBL25",
-        "source": "chembl",
-        "source_file": "chembl_36.db",
-        "source_record_id": "CHEMBL25",
-        "text": "Compound CHEMBL25 exhibits binding activity new-value.",
-        "license": "CC BY-SA",
-        "subset": "commercial",
-    })
-    write_b = write_rows([row_b], tmp_path / "02_processed", source="chembl", source_file="chembl_36.db")
+    row_b = finalize_row(
+        {
+            **empty_article_row(),
+            "id": "chembl:CHEMBL25",
+            "source": "chembl",
+            "source_file": "chembl_36.db",
+            "source_record_id": "CHEMBL25",
+            "text": "Compound CHEMBL25 exhibits binding activity new-value.",
+            "license": "CC BY-SA",
+            "subset": "commercial",
+        }
+    )
+    write_b = write_rows(
+        [row_b], tmp_path / "02_processed", source="chembl", source_file="chembl_36.db"
+    )
     postgres_loader.load_source_file(
         pg_conn, source="chembl", staging_path=Path(write_b["paths"][0]), run_id="rB"
     )
@@ -204,10 +213,12 @@ def test_chembl_serialize_dry_run_dies_3(tmp_path):
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "writes the DB" in proc.stderr
 
+
 def test_chembl_serialize_dispatches(tmp_path):
     # no data -> the scaffold exits 0 (nothing to do); NOT 3 (dispatch bug)
     proc = _run(["chembl", "serialize", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
+
 
 def test_uniprot_serialize_dry_run_dies_3(tmp_path):
     # a second structured source with no wrapper yet -> caught by the
@@ -217,6 +228,7 @@ def test_uniprot_serialize_dry_run_dies_3(tmp_path):
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "not yet implemented" in proc.stderr or "wrapper not found" in proc.stderr
 
+
 def test_mesh_graph_wrapper_not_found_dies_3(tmp_path):
     # mesh graph is allowed by the dispatch guard but graph_mesh.sh doesn't
     # exist until Task 9 -- proves the mesh-specific graph carve-out is wired
@@ -224,6 +236,7 @@ def test_mesh_graph_wrapper_not_found_dies_3(tmp_path):
     proc = _run(["mesh", "graph"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "wrapper not found" in proc.stderr
+
 
 def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
     # a structured source must NOT be reachable via the SP2 _is_lit gate
@@ -330,6 +343,7 @@ def test_pubchem_serialize_is_not_a_literature_source(tmp_path):
 - [ ] **Step 5: chembl scaffold.** Create `src/episteme/data/chembl/__init__.py` (empty) and `src/episteme/data/chembl/serialize_chembl.py`:
 ```python
 """SP4 chembl serializer -- SCAFFOLD (Task 2). Task 5 fills the body."""
+
 from __future__ import annotations
 import argparse
 import sys
@@ -363,8 +377,10 @@ def main(argv: list[str] | None = None) -> int:
     res = serialize_chembl(
         args.raw_dir or Path("01_raw/chembl"),
         args.processed_dir or Path("02_processed"),
-        max_files=args.max_files, force=args.force,
-        workers=args.workers, verbose=args.verbose,
+        max_files=args.max_files,
+        force=args.force,
+        workers=args.workers,
+        verbose=args.verbose,
     )
     print(f"chembl serialize (scaffold): {res}")
     return 0
@@ -453,6 +469,7 @@ GRANT SELECT, INSERT, DELETE ON episteme.mesh_hierarchy TO episteme_app;
 ```python
 MIGRATION_0003 = REPO_ROOT / "src/episteme/data/db/migrations/0003_mesh_hierarchy.sql"
 
+
 def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
     _setup_schema(pg_conn)  # existing helper
     with pg_conn.cursor() as cur:
@@ -465,16 +482,16 @@ def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "desc2026.xml").write_text(
-        '<DescriptorRecordSet>'
-        '<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>'
-        '<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>'
-        '<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>'
-        '</DescriptorRecord>'
-        '<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>'
-        '<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>'
-        '<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>'
-        '</DescriptorRecord>'
-        '</DescriptorRecordSet>',
+        "<DescriptorRecordSet>"
+        "<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "</DescriptorRecordSet>",
         encoding="utf-8",
     )
 
@@ -483,12 +500,12 @@ def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
         cur.execute(
             "INSERT INTO episteme.articles (id, source, source_file, source_record_id) "
             "VALUES (%s, 'mesh', %s, %s), (%s, 'mesh', %s, %s)",
-            ("mesh:D003924", "desc2026.xml", "D003924",
-             "mesh:D003920", "desc2026.xml", "D003920"),
+            ("mesh:D003924", "desc2026.xml", "D003924", "mesh:D003920", "desc2026.xml", "D003920"),
         )
     pg_conn.commit()
 
     from episteme.data.graph_builder import build, neighbours
+
     res = build(pg_conn, source="mesh", raw_dir=raw, run_id="t")
     pg_conn.commit()
     assert res["mesh_hierarchy"] == 1
@@ -511,8 +528,14 @@ def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
 `_GRAPH_SOURCES` gains `"mesh"`:
 ```python
 _GRAPH_SOURCES = (
-    "pmc", "pubmed", "apollo", "europepmc_manuscript", "europepmc_preprint",
-    "guidelines", "bookshelf", "mesh",
+    "pmc",
+    "pubmed",
+    "apollo",
+    "europepmc_manuscript",
+    "europepmc_preprint",
+    "guidelines",
+    "bookshelf",
+    "mesh",
 )
 ```
 (Adding `mesh` to this tuple also lets it through the existing parts-phase — harmless: mesh rows have `container_id IS NULL`, so that phase's `SELECT ... WHERE container_id IS NOT NULL` naturally returns 0 rows for `source="mesh"`. No guard needed there.)
@@ -557,54 +580,53 @@ def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
 
 New derivation, added to `build()` after the existing parts-phase, gated `if source == "mesh":`:
 ```python
-    total_mesh_hierarchy = 0
-    if source == "mesh":
+total_mesh_hierarchy = 0
+if source == "mesh":
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'")
+        mesh_files = [r[0] for r in cur.fetchall()]
+
+    for src_file in sorted(mesh_files):
+        xml_path = None
+        for cand in Path(raw_dir).rglob(src_file):
+            xml_path = cand
+            break
+        if xml_path is None:
+            continue
+
+        descriptors = _parse_mesh_descriptors(xml_path)
+        # tree number -> descriptor UI, to resolve a child's parent prefix
+        tree_to_ui = {t: ui for ui, trees in descriptors.items() for t in trees}
+
+        edges: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for ui, trees in descriptors.items():
+            for tree in trees:
+                if "." not in tree:
+                    continue  # top-level descriptor, no parent
+                parent_tree = tree.rsplit(".", 1)[0]
+                parent_ui = tree_to_ui.get(parent_tree)
+                if not parent_ui or parent_ui == ui:
+                    continue
+                key = (parent_ui, ui)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append((parent_ui, ui, src_file))
+
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'"
-            )
-            mesh_files = [r[0] for r in cur.fetchall()]
+            cur.execute("DELETE FROM episteme.mesh_hierarchy WHERE source_file = %s", (src_file,))
+            if edges:
+                cur.executemany(_MESH_HIERARCHY_INSERT, edges)
 
-        for src_file in sorted(mesh_files):
-            xml_path = None
-            for cand in Path(raw_dir).rglob(src_file):
-                xml_path = cand
-                break
-            if xml_path is None:
-                continue
-
-            descriptors = _parse_mesh_descriptors(xml_path)
-            # tree number -> descriptor UI, to resolve a child's parent prefix
-            tree_to_ui = {t: ui for ui, trees in descriptors.items() for t in trees}
-
-            edges: list[tuple[str, str, str]] = []
-            seen: set[tuple[str, str]] = set()
-            for ui, trees in descriptors.items():
-                for tree in trees:
-                    if "." not in tree:
-                        continue  # top-level descriptor, no parent
-                    parent_tree = tree.rsplit(".", 1)[0]
-                    parent_ui = tree_to_ui.get(parent_tree)
-                    if not parent_ui or parent_ui == ui:
-                        continue
-                    key = (parent_ui, ui)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    edges.append((parent_ui, ui, src_file))
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM episteme.mesh_hierarchy WHERE source_file = %s", (src_file,)
-                )
-                if edges:
-                    cur.executemany(_MESH_HIERARCHY_INSERT, edges)
-
-            audit_trail.record(
-                "graph_commit", conn=conn, object=f"mesh {src_file}",
-                rows_affected=len(edges), run_id=run_id,
-            )
-            total_mesh_hierarchy += len(edges)
+        audit_trail.record(
+            "graph_commit",
+            conn=conn,
+            object=f"mesh {src_file}",
+            rows_affected=len(edges),
+            run_id=run_id,
+        )
+        total_mesh_hierarchy += len(edges)
 ```
 Add `"mesh_hierarchy": total_mesh_hierarchy` to the function's return dict. Update the module/function docstrings to mention the fourth derivation (mirror how SP2's docstrings were updated when the third derivation landed).
 

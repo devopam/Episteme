@@ -232,6 +232,7 @@ def fresh_config(tmp_path, monkeypatch):
     def _load(text: str):
         env_file.write_text(text, encoding="utf-8")
         import episteme.config as cfg
+
         importlib.reload(cfg)
         cfg.get_settings.cache_clear()
         return cfg
@@ -373,7 +374,9 @@ def get_settings() -> Settings:
         ncbi_ftp_host=_get("NCBI_FTP_HOST", "ftp.ncbi.nlm.nih.gov"),
         pmc_s3_bucket=_get("PMC_S3_BUCKET", "pmc-oa-opendata"),
         ebi_ftp_host=_get("EBI_FTP_HOST", "ftp.ebi.ac.uk"),
-        europepmc_base_url=_get("EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"),
+        europepmc_base_url=_get(
+            "EUROPEPMC_BASE_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest"
+        ),
         apollo_hf_repo=_get("APOLLO_HF_REPO", "FreedomIntelligence/ApolloCorpus"),
     )
 
@@ -477,9 +480,7 @@ def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
     if json_format:
         handler.setFormatter(_JsonFormatter())
     else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
     root.setLevel(level.upper())
 ```

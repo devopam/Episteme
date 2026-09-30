@@ -112,7 +112,9 @@ def test_custom_production_name():
     s = _s(db_mode="restricted", pg_database="prod_db", production_database="prod_db")
     with pytest.raises(ProductionDatabaseGuardError):
         check_database_allowed(s)
-    check_database_allowed(_s(db_mode="restricted", pg_database="episteme", production_database="prod_db"))
+    check_database_allowed(
+        _s(db_mode="restricted", pg_database="episteme", production_database="prod_db")
+    )
 
 
 def test_default_mode_is_restricted(clean_settings):
@@ -250,10 +252,12 @@ and pass `pg_database=pg_database,` (replacing the existing `pg_database=_get("P
 ```python
 from episteme.data.db.guard import check_database_allowed, pool_kwargs
 
+
 def dsn_from_settings() -> str:
     settings = get_settings()
     check_database_allowed(settings)
     return settings.pg_dsn()
+
 
 def get_pool() -> ConnectionPool:
     global _POOL
@@ -513,7 +517,9 @@ def test_same_named_inputs_in_two_directories_are_both_processed(source, tmp_pat
     res = fn(raw, tmp_path / "processed")
     assert res["inputs"] == 2, res
     assert res["ok"] == 2 and res["failed"] == 0, res
-    markers = sorted(p.name for p in (tmp_path / "processed" / "_ops" / source / "success").glob("*.ok"))
+    markers = sorted(
+        p.name for p in (tmp_path / "processed" / "_ops" / source / "success").glob("*.ok")
+    )
     assert len(markers) == 2 and markers[0] != markers[1], markers
     assert all(m.startswith(("a__", "b__")) for m in markers), markers
 ```
@@ -550,12 +556,16 @@ def test_clinvar_record_without_variation_id_is_counted_and_skipped(tmp_path):
     cols = header.lstrip("#").split("\t")
     bad = first.split("\t")
     bad[cols.index("VariationID")] = ""
-    (raw / "variant_summary.txt").write_text("\n".join([header, first, "\t".join(bad)]) + "\n", encoding="utf-8")
+    (raw / "variant_summary.txt").write_text(
+        "\n".join([header, first, "\t".join(bad)]) + "\n", encoding="utf-8"
+    )
     res = serialize_clinvar(raw, tmp_path / "processed")
     assert res["ok"] == 1 and res["failed"] == 0
     df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "clinvar").glob("*.parquet")))
     assert not any(str(i).endswith(":unknown") for i in df["id"].to_list())
-    marker = json.loads(next((tmp_path / "processed" / "_ops" / "clinvar" / "success").glob("*.ok")).read_text())
+    marker = json.loads(
+        next((tmp_path / "processed" / "_ops" / "clinvar" / "success").glob("*.ok")).read_text()
+    )
     assert marker["stats"]["skipped_no_id"] == 1
 ```
   Run each — they fail (a synthesized `…:unknown` id is emitted).
@@ -649,7 +659,9 @@ def _safe_extract(archive: Path, dest: Path) -> None:
 import re
 from pathlib import Path
 
-WRAPPER = Path(__file__).resolve().parents[1] / "scripts" / "data" / "uniprot" / "download_uniprot.sh"
+WRAPPER = (
+    Path(__file__).resolve().parents[1] / "scripts" / "data" / "uniprot" / "download_uniprot.sh"
+)
 
 
 def _files() -> list[str]:
@@ -740,7 +752,14 @@ def _run(tmp_path, *args):
         "EPISTEME_DATA_ROOT": str(tmp_path),
         "PGDATABASE": "episteme_test",
     }
-    proc = subprocess.run([_bash(), str(WRAPPER), *args], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(
+        [_bash(), str(WRAPPER), *args],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     return proc, calls
 
@@ -851,7 +870,11 @@ def test_existing_text_token_behavior_is_unchanged():
 - [ ] **Step 1: Write the failing tests.**
   - `test_article_schema.py`:
 ```python
-from episteme.data.article_schema import LICENSE_PUBLIC_DOMAIN, normalize_license, subset_from_license
+from episteme.data.article_schema import (
+    LICENSE_PUBLIC_DOMAIN,
+    normalize_license,
+    subset_from_license,
+)
 
 
 def test_public_domain_code_maps_to_commercial():

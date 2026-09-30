@@ -149,8 +149,7 @@ def test_reactome_serialize_rows(tmp_path):
 
     bta_109581 = by_id["reactome:R-BTA-109581"]
     assert bta_109581["text"] == (
-        "Reactome pathway Apoptosis (Bos taurus). "
-        "As catalogued in the Reactome pathway database."
+        "Reactome pathway Apoptosis (Bos taurus). As catalogued in the Reactome pathway database."
     )
     # Fully sparse (no summation, no protein hits) -> short text, honest
     # "partial", not a bug -- mirrors every prior SP4 structured source's

@@ -195,6 +195,7 @@ DSN is built from episteme.config.get_settings() — config.py stays the sole
 os.environ reader. The pipeline connects as the non-superuser episteme_app
 role (see scripts/data/db/init_database.sh).
 """
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -243,6 +244,7 @@ def pg_conn():
     if not dsn:
         pytest.skip("TEST_PG_DSN not set")
     import psycopg
+
     conn = psycopg.connect(dsn, autocommit=False)
     try:
         yield conn
@@ -398,7 +400,11 @@ pytestmark = pytest.mark.pg
 
 
 def _setup_schema(conn):
-    with conn.cursor() as cur, open("src/episteme/data/db/extensions.sql") as ext, open("src/episteme/data/db/schema.sql") as sch:
+    with (
+        conn.cursor() as cur,
+        open("src/episteme/data/db/extensions.sql") as ext,
+        open("src/episteme/data/db/schema.sql") as sch,
+    ):
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute(ext.read())
         cur.execute(sch.read())
@@ -409,13 +415,18 @@ def test_hash_chain_and_tamper_detection(pg_conn, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test-actor")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
     import importlib, episteme.config as cfg
-    importlib.reload(cfg); cfg.get_settings.cache_clear()
+
+    importlib.reload(cfg)
+    cfg.get_settings.cache_clear()
     from episteme import audit_trail
+
     importlib.reload(audit_trail)
 
     _setup_schema(pg_conn)
     h1 = audit_trail.record("run_start", conn=pg_conn, object="pmc", run_id="r1")
-    h2 = audit_trail.record("load_commit", conn=pg_conn, object="pmc PMCFIX0001", rows_affected=1, run_id="r1")
+    h2 = audit_trail.record(
+        "load_commit", conn=pg_conn, object="pmc PMCFIX0001", rows_affected=1, run_id="r1"
+    )
     pg_conn.commit()
 
     assert audit_trail.verify(pg_conn) == []
@@ -432,13 +443,16 @@ def test_hash_chain_and_tamper_detection(pg_conn, monkeypatch, tmp_path):
 
     # tamper: flip a field, verify() must catch it
     with pg_conn.cursor() as cur:
-        cur.execute("UPDATE episteme._audit SET object = 'TAMPERED' WHERE seq = 1")  # superuser test conn can
+        cur.execute(
+            "UPDATE episteme._audit SET object = 'TAMPERED' WHERE seq = 1"
+        )  # superuser test conn can
     assert audit_trail.verify(pg_conn) != []
 
 
 def test_bad_event_type_rejected(pg_conn, monkeypatch):
     monkeypatch.setenv("EPISTEME_ACTOR", "x")
     from episteme import audit_trail
+
     with pytest.raises(ValueError):
         audit_trail.record("not_a_real_event", conn=pg_conn)
 ```
@@ -531,7 +545,9 @@ Expected: `episteme_sys_admin` + `episteme_app` roles present; `episteme` + `epi
 
 ```python
 import pytest
+
 pytestmark = pytest.mark.pg
+
 
 def test_schema_and_partitions(pg_conn):
     with pg_conn.cursor() as cur:
@@ -540,7 +556,9 @@ def test_schema_and_partitions(pg_conn):
         cur.execute("""SELECT count(*) FROM pg_partitioned_table pt
                        JOIN pg_class c ON c.oid=pt.partrelid
                        JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='episteme'""")
-        assert cur.fetchone()[0] >= 5   # articles, article_body, article_cites, article_mesh, chunks, _audit
+        assert (
+            cur.fetchone()[0] >= 5
+        )  # articles, article_body, article_cites, article_mesh, chunks, _audit
         cur.execute("""SELECT has_table_privilege('episteme_app','episteme._audit','UPDATE')""")
         assert cur.fetchone()[0] is False
 ```
@@ -583,7 +601,9 @@ EOF
 ```python
 import pytest
 from pathlib import Path
+
 pytestmark = pytest.mark.pg
+
 
 def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     monkeypatch.setenv("EPISTEME_ACTOR", "t")
@@ -594,11 +614,26 @@ def test_load_and_idempotent_replace(pg_conn, tmp_path, monkeypatch):
     from episteme.data.staging_writer import write_rows
     from episteme.data import postgres_loader
 
-    rows = [finalize_row({**empty_article_row(), "id": "pmcid:PMC1", "source": "pmc",
-                          "source_file": "B01.json", "pmcid": "PMC1", "year": 2024,
-                          "abstract": "an abstract about acetylcholinesterase " * 5,
-                          "license": "CC BY", "subset": "commercial"})]
-    shard = Path(write_rows(rows, tmp_path / "02_processed", source="pmc", source_file="B01.json")["paths"][0])
+    rows = [
+        finalize_row(
+            {
+                **empty_article_row(),
+                "id": "pmcid:PMC1",
+                "source": "pmc",
+                "source_file": "B01.json",
+                "pmcid": "PMC1",
+                "year": 2024,
+                "abstract": "an abstract about acetylcholinesterase " * 5,
+                "license": "CC BY",
+                "subset": "commercial",
+            }
+        )
+    ]
+    shard = Path(
+        write_rows(rows, tmp_path / "02_processed", source="pmc", source_file="B01.json")["paths"][
+            0
+        ]
+    )
     r1 = postgres_loader.load_source_file(pg_conn, source="pmc", staging_path=shard, run_id="r1")
     pg_conn.commit()
     with pg_conn.cursor() as cur:

@@ -152,7 +152,11 @@ def _load(path: Path) -> dict:
 def _triggers(wf: dict) -> dict:
     trig = wf.get("on", wf.get(True))
     assert trig is not None, "workflow has no 'on:' block"
-    return trig if isinstance(trig, dict) else {t: None for t in ([trig] if isinstance(trig, str) else trig)}
+    return (
+        trig
+        if isinstance(trig, dict)
+        else {t: None for t in ([trig] if isinstance(trig, str) else trig)}
+    )
 
 
 def _run_lines(job: dict) -> list[str]:
@@ -164,6 +168,7 @@ def _uses(job: dict) -> list[str]:
 
 
 # --- dependabot.yml --------------------------------------------------------
+
 
 def test_dependabot_ecosystems_are_uv_and_actions_weekly():
     cfg = _load(GH / "dependabot.yml")
@@ -186,6 +191,7 @@ def test_dependabot_groups_security_updates_only():
 
 
 # --- ci.yml -----------------------------------------------------------------
+
 
 def _ci_job() -> tuple[dict, dict]:
     wf = _load(GH / "workflows" / "ci.yml")
@@ -226,6 +232,7 @@ def test_ci_runs_model_smoke_tests():
 
 
 # --- dependabot-auto-merge.yml -----------------------------------------------
+
 
 def _am() -> tuple[dict, dict]:
     wf = _load(GH / "workflows" / "dependabot-auto-merge.yml")

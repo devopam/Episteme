@@ -83,15 +83,20 @@ from pathlib import Path
 from episteme.data.jats import local_name, child_text, itertext, parse_jats_fields, iter_book_parts
 import defusedxml.ElementTree as ET
 
+
 def test_local_name_strips_namespace():
     assert local_name("{http://x}article") == "article"
     assert local_name("plain") == "plain"
 
+
 def test_child_text_reads_nested_name(tmp_path):
     p = tmp_path / "a.xml"
-    p.write_text('<contrib><name><surname>Doe</surname><given-names>J</given-names></name></contrib>')
+    p.write_text(
+        "<contrib><name><surname>Doe</surname><given-names>J</given-names></name></contrib>"
+    )
     root = ET.parse(str(p)).getroot()
     assert child_text(root, "surname") == "Doe"
+
 
 def test_parse_jats_fields_pmc_fixture():
     # reuse the SP1-β pmc fixture — parse must yield the same title/abstract it did before jats.py
@@ -102,11 +107,12 @@ def test_parse_jats_fields_pmc_fixture():
     assert fields.get("title")
     assert "abstract" in fields
 
+
 def test_iter_book_parts_yields_each_part(tmp_path):
     p = tmp_path / "book.xml"
     p.write_text(
         '<book><book-part id="p1"><book-part-meta><title>Ch1</title></book-part-meta>'
-        '<body><p>one</p></body></book-part>'
+        "<body><p>one</p></body></book-part>"
         '<book-part id="p2"><body><p>two</p></body></book-part></book>'
     )
     root = ET.parse(str(p)).getroot()
@@ -125,6 +131,7 @@ Move `_local`→`local_name`, `_child_text`→`child_text`, `_itertext`→`itert
 ```python
 from collections.abc import Iterator
 
+
 def iter_book_parts(root) -> Iterator:
     """Yield every <book-part> element under root, depth-first, including nested."""
     for el in root.iter():
@@ -136,7 +143,12 @@ def iter_book_parts(root) -> Iterator:
 
 Replace the four local defs with:
 ```python
-from episteme.data.jats import local_name as _local, child_text as _child_text, itertext as _itertext, parse_jats_fields
+from episteme.data.jats import (
+    local_name as _local,
+    child_text as _child_text,
+    itertext as _itertext,
+    parse_jats_fields,
+)
 ```
 (keep the `_`-prefixed aliases so no other line in the file changes). Delete lines `70-172`'s bodies.
 
@@ -172,14 +184,17 @@ pytestmark = pytest.mark.pg  # applies 0001+0002 to episteme_test
 
 REPO = Path(__file__).resolve().parents[1]
 
+
 @pytest.fixture(scope="module")
 def sa_conn():
     import psycopg
+
     dsn = os.environ.get("TEST_PG_DSN")
     if not dsn:
         pytest.skip("TEST_PG_DSN not set")
     with psycopg.connect(dsn, autocommit=True) as c:
         yield c
+
 
 def test_migration_0002_adds_container_columns(sa_conn):
     with sa_conn.cursor() as cur:
@@ -191,6 +206,7 @@ def test_migration_0002_adds_container_columns(sa_conn):
         cols = {r[0] for r in cur.fetchall()}
     assert cols == {"container_id", "book_meta"}
 
+
 def test_migration_0002_article_parts_table_and_partitions(sa_conn):
     with sa_conn.cursor() as cur:
         cur.execute("SELECT to_regclass('episteme.article_parts')")
@@ -201,6 +217,7 @@ def test_migration_0002_article_parts_table_and_partitions(sa_conn):
             WHERE p.relname = 'article_parts'
         """)
         assert cur.fetchone()[0] == 8  # 8 hash buckets
+
 
 def test_migration_0002_bookshelf_partition(sa_conn):
     with sa_conn.cursor() as cur:
@@ -214,6 +231,7 @@ Also a `not pg` schema test:
 ```python
 def test_schema_version_and_columns():
     from episteme.data import article_schema as s
+
     assert s.SCHEMA_VERSION == "1.4"
     assert s.ARTICLE_COLUMNS[-2:] == ["container_id", "book_meta"]
     assert "isbn" in s.BOOK_META_KEYS
@@ -226,7 +244,7 @@ def test_schema_version_and_columns():
 - [ ] **Step 3: Edit `article_schema.py`**
 
 ```python
-SCHEMA_VERSION = "1.4"   # was "1.3" — +container_id, +book_meta (SP2)
+SCHEMA_VERSION = "1.4"  # was "1.3" — +container_id, +book_meta (SP2)
 BOOK_META_KEYS = ("isbn", "editors", "publisher", "edition", "n_parts")
 ```
 Append to `ARTICLE_COLUMNS`: `"container_id"`, `"book_meta"` (after `"pdf_url"`).
@@ -314,12 +332,20 @@ In the `CREATE PROPERTY GRAPH` block, after the `article_cites` edge, add an `ar
 
 ```python
 import pytest
+
 pytestmark = pytest.mark.pg
+
 
 def test_build_populates_article_parts(pg_conn_with_bookshelf_rows):
     # fixture: 1 book row (id='bookshelf:NBK1') + 2 part rows (container_id='bookshelf:NBK1')
     from episteme.data.graph_builder import build, neighbours
-    res = build(pg_conn_with_bookshelf_rows, source="bookshelf", raw_dir="tests/fixtures/sp2/bookshelf", run_id="t")
+
+    res = build(
+        pg_conn_with_bookshelf_rows,
+        source="bookshelf",
+        raw_dir="tests/fixtures/sp2/bookshelf",
+        run_id="t",
+    )
     assert res["parts"] == 2
     parts = neighbours(pg_conn_with_bookshelf_rows, "bookshelf:NBK1", kind="part")
     assert set(parts) == {"bookshelf:NBK1:p1", "bookshelf:NBK1:p2"}
@@ -381,10 +407,12 @@ def test_bookshelf_extract_dry_run_dies_3(tmp_path):
     proc = _run(["bookshelf", "extract", "--dry-run"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
 
+
 def test_bookshelf_extract_dispatches(tmp_path):
     # no data -> extractor exits 0 (nothing to do) or 1 (no raw dir); NOT 3 (dispatch bug)
     proc = _run(["bookshelf", "extract", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
+
 
 def test_corpus_materialize_alias(tmp_path):
     proc = _run(["corpus", "materialize", "--dry-run"], tmp_path, FAST_TIMEOUT)
@@ -469,14 +497,17 @@ from episteme.data import article_schema
 
 FX = Path("tests/fixtures/sp2/pubmed")
 
+
 def test_pubmed_extract_rows(tmp_path):
     res = extract_pubmed(FX, tmp_path)
     assert res["inputs"] == 1 and res["rows"] >= 1
-    shards = list((tmp_path / "staging" / "pubmed").glob("*.parquet")) or \
-             list((tmp_path / "staging" / "pubmed").glob("*.jsonl"))
+    shards = list((tmp_path / "staging" / "pubmed").glob("*.parquet")) or list(
+        (tmp_path / "staging" / "pubmed").glob("*.jsonl")
+    )
     assert shards
     # read one row back
     import polars as pl
+
     df = pl.read_parquet(shards[0]) if shards[0].suffix == ".parquet" else pl.read_ndjson(shards[0])
     r = df.to_dicts()[0]
     assert r["source"] == "pubmed"
@@ -484,9 +515,11 @@ def test_pubmed_extract_rows(tmp_path):
     assert r["extract_status"] in article_schema.EXTRACT_STATUSES
     assert r["container_id"] is None
 
+
 def test_pubmed_no_abstract_is_empty(tmp_path):
     res = extract_pubmed(FX, tmp_path)
     import polars as pl
+
     shards = list((tmp_path / "staging" / "pubmed").glob("*.*"))
     df = pl.read_parquet(shards[0]) if shards[0].suffix == ".parquet" else pl.read_ndjson(shards[0])
     statuses = set(df["extract_status"].to_list())
@@ -533,6 +566,7 @@ Same shape as Task 5. Spec §3.2 `apollo` row. `git rm src/episteme/data/apollo/
 ```python
 import responses  # or unittest.mock over requests
 from episteme.data.europepmc.preprints.download_europepmc_preprints import download_preprints
+
 
 def test_harvest_writes_per_id_xml(tmp_path, monkeypatch):
     # monkeypatch the pprid list fetch -> "PPR1\nPPR2\n", and GET /{id}/fullTextXML -> "<article/>"
@@ -613,15 +647,19 @@ def test_harvest_writes_per_id_xml(tmp_path, monkeypatch):
 ```python
 def test_bookshelf_book_plus_parts(tmp_path):
     from episteme.data.bookshelf.extract_bookshelf import extract_bookshelf
+
     res = extract_bookshelf(Path("tests/fixtures/sp2/bookshelf"), tmp_path)
     import polars as pl
+
     shards = list((tmp_path / "staging" / "bookshelf").glob("*.*"))
-    rows = (pl.read_parquet(shards[0]) if shards[0].suffix==".parquet" else pl.read_ndjson(shards[0])).to_dicts()
+    rows = (
+        pl.read_parquet(shards[0]) if shards[0].suffix == ".parquet" else pl.read_ndjson(shards[0])
+    ).to_dicts()
     book = [r for r in rows if r["id"] == "bookshelf:NBK1"][0]
     parts = [r for r in rows if r["container_id"] == "bookshelf:NBK1"]
     assert book["container_id"] is None
     assert book["book_meta"] is not None and "isbn" in book["book_meta"]
-    assert "Chapter 1" not in (book["text"] or "")   # book text is TOC+front only
+    assert "Chapter 1" not in (book["text"] or "")  # book text is TOC+front only
     assert {p["id"] for p in parts} == {"bookshelf:NBK1:p1", "bookshelf:NBK1:p2"}  # idx skipped
     assert all(p["container_id"] == "bookshelf:NBK1" for p in parts)
 ```

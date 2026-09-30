@@ -165,10 +165,19 @@ def test_collect_reads_sync_stamp_and_counts(tmp_path):
 
 
 def test_cli_degrades_when_db_unreachable(tmp_path):
-    env = {**os.environ, "PGDATABASE": "episteme_test", "PGPORT": "1", "EPISTEME_RAW_ROOT": str(tmp_path)}
+    env = {
+        **os.environ,
+        "PGDATABASE": "episteme_test",
+        "PGPORT": "1",
+        "EPISTEME_RAW_ROOT": str(tmp_path),
+    }
     p = subprocess.run(
         [".venv/Scripts/python.exe", "-m", "episteme.data.source_inventory"],
-        cwd=REPO, env=env, capture_output=True, text=True, timeout=60,
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert p.returncode == 0, p.stderr[-500:]
     assert "chembl" in p.stdout and "n/a" in p.stdout
@@ -200,7 +209,11 @@ from ._repo import REPO, doc
 def _schema_columns() -> list[str]:
     sql = (REPO / "src/episteme/data/db/schema.sql").read_text(encoding="utf-8")
     body = re.search(r"CREATE TABLE episteme\._audit \((.*?)\n\) PARTITION", sql, re.S).group(1)
-    return [ln.split()[0] for ln in body.splitlines() if ln.strip() and not ln.strip().startswith(("PRIMARY", "--"))]
+    return [
+        ln.split()[0]
+        for ln in body.splitlines()
+        if ln.strip() and not ln.strip().startswith(("PRIMARY", "--"))
+    ]
 
 
 def test_every_event_type_is_documented():
@@ -220,7 +233,9 @@ def test_every_audit_column_is_documented():
 def test_boundaries_and_claims():
     text = doc("11-gxp-data-integrity.md")
     assert "GxP-ready" in text
-    assert "GxP-compliant" not in text.replace("not GxP-compliant", "").replace('never "GxP-compliant"', "")
+    assert "GxP-compliant" not in text.replace("not GxP-compliant", "").replace(
+        'never "GxP-compliant"', ""
+    )
     assert "EPISTEME_DB_MODE=restricted" in text  # go-live item
     assert "database name" in text  # guard limit
     assert "verify_audit_trail.sh" in text
@@ -253,10 +268,14 @@ from episteme.data.article_schema import (
 from ._repo import doc
 
 SAMPLES = [
-    "CC0", "https://creativecommons.org/licenses/by/4.0/",
-    "https://creativecommons.org/licenses/by-sa/4.0/", "https://creativecommons.org/licenses/by-nd/4.0/",
-    "https://creativecommons.org/licenses/by-nc/4.0/", "https://creativecommons.org/publicdomain/zero/1.0/",
-    "text mining", "something unrecognised",
+    "CC0",
+    "https://creativecommons.org/licenses/by/4.0/",
+    "https://creativecommons.org/licenses/by-sa/4.0/",
+    "https://creativecommons.org/licenses/by-nd/4.0/",
+    "https://creativecommons.org/licenses/by-nc/4.0/",
+    "https://creativecommons.org/publicdomain/zero/1.0/",
+    "text mining",
+    "something unrecognised",
 ]
 
 
@@ -271,7 +290,9 @@ def test_public_domain_is_documented_as_override():
     assert f"`{LICENSE_PUBLIC_DOMAIN}`" in text
     assert "governance override" in text
     assert subset_from_license(LICENSE_PUBLIC_DOMAIN) == "commercial"
-    assert normalize_license("public domain")[0] != LICENSE_PUBLIC_DOMAIN  # never returned by normalize_license
+    assert (
+        normalize_license("public domain")[0] != LICENSE_PUBLIC_DOMAIN
+    )  # never returned by normalize_license
 
 
 def test_identity_and_storage_terms_present():
@@ -314,7 +335,10 @@ def test_docs_07_uses_postgres_property_tables():
 
 
 def test_referenced_adrs_exist():
-    for name in ("0001-hybrid-storage-architecture.md", "0002-data-model-storage-and-partitioning.md"):
+    for name in (
+        "0001-hybrid-storage-architecture.md",
+        "0002-data-model-storage-and-partitioning.md",
+    ):
         assert (REPO / "docs" / "adr" / name).is_file()
 ```
 
@@ -376,7 +400,14 @@ def test_every_wired_source_has_a_runbook_section_or_inventory_pointer():
 
 def test_guard_and_goLive_are_documented():
     t = doc("10-data-sources-runbook.md")
-    for term in ("EPISTEME_DB_MODE", "EPISTEME_DB_TARGET", "PGDATABASE_SECONDARY", "episteme_test", "restricted", "12-source-inventory"):
+    for term in (
+        "EPISTEME_DB_MODE",
+        "EPISTEME_DB_TARGET",
+        "PGDATABASE_SECONDARY",
+        "episteme_test",
+        "restricted",
+        "12-source-inventory",
+    ):
         assert term in t, term
 
 

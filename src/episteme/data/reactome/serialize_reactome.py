@@ -348,7 +348,7 @@ def _build_query(primary_path: Path, summation_path: Path | None, protein_path: 
             ")"
         )
         protein_select = (
-            "pa.proteins_sample AS proteins_sample, " "COALESCE(cnt.n_proteins, 0) AS n_proteins"
+            "pa.proteins_sample AS proteins_sample, COALESCE(cnt.n_proteins, 0) AS n_proteins"
         )
         protein_join = (
             "LEFT JOIN protein_agg pa ON pa.pathway_id = p.pathway_id "
@@ -815,9 +815,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: no {_PRIMARY_STEM}* files under {raw_dir}", file=sys.stderr)
         return 1
 
-    print(
-        f"done inputs={res['inputs']} ok={res['ok']} " f"failed={res['failed']} rows={res['rows']}"
-    )
+    print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
     return 1 if res["failed"] else 0
 
 

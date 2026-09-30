@@ -142,9 +142,9 @@ def test_code_premise_extract_and_serialize_use_record_with_mirror_fallback():
         return hits
 
     assert uses_both("extract_*.py"), "no extract module pairs record() with mirror_only fallback"
-    assert uses_both(
-        "serialize_*.py"
-    ), "no serialize module pairs record() with mirror_only fallback"
+    assert uses_both("serialize_*.py"), (
+        "no serialize module pairs record() with mirror_only fallback"
+    )
 
 
 def test_reason_enforcement_gap_row_reflects_record_level_check():
