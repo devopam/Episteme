@@ -1,0 +1,29 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Install (locked)
+        run: uv sync --locked --extra dev
+      - name: ruff format
+        run: uv run --no-sync ruff format --check .
+      - name: ruff check
+        run: uv run --no-sync ruff check .
+      - name: pytest (no database, no network dispatch smoke test)
+        run: uv run --no-sync pytest -m "not pg" -q --ignore=tests/test_run_pipeline_dispatch.py
