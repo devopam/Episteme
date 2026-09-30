@@ -763,7 +763,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'model'", specifier = ">=2.0.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", marker = "extra == 'model'", specifier = ">=5.17.0" },
-    { name = "trl", marker = "extra == 'model'", specifier = ">=0.7.2" },
+    { name = "trl", marker = "extra == 'model'", specifier = ">=1.14.0" },
 ]
 provides-extras = ["data", "model", "dev"]
 
@@ -3801,7 +3801,7 @@ wheels = [
 
 [[package]]
 name = "trl"
-version = "1.12.0"
+version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "accelerate" },
@@ -3810,9 +3810,9 @@ dependencies = [
     { name = "packaging" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c1/e8/2e131fd15224433c48b0c6afd80a2926a815e070dd2d9b528cc07c337056/trl-1.12.0.tar.gz", hash = "sha256:494ec6cfd07097bb8116cc7bec299b067dd765d1c19ed3eca2d874a29979f229", size = 818314, upload-time = "2026-08-26T19:46:16.456Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/4b/f14948316749eb0473439a3e39dfbf00dcc5543b7c2ffa7fb55c6f329768/trl-1.14.0.tar.gz", hash = "sha256:c110d46307b097c44d9f6cdd556cc472563250f4000cbcf07ff69f86a1bbd45a", size = 764564, upload-time = "2026-09-25T05:57:30.492Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/21/b29125ab2c1b324de93f863b9ab58237ccf87990dbd7ef7ef066bb1284aa/trl-1.12.0-py3-none-any.whl", hash = "sha256:9c8f117b21a941edbc85744f5a341c9453d38e81f24ae81d3c6e9b9ca3b96409", size = 992576, upload-time = "2026-08-26T19:46:14.821Z" },
+    { url = "https://files.pythonhosted.org/packages/18/7d/3302bb42be0a304313792fa2fe7b60979f86c69eb2647cb8d3e0036d5080/trl-1.14.0-py3-none-any.whl", hash = "sha256:10059306c0efc6a2c32b17bc28363bb1c7b186a820d0e34e1fbd8b2aac80c22c", size = 925014, upload-time = "2026-09-25T05:57:28.82Z" },
 ]
 
 [[package]]
