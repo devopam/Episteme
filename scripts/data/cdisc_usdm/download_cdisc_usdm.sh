@@ -72,6 +72,8 @@ dest="$(resolve_dest cdisc_usdm "$tag")"
 # under Deliverables/. path/type are tracked per-entry: reset at each object-open line,
 # recorded independently as seen, emitted at the matching object-close line so a reordered
 # field (or a reordered GitHub response) cannot pair a path with the wrong entry's type.
+# Also cleared immediately after that emit, so the OUTER object's own closing "}" (which
+# matches the same close pattern) cannot re-emit the last entry's path a second time.
 planned=()
 while IFS= read -r rel; do
     [ -n "$rel" ] || continue
@@ -81,7 +83,7 @@ done < <(printf '%s\n' "$tree" | awk '
     /^ *\{ *$/ { path=""; type="" }
     /^ *"path":/ { p=$0; sub(/^ *"path": *"/, "", p); sub(/",? *$/, "", p); path=p }
     /^ *"type":/ { t=$0; sub(/^ *"type": *"/, "", t); sub(/",? *$/, "", t); type=t }
-    /^ *\},? *$/ { if (type == "blob" && path ~ /^Deliverables\//) print path }')
+    /^ *\},? *$/ { if (type == "blob" && path ~ /^Deliverables\//) print path; path=""; type="" }')
 [ "${#planned[@]}" -gt 0 ] || die "cdisc_usdm: no files resolved under Deliverables/ in release $tag"
 
 # --max-files caps the RESOLVED data-file set here, before the --force prune loop.

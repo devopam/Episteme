@@ -299,6 +299,30 @@ def test_awk_tree_parser_pairs_path_and_type_per_entry(tmp_path):
     )
 
 
+def test_last_deliverables_entry_is_not_fetched_twice(tmp_path):
+    # The outer tree object's own closing "}" line matches the same awk closing-brace
+    # pattern used to emit a per-entry blob path. If the parser never clears path/type
+    # after emitting, and the LAST tree entry is a Deliverables/ blob, the outer object's
+    # close re-emits that same path a second time -> fetched twice.
+    tree = _tree(
+        [
+            ("Deliverables", "tree"),
+            ("Deliverables/API/USDM_API.json", "blob"),
+            ("Deliverables/CT/USDM_CT.xlsx", "blob"),
+        ]
+    )
+    proc, calls = _run(tmp_path, tree=tree)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    get_calls = [c for c in calls if c.startswith("https://raw.githubusercontent.com/")]
+    assert get_calls.count(RAW + "/Deliverables/CT/USDM_CT.xlsx") == 1
+
+    # Separate, untouched tmp dir: no local files means no size-match HEAD requests to
+    # muddy the "DRY: would fetch" count.
+    proc, _ = _run(tmp_path / "dry", "--dry-run", tree=tree)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert proc.stderr.count("DRY: would fetch") == 4  # 2 data files + LICENSE + README.md
+
+
 def test_older_release_folder_is_untouched(tmp_path):
     old = _root(tmp_path) / "v3.13.0" / "Deliverables" / "keep.txt"
     old.parent.mkdir(parents=True)
