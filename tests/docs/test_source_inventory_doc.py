@@ -57,3 +57,7 @@ def test_licence_caveats_are_recorded_per_row():
     assert "training corpus" in row
     for src in ("mesh", "pubchem", "clinvar"):
         assert "governance override" in " ".join(rows[src]), src
+    usdm = " ".join(rows["cdisc_usdm"])
+    assert "UNVERIFIED" in usdm  # model-file licence
+    assert "until CDISC confirms" in usdm
+    assert "training corpus" in usdm

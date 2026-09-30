@@ -208,6 +208,19 @@ def test_cdisc_bc_corpus_lockdown_is_documented():
     assert "cdisc.org/terms-and-conditions" not in sec  # URL belongs to the wrapper comment only
 
 
+def test_cdisc_usdm_section_is_documented():
+    sec = _section(_text(), "### 5.7", "\n---")
+    assert "`cdisc_usdm`" in sec
+    assert "Download-only" in sec
+    assert "Deliverables/" in sec
+    assert "release_tag" in sec and "commit_sha" in sec
+    assert "until CDISC confirms a licence for the model files" in sec
+    assert "excluded from any training corpus" in sec
+    assert "three GitHub API calls" in sec
+    row = next(line for line in _text().splitlines() if line.startswith("| `europepmc_abstracts`"))
+    assert "`cdisc_usdm`" in row  # download-only row of the stage table
+
+
 def test_known_hazards_are_documented():
     t = _text()
     for term in (

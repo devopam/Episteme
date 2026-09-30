@@ -65,6 +65,7 @@ FAST_TOKENS = [
     "aact",
     "cdisc_bc",
     "cdisc_ct",
+    "cdisc_usdm",
     "europepmc_preprint",
     "europepmc_id_mappings",
     "europepmc_lite",
@@ -371,3 +372,12 @@ def test_cdisc_bc_is_download_only(tmp_path, stage):
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "unknown source" not in proc.stderr  # registered in WRAPPER, refused for the stage
     assert f"cdisc_bc {stage} is not in SP" in proc.stderr
+
+
+@pytest.mark.parametrize("stage", ["serialize", "extract", "load"])
+def test_cdisc_usdm_is_download_only(tmp_path, stage):
+    # cdisc_usdm is in WRAPPER only (not LIT_SOURCES / STRUCTURED_SOURCES): early validation dies 3.
+    proc = _run(["cdisc_usdm", stage], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "unknown source" not in proc.stderr  # registered in WRAPPER, refused for the stage
+    assert f"cdisc_usdm {stage} is not in SP" in proc.stderr

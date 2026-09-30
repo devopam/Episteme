@@ -27,5 +27,5 @@ Medical-LLM data pipeline: acquire open biomedical sources, extract or serialize
 - `src/episteme/config.py` is the only module that reads `os.environ`.
 - Endpoint URLs live only in `scripts/data/_lib/sources.env`; this must stay empty: `grep -REn 'ftp\.|s3://|https?://' scripts/data/ | grep -v _lib/sources.env | grep -vE ':[0-9]+:\s*#'`
 - Restartability and duplicate detection are a project-wide rule: every extractor/serializer keys its checkpoint marker and stored `source_file` on `input_key(path, raw_dir)`, with a collision test.
-- `cdisc_bc` stays download-only: no serializer, no corpus inclusion, until CDISC confirms a licence for its `export/` data.
+- `cdisc_bc` and `cdisc_usdm` stay download-only: no serializer, no corpus inclusion, until CDISC confirms a licence for their data files (`cdisc_bc`: `export/`; `cdisc_usdm`: the USDM model files).
 - Git: `git add` explicit paths only; never `--no-verify`; run `ruff format` and `ruff check` on changed Python before committing; never commit `.env`.

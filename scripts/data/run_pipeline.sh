@@ -89,6 +89,7 @@ declare -A WRAPPER=(
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
+    [cdisc_usdm]="cdisc_usdm/download_cdisc_usdm.sh"
 )
 
 # SP2 literature sources: the six that get the full extract -> load -> graph

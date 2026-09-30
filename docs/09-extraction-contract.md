@@ -299,6 +299,7 @@ Caveat for PubChem and ClinVar: they carry contributor-submitted content whose s
 | `ontologies` | GO and MONDO `CC BY` -> `commercial`; HPO `unknown` -> `open_metadata` | GO and MONDO declare a `creativecommons.org/licenses/by/` URL, which `normalize_license` now recognises; HPO declares only a licence page URL |
 | `uniprot` | `subset` = `text_mining` (hardcoded) | the real licence is CC BY 4.0, but the serializer hardcodes `text_mining` as a governance override instead of calling `subset_from_license` |
 | `cdisc_bc` | none | download-only, no serializer, no `articles` rows; licence **unverified** (repo code is MIT; the README grants CC-BY-4.0 to documentation only and states nothing for `export/` data); no `subset` is ever assigned, and until CDISC confirms a licence for `export/` directly no row from this source may enter a training corpus |
+| `cdisc_usdm` | none | download-only, no serializer, no `articles` rows; licence **unverified** (the repo README grants MIT to code and scripts and CC-BY-4.0 to documentation and minutes; the USDM model files are named in neither); no `subset` is ever assigned, and until CDISC confirms a licence for the model files no row from this source may enter a training corpus |
 
 Per-source cadence and script paths: `docs/12-source-inventory.md`.
 
