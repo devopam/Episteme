@@ -48,7 +48,7 @@ dev = [
     "episteme[data,model]",
     "pytest>=7.0.0",
     "jsonschema>=4.0.0",
-    "ruff>=0.6.0,<0.7",
+    "ruff>=0.16.9,<0.17",
     "bandit>=1.7.8",
     "pre-commit>=4.0.0",
 ]
@@ -80,7 +80,7 @@ markers = [
 dev = [
     "pytest>=7.0.0",
     "jsonschema>=4.0.0",
-    "ruff>=0.6.0,<0.7",
+    "ruff>=0.16.9,<0.17",
     "bandit>=1.7.8",
     "pre-commit>=4.0.0",
 ]
