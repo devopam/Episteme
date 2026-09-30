@@ -20,7 +20,7 @@ Add CDISC's Unified Study Definitions Model (USDM, repository `cdisc-org/DDF-RA`
 
 - Latest release: `v4.0.0`, published 2025-06-03 (`GET /repos/cdisc-org/DDF-RA/releases/latest` → `tag_name`). The repository has not been pushed since 2025-06-19.
 - `GET /repos/cdisc-org/DDF-RA/git/trees/v4.0.0?recursive=1` returns the whole tree in one response: 158 entries, `"truncated": false`. Each blob entry has `path`, `type: "blob"` and `size`.
-- `Deliverables/` at `v4.0.0`: 77 files, 15,250,261 bytes, in `API/` (OpenAPI JSON/YAML, version-diff files), `CT/` (`USDM_CT.xlsx`, diffs), `IG/` (`USDM-IG.pdf`, 5.9 MB), `RULES/` (CORE rules `.xlsx`, including a `USDM_V3.0/` subfolder) and `UML/` (`dataStructure.yml`, `dataDictionary.MD`, `USDM_UML.xmi`/`.qea`, version diffs, diagram PNGs under `UML_Views/`). No path under `Deliverables/` contains a space.
+- `Deliverables/` at `v4.0.0`: 75 files, 15,250,261 bytes, in `API/` (OpenAPI JSON/YAML, version-diff files), `CT/` (`USDM_CT.xlsx`, diffs), `IG/` (`USDM-IG.pdf`, 5.9 MB), `RULES/` (CORE rules `.xlsx`, including a `USDM_V3.0/` subfolder) and `UML/` (`dataStructure.yml`, `dataDictionary.MD`, `USDM_UML.xmi`/`.qea`, version diffs, diagram PNGs under `UML_Views/`). No path under `Deliverables/` contains a space.
 - Raw files are served at `https://raw.githubusercontent.com/cdisc-org/DDF-RA/<ref>/<path>`.
 - Licence: `LICENSE` is MIT. The README says MIT covers "code and scripts" and CC-BY-4.0 covers "content files like documentation and minutes"; the model files are not named in either. Status: **unverified**, as for `cdisc_bc`.
 - Unauthenticated GitHub API limit: 60 requests per hour.
