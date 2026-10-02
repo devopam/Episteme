@@ -21,7 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 data = [
     "pandas>=2.0.0",
-    "polars>=0.19.0",
+    "polars>=1.44.2",
     "pyarrow>=12.0.0",
     "requests>=2.31.0",
     "datasketch>=1.5.0",
