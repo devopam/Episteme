@@ -15,7 +15,7 @@ classifiers = [
 ]
 dependencies = [
     "python-dotenv>=1.0.0",
-    "tqdm>=4.66.0",
+    "tqdm>=4.70.1",
 ]
 
 [project.optional-dependencies]
