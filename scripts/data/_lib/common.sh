@@ -221,7 +221,9 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
         _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
         mkdir -p "$dest_dir/$(dirname "$rel")"
-        curl -fL -C - --retry 15 --retry-delay 30 -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
+        # --retry alone skips connection resets (curl exit 56), which ended a 3.7 h
+        # reactome fetch on 2026-10-08; --retry-all-errors retries them, resuming via -C -.
+        curl -fL -C - --retry 15 --retry-delay 30 --retry-all-errors -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
     done
 }
 
