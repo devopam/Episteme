@@ -94,6 +94,12 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         case "$val" in                                  # strip one matching quote pair
             \"*\") val="${val#\"}"; val="${val%\"}" ;;
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
+            *)  # unquoted, as python-dotenv reads it (config.py's view): an inline
+                # comment starts at whitespace + '#', and the value is trimmed.
+                # (ltrim first: python-dotenv reads `K=   # x` as "# x").
+                val="${val#"${val%%[![:space:]]*}"}"
+                val="${val%%[[:space:]]#*}"
+                val="${val%"${val##*[![:space:]]}"}" ;;
         esac
         export "$key=$val"
     done < "$env_file"
