@@ -32,6 +32,21 @@ fi
 exit "$code"
 """
 
+TOOLS = (
+    "bash",
+    "env",
+    "date",
+    "mkdir",
+    "dirname",
+    "basename",
+    "mktemp",
+    "rm",
+    "sleep",
+    "wc",
+    "cut",
+    "cat",
+)
+
 
 def _bash() -> str:
     for c in (r"C:\Program Files\Git\bin\bash.exe", "/usr/bin/bash", "/bin/bash"):
@@ -40,9 +55,9 @@ def _bash() -> str:
     pytest.skip("no POSIX bash")
 
 
-def _run(tmp_path: Path, codes: str) -> tuple[subprocess.CompletedProcess, list[str]]:
-    if any(Path(d, "aria2c").exists() for d in ("/usr/bin", "/bin")):
-        pytest.skip("aria2c in a system dir; the curl fallback can't be reached")
+def _run(
+    tmp_path: Path, codes: str, tries: str = "4"
+) -> tuple[subprocess.CompletedProcess, list[str]]:
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
@@ -50,13 +65,25 @@ def _run(tmp_path: Path, codes: str) -> tuple[subprocess.CompletedProcess, list[
     fake.mkdir()
     (fake / "curl").write_bytes(FAKE_CURL.encode("utf-8"))
     (fake / "curl").chmod(0o755)
+    # The curl fallback runs only when aria2c is absent. On POSIX, PATH is just
+    # fakebin, holding the fake curl plus links to the tools the scripts need, so
+    # an aria2c in /usr/bin can't hide the fallback. Git Bash on Windows keeps
+    # /usr/bin (its programs need the msys DLLs there), and aria2c is never there.
+    if os.name == "nt":
+        path_tail = ":/usr/bin:/bin"
+    else:
+        path_tail = ""
+        for tool in TOOLS:
+            found = shutil.which(tool)
+            if found:
+                (fake / tool).symlink_to(found)
     log = tmp_path / "curl.log"
     dest = tmp_path / "out"
 
     # PATH entries are ':'-separated, so a Windows `C:/...` path goes through cygpath
     script = (
         'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
-        'export PATH="$fb:/usr/bin:/bin"; '
+        'export PATH="$fb$PATH_TAIL"; '
         '. "$LIB/common.sh"; http_fetch "$DEST" "https://example.invalid/d/file.txt"'
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
@@ -64,10 +91,11 @@ def _run(tmp_path: Path, codes: str) -> tuple[subprocess.CompletedProcess, list[
         {
             "LIB": lib.as_posix(),
             "FAKEBIN": fake.as_posix(),
+            "PATH_TAIL": path_tail,
             "DEST": dest.as_posix(),
             "FAKE_CURL_LOG": log.as_posix(),
             "FAKE_CURL_CODES": codes,
-            "EPISTEME_CURL_RESUME_TRIES": "4",
+            "EPISTEME_CURL_RESUME_TRIES": tries,
             "EPISTEME_CURL_RESUME_DELAY": "0",
         }
     )
@@ -79,9 +107,9 @@ def _run(tmp_path: Path, codes: str) -> tuple[subprocess.CompletedProcess, list[
 
 
 def test_connection_reset_is_resumed(tmp_path):
-    proc, calls = _run(tmp_path, "56 18 0")
+    proc, calls = _run(tmp_path, "6 56 18 0")
     assert proc.returncode == 0, proc.stderr
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert all("-C -" in c and "--retry 15" in c for c in calls)
     assert all("--retry-all-errors" not in c for c in calls)
     assert (tmp_path / "out" / "file.txt").exists()
@@ -98,3 +126,11 @@ def test_transient_errors_give_up_after_the_try_limit(tmp_path):
     proc, calls = _run(tmp_path, "56 56 56 56 56 56")
     assert proc.returncode != 0
     assert len(calls) == 4
+
+
+def test_non_numeric_try_limit_falls_back_instead_of_looping(tmp_path):
+    # 20 transient failures; a broken `-ge` test would keep calling curl past them
+    proc, calls = _run(tmp_path, " ".join(["56"] * 20), tries="lots")
+    assert proc.returncode != 0
+    assert len(calls) == 15  # the default limit
+    assert "EPISTEME_CURL_RESUME_TRIES not a number" in proc.stderr
