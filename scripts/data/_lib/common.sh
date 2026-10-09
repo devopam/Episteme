@@ -64,6 +64,35 @@ _common_repo_root() { # nearest ancestor containing pyproject.toml
     return 1
 }
 
+_dotenv_quoted() { # _dotenv_quoted RAW — RAW starts with ' or "; sets _DOTENV_VAL
+    # python-dotenv's rules: a backslash always pairs with the next character, the
+    # value ends at the first unpaired matching quote, and anything after it (an
+    # inline comment) is dropped. Escapes decoded: in "..." \\ \' \" \a \b \f \n \r
+    # \t \v; in '...' only \\ and \'. Any other backslash pair stays as written.
+    # Returns 1 if the closing quote is missing.
+    local raw="$1" q="${1:0:1}" out="" i=1 n="${#1}" c d
+    while [ "$i" -lt "$n" ]; do
+        c="${raw:i:1}"
+        if [ "$c" = "$q" ]; then _DOTENV_VAL="$out"; return 0; fi
+        if [ "$c" = "\\" ] && [ $((i + 1)) -lt "$n" ]; then
+            d="${raw:i+1:1}"; i=$((i + 2))
+            if [ "$q" = '"' ]; then
+                case "$d" in
+                    \\|\'|\") out+="$d" ;;
+                    a) out+=$'\a' ;; b) out+=$'\b' ;; f) out+=$'\f' ;; n) out+=$'\n' ;;
+                    r) out+=$'\r' ;; t) out+=$'\t' ;; v) out+=$'\v' ;;
+                    *) out+="\\$d" ;;
+                esac
+            else
+                case "$d" in \\|\') out+="$d" ;; *) out+="\\$d" ;; esac
+            fi
+            continue
+        fi
+        out+="$c"; i=$((i + 1))
+    done
+    return 1
+}
+
 load_dotenv() { # source <repo-root>/.env if present; values already in the
                 # environment are NOT overwritten (real env wins).
     local root env_file
@@ -91,13 +120,19 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
             *" $key "*) [ -n "${!key:-}" ] && continue ;;
         esac
         val="${line#*=}"
-        case "$val" in                                  # strip one matching quote pair
-            \"*\") val="${val#\"}"; val="${val%\"}" ;;
-            \'*\') val="${val#\'}"; val="${val%\'}" ;;
-            *)  # unquoted, as python-dotenv reads it (config.py's view): an inline
-                # comment starts at whitespace + '#', and the value is trimmed.
-                # (ltrim first: python-dotenv reads `K=   # x` as "# x").
-                val="${val#"${val%%[![:space:]]*}"}"
+        # Read the value as python-dotenv does (config.py's view). Leading spaces
+        # are skipped first, so `K=  "x"` is quoted and `K=   # x` reads as "# x".
+        val="${val#"${val%%[![:space:]]*}"}"
+        # (Not mirrored: python-dotenv's ${VAR} interpolation, and quoted values
+        # spanning several lines.)
+        case "$val" in
+            \"*|\'*)
+                _dotenv_quoted "$val" || {
+                    log WARN "load_dotenv: unterminated quoted value for $key — skipped (as python-dotenv does)"
+                    continue
+                }
+                val="$_DOTENV_VAL" ;;
+            *)  # unquoted: an inline comment starts at whitespace + '#'; then rtrim.
                 val="${val%%[[:space:]]#*}"
                 val="${val%"${val##*[![:space:]]}"}" ;;
         esac
@@ -221,9 +256,34 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
         _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
         mkdir -p "$dest_dir/$(dirname "$rel")"
-        # --retry alone skips connection resets (curl exit 56), which ended a 3.7 h
-        # reactome fetch on 2026-10-08; --retry-all-errors retries them, resuming via -C -.
-        curl -fL -C - --retry 15 --retry-delay 30 --retry-all-errors -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
+        _curl_resume "$dest_dir/$rel" "$url" || die "curl failed: $url"
+    done
+}
+
+_curl_resume() { # _curl_resume DEST URL — resumable curl; re-run only on transient network exits
+    # curl's own --retry covers timeouts and HTTP 408/429/5xx but not a connection
+    # reset (exit 56), which ended a 3.7 h reactome fetch on 2026-10-08. Re-running
+    # on transient exit codes resumes via -C -; permanent failures (HTTP 4xx = 22,
+    # write errors) fail at once. (Not --retry-all-errors: it also retries permanent
+    # errors, and curl < 7.71 rejects it.)
+    local dest="$1" url="$2" try=1 rc
+    local tries="${EPISTEME_CURL_RESUME_TRIES:-15}" delay="${EPISTEME_CURL_RESUME_DELAY:-30}"
+    # a non-numeric setting would break the -ge test below and loop for ever
+    case "$tries" in ''|*[!0-9]*) log WARN "EPISTEME_CURL_RESUME_TRIES not a number — using 15"; tries=15 ;; esac
+    case "$delay" in ''|*[!0-9]*) log WARN "EPISTEME_CURL_RESUME_DELAY not a number — using 30"; delay=30 ;; esac
+    while :; do
+        curl -fL -C - --retry 15 --retry-delay 30 -o "$dest" "$url"; rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            # DNS failure, connect failed, partial file, timeout, TLS handshake,
+            # empty reply, send/recv error
+            6|7|18|28|35|52|55|56) ;;
+            *) return "$rc" ;;
+        esac
+        [ "$try" -ge "$tries" ] && return "$rc"
+        try=$((try + 1))
+        log WARN "curl exit $rc on $url — resuming (attempt $try/$tries)"
+        sleep "$delay"
     done
 }
 

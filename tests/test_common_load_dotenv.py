@@ -32,6 +32,17 @@ ENV_TEXT = (
     "EPI_LDT_ONLYCOMMENT=   # nothing but a comment\n"
     "EPI_LDT_TRAILING=trailing   \n"
     "EPI_LDT_URL=https://example.org/a#frag\n"
+    'EPI_LDT_DQ_LEADWS=  "lead ws"\n'
+    "EPI_LDT_SQ_LEADWS=  'sq lead'\n"
+    'EPI_LDT_DQ_COMMENT="x" # note\n'
+    "EPI_LDT_SQ_COMMENT='y'   # note\n"
+    'EPI_LDT_DQ_HASH_COMMENT="has # inside" # c\n'
+    # backslash escapes, decoded as python-dotenv does
+    'EPI_LDT_DQ_ESC_QUOTE="pa\\"ss" # c\n'
+    'EPI_LDT_DQ_ESC_BS="a\\\\" # c\n'
+    'EPI_LDT_DQ_ESC_CTRL="x\\ty\\nz"\n'
+    'EPI_LDT_DQ_ESC_OTHER="keep\\qliteral"\n'
+    "EPI_LDT_SQ_ESC='it\\'s \\\\ \\n'\n"
 )
 KEYS = [line.split("=", 1)[0] for line in ENV_TEXT.splitlines() if "=" in line]
 
@@ -52,7 +63,7 @@ def test_shell_load_dotenv_matches_python_dotenv(tmp_path):
 
     script = (
         '. "$LIB/common.sh"; load_dotenv >/dev/null 2>&1; '
-        'for k in $KEYS; do printf "%s=[%s]\\n" "$k" "${!k-<unset>}"; done'
+        'for k in $KEYS; do printf "%s=[%s]\\0" "$k" "${!k-<unset>}"; done'
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("EPI_LDT_")}
     env.update({"LIB": lib.as_posix(), "KEYS": " ".join(KEYS)})
@@ -64,7 +75,8 @@ def test_shell_load_dotenv_matches_python_dotenv(tmp_path):
         timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
-    shell = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+    # NUL-separated: decoded values may hold newlines
+    shell = dict(rec.split("=", 1) for rec in proc.stdout.split("\0") if rec)
     expected = dotenv_values(env_file)
     for key in KEYS:
         assert shell[key] == f"[{expected[key]}]", key
