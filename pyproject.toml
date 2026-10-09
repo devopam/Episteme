@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.4",
     "tqdm>=4.70.1",
 ]
 
