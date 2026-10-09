@@ -32,6 +32,11 @@ ENV_TEXT = (
     "EPI_LDT_ONLYCOMMENT=   # nothing but a comment\n"
     "EPI_LDT_TRAILING=trailing   \n"
     "EPI_LDT_URL=https://example.org/a#frag\n"
+    'EPI_LDT_DQ_LEADWS=  "lead ws"\n'
+    "EPI_LDT_SQ_LEADWS=  'sq lead'\n"
+    'EPI_LDT_DQ_COMMENT="x" # note\n'
+    "EPI_LDT_SQ_COMMENT='y'   # note\n"
+    'EPI_LDT_DQ_HASH_COMMENT="has # inside" # c\n'
 )
 KEYS = [line.split("=", 1)[0] for line in ENV_TEXT.splitlines() if "=" in line]
 

@@ -91,13 +91,15 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
             *" $key "*) [ -n "${!key:-}" ] && continue ;;
         esac
         val="${line#*=}"
-        case "$val" in                                  # strip one matching quote pair
-            \"*\") val="${val#\"}"; val="${val%\"}" ;;
-            \'*\') val="${val#\'}"; val="${val%\'}" ;;
-            *)  # unquoted, as python-dotenv reads it (config.py's view): an inline
-                # comment starts at whitespace + '#', and the value is trimmed.
-                # (ltrim first: python-dotenv reads `K=   # x` as "# x").
-                val="${val#"${val%%[![:space:]]*}"}"
+        # Read the value as python-dotenv does (config.py's view). Leading spaces
+        # are skipped first, so `K=  "x"` is quoted and `K=   # x` reads as "# x".
+        val="${val#"${val%%[![:space:]]*}"}"
+        case "$val" in
+            # quoted: the value ends at the first closing quote; anything after it
+            # (an inline comment) is dropped. Backslash-escaped quotes are not handled.
+            \"*\"*) val="${val#\"}"; val="${val%%\"*}" ;;
+            \'*\'*) val="${val#\'}"; val="${val%%\'*}" ;;
+            *)  # unquoted: an inline comment starts at whitespace + '#'; then rtrim.
                 val="${val%%[[:space:]]#*}"
                 val="${val%"${val##*[![:space:]]}"}" ;;
         esac
@@ -221,9 +223,29 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
         _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
         mkdir -p "$dest_dir/$(dirname "$rel")"
-        # --retry alone skips connection resets (curl exit 56), which ended a 3.7 h
-        # reactome fetch on 2026-10-08; --retry-all-errors retries them, resuming via -C -.
-        curl -fL -C - --retry 15 --retry-delay 30 --retry-all-errors -o "$dest_dir/$rel" "$url" || die "curl failed: $url"
+        _curl_resume "$dest_dir/$rel" "$url" || die "curl failed: $url"
+    done
+}
+
+_curl_resume() { # _curl_resume DEST URL — resumable curl; re-run only on transient network exits
+    # curl's own --retry covers timeouts and HTTP 408/429/5xx but not a connection
+    # reset (exit 56), which ended a 3.7 h reactome fetch on 2026-10-08. Re-running
+    # on transient exit codes resumes via -C -; permanent failures (HTTP 4xx = 22,
+    # write errors) fail at once. (Not --retry-all-errors: it also retries permanent
+    # errors, and curl < 7.71 rejects it.)
+    local dest="$1" url="$2" try=1 rc
+    local tries="${EPISTEME_CURL_RESUME_TRIES:-15}" delay="${EPISTEME_CURL_RESUME_DELAY:-30}"
+    while :; do
+        curl -fL -C - --retry 15 --retry-delay 30 -o "$dest" "$url"; rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            7|18|28|35|52|55|56) ;;  # connect failed, partial file, timeout, TLS handshake, empty reply, send/recv error
+            *) return "$rc" ;;
+        esac
+        [ "$try" -ge "$tries" ] && return "$rc"
+        try=$((try + 1))
+        log WARN "curl exit $rc on $url — resuming (attempt $try/$tries)"
+        sleep "$delay"
     done
 }
 
