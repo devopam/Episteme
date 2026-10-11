@@ -23,19 +23,33 @@ REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "scripts" / "data" / "_lib"
 
 FAKE_CURL = r"""#!/usr/bin/env bash
-# replays exit codes from $FAKE_CURL_CODES, one per call; logs each call's args
+# replays exit codes from $FAKE_CURL_CODES, one per call; logs each call's args.
+# With `-C -` it appends, as a real resume does, so a stale partial shows up.
 echo "$*" >> "$FAKE_CURL_LOG"
 n=$(wc -l < "$FAKE_CURL_LOG")
 code=$(echo $FAKE_CURL_CODES | cut -d' ' -f"$n")
 code=${code:-0}
+resume=0; case " $* " in *" -C - "*) resume=1 ;; esac
 if [ "$code" = 0 ]; then
-    while [ "$#" -gt 0 ]; do [ "$1" = -o ] && { echo data > "$2"; }; shift; done
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = -o ]; then
+            if [ "$resume" = 1 ]; then echo data >> "$2"; else echo data > "$2"; fi
+        fi
+        shift
+    done
 fi
 exit "$code"
 """
 
-FAKE_ARIA2C = """#!/usr/bin/env bash
+FAKE_ARIA2C = r"""#!/usr/bin/env bash
+# exits $FAKE_ARIA2C_CODE; writes $FAKE_ARIA2C_SESSION (space-separated URLs) as
+# the --save-session file, in aria2c's format (URI line, indented options)
 echo "$*" >> "$FAKE_ARIA2C_LOG"
+for a in "$@"; do
+    case "$a" in --save-session=*)
+        for u in $FAKE_ARIA2C_SESSION; do printf '%s\t\n gid=1\n' "$u"; done > "${a#*=}" ;;
+    esac
+done
 exit "$FAKE_ARIA2C_CODE"
 """
 
@@ -63,7 +77,12 @@ def _bash() -> str:
 
 
 def _run(
-    tmp_path: Path, codes: str, tries: str = "4", aria2c_code: int | None = None
+    tmp_path: Path,
+    codes: str,
+    tries: str = "4",
+    aria2c_code: int | None = None,
+    urls: tuple[str, ...] = ("https://example.invalid/d/file.txt",),
+    session: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
@@ -94,7 +113,7 @@ def _run(
     script = (
         'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
         'export PATH="$fb$PATH_TAIL"; '
-        '. "$LIB/common.sh"; http_fetch "$DEST" "https://example.invalid/d/file.txt"'
+        '. "$LIB/common.sh"; http_fetch "$DEST" $URLS'
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
     env.update(
@@ -109,6 +128,8 @@ def _run(
             "EPISTEME_CURL_RESUME_DELAY": "0",
             "FAKE_ARIA2C_LOG": (tmp_path / "aria2c.log").as_posix(),
             "FAKE_ARIA2C_CODE": str(aria2c_code or 0),
+            "FAKE_ARIA2C_SESSION": " ".join(session),
+            "URLS": " ".join(urls),
         }
     )
     proc = subprocess.run(
@@ -167,10 +188,26 @@ def test_aria2c_partial_file_is_restarted_not_appended(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert len(calls) == 1  # no size probe: the partial was discarded first
     assert not (out / "file.txt.aria2").exists()
-    assert (out / "file.txt").read_text().strip() == "data"
+    # the fake curl appends on `-C -`: a kept partial would end up in front
+    assert (out / "file.txt").read_text() == "data\n"
 
 
 def test_aria2c_success_does_not_call_curl(tmp_path):
     proc, calls = _run(tmp_path, "0", aria2c_code=0)
     assert proc.returncode == 0, proc.stderr
     assert calls == []
+
+
+def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
+    # aria2c finished a.txt (its server may give no Content-Length and reject a
+    # range at EOF, so it must not be re-requested) and failed b.txt
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "a.txt").write_text("complete-a")
+    a, b = "https://example.invalid/d/a.txt", "https://example.invalid/d/b.txt"
+    proc, calls = _run(tmp_path, "0", aria2c_code=3, urls=(a, b), session=(b,))
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 1 and b in calls[0]
+    assert "retrying 1 unfinished file(s)" in proc.stderr
+    assert (out / "a.txt").read_text() == "complete-a"
+    assert (out / "b.txt").read_text() == "data\n"
