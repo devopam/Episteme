@@ -6,6 +6,8 @@ reset ended a 3.7 h reactome download. `--retry-all-errors` was rejected: it als
 retries permanent errors (a 404 waited ~7.5 min) and curl < 7.71 lacks it.
 
 A fake `curl` on PATH replays a scripted sequence of exit codes and logs its calls.
+When aria2c fails, http_fetch retries the unfinished files with the same curl path
+(2026-10-11: Windows aria2c failed every TLS handshake with ftp.expasy.org).
 """
 
 from __future__ import annotations
@@ -32,6 +34,11 @@ fi
 exit "$code"
 """
 
+FAKE_ARIA2C = """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_ARIA2C_LOG"
+exit "$FAKE_ARIA2C_CODE"
+"""
+
 TOOLS = (
     "bash",
     "env",
@@ -56,7 +63,7 @@ def _bash() -> str:
 
 
 def _run(
-    tmp_path: Path, codes: str, tries: str = "4"
+    tmp_path: Path, codes: str, tries: str = "4", aria2c_code: int | None = None
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
@@ -65,6 +72,9 @@ def _run(
     fake.mkdir()
     (fake / "curl").write_bytes(FAKE_CURL.encode("utf-8"))
     (fake / "curl").chmod(0o755)
+    if aria2c_code is not None:
+        (fake / "aria2c").write_bytes(FAKE_ARIA2C.encode("utf-8"))
+        (fake / "aria2c").chmod(0o755)
     # The curl fallback runs only when aria2c is absent. On POSIX, PATH is just
     # fakebin, holding the fake curl plus links to the tools the scripts need, so
     # an aria2c in /usr/bin can't hide the fallback. Git Bash on Windows keeps
@@ -97,6 +107,8 @@ def _run(
             "FAKE_CURL_CODES": codes,
             "EPISTEME_CURL_RESUME_TRIES": tries,
             "EPISTEME_CURL_RESUME_DELAY": "0",
+            "FAKE_ARIA2C_LOG": (tmp_path / "aria2c.log").as_posix(),
+            "FAKE_ARIA2C_CODE": str(aria2c_code or 0),
         }
     )
     proc = subprocess.run(
@@ -134,3 +146,31 @@ def test_non_numeric_try_limit_falls_back_instead_of_looping(tmp_path):
     assert proc.returncode != 0
     assert len(calls) == 15  # the default limit
     assert "EPISTEME_CURL_RESUME_TRIES not a number" in proc.stderr
+
+
+def test_aria2c_failure_falls_back_to_curl(tmp_path):
+    proc, calls = _run(tmp_path, "0", aria2c_code=1)
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "aria2c.log").exists()
+    assert len(calls) == 1 and "-C -" in calls[0]
+    assert "aria2c exit 1" in proc.stderr
+    assert (tmp_path / "out" / "file.txt").read_text().strip() == "data"
+
+
+def test_aria2c_partial_file_is_restarted_not_appended(tmp_path):
+    # segmented aria2c output can have holes; `-C -` would append at its size
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "file.txt").write_text("partial-with-holes")
+    (out / "file.txt.aria2").write_text("control")
+    proc, calls = _run(tmp_path, "0", aria2c_code=1)
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 1  # no size probe: the partial was discarded first
+    assert not (out / "file.txt.aria2").exists()
+    assert (out / "file.txt").read_text().strip() == "data"
+
+
+def test_aria2c_success_does_not_call_curl(tmp_path):
+    proc, calls = _run(tmp_path, "0", aria2c_code=0)
+    assert proc.returncode == 0, proc.stderr
+    assert calls == []
