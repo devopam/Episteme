@@ -4,7 +4,7 @@
 owns the transaction boundary):
 
     1. hash the shard in 1 MiB chunks; COPY its ids into a temp table
-       ``_load_ids`` (ON COMMIT DROP); collect its distinct source_file(s)
+       ``pg_temp._load_ids`` (ON COMMIT DROP); collect its distinct source_file(s)
     2. DELETE FROM episteme.article_body for every article of the replaced
        source_file(s) (via the articles.id linkage), then for the shard's own ids
     3. DELETE FROM episteme.articles: an incoming id under another source_file,
@@ -152,8 +152,9 @@ def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[lis
     if fmt == "parquet":
         import pyarrow.parquet as pq
 
-        for rb in pq.ParquetFile(staging_path).iter_batches(batch_size=batch_size):
-            yield rb.to_pylist()
+        with pq.ParquetFile(staging_path) as pf:
+            for rb in pf.iter_batches(batch_size=batch_size):
+                yield rb.to_pylist()
         return
     it = _iter_jsonl(staging_path)
     while batch := list(itertools.islice(it, batch_size)):
@@ -167,9 +168,9 @@ def _iter_id_batches(
     if fmt == "parquet":
         import pyarrow.parquet as pq
 
-        table = pq.read_table(staging_path, columns=["id", "source_file"])
-        for rb in table.to_batches(max_chunksize=batch_size):
-            yield rb.column("id").to_pylist(), rb.column("source_file").to_pylist()
+        with pq.ParquetFile(staging_path) as pf:
+            for rb in pf.iter_batches(batch_size=batch_size, columns=["id", "source_file"]):
+                yield rb.column("id").to_pylist(), rb.column("source_file").to_pylist()
         return
     it = _iter_jsonl(staging_path)
     while batch := list(itertools.islice(it, batch_size)):
@@ -210,14 +211,14 @@ def load_source_file(
         # IN (SELECT ...) against an ANALYZEd table plan as hash/index lookups.
         # DROP first so two loads in one transaction do not collide.
         cur.execute("DROP TABLE IF EXISTS pg_temp._load_ids")
-        cur.execute("CREATE TEMP TABLE _load_ids (id text) ON COMMIT DROP")
+        cur.execute("CREATE TEMP TABLE pg_temp._load_ids (id text) ON COMMIT DROP")
         source_file_set: set[str] = set()
-        with cur.copy("COPY _load_ids (id) FROM STDIN") as cp:
+        with cur.copy("COPY pg_temp._load_ids (id) FROM STDIN") as cp:
             for ids, sfs in _iter_id_batches(staging_path, fmt, batch_size):
                 for i in ids:
                     cp.write_row((i,))
                 source_file_set.update(sfs)
-        cur.execute("ANALYZE _load_ids")
+        cur.execute("ANALYZE pg_temp._load_ids")
         source_files = sorted(source_file_set)
 
         # (c) article_body first. article_body has no source_file column, so
@@ -244,7 +245,7 @@ def load_source_file(
         body_deleted = cur.rowcount
         cur.execute(
             "DELETE FROM episteme.article_body "
-            "WHERE source = %s AND article_id IN (SELECT id FROM _load_ids)",
+            "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)",
             (source,),
         )
         body_deleted += cur.rowcount
@@ -262,7 +263,7 @@ def load_source_file(
         # sources).
         cur.execute(
             "DELETE FROM episteme.articles "
-            "WHERE id IN (SELECT id FROM _load_ids) AND source = %s "
+            "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
             "AND NOT (source_file = ANY(%s))",
             (source, source_files),
         )
