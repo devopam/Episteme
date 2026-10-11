@@ -121,7 +121,8 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
         esac
         val="${line#*=}"
         # Read the value as python-dotenv does (config.py's view). Leading spaces
-        # are skipped first, so `K=  "x"` is quoted and `K=   # x` reads as "# x".
+        # are skipped first, so `K=  "x"` is quoted and `K=   # x` reads as ""
+        # (python-dotenv >= 1.2.4; 1.2.3 returned "# x").
         val="${val#"${val%%[![:space:]]*}"}"
         # (Not mirrored: python-dotenv's ${VAR} interpolation, and quoted values
         # spanning several lines.)
@@ -132,6 +133,7 @@ load_dotenv() { # source <repo-root>/.env if present; values already in the
                     continue
                 }
                 val="$_DOTENV_VAL" ;;
+            '#'*) val="" ;;  # nothing but a comment
             *)  # unquoted: an inline comment starts at whitespace + '#'; then rtrim.
                 val="${val%%[[:space:]]#*}"
                 val="${val%"${val##*[![:space:]]}"}" ;;
