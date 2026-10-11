@@ -56,6 +56,7 @@ import polars as pl
 
 from episteme.data import article_schema
 from episteme.data.reactome.serialize_reactome import (
+    discover_reactome_files,
     iter_rows_from_file,
     main,
     serialize_reactome,
@@ -330,3 +331,18 @@ def test_reactome_record_without_pathway_id_is_counted_and_skipped(tmp_path):
         next((tmp_path / "processed" / "_ops" / "reactome" / "success").glob("*.ok")).read_text()
     )
     assert marker["stats"]["skipped_no_id"] == 1
+
+
+def test_reactome_relation_file_is_not_a_primary(tmp_path):
+    """The real release ships ReactomePathwaysRelation.txt (2-column
+    parent/child edges) next to ReactomePathways.txt. The prefix pattern
+    matched it and the 2026-10-11 full load failed its CSV sniff."""
+    import shutil
+
+    shutil.copy(FX / "ReactomePathways.tsv", tmp_path / "ReactomePathways.txt")
+    (tmp_path / "ReactomePathwaysRelation.txt").write_text(
+        "R-HSA-109581\tR-HSA-109606\n", encoding="utf-8"
+    )
+    assert [p.name for p in discover_reactome_files(tmp_path)] == ["ReactomePathways.txt"]
+    res = serialize_reactome(tmp_path, tmp_path / "out")
+    assert (res["inputs"], res["ok"], res["failed"]) == (1, 1, 0)
