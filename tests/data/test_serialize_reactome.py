@@ -339,10 +339,18 @@ def test_reactome_relation_file_is_not_a_primary(tmp_path):
     matched it and the 2026-10-11 full load failed its CSV sniff."""
     import shutil
 
-    shutil.copy(FX / "ReactomePathways.tsv", tmp_path / "ReactomePathways.txt")
-    (tmp_path / "ReactomePathwaysRelation.txt").write_text(
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    shutil.copy(FX / "ReactomePathways.tsv", raw / "ReactomePathways.txt")
+    (raw / "ReactomePathwaysRelation.txt").write_text(
         "R-HSA-109581\tR-HSA-109606\n", encoding="utf-8"
     )
-    assert [p.name for p in discover_reactome_files(tmp_path)] == ["ReactomePathways.txt"]
-    res = serialize_reactome(tmp_path, tmp_path / "out")
+    assert [p.name for p in discover_reactome_files(raw)] == ["ReactomePathways.txt"]
+    res = serialize_reactome(raw, tmp_path / "out")
     assert (res["inputs"], res["ok"], res["failed"]) == (1, 1, 0)
+
+    # only the exact edge-list name is excluded, not every file sharing its prefix
+    other = tmp_path / "other"
+    other.mkdir()
+    shutil.copy(FX / "ReactomePathways.tsv", other / "ReactomePathwaysRelationLike.txt")
+    assert [p.name for p in discover_reactome_files(other)] == ["ReactomePathwaysRelationLike.txt"]

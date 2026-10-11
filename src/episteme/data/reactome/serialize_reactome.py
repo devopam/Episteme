@@ -238,7 +238,7 @@ _PRIMARY_COLUMNS = {"pathway_id": "VARCHAR", "name": "VARCHAR", "species": "VARC
 # Real release files that share the primary prefix but are not primaries:
 # ReactomePathwaysRelation.txt is a 2-column parent/child edge list and made
 # the first full load fail its DuckDB sniff (2026-10-11).
-_NOT_PRIMARY_STEMS = ("ReactomePathwaysRelation",)
+_NOT_PRIMARY_NAMES = frozenset(f"ReactomePathwaysRelation{ext}" for ext in _CANDIDATE_EXTS)
 
 # SIBLING 1: pathway-description prose. Column shape + header=true + the
 # real duplicate-id / malformed-row findings are documented in the module
@@ -513,11 +513,7 @@ def discover_reactome_files(raw_dir: Path) -> list[Path]:
     files and a generic pattern would make all three match as independent
     primaries."""
     patterns = [f"{_PRIMARY_STEM}*{ext}" for ext in _CANDIDATE_EXTS]
-    files = [
-        p
-        for p in discover_input_files(raw_dir, patterns)
-        if not p.name.startswith(_NOT_PRIMARY_STEMS)
-    ]
+    files = [p for p in discover_input_files(raw_dir, patterns) if p.name not in _NOT_PRIMARY_NAMES]
     files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
