@@ -27,9 +27,7 @@ def test_write_rows_parquet_one_shard_per_file(tmp_path):
 def test_write_rows_jsonl_fallback_roundtrips(tmp_path, monkeypatch):
     import episteme.data.staging_writer as sw
 
-    monkeypatch.setattr(
-        sw, "write_parquet_shard", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no pyarrow"))
-    )
+    monkeypatch.setattr(sw, "_pyarrow_available", lambda: False)
     rows = [_row(id="pmc:PMC1", source="pmc", text="hi")]
     res = write_rows(rows, tmp_path, source="pmc", source_file="f.xml")
     assert res["format"] == "jsonl"
@@ -85,3 +83,99 @@ def test_parquet_column_types_readback(tmp_path):
         assert schema.field(col).type == pa.list_(pa.string())
     for col in ("is_retracted", "is_manuscript", "is_historical_ocr"):
         assert schema.field(col).type == pa.bool_()
+
+
+def _mixed_rows():
+    return [
+        _row(id="pmc:1", source="pmc", title="a", year=2024, authors=["A"], is_retracted=True),
+        _row(id="pmc:2", source="pmc", title="b", year=None, authors=None, mesh=None),
+        _row(id="pmc:3", source="pmc", title="c", year=1999, mesh=["M"], publication_types=["R"]),
+        _row(id="pmc:4", source="pmc", title="d", year=2001, authors=None, mesh=None),
+        _row(id="pmc:5", source="pmc", title="e", year=None, publication_types=None),
+    ]
+
+
+def test_multi_batch_equals_single_batch_and_shard(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from episteme.data.staging_writer import write_parquet_shard
+
+    rows = _mixed_rows()
+    multi = write_rows(rows, tmp_path / "m", source="pmc", source_file="f.xml", batch_size=2)
+    single = write_rows(rows, tmp_path / "s", source="pmc", source_file="f.xml", batch_size=1000)
+    shard = write_parquet_shard(rows, tmp_path / "w", source="pmc", source_file="f.xml")
+    assert multi["n_rows"] == 5 and multi["format"] == "parquet"
+    tm = pq.read_table(multi["paths"][0])
+    assert tm.equals(pq.read_table(single["paths"][0]))
+    assert tm.equals(pq.read_table(shard[0]))
+    assert tm.schema.field("year").type == pa.int32()
+    assert tm.schema.field("authors").type == pa.list_(pa.string())
+    assert pq.ParquetFile(multi["paths"][0]).num_row_groups == 3
+
+
+def test_all_none_list_batch_keeps_schema(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows = [
+        _row(id="pmc:1", authors=["A"], year=2000),
+        _row(id="pmc:2", authors=None, mesh=None, year=None),
+    ]
+    res = write_rows(rows, tmp_path, source="pmc", source_file="f.xml", batch_size=1)
+    t = pq.read_table(res["paths"][0])
+    assert t.schema.field("authors").type == pa.list_(pa.string())
+    assert t.schema.field("year").type == pa.int32()
+    assert t.schema.field("is_retracted").type == pa.bool_()
+
+
+def test_generator_input_works(tmp_path):
+    res = write_rows(
+        (r for r in _mixed_rows()), tmp_path, source="pmc", source_file="g.xml", batch_size=2
+    )
+    assert res["n_rows"] == 5
+    assert len(res["paths"]) == 1
+
+
+def test_generator_failure_leaves_no_file(tmp_path):
+    import pytest
+
+    def gen():
+        for i, r in enumerate(_mixed_rows()):
+            if i == 3:
+                raise ValueError("boom")
+            yield r
+
+    with pytest.raises(ValueError, match="boom"):
+        write_rows(gen(), tmp_path, source="pmc", source_file="x.xml", batch_size=2)
+    base = tmp_path / "staging" / "pmc"
+    assert not list(base.glob("*.parquet"))
+    assert not list(base.glob("*.tmp"))
+
+
+def test_empty_iterator_writes_nothing(tmp_path):
+    res = write_rows(iter([]), tmp_path, source="pmc", source_file="e.xml")
+    assert res == {"format": "parquet", "paths": [], "n_rows": 0}
+    base = tmp_path / "staging" / "pmc"
+    assert not base.exists() or not list(base.iterdir())
+
+
+def test_jsonl_fallback_streams_and_cleans_up(tmp_path, monkeypatch):
+    import pytest
+
+    import episteme.data.staging_writer as sw
+
+    monkeypatch.setattr(sw, "_pyarrow_available", lambda: False)
+    res = write_rows((r for r in _mixed_rows()), tmp_path, source="pmc", source_file="j.xml")
+    assert res["format"] == "jsonl" and res["n_rows"] == 5
+    assert len(Path(res["paths"][0]).read_text().splitlines()) == 5
+
+    def gen():
+        yield _row(id="pmc:1")
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        write_rows(gen(), tmp_path, source="pmc", source_file="k.xml")
+    base = tmp_path / "staging" / "pmc"
+    assert not (base / "k.jsonl").exists()
+    assert not list(base.glob("*.tmp"))
