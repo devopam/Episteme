@@ -132,8 +132,36 @@ Files: `src/episteme/data/postgres_loader.py`, `tests/data/test_postgres_loader.
   rows as `batch_size=50_000`; a reload replaces (event `load_replace`, counts as
   today); the id-collision case (same id, different source_file) behaves as today.
   Run them locally against `episteme_test`.
+- Index-friendly deletes (added 2026-10-11 after observing a multi-minute uniprot
+  `article_body` DELETE): split today's `OR`-ed `article_body` delete into two
+  statements with the same combined effect — (a) rows linked through
+  `episteme.articles` for the shard's `source_file`s (`DELETE ... USING
+  episteme.articles a WHERE a.source = %s AND a.source_file = ANY(%s) AND
+  b.article_id = a.id AND b.source = %s`), then (b) rows whose `article_id` is in
+  `_load_ids` and `source = %s`; `body_deleted` = (a) + (b). `ANALYZE _load_ids`
+  after filling it.
 
-## Task 6: Drift log
+## Task 6: Migration 0004 — load-path indexes
+
+Files: `src/episteme/data/db/migrations/0004_articles_load_indexes.sql` (new), a
+`pg`-marked test in the file where migration 0003's test lives,
+`docs/10-data-sources-runbook.md` (migrations table row + the migration-apply
+command's list).
+
+- Why: every non-pmc/bookshelf source lands in the `articles_default` partition,
+  which has no index on `id` or `source_file`; each per-file load's deletes scan
+  the whole partition (5.4M rows after Stage 1; pubmed adds ~1,300 files and tens
+  of millions of rows).
+- `CREATE INDEX IF NOT EXISTS articles_source_file_idx ON episteme.articles (source, source_file);`
+  `CREATE INDEX IF NOT EXISTS articles_id_idx ON episteme.articles (id);`
+  Idempotent, header comment in 0003's style (apply directly with psql; say why).
+- Test: after applying, both indexes exist on `episteme.articles` and on its
+  partitions (pg_indexes), and an `EXPLAIN` of the loader's per-file delete
+  predicate on `episteme_test` uses an index scan (or bitmap) rather than a seq
+  scan on `articles_default` (use `SET enable_seqscan = off` only if the table is
+  too small for the planner to prefer the index — say so in the test).
+
+## Task 7: Drift log
 
 File: `docs/project-incubation-baseline.md`.
 
