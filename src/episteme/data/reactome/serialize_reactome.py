@@ -163,6 +163,7 @@ Roadmap CLI (Sec 4.7-shaped, SP4 Sec 5):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import threading
@@ -173,14 +174,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-import duckdb
-
 _SRC = Path(__file__).resolve().parents[3]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import duckdb_conn  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     SCHEMA_VERSION,
@@ -197,9 +197,13 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
-from episteme.data.staging_writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
+
+# Module-level (read at call time) so tests can shrink it.
+_FETCH_BATCH_ROWS = duckdb_conn.FETCH_BATCH_ROWS
+_WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 
 SOURCE = "reactome"
 
@@ -469,32 +473,29 @@ def iter_rows_from_file(
     ``UniProt2Reactome`` (pre-aggregated) sibling files if present alongside
     it.
 
-    NOT a streaming read despite the generator shape: ``con.execute(...)`` +
-    ``con.fetchall()`` materializes the whole join in memory before the
-    first row is yielded (same DuckDB DBAPI limitation as chembl/pubchem/
-    clinvar's own ``iter_rows_from_file``). A real full ``ReactomePathways
-    .txt`` is ~23.6K rows -- small enough that this is not a practical
-    concern for this source (unlike clinvar's ~4.56M-row scale), but flagged
-    for consistency with the other structured serializers' own named
-    concern.
+    A streaming read: the connection is memory-bounded (``duckdb_conn.connect``)
+    and rows are fetched in ``_FETCH_BATCH_ROWS`` batches, so peak memory is
+    one batch, not the whole join. The connection stays open until the
+    generator finishes.
     """
     source_file = source_file or path.name
     directory = path.parent
     summation_path = _find_sibling(directory, _SUMMATION_STEM)
     protein_path = _find_sibling(directory, _PROTEIN_STEM)
     sql = _build_query(path, summation_path, protein_path)
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     try:
         con.execute(sql)
         cols = [d[0] for d in con.description]
-        for raw in con.fetchall():
-            rec = dict(zip(cols, raw, strict=True))
-            row = reactome_row(rec, source_file)
-            if row is None:
-                if stats is not None:
-                    stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
-                continue
-            yield row
+        for batch in duckdb_conn.fetch_batches(con, batch_size=_FETCH_BATCH_ROWS):
+            for raw in batch:
+                rec = dict(zip(cols, raw, strict=True))
+                row = reactome_row(rec, source_file)
+                if row is None:
+                    if stats is not None:
+                        stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                    continue
+                yield row
     finally:
         con.close()
 
@@ -571,30 +572,42 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
+    n_rows = 0
     iter_stats: dict[str, int] = {}
     try:
-        for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
 
-        write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-        )
+        def _counted() -> Iterator[dict[str, Any]]:
+            nonlocal n_rows
+            with contextlib.closing(
+                iter_rows_from_file(path, source_file=basename, stats=iter_stats)
+            ) as source_rows:
+                for row in source_rows:
+                    status_counts[str(row.get("extract_status"))] += 1
+                    n_rows += 1
+                    yield row
+
+        gen = _counted()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+                batch_size=_WRITE_BATCH_ROWS,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
         stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -603,7 +616,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}

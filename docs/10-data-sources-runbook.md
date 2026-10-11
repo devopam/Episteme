@@ -31,7 +31,7 @@ Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/
 
 Source: `openalex`, one works shard, through download, serialize and load (the structured chain; `graph` is not wired for `openalex`, section 4.2). It needs the `aws` CLI (section 1.1) and internet access to the public OpenAlex S3 bucket (`OPENALEX_S3` in `scripts/data/_lib/sources.env`); it does not touch `ftp.ebi.ac.uk`. An alternative literature chain on Europe PMC is at the end of this section.
 
-Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reachable `episteme_test`, and migrations 0002 and 0003 applied. Run the check in section 2.3 first and expect `t|t|t`; if it does not, apply the migrations there before step 3. `EPISTEME_ACTOR` is free text recorded on audit rows; for a test run `episteme_sys_admin` is what the repository's own tests use (the value is only recorded as text on audit rows, so any attributable name works). Because each Bash invocation is a fresh shell (section 0.2 rule 1), the commands below carry `EPISTEME_ACTOR=episteme_sys_admin` as an inline prefix, like `PGDATABASE`; a real environment variable beats `.env`, so the prefix always wins. If the preflight in step 1 prints `EPISTEME_ACTOR=MISSING`, nothing else is needed: the prefix supplies it. Without any value the dispatcher exits 2.
+Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reachable `episteme_test`, and migrations 0002 and 0003 applied (0004 recommended). Run the check in section 2.3 first and expect `t|t|t|t`; if it does not, apply the migrations there before step 3. `EPISTEME_ACTOR` is free text recorded on audit rows; for a test run `episteme_sys_admin` is what the repository's own tests use (the value is only recorded as text on audit rows, so any attributable name works). Because each Bash invocation is a fresh shell (section 0.2 rule 1), the commands below carry `EPISTEME_ACTOR=episteme_sys_admin` as an inline prefix, like `PGDATABASE`; a real environment variable beats `.env`, so the prefix always wins. If the preflight in step 1 prints `EPISTEME_ACTOR=MISSING`, nothing else is needed: the prefix supplies it. Without any value the dispatcher exits 2.
 
 ```bash
 # 1. preflight: prints only "set" / "MISSING", never a value (expect all set)
@@ -115,6 +115,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
 | `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
+| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `<processed root>/_ops/_duckdb_tmp`). |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
 | `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
@@ -164,7 +165,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002 and 0003 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0004 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -173,20 +174,21 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0001_add_chunk_vector_columns.sql` | `chunks.embedding` (pgvector) and `chunks.chunk_tsv` | **Cannot apply:** `vector` and `pg_search` are absent on PG19beta3. Needed only for Phase 1 retrieval. |
 | `0002_container_and_book_parts.sql` | `articles.container_id` and `book_meta`, the `bookshelf` partitions, `article_parts` | Required before **any** load (the loader writes those columns) and before `graph`. |
 | `0003_mesh_hierarchy.sql` | `episteme.mesh_hierarchy` | Required before `mesh` graph. |
+| `0004_articles_load_indexes.sql` | `articles (source, source_file)` and `articles (id)` indexes (per partition) | Recommended before any large load: without them each per-file delete scans the whole `articles_default` partition. Apply it with **no load running**: `CREATE INDEX` on the partitioned parent blocks writes to every partition while it builds (`CONCURRENTLY` is not possible on a partitioned parent). |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 or 0003, apply those two directly. Both are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
-
-```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
-```
-
-Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t`):
+Because `migrate_database.sh` dies at 0001 and never reaches 0002, 0003 or 0004, apply those three directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$)"'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies all three and tracks them. Do not run it on the local build.
+Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t`; the fourth column is 0004's `articles_id_idx`):
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$), to_regclass(\$\$episteme.articles_id_idx\$\$) is not null"'
+```
+
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0004 and tracks them. Do not run it on the local build.
 
 ---
 

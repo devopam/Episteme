@@ -273,3 +273,73 @@ def test_clinvar_record_without_variation_id_is_counted_and_skipped(tmp_path):
         next((tmp_path / "processed" / "_ops" / "clinvar" / "success").glob("*.ok")).read_text()
     )
     assert marker["stats"]["skipped_no_id"] == 1
+
+
+def test_clinvar_tiny_batches_match_default_shard(tmp_path, monkeypatch):
+    """Serializing with 1-row fetch and write batches yields the same shard."""
+    from episteme.data import duckdb_conn, staging_writer
+    from episteme.data.clinvar import serialize_clinvar as mod
+
+    default_dir = tmp_path / "default"
+    tiny_dir = tmp_path / "tiny"
+    assert serialize_clinvar(FX, default_dir)["ok"] == 1
+
+    calls = {"batches": 0}
+    real_fetch_batches = duckdb_conn.fetch_batches
+
+    def _counting_fetch_batches(con, batch_size=duckdb_conn.FETCH_BATCH_ROWS):
+        for batch in real_fetch_batches(con, batch_size=batch_size):
+            calls["batches"] += 1
+            yield batch
+
+    monkeypatch.setattr(mod, "_FETCH_BATCH_ROWS", 1)
+    monkeypatch.setattr(mod, "_WRITE_BATCH_ROWS", 1)
+    monkeypatch.setattr(duckdb_conn, "fetch_batches", _counting_fetch_batches)
+    res = serialize_clinvar(FX, tiny_dir)
+    assert res["ok"] == 1
+    assert staging_writer.WRITE_BATCH_ROWS != 1  # the patch above is module-local
+    assert calls["batches"] > 1
+
+    def _rows(root):
+        df = _read_shard(root / "staging" / "clinvar") if "_read_shard" in globals() else None
+        if df is None:
+            shards = list((root / "staging" / "clinvar").glob("*.*"))
+            df = (
+                pl.read_parquet(shards[0])
+                if shards[0].suffix == ".parquet"
+                else pl.read_ndjson(shards[0])
+            )
+        return [{k: v for k, v in r.items() if k != "retrieved_at"} for r in df.to_dicts()]
+
+    assert _rows(tiny_dir) == _rows(default_dir)
+    assert _rows(tiny_dir)
+
+
+def test_clinvar_row_generators_closed_when_write_rows_raises(tmp_path, monkeypatch):
+    """A mid-stream ``write_rows`` failure closes the row generators explicitly.
+
+    The fake ``write_rows`` keeps a reference to the generator it was given, so
+    cleanup cannot be left to refcounting; the spy source's ``finally`` must
+    still run (and the failure is recorded, not raised).
+    """
+    from episteme.data.clinvar import serialize_clinvar as mod
+
+    state = {"closed": False, "kept": []}
+    real_iter = mod.iter_rows_from_file
+
+    def _spy_iter(path, **kwargs):
+        try:
+            yield from real_iter(path, **kwargs)
+        finally:
+            state["closed"] = True
+
+    def _failing_write_rows(rows, *args, **kwargs):
+        state["kept"].append(rows)  # keep it alive: no refcount-driven cleanup
+        next(iter(rows))  # consume some rows, then die mid-stream
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "iter_rows_from_file", _spy_iter)
+    monkeypatch.setattr(mod, "write_rows", _failing_write_rows)
+    res = serialize_clinvar(FX, tmp_path / "processed")
+    assert res["failed"] == 1
+    assert state["closed"] is True

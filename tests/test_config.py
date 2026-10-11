@@ -189,3 +189,12 @@ class TestFreshConfigNoLeak:
         if not self._ran:
             pytest.skip("needs test_a to have run first (file order)")
         assert not [k for k, v in os.environ.items() if self._MARK in v]
+
+
+def test_duckdb_memory_limit_default(fresh_config):
+    assert fresh_config("").get_settings().duckdb_memory_limit == "4GB"
+
+
+def test_duckdb_memory_limit_override(fresh_config):
+    cfg = fresh_config("EPISTEME_DUCKDB_MEMORY_LIMIT=2GB\n")
+    assert cfg.get_settings().duckdb_memory_limit == "2GB"

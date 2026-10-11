@@ -165,6 +165,7 @@ Roadmap CLI (Sec 4.7-shaped, SP4 Sec 5):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import threading
@@ -198,9 +199,12 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
-from episteme.data.staging_writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
+
+# Module-level (read at call time) so tests can shrink it.
+_WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 
 SOURCE = "ontologies"
 
@@ -415,28 +419,38 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
+    n_rows = 0
     try:
-        for row in iter_rows_from_file(path, source_file=basename):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
 
-        write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-        )
+        def _counted() -> Iterator[dict[str, Any]]:
+            nonlocal n_rows
+            with contextlib.closing(iter_rows_from_file(path, source_file=basename)) as source_rows:
+                for row in source_rows:
+                    status_counts[str(row.get("extract_status"))] += 1
+                    n_rows += 1
+                    yield row
+
+        gen = _counted()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+                batch_size=_WRITE_BATCH_ROWS,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -445,7 +459,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}

@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -88,9 +89,12 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
-from episteme.data.staging_writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
+
+# Module-level (read at call time) so tests can shrink it.
+_WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 
 SOURCE = "cdisc_ct"
 
@@ -192,27 +196,41 @@ def process_one(
     release_date = path.parent.name
 
     t0 = time.time()
-    rows: list[dict[str, Any]] = []
+    status_counts: Counter[str] = Counter()
+    n_rows = 0
     try:
         codelists, counts = parse_ct_file(path)
-        rows = build_rows(
+        # build_rows parses the whole release into a list (parsing detail, left as
+        # is); the counting generator only avoids a second accumulation.
+        built = build_rows(
             codelists,
             package=package,
             release_date=release_date,
             source_file=basename,
         )
-        status_counts: Counter[str] = Counter(str(r.get("extract_status")) for r in rows)
 
-        write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-        )
+        def _counted() -> Iterator[dict[str, Any]]:
+            nonlocal n_rows
+            for row in built:
+                status_counts[str(row.get("extract_status"))] += 1
+                n_rows += 1
+                yield row
+
+        gen = _counted()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+                batch_size=_WRITE_BATCH_ROWS,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "skipped_no_id": counts.get("skipped_no_id", 0),
             "orphan_terms": counts.get("orphan_terms", 0),
@@ -220,7 +238,7 @@ def process_one(
             "write": write_info,
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001 -- includes CTFormatError (Task 1)
         mark_failed(
@@ -229,7 +247,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
