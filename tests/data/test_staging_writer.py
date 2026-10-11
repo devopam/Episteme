@@ -179,3 +179,12 @@ def test_jsonl_fallback_streams_and_cleans_up(tmp_path, monkeypatch):
     base = tmp_path / "staging" / "pmc"
     assert not (base / "k.jsonl").exists()
     assert not list(base.glob("*.tmp"))
+
+
+def test_write_rows_rejects_batch_size_below_one(tmp_path):
+    import pytest
+
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="batch_size"):
+            write_rows(_mixed_rows(), tmp_path, source="pmc", source_file="b.xml", batch_size=bad)
+    assert not (tmp_path / "staging").exists()

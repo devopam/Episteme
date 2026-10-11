@@ -1,4 +1,4 @@
-"""Non-pg checks of postgres_loader's streaming readers."""
+"""Non-pg checks of postgres_loader's streaming readers and argument guards."""
 
 from pathlib import Path
 
@@ -28,6 +28,22 @@ def _shard(tmp_path: Path, n: int, *, prefer_parquet: bool = True) -> Path:
         rows, tmp_path, source="chembl", source_file="F.db", prefer_parquet=prefer_parquet
     )
     return Path(info["paths"][0])
+
+
+class _NoConn:
+    """Any use of the connection fails the test: the guard must run first."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"connection touched: {name}")
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_load_source_file_rejects_batch_size_below_one(tmp_path, bad):
+    shard = _shard(tmp_path, 3)
+    with pytest.raises(ValueError, match="batch_size"):
+        postgres_loader.load_source_file(
+            _NoConn(), source="chembl", staging_path=shard, run_id="r", batch_size=bad
+        )
 
 
 def test_id_pass_streams_parquet_without_reading_whole_columns(tmp_path, monkeypatch):

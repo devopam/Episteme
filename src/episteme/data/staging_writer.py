@@ -194,6 +194,8 @@ def write_rows(
     batch_size: int = WRITE_BATCH_ROWS,
 ) -> dict[str, Any]:
     assert source in article_schema.SOURCES, f"unknown source {source!r}"
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if prefer_parquet and _pyarrow_available():
         paths, n = _write_parquet_stream(
             rows, staging_root, source=source, source_file=source_file, batch_size=batch_size

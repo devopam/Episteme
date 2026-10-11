@@ -192,6 +192,8 @@ def load_source_file(
     Returns a stats dict:
     ``{source_file, rows, deleted, body_deleted, event, staging_path}``.
     """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     staging_path = Path(staging_path)
 
     if source in _ID_MAP_SOURCES:
