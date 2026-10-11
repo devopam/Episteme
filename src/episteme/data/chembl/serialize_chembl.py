@@ -43,6 +43,7 @@ Roadmap CLI (Sec 4.7-shaped, SP4 Sec 5):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import tarfile
@@ -404,19 +405,26 @@ def process_one(
 
         def _counted() -> Iterator[dict[str, Any]]:
             nonlocal n_rows
-            for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
-                status_counts[str(row.get("extract_status"))] += 1
-                n_rows += 1
-                yield row
+            with contextlib.closing(
+                iter_rows_from_file(path, source_file=basename, stats=iter_stats)
+            ) as source_rows:
+                for row in source_rows:
+                    status_counts[str(row.get("extract_status"))] += 1
+                    n_rows += 1
+                    yield row
 
-        write_info = write_rows(
-            _counted(),
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-            batch_size=_WRITE_BATCH_ROWS,
-        )
+        gen = _counted()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+                batch_size=_WRITE_BATCH_ROWS,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
             "n_rows": n_rows,

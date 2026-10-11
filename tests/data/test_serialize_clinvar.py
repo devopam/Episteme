@@ -313,3 +313,33 @@ def test_clinvar_tiny_batches_match_default_shard(tmp_path, monkeypatch):
 
     assert _rows(tiny_dir) == _rows(default_dir)
     assert _rows(tiny_dir)
+
+
+def test_clinvar_row_generators_closed_when_write_rows_raises(tmp_path, monkeypatch):
+    """A mid-stream ``write_rows`` failure closes the row generators explicitly.
+
+    The fake ``write_rows`` keeps a reference to the generator it was given, so
+    cleanup cannot be left to refcounting; the spy source's ``finally`` must
+    still run (and the failure is recorded, not raised).
+    """
+    from episteme.data.clinvar import serialize_clinvar as mod
+
+    state = {"closed": False, "kept": []}
+    real_iter = mod.iter_rows_from_file
+
+    def _spy_iter(path, **kwargs):
+        try:
+            yield from real_iter(path, **kwargs)
+        finally:
+            state["closed"] = True
+
+    def _failing_write_rows(rows, *args, **kwargs):
+        state["kept"].append(rows)  # keep it alive: no refcount-driven cleanup
+        next(iter(rows))  # consume some rows, then die mid-stream
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "iter_rows_from_file", _spy_iter)
+    monkeypatch.setattr(mod, "write_rows", _failing_write_rows)
+    res = serialize_clinvar(FX, tmp_path / "processed")
+    assert res["failed"] == 1
+    assert state["closed"] is True

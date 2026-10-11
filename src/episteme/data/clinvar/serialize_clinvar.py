@@ -138,6 +138,7 @@ Roadmap CLI (Sec 4.7-shaped, SP4 Sec 5):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import threading
@@ -231,15 +232,14 @@ _CANDIDATE_EXTS = (".txt.gz", ".gz", ".tsv", ".txt")
 # Only the columns ``_build_text``/``clinvar_row`` actually read are
 # selected -- ``Type``/``GeneSymbol``/``ReviewStatus`` are NOT (an earlier
 # draft selected them speculatively; dropped after a self-review pass
-# confirmed neither function reads them). This matters beyond tidiness: at
-# real full-file scale (~4.56M deduped rows), every unused column is a few
-# hundred MB of Python strings ``con.fetchall()`` materializes for nothing,
-# directly adding to the memory ceiling this task's real end-to-end attempt
-# hit (see task-8-report.md's Concern 1). ``assembly`` IS kept, despite not
-# feeding ``text`` either, because it is the one column that makes the
-# QUALIFY clause's GRCh38-preference actually observable/testable (see
-# ``test_clinvar_assembly_dedup_prefers_grch38``) -- without it, which
-# assembly row survives the dedup would be a silently untested behaviour.
+# confirmed neither function reads them). This matters beyond tidiness: every
+# unused column is Python strings built for nothing in each fetched batch of
+# ``_FETCH_BATCH_ROWS`` rows, directly adding to the per-batch memory cost.
+# ``assembly`` IS kept, despite not feeding ``text`` either, because it is the
+# one column that makes the QUALIFY clause's GRCh38-preference actually
+# observable/testable (see ``test_clinvar_assembly_dedup_prefers_grch38``) --
+# without it, which assembly row survives the dedup would be a silently
+# untested behaviour.
 _QUERY = """
     SELECT
         VariationID                        AS variation_id,
@@ -452,19 +452,26 @@ def process_one(
 
         def _counted() -> Iterator[dict[str, Any]]:
             nonlocal n_rows
-            for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
-                status_counts[str(row.get("extract_status"))] += 1
-                n_rows += 1
-                yield row
+            with contextlib.closing(
+                iter_rows_from_file(path, source_file=basename, stats=iter_stats)
+            ) as source_rows:
+                for row in source_rows:
+                    status_counts[str(row.get("extract_status"))] += 1
+                    n_rows += 1
+                    yield row
 
-        write_info = write_rows(
-            _counted(),
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-            batch_size=_WRITE_BATCH_ROWS,
-        )
+        gen = _counted()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+                batch_size=_WRITE_BATCH_ROWS,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
             "n_rows": n_rows,
