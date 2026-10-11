@@ -137,6 +137,7 @@ class Settings:
     db_target: str = "primary"
     production_database: str = "episteme"
     pg_database_secondary: str | None = None
+    duckdb_memory_limit: str = "4GB"
 
     def pg_dsn(self) -> str:
         return (
@@ -216,6 +217,7 @@ def get_settings() -> Settings:
         db_target=db_target,
         production_database=_get("EPISTEME_PRODUCTION_DATABASE", "episteme"),
         pg_database_secondary=secondary,
+        duckdb_memory_limit=(_get("EPISTEME_DUCKDB_MEMORY_LIMIT") or "4GB").strip(),
     )
 
 

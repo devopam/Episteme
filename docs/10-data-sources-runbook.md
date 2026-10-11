@@ -115,6 +115,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
 | `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
+| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `<processed root>/_ops/_duckdb_tmp`). |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
 | `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
