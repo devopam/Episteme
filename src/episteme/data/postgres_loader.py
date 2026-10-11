@@ -3,12 +3,15 @@
 ``load_source_file`` runs as ONE transaction (it never commits -- the caller
 owns the transaction boundary):
 
-    1. read the staging shard (Polars) into a list of row dicts
+    1. hash the shard in 1 MiB chunks; COPY its ids into a temp table
+       ``_load_ids`` (ON COMMIT DROP); collect its distinct source_file(s)
     2. DELETE FROM episteme.article_body for every article of the replaced
-       source_file(s) (via the articles.id linkage, plus the shard's own ids)
-    3. DELETE FROM episteme.articles      WHERE source_file = ANY(<file>)   (per file)
-    4. COPY the hot (non-text) columns into episteme.articles
-    5. COPY (article_id, source, year + 4 text cols) into episteme.article_body
+       source_file(s) (via the articles.id linkage), then for the shard's own ids
+    3. DELETE FROM episteme.articles: an incoming id under another source_file,
+       then WHERE source_file = ANY(<file>) per file
+    4. stream the shard in batches; per batch COPY the hot (non-text) columns
+       into episteme.articles,
+    5. ... then (article_id, source, year + 4 text cols) into episteme.article_body
     6. INSERT one episteme._lineage row per distinct source_file
     7. audit_trail.record("load_replace" if anything was deleted else "load_commit")
 
@@ -28,6 +31,10 @@ via the helpers it calls (``audit_trail``).
 from __future__ import annotations
 
 import hashlib
+import itertools
+import json
+from collections import Counter
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,13 +60,22 @@ BODY_COLUMNS: tuple[str, ...] = (
     "text",
 )
 
+# Rows per streamed batch (the loader's memory bound) and the content-hash
+# read size.
+LOAD_BATCH_ROWS = 50_000
+_HASH_CHUNK_BYTES = 1 << 20
+
 # SP1-β loads pmc only. These sources are identifier enrichment, not a text
 # source -- id_mappings would route to episteme.id_map. Documented, not exercised.
 _ID_MAP_SOURCES = ("europepmc_lite", "europepmc_id_mappings")
 
 
 def _read_shard(staging_path: Path) -> list[dict[str, Any]]:
-    """Read a Parquet or JSONL staging shard into a list of row dicts (no pandas)."""
+    """Read a Parquet or JSONL staging shard into a list of row dicts (no pandas).
+
+    Whole-shard read: ``load_source_file`` no longer uses it (it streams);
+    kept for compatibility only.
+    """
     import polars as pl
 
     name = staging_path.name.lower()
@@ -106,16 +122,73 @@ def _hot_value(row: dict[str, Any], col: str) -> Any:
     return row.get(col)
 
 
+def _file_sha256(path: Path) -> str:
+    """SHA-256 hex of the whole file, read in 1 MiB chunks (same digest as read_bytes())."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(_HASH_CHUNK_BYTES):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _shard_format(staging_path: Path) -> str:
+    name = staging_path.name.lower()
+    if name.endswith(".parquet"):
+        return "parquet"
+    if name.endswith((".jsonl", ".ndjson")):
+        return "jsonl"
+    raise ValueError(f"unsupported staging shard format: {staging_path}")
+
+
+def _iter_jsonl(staging_path: Path) -> Iterator[dict[str, Any]]:
+    with staging_path.open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                yield json.loads(line)
+
+
+def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[list[dict[str, Any]]]:
+    """Row dicts in batches of at most ``batch_size`` -- never the whole shard."""
+    if fmt == "parquet":
+        import pyarrow.parquet as pq
+
+        for rb in pq.ParquetFile(staging_path).iter_batches(batch_size=batch_size):
+            yield rb.to_pylist()
+        return
+    it = _iter_jsonl(staging_path)
+    while batch := list(itertools.islice(it, batch_size)):
+        yield batch
+
+
+def _iter_id_batches(
+    staging_path: Path, fmt: str, batch_size: int
+) -> Iterator[tuple[list[Any], list[Any]]]:
+    """(ids, source_files) in batches -- the ``id``/``source_file`` columns only."""
+    if fmt == "parquet":
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(staging_path, columns=["id", "source_file"])
+        for rb in table.to_batches(max_chunksize=batch_size):
+            yield rb.column("id").to_pylist(), rb.column("source_file").to_pylist()
+        return
+    it = _iter_jsonl(staging_path)
+    while batch := list(itertools.islice(it, batch_size)):
+        yield [r["id"] for r in batch], [r["source_file"] for r in batch]
+
+
 def load_source_file(
     conn,
     *,
     source: str,
     staging_path: Path | str,
     run_id: str,
+    batch_size: int = LOAD_BATCH_ROWS,
 ) -> dict[str, Any]:
     """Load one staging shard into episteme.articles + episteme.article_body.
 
-    One transaction; the caller commits. Returns a stats dict:
+    One transaction; the caller commits. Rows stream through in batches of
+    ``batch_size``, so peak memory is bounded by the batch, not the shard.
+    Returns a stats dict:
     ``{source_file, rows, deleted, body_deleted, event, staging_path}``.
     """
     staging_path = Path(staging_path)
@@ -124,34 +197,57 @@ def load_source_file(
         # SP1-β: pmc only; id_mappings would route to episteme.id_map here.
         raise NotImplementedError(f"{source} loading is SP2+")
 
-    rows = _read_shard(staging_path)
-    content_hash = hashlib.sha256(staging_path.read_bytes()).hexdigest()
-
-    deleted_ids = [r["id"] for r in rows]
-    source_files = sorted({r["source_file"] for r in rows})
+    fmt = _shard_format(staging_path)
+    content_hash = _file_sha256(staging_path)
 
     deleted = 0
     per_file_deleted: dict[str, int] = {}
 
     with conn.cursor() as cur:
+        # The shard's ids go into a temp table, never a bound array: Postgres
+        # compares `col = ANY($array)` linearly per row (no hashing), which made
+        # a ~570k-id article_body delete run for 15+ minutes. Joins and
+        # IN (SELECT ...) against an ANALYZEd table plan as hash/index lookups.
+        # DROP first so two loads in one transaction do not collide.
+        cur.execute("DROP TABLE IF EXISTS pg_temp._load_ids")
+        cur.execute("CREATE TEMP TABLE _load_ids (id text) ON COMMIT DROP")
+        source_file_set: set[str] = set()
+        with cur.copy("COPY _load_ids (id) FROM STDIN") as cp:
+            for ids, sfs in _iter_id_batches(staging_path, fmt, batch_size):
+                for i in ids:
+                    cp.write_row((i,))
+                source_file_set.update(sfs)
+        cur.execute("ANALYZE _load_ids")
+        source_files = sorted(source_file_set)
+
         # (c) article_body first. article_body has no source_file column, so
-        # target it by the linkage articles.id == article_body.article_id for
-        # the source_file(s) being replaced -- this also removes rows whose id
-        # is dropped by a shrinking re-load (which the articles delete below
-        # would otherwise orphan) -- OR-ed with the incoming shard's ids for
+        # target it (c1) by the linkage articles.id == article_body.article_id
+        # for the source_file(s) being replaced -- this also removes rows whose
+        # id is dropped by a shrinking re-load (which the articles delete below
+        # would otherwise orphan) -- then (c2) by the incoming shard's ids for
         # the belt-and-braces case of a pre-existing body row for a new id.
-        # scoped by source: source_file basenames are not globally unique across sources
+        # Two statements instead of one OR-ed predicate so each can use a join;
+        # (c2) only sees what (c1) left, so the sum is the OR-ed delete's count.
+        # scoped by source: source_file basenames are not globally unique across sources.
+        # (c1) also requires b.source = source: the former OR-ed form did not on
+        # its linkage arm, so it could delete another source's body row that
+        # shared an id with a replaced article.
         cur.execute(
             """
-            DELETE FROM episteme.article_body
-             WHERE article_id IN (
-                     SELECT id FROM episteme.articles WHERE source_file = ANY(%s) AND source = %s
-                   )
-                OR (article_id = ANY(%s) AND source = %s)
+            DELETE FROM episteme.article_body b
+             USING episteme.articles a
+             WHERE a.source = %s AND a.source_file = ANY(%s)
+               AND b.article_id = a.id AND b.source = %s
             """,
-            (source_files, source, deleted_ids, source),
+            (source, source_files, source),
         )
         body_deleted = cur.rowcount
+        cur.execute(
+            "DELETE FROM episteme.article_body "
+            "WHERE source = %s AND article_id IN (SELECT id FROM _load_ids)",
+            (source,),
+        )
+        body_deleted += cur.rowcount
 
         # (d0) id-collision guard: a periodic full-dump re-release (SP4's
         # normal re-run shape) may reuse a native id under a DIFFERENT
@@ -166,8 +262,9 @@ def load_source_file(
         # sources).
         cur.execute(
             "DELETE FROM episteme.articles "
-            "WHERE id = ANY(%s) AND source = %s AND NOT (source_file = ANY(%s))",
-            (deleted_ids, source, source_files),
+            "WHERE id IN (SELECT id FROM _load_ids) AND source = %s "
+            "AND NOT (source_file = ANY(%s))",
+            (source, source_files),
         )
         deleted += cur.rowcount
 
@@ -181,31 +278,34 @@ def load_source_file(
             per_file_deleted[sf] = cur.rowcount
             deleted += cur.rowcount
 
-        # (e) COPY the hot columns into episteme.articles.
+        # (e)+(f) stream the rows: per batch, COPY the hot columns into
+        # episteme.articles, then the text columns into episteme.article_body.
         hot_cols_sql = ", ".join(HOT_COLUMNS)
-        with cur.copy(f"COPY episteme.articles ({hot_cols_sql}) FROM STDIN") as cp:
-            for r in rows:
-                cp.write_row(tuple(_hot_value(r, c) for c in HOT_COLUMNS))
-
-        # (f) COPY the text columns into episteme.article_body.
         body_cols_sql = ", ".join(BODY_COLUMNS)
-        with cur.copy(f"COPY episteme.article_body ({body_cols_sql}) FROM STDIN") as cp:
-            for r in rows:
-                cp.write_row(
-                    (
-                        r["id"],
-                        r.get("source"),
-                        _coerce_year(r.get("year")),
-                        r.get("title"),
-                        r.get("abstract"),
-                        r.get("body_text"),
-                        r.get("text"),
+        per_file_inserted: Counter[str] = Counter()
+        total = 0
+        for batch in _iter_batches(staging_path, fmt, batch_size):
+            with cur.copy(f"COPY episteme.articles ({hot_cols_sql}) FROM STDIN") as cp:
+                for r in batch:
+                    cp.write_row(tuple(_hot_value(r, c) for c in HOT_COLUMNS))
+            with cur.copy(f"COPY episteme.article_body ({body_cols_sql}) FROM STDIN") as cp:
+                for r in batch:
+                    cp.write_row(
+                        (
+                            r["id"],
+                            r.get("source"),
+                            _coerce_year(r.get("year")),
+                            r.get("title"),
+                            r.get("abstract"),
+                            r.get("body_text"),
+                            r.get("text"),
+                        )
                     )
-                )
+            per_file_inserted.update(r["source_file"] for r in batch)
+            total += len(batch)
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:
-            rows_inserted = sum(1 for r in rows if r["source_file"] == sf)
             cur.execute(
                 """
                 INSERT INTO episteme._lineage
@@ -213,7 +313,7 @@ def load_source_file(
                      rows_inserted, rows_deleted)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (source, sf, run_id, content_hash, rows_inserted, per_file_deleted[sf]),
+                (source, sf, run_id, content_hash, per_file_inserted[sf], per_file_deleted[sf]),
             )
 
     # (h) audit -- in conn's transaction, no commit.
@@ -223,13 +323,13 @@ def load_source_file(
         conn=conn,
         object=f"{source} {staging_path.name}",
         input_content_hash=content_hash,
-        rows_affected=len(rows),
+        rows_affected=total,
         run_id=run_id,
     )
 
     return {
         "source_file": source_files,
-        "rows": len(rows),
+        "rows": total,
         "deleted": deleted,
         "body_deleted": body_deleted,
         "event": event,
