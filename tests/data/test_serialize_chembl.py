@@ -259,3 +259,43 @@ def test_unsafe_tar_member_is_rejected(tmp_path, monkeypatch, has_filter):
     with pytest.raises(Exception):  # noqa: B017 - either path may raise a different type
         sc._safe_extract(p, out)
     assert not (tmp_path / "escape.db").exists()
+
+
+def test_chembl_tiny_batches_match_default_shard(tmp_path, monkeypatch):
+    """Serializing with 1-row fetch and write batches yields the same shard."""
+    from episteme.data import duckdb_conn, staging_writer
+    from episteme.data.chembl import serialize_chembl as mod
+
+    default_dir = tmp_path / "default"
+    tiny_dir = tmp_path / "tiny"
+    assert serialize_chembl(FX, default_dir)["ok"] == 1
+
+    calls = {"batches": 0}
+    real_fetch_batches = duckdb_conn.fetch_batches
+
+    def _counting_fetch_batches(con, batch_size=duckdb_conn.FETCH_BATCH_ROWS):
+        for batch in real_fetch_batches(con, batch_size=batch_size):
+            calls["batches"] += 1
+            yield batch
+
+    monkeypatch.setattr(mod, "_FETCH_BATCH_ROWS", 1)
+    monkeypatch.setattr(mod, "_WRITE_BATCH_ROWS", 1)
+    monkeypatch.setattr(duckdb_conn, "fetch_batches", _counting_fetch_batches)
+    res = serialize_chembl(FX, tiny_dir)
+    assert res["ok"] == 1
+    assert staging_writer.WRITE_BATCH_ROWS != 1  # the patch above is module-local
+    assert calls["batches"] > 1
+
+    def _rows(root):
+        df = _read_shard(root / "staging" / "chembl") if "_read_shard" in globals() else None
+        if df is None:
+            shards = list((root / "staging" / "chembl").glob("*.*"))
+            df = (
+                pl.read_parquet(shards[0])
+                if shards[0].suffix == ".parquet"
+                else pl.read_ndjson(shards[0])
+            )
+        return [{k: v for k, v in r.items() if k != "retrieved_at"} for r in df.to_dicts()]
+
+    assert _rows(tiny_dir) == _rows(default_dir)
+    assert _rows(tiny_dir)

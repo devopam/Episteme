@@ -63,6 +63,10 @@ if str(_SRC) not in sys.path:
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import (  # noqa: E402
+    duckdb_conn,
+    staging_writer,
+)
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     SCHEMA_VERSION,
@@ -84,6 +88,10 @@ from episteme.data.staging_writer import write_rows  # noqa: E402
 _LOG = logging.getLogger(__name__)
 
 SOURCE = "chembl"
+
+# Batch sizes are module-level (read at call time) so tests can shrink them.
+_FETCH_BATCH_ROWS = duckdb_conn.FETCH_BATCH_ROWS
+_WRITE_BATCH_ROWS = staging_writer.WRITE_BATCH_ROWS
 
 # ChEMBL's own stated release licence (LICENSE file at the release root: CC
 # BY-SA 3.0 Unported). Run through normalize_license()/subset_from_license()
@@ -290,20 +298,15 @@ def iter_rows_from_file(
     """Yield one ``episteme.articles`` row per ``activities`` record from one
     ChEMBL SQLite release file (bare ``.db`` or ``*sqlite.tar.gz``).
 
-    NOT a streaming read despite the generator shape: ``con.execute(...)`` +
-    ``con.fetchall()`` materializes the whole join in memory before the first
-    row is yielded (DuckDB's Python DBAPI cursor has no server-side-cursor
-    chunked fetch used here). Harmless for this task's fixture; a real
-    ChEMBL release's ``activities`` table is on the order of 10^7 rows, two
-    orders of magnitude past a ~19 MB pubmed XML file -- flagged as a named
-    ops concern in the task-5 report for whoever runs the real full-scale
-    release, not fixed here (chunked/paginated reads + shard-batched writes
-    would be the fix, out of scope for this task's fixture-gated proof).
+    A streaming read: the connection is memory-bounded (``duckdb_conn.connect``)
+    and rows are fetched in ``_FETCH_BATCH_ROWS`` batches, so peak memory is
+    one batch, not the whole result. The extracted temp dir and the connection
+    stay alive until the generator is exhausted or closed.
     """
     source_file = source_file or path.name
     with tempfile.TemporaryDirectory(prefix="chembl_extract_") as td:
         db_path = _resolve_sqlite_db(path, Path(td))
-        con = duckdb.connect()
+        con = duckdb_conn.connect()
         try:
             try:
                 con.sql("INSTALL sqlite")
@@ -313,14 +316,15 @@ def iter_rows_from_file(
             db_str = str(db_path)
             con.execute(_BIOACTIVITY_QUERY, [db_str, db_str, db_str, db_str, db_str])
             cols = [d[0] for d in con.description]
-            for raw in con.fetchall():
-                rec = dict(zip(cols, raw, strict=True))
-                row = bioactivity_row(rec, source_file)
-                if row is None:
-                    if stats is not None:
-                        stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
-                    continue
-                yield row
+            for batch in duckdb_conn.fetch_batches(con, batch_size=_FETCH_BATCH_ROWS):
+                for raw in batch:
+                    rec = dict(zip(cols, raw, strict=True))
+                    row = bioactivity_row(rec, source_file)
+                    if row is None:
+                        if stats is not None:
+                            stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                        continue
+                    yield row
         finally:
             con.close()
 
@@ -394,30 +398,35 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
+    n_rows = 0
     iter_stats: dict[str, int] = {}
     try:
-        for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
+
+        def _counted() -> Iterator[dict[str, Any]]:
+            nonlocal n_rows
+            for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
+                status_counts[str(row.get("extract_status"))] += 1
+                n_rows += 1
+                yield row
 
         write_info = write_rows(
-            rows,
+            _counted(),
             processed_dir,
             source=SOURCE,
             source_file=basename,
             prefer_parquet=True,
+            batch_size=_WRITE_BATCH_ROWS,
         )
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
         stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -426,7 +435,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}

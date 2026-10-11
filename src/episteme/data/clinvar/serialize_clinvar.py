@@ -148,14 +148,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-import duckdb
-
 _SRC = Path(__file__).resolve().parents[3]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import (  # noqa: E402
+    duckdb_conn,
+    staging_writer,
+)
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     LICENSE_PUBLIC_DOMAIN,
@@ -178,6 +180,10 @@ from episteme.data.staging_writer import write_rows  # noqa: E402
 _LOG = logging.getLogger(__name__)
 
 SOURCE = "clinvar"
+
+# Batch sizes are module-level (read at call time) so tests can shrink them.
+_FETCH_BATCH_ROWS = duckdb_conn.FETCH_BATCH_ROWS
+_WRITE_BATCH_ROWS = staging_writer.WRITE_BATCH_ROWS
 
 # ClinVar's own real "Disclaimer and data use policy" text, fetched directly
 # from https://www.ncbi.nlm.nih.gov/clinvar/docs/maintenance_use/ at
@@ -350,28 +356,25 @@ def iter_rows_from_file(
     (the same VariationID reported once per genome assembly) are deduped in
     SQL -- see module docstring's "Assembly-duplicate dedup" section.
 
-    NOT a streaming read despite the generator shape: ``con.execute(...)`` +
-    ``con.fetchall()`` materializes the whole (deduped) result in memory
-    before the first row is yielded (same DuckDB DBAPI limitation as
-    chembl/pubchem's own ``iter_rows_from_file``). A real full
-    ``variant_summary.txt.gz`` is ~9.06M physical rows / ~4.56M distinct
-    VariationIDs after dedup -- flagged as the same class of named ops
-    concern chembl's task-5 report raised for its own 10^7-row
-    ``activities`` table, not fixed here.
+    A streaming read: the connection is memory-bounded (``duckdb_conn.connect``)
+    and rows are fetched in ``_FETCH_BATCH_ROWS`` batches, so peak memory is
+    one batch, not the whole result. The connection stays open until the
+    generator finishes.
     """
     source_file = source_file or path.name
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     try:
         con.execute(_QUERY, [str(path)])
         cols = [d[0] for d in con.description]
-        for raw in con.fetchall():
-            rec = dict(zip(cols, raw, strict=True))
-            row = clinvar_row(rec, source_file)
-            if row is None:
-                if stats is not None:
-                    stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
-                continue
-            yield row
+        for batch in duckdb_conn.fetch_batches(con, batch_size=_FETCH_BATCH_ROWS):
+            for raw in batch:
+                rec = dict(zip(cols, raw, strict=True))
+                row = clinvar_row(rec, source_file)
+                if row is None:
+                    if stats is not None:
+                        stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                    continue
+                yield row
     finally:
         con.close()
 
@@ -443,30 +446,35 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
+    n_rows = 0
     iter_stats: dict[str, int] = {}
     try:
-        for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
+
+        def _counted() -> Iterator[dict[str, Any]]:
+            nonlocal n_rows
+            for row in iter_rows_from_file(path, source_file=basename, stats=iter_stats):
+                status_counts[str(row.get("extract_status"))] += 1
+                n_rows += 1
+                yield row
 
         write_info = write_rows(
-            rows,
+            _counted(),
             processed_dir,
             source=SOURCE,
             source_file=basename,
             prefer_parquet=True,
+            batch_size=_WRITE_BATCH_ROWS,
         )
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
         stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         mark_failed(
@@ -475,7 +483,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
