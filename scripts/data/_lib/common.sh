@@ -235,28 +235,71 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     mkdir -p "$dest_dir"
 
     if command -v aria2c >/dev/null 2>&1; then
-        local aria_in rc; aria_in="$(mktemp)"
+        local aria_in session rc; aria_in="$(mktemp)"; session="$(mktemp)"
         local line url rel
         for line in "${urls[@]}"; do
             url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
             _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
             printf '%s\n  dir=%s\n  out=%s\n' "$url" "$dest_dir/$(dirname "$rel")" "$(basename "$rel")" >> "$aria_in"
         done
+        # --save-session lists exactly the downloads aria2c did not finish
         aria2c -c -x16 -s16 -j"${EPISTEME_DOWNLOAD_THREADS:-4}" \
             --max-tries=15 --retry-wait=30 --auto-file-renaming=false \
             --allow-overwrite=true --file-allocation=none --console-log-level=warn \
-            -i "$aria_in"
-        rc=$?; rm -f "$aria_in"; return "$rc"
+            --save-session="$session" -i "$aria_in"
+        rc=$?; rm -f "$aria_in"
+        [ "$rc" -eq 0 ] && { rm -f "$session"; return 0; }
+        # aria2c can fail where curl works: the Windows build's TLS stack failed
+        # every handshake with ftp.expasy.org on 2026-10-11 ("The function requested
+        # is not supported") while curl fetched the same URLs.
+        command -v curl >/dev/null 2>&1 || { rm -f "$session"; return "$rc"; }
+        local -a retry=()
+        mapfile -t retry < <(_aria2_unfinished "$session" "${urls[@]}")
+        rm -f "$session"
+        # no usable session (aria2c killed before writing it): retry every line
+        [ "${#retry[@]}" -gt 0 ] || retry=("${urls[@]}")
+        log WARN "aria2c exit $rc — retrying ${#retry[@]} unfinished file(s) with curl"
+        _curl_fetch_all "$dest_dir" "${retry[@]}"
+        return
     fi
 
     command -v curl >/dev/null 2>&1 || die "no download tool: install aria2c (or curl for the slow path)"
     log WARN "aria2c not found — sequential curl fallback (degraded throughput)"
-    local line url rel
-    for line in "${urls[@]}"; do
+    _curl_fetch_all "$dest_dir" "${urls[@]}"
+}
+
+_aria2_unfinished() { # _aria2_unfinished SESSION LINE... — the http_fetch lines whose URL the aria2c session lists
+    local session="$1"; shift
+    [ -s "$session" ] || return 0
+    local -A pending=()
+    local s line
+    # session format: a URI line (tab-separated mirrors) then indented options
+    while IFS= read -r s; do
+        case "$s" in ''|[[:space:]]*) continue ;; esac
+        s="${s%%$'\t'*}"; pending["${s%$'\r'}"]=1
+    done < "$session"
+    for line in "$@"; do
+        [ -n "${pending["${line%%$'\t'*}"]:-}" ] && printf '%s\n' "$line"
+    done
+    return 0
+}
+
+_curl_fetch_all() { # _curl_fetch_all DEST_DIR LINE... — sequential resumable curl over http_fetch lines
+    local dest_dir="$1"; shift
+    local line url rel out
+    for line in "$@"; do
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
         _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
-        mkdir -p "$dest_dir/$(dirname "$rel")"
-        _curl_resume "$dest_dir/$rel" "$url" || die "curl failed: $url"
+        out="$dest_dir/$rel"
+        if [ -e "$out.aria2" ]; then
+            # an unfinished aria2c file: its segments can leave holes, so `-C -`
+            # (which appends at the file size) would corrupt it — start over
+            rm -f "$out" "$out.aria2"
+        elif [ -s "$out" ] && size_match_skip "$out" "$url"; then
+            continue  # already complete (aria2c removes the control file when done)
+        fi
+        mkdir -p "$(dirname "$out")"
+        _curl_resume "$out" "$url" || die "curl failed: $url"
     done
 }
 
