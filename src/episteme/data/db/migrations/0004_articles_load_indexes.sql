@@ -8,6 +8,9 @@
 -- (idempotent -- safe to re-run). Untracked in episteme._migrations when
 -- applied this way (mirrors 0002/0003's identical caveat, see their headers).
 -- Creating the index on the partitioned parent creates one per partition.
+-- LOCKING: CREATE INDEX on the partitioned parent blocks writes to every
+-- partition until it finishes, and CONCURRENTLY is not possible on a
+-- partitioned parent. Apply with no load running.
 
 CREATE INDEX IF NOT EXISTS articles_source_file_idx
     ON episteme.articles (source, source_file);
