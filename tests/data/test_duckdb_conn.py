@@ -26,14 +26,16 @@ def test_connect_applies_limit_and_temp_dir(tmp_path):
 
 @pytest.fixture
 def settings_root(tmp_path, monkeypatch):
-    """Point get_settings() at tmp_path (processed root) and a 256MB DuckDB limit."""
-    import episteme.config as cfg
+    """Point get_settings() at tmp_path (processed root) and a 256MB DuckDB limit.
 
+    Clears the cache of the function duckdb_conn actually bound: other tests
+    importlib.reload(episteme.config), leaving it a different object.
+    """
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
     monkeypatch.setenv("EPISTEME_DUCKDB_MEMORY_LIMIT", "256MB")
-    cfg.get_settings.cache_clear()
+    duckdb_conn.get_settings.cache_clear()
     yield tmp_path
-    cfg.get_settings.cache_clear()
+    duckdb_conn.get_settings.cache_clear()
 
 
 def test_connect_defaults_come_from_settings(settings_root):
