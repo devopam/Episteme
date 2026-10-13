@@ -206,7 +206,7 @@ PostgreSQL's defaults suit a small shared server, not a single-user bulk load. O
 
 `fsync`, `full_page_writes` and data checksums stay on (GxP data integrity, docs/11). Memory budget on 16 GB: 2 GB of shared buffers, up to 4 GB of DuckDB during a serialize (`EPISTEME_DUCKDB_MEMORY_LIMIT`), and the Python workers, with headroom for the operating system cache.
 
-Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs. `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, sets each value, reloads, and lists the settings that wait for a restart. The MCPg server cannot do this: its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
+Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs, if a restart is pending, or if an `ALTER ROLE`/`ALTER DATABASE ... SET` override of one of these settings exists (it would beat the server value for, say, `episteme_app` sessions). `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, validates every name and value first (nothing is written if one is invalid), sets each value, reloads, and confirms each one is active or waiting for a restart. Every connection uses `PGCONNECT_TIMEOUT` (default 10 seconds). The MCPg server cannot do this: its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
 
 ```bash
 bash scripts/data/db/tune_postgres.sh check
@@ -221,7 +221,7 @@ bash scripts/data/db/tune_postgres.sh apply     # then restart the postgresql-x6
 4. Rename `<data>\pg_wal` to `pg_wal.old` and create a junction in its place: `New-Item -ItemType Junction -Path <data>\pg_wal -Target C:\pgwal\episteme19\pg_wal`. This is the layout `initdb --waldir` creates on Windows.
 5. Start the service, check that the server is not in recovery, run a `CHECKPOINT`, verify the audit chain, then delete `pg_wal.old`.
 
-Cost: the database then depends on both drives; back-ups must cover both. Size the WAL directory for `max_wal_size` plus a margin (about 18 GB at 16GB).
+Cost: the database then depends on both drives; back-ups must cover both. `max_wal_size` is a soft target, not a cap: a load that writes WAL faster than checkpoints can recycle it, or WAL held back by archiving or a replication slot (neither is used on the local build), can grow `pg_wal` past it. Give the WAL disk generous headroom, at least twice `max_wal_size` (32 GB at 16GB; the local SSD has hundreds of GB free), and watch its size during the first large load. A full WAL disk stops all writes.
 
 ---
 
