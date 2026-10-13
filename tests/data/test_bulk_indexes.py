@@ -77,6 +77,17 @@ def _events(conn) -> list[str]:
     return rows
 
 
+def _rebuild_objects(conn) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT object FROM episteme._audit "
+            "WHERE event_type = 'bulk_index_rebuild' ORDER BY seq"
+        )
+        rows = [r[0] for r in cur.fetchall()]
+    conn.commit()
+    return rows
+
+
 def _set_definition(conn, index_name: str, definition: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -128,7 +139,7 @@ def test_drop_then_rebuild_restores_every_index_exactly(pg_conn, bulk):
     assert set(attached) == set(bi.COVERED_INDEXES)
     assert all(n == direct_partitions for n in attached.values())
 
-    assert _events(pg_conn) == ["bulk_index_drop", "bulk_index_rebuild"]
+    assert _events(pg_conn) == ["bulk_index_drop"] + ["bulk_index_rebuild"] * 6
     assert audit_trail.verify(pg_conn) == []
 
 
@@ -168,7 +179,7 @@ def test_rebuild_refuses_a_definition_without_on_only(pg_conn, bulk):
 def test_interrupted_rebuild_keeps_the_rest_and_resumes(pg_conn, bulk):
     import psycopg
 
-    bi, _ = bulk
+    bi, audit_trail = bulk
     before = _snapshot(pg_conn)
     bi.drop(pg_conn, run_id="r1")
     name = "episteme.articles_doi_idx"  # second in index_name order, after authors
@@ -184,11 +195,17 @@ def test_interrupted_rebuild_keeps_the_rest_and_resumes(pg_conn, bulk):
     assert "episteme.articles_authors_gin" not in pending
     assert name in pending
     assert len(pending) == 5
+    objs = _rebuild_objects(pg_conn)
+    assert len(objs) == 1 and objs[0].endswith("articles_authors_gin")
 
     _set_definition(pg_conn, name, good)
     assert len(bi.rebuild(pg_conn, run_id="r1")) == 5
     assert _snapshot(pg_conn) == before
     assert _pending(pg_conn) == []
+    objs = _rebuild_objects(pg_conn)
+    assert len(objs) == 6
+    assert {o.rsplit(" ", 1)[1] for o in objs} == set(bi.COVERED_INDEXES)
+    assert audit_trail.verify(pg_conn) == []
 
 
 def test_rebuild_replaces_an_invalid_index_of_the_same_name(pg_conn, bulk):
@@ -213,3 +230,14 @@ def test_rebuild_with_nothing_pending_is_a_no_op(pg_conn, bulk):
     bi, _ = bulk
     assert bi.rebuild(pg_conn, run_id="r1") == []
     assert _events(pg_conn) == []
+
+
+def test_rebuild_refuses_a_valid_index_that_differs_from_the_saved_definition(pg_conn, bulk):
+    bi, _ = bulk
+    bi.drop(pg_conn, run_id="r1")
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE INDEX articles_pmid_idx ON episteme.articles USING btree (pmcid)")
+    pg_conn.commit()
+    with pytest.raises(bi.BulkIndexError, match="articles_pmid_idx"):
+        bi.rebuild(pg_conn, run_id="r1")
+    assert "episteme.articles_pmid_idx" in _pending(pg_conn)

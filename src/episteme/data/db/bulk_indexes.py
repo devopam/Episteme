@@ -12,8 +12,12 @@ and with ``pool_kwargs`` so ``read-only`` mode refuses the writes.
 ``drop`` saves each covered index's ``pg_get_indexdef()`` in
 ``episteme._bulk_index_state`` (migration 0005) and drops it, in one
 transaction with its audit row. ``rebuild`` re-creates each saved index in its
-own transaction and deletes its row there, then runs ``ANALYZE``. A row left in
+own transaction, deletes its row and writes its ``bulk_index_rebuild`` audit
+row there (one per index), then runs ``ANALYZE`` (not audited). A row left in
 the table means a rebuild is pending; ``drop`` refuses until it is done.
+
+Exit codes: drop 0 ok / 2 rebuild pending / 1 error; rebuild 0 / 1; status 0
+nothing pending / 1 pending / 3 error (e.g. migration 0005 not applied).
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import psycopg
 from psycopg import sql
 
 from episteme import audit_trail
-from episteme.config import ConfigError, get_settings
+from episteme.config import ConfigError, get_settings, require_actor
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
 
@@ -46,7 +50,7 @@ COVERED_INDEXES: tuple[str, ...] = (
 )
 # pg_get_indexdef() of a partitioned parent index reads "ON ONLY"; run verbatim
 # it would create an empty, invalid parent index with no partition indexes.
-_PARENT_DEF = re.compile(r"^CREATE INDEX \S+ ON ONLY episteme\.articles USING ")
+_PARENT_DEF = re.compile(r"^CREATE INDEX (\S+) ON ONLY episteme\.articles USING ")
 
 
 class BulkIndexError(RuntimeError):
@@ -57,13 +61,19 @@ class PendingRebuildError(BulkIndexError):
     """A previous bulk load's rebuild never finished."""
 
 
-def rebuild_sql(definition: str) -> str:
+def rebuild_sql(definition: str, name: str) -> str:
     """The saved parent definition with its one ``ON ONLY`` turned into ``ON``,
-    which builds the index on every partition and attaches them."""
-    if not _PARENT_DEF.match(definition):
+    which builds the index on every partition and attaches them. ``name`` is the
+    index the definition must create."""
+    m = _PARENT_DEF.match(definition)
+    if not m:
         raise BulkIndexError(
             f"saved definition is not a parent index on episteme.articles: {definition!r}"
         )
+    if ";" in definition:
+        raise BulkIndexError(f"saved definition for {name} contains ';': {definition!r}")
+    if m.group(1) != name:
+        raise BulkIndexError(f"saved definition creates {m.group(1)!r}, expected {name!r}")
     return definition.replace(
         " ON ONLY episteme.articles USING ", " ON episteme.articles USING ", 1
     )
@@ -100,6 +110,7 @@ def _drop_index(cur: psycopg.Cursor, schema: str, name: str) -> None:
 
 def drop(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
     """Save and drop every covered index, in one transaction; commits."""
+    require_actor()  # fail before any work, not at the audit row
     try:
         if status(conn):
             raise PendingRebuildError(
@@ -118,7 +129,7 @@ def drop(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
             if missing:
                 raise BulkIndexError(f"covered index(es) not found on episteme.articles: {missing}")
             for name in COVERED_INDEXES:
-                rebuild_sql(found[name])  # never drop what could not be rebuilt
+                rebuild_sql(found[name], name)  # never drop what could not be rebuilt
             for name in COVERED_INDEXES:
                 cur.execute(
                     "INSERT INTO episteme._bulk_index_state (index_name, definition, run_id) "
@@ -146,11 +157,16 @@ def rebuild(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
     Every saved definition is validated before anything is built. An index of
     the same name that already exists and is valid is kept; an invalid one is
     dropped and rebuilt. Returns the schema-qualified names handled."""
+    require_actor()  # fail before hours of index work, not at the first audit row
     pending = status(conn)
     conn.commit()
     if not pending:
         return []
-    statements = {row["index_name"]: rebuild_sql(row["definition"]) for row in pending}
+    statements = {
+        row["index_name"]: rebuild_sql(row["definition"], row["index_name"].split(".", 1)[1])
+        for row in pending
+    }
+    saved = {row["index_name"]: row["definition"] for row in pending}
 
     done: list[str] = []
     for full_name, statement in statements.items():
@@ -158,13 +174,28 @@ def rebuild(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
         try:
             with conn.cursor() as cur:
                 validity = _index_validity(cur, name)
-                if validity is False:
+                if validity is True:
+                    cur.execute("SELECT pg_get_indexdef(%s::regclass)", (f"{schema}.{name}",))
+                    (existing,) = cur.fetchone()
+                    if existing != saved[full_name]:
+                        raise BulkIndexError(
+                            f"index {full_name} already exists and differs from the saved "
+                            f"definition: {existing!r}"
+                        )
+                elif validity is False:
                     _drop_index(cur, schema, name)
                 if validity is not True:
                     cur.execute(statement)
                 cur.execute(
                     "DELETE FROM episteme._bulk_index_state WHERE index_name = %s", (full_name,)
                 )
+            audit_trail.record(
+                "bulk_index_rebuild",
+                conn=conn,
+                object=f"episteme.articles {name}",
+                rows_affected=1,
+                run_id=run_id,
+            )
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -174,13 +205,6 @@ def rebuild(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
     try:
         with conn.cursor() as cur:
             cur.execute("ANALYZE episteme.articles")
-        audit_trail.record(
-            "bulk_index_rebuild",
-            conn=conn,
-            object="episteme.articles " + ",".join(n.split(".", 1)[1] for n in done),
-            rows_affected=len(done),
-            run_id=run_id,
-        )
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -198,13 +222,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", choices=("drop", "rebuild", "status"))
     args = p.parse_args(argv)
 
-    settings = get_settings()
     try:
+        settings = get_settings()
         dsn = db_connection.admin_dsn_from_settings()
     except (ProductionDatabaseGuardError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    failure = 3 if args.action == "status" else 1
     try:
         with psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
             if args.action == "status":
@@ -231,9 +256,9 @@ def main(argv: list[str] | None = None) -> int:
                 else "rebuilt 0 (nothing pending)"
             )
             return 0
-    except (BulkIndexError, psycopg.Error) as exc:
+    except (BulkIndexError, ConfigError, psycopg.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return failure
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ PARENT_DEFS = {
 
 @pytest.mark.parametrize("name", sorted(PARENT_DEFS))
 def test_rebuild_sql_builds_on_every_partition(name):
-    out = bulk_indexes.rebuild_sql(PARENT_DEFS[name])
+    out = bulk_indexes.rebuild_sql(PARENT_DEFS[name], name)
     assert out == PARENT_DEFS[name].replace(" ON ONLY ", " ON ", 1)
     assert "ON ONLY" not in out
 
@@ -38,7 +38,18 @@ def test_rebuild_sql_builds_on_every_partition(name):
 )
 def test_rebuild_sql_refuses_anything_else(bad):
     with pytest.raises(bulk_indexes.BulkIndexError):
-        bulk_indexes.rebuild_sql(bad)
+        bulk_indexes.rebuild_sql(bad, "x")
+
+
+def test_rebuild_sql_refuses_a_trailing_statement():
+    bad = PARENT_DEFS["articles_mesh_gin"] + "; DROP TABLE episteme.articles"
+    with pytest.raises(bulk_indexes.BulkIndexError):
+        bulk_indexes.rebuild_sql(bad, "articles_mesh_gin")
+
+
+def test_rebuild_sql_refuses_a_name_mismatch():
+    with pytest.raises(bulk_indexes.BulkIndexError, match="expected"):
+        bulk_indexes.rebuild_sql(PARENT_DEFS["articles_mesh_gin"], "articles_pmid_idx")
 
 
 def test_covered_indexes_are_exactly_the_six():
@@ -77,3 +88,23 @@ def test_main_rejects_an_unknown_action():
     with pytest.raises(SystemExit) as exc:
         bulk_indexes.main(["vacuum"])
     assert exc.value.code == 2
+
+
+def test_main_passes_pool_kwargs_and_status_error_exits_3(monkeypatch):
+    import psycopg
+
+    monkeypatch.setattr(
+        bulk_indexes,
+        "get_settings",
+        lambda: SimpleNamespace(db_mode="read-only", run_id=None),
+    )
+    monkeypatch.setattr(connection, "admin_dsn_from_settings", lambda: "dbname=dummy")
+    captured = {}
+
+    def _connect(dsn, **kwargs):
+        captured.update(kwargs)
+        raise psycopg.OperationalError("stop")
+
+    monkeypatch.setattr(bulk_indexes.psycopg, "connect", _connect)
+    assert bulk_indexes.main(["status"]) == 3
+    assert captured["options"] == "-c default_transaction_read_only=on"
