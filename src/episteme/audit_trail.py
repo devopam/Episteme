@@ -42,9 +42,9 @@ from episteme.config import get_settings, require_actor
 
 _LOG = logging.getLogger(__name__)
 
-# Frozen event-type set (phase-0 data roadmap Sec 4.8). The roadmap text is the
-# tiebreaker over any other count: it lists exactly these 13 names. record()
-# rejects anything else with ValueError *before* any config or DB work.
+# Closed event-type set. The phase-0 data roadmap (Sec 4.8) fixed the first 13
+# names; bulk_index_drop / bulk_index_rebuild (bulk-load mode, 2026-10) make 15.
+# record() rejects anything else with ValueError *before* any config or DB work.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
         "run_start",
@@ -60,6 +60,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "integrity_check",
         "manual_correction",
         "config_change",
+        "bulk_index_drop",
+        "bulk_index_rebuild",
     }
 )
 

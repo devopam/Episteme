@@ -122,6 +122,8 @@ exists in `src/`.
 | `serialize_commit` | a structured-source serializer output was committed; added after the original design, which had no such type | the serializers' `_best_effort_audit`: `record()` on a fresh connection, committed immediately (chained DB row); `mirror_only` only as a fallback if that fails |
 | `load_commit` | a shard was loaded with nothing replaced | `postgres_loader` (DB row) |
 | `load_replace` | a shard load replaced existing rows (delete count recorded) | `postgres_loader` (DB row) |
+| `bulk_index_drop` | bulk-load mode dropped the secondary indexes of `episteme.articles` (object names them) | `bulk_indexes drop` (DB row, in the same transaction as the drop) |
+| `bulk_index_rebuild` | bulk-load mode re-created them and ran `ANALYZE` | `bulk_indexes rebuild` (DB row, after the last index) |
 | `graph_commit` | graph build output for a source file | `graph_builder` (DB row) |
 | `corpus_materialize` | corpus materialization | `corpus_materializer` (DB row) |
 | `schema_migration` | a schema migration was applied | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record schema_migration --reason ...`; `--reason` is required, section 6) |
