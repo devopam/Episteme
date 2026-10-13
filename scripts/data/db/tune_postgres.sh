@@ -95,7 +95,13 @@ for s in "${SETTINGS[@]}"; do
 done
 su_psql -X -q -At -v ON_ERROR_STOP=1 -c "select pg_reload_conf()" >/dev/null \
     || die "tune_postgres.sh: pg_reload_conf() failed"
-pending="$(current_rows su_psql | awk -F'|' '$3=="t"{print $1}' | paste -sd' ' -)"
+# pg_file_settings re-reads the config files, so it shows a value the server has
+# not applied without waiting for the reload to reach any backend.
+# pg_settings.pending_restart is unreliable here: on Windows a new backend
+# inherits the postmaster's settings and never sets it (seen on PG19beta3).
+pending="$(su_psql -X -At -v ON_ERROR_STOP=1 -c \
+    "select name from pg_file_settings where sourcefile like '%postgresql.auto.conf' and not applied and name in ($(names_sql)) order by name" \
+    | paste -sd' ' -)"
 if [ -n "$pending" ]; then
     log WARN "restart the PostgreSQL service to apply: $pending"
 else

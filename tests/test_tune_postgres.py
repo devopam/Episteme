@@ -20,7 +20,10 @@ DATA = REPO / "scripts" / "data"
 
 FAKE_PSQL = r"""#!/usr/bin/env bash
 echo "$*" >> "$FAKE_PSQL_LOG"
-case "$*" in *pg_settings*) printf '%s\n' $FAKE_ROWS ;; esac
+case "$*" in
+    *pg_file_settings*) printf '%s\n' $FAKE_UNAPPLIED ;;
+    *pg_settings*) printf '%s\n' $FAKE_ROWS ;;
+esac
 exit 0
 """
 
@@ -48,7 +51,13 @@ def _rows(overrides: dict[str, str] | None = None, pending: str = "f") -> str:
     return " ".join(f"{k}|{v}|{pending}" for k, v in sorted(vals.items()))
 
 
-def _run(tmp_path: Path, *args: str, rows: str = "", extra: dict[str, str] | None = None):
+def _run(
+    tmp_path: Path,
+    *args: str,
+    rows: str = "",
+    unapplied: str = "",
+    extra: dict[str, str] | None = None,
+):
     root = tmp_path / "repo"
     shutil.copytree(DATA / "_lib", root / "scripts" / "data" / "_lib")
     (root / "scripts" / "data" / "db").mkdir(parents=True)
@@ -69,6 +78,7 @@ def _run(tmp_path: Path, *args: str, rows: str = "", extra: dict[str, str] | Non
             "EPISTEME_SYS_ADMIN_PASSWORD": SECRET,
             "FAKE_PSQL_LOG": log.as_posix(),
             "FAKE_ROWS": rows,
+            "FAKE_UNAPPLIED": unapplied,
             **(extra or {}),
         }
     )
@@ -104,7 +114,9 @@ def test_apply_sets_every_setting_as_superuser_without_leaking_password(tmp_path
     proc, calls = _run(
         tmp_path,
         "apply",
-        rows=_rows(pending="t"),
+        # pending_restart stays "f" (as on Windows); pg_file_settings reports it
+        rows=_rows({"shared_buffers": "128MB"}),
+        unapplied="shared_buffers",
         extra={"POSTGRES_SUPERUSER": "pgsu", "POSTGRES_SUPERUSER_PASSWORD": SECRET},
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -114,8 +126,21 @@ def test_apply_sets_every_setting_as_superuser_without_leaking_password(tmp_path
         assert any(f"ALTER SYSTEM SET {name} = '{value}'" in c for c in alters), name
     assert all("-U pgsu" in c and "-d postgres" in c for c in calls)
     assert any("pg_reload_conf" in c for c in calls)
-    assert "restart the PostgreSQL service" in proc.stderr + proc.stdout
-    assert SECRET not in proc.stdout + proc.stderr + "\n".join(calls)
+    out = proc.stderr + proc.stdout
+    assert "restart the PostgreSQL service to apply: shared_buffers" in out
+    assert "all settings active" not in out
+    assert SECRET not in out + "\n".join(calls)
+
+
+def test_apply_reports_all_active_when_nothing_is_unapplied(tmp_path):
+    proc, _ = _run(
+        tmp_path,
+        "apply",
+        rows=_rows(),
+        extra={"POSTGRES_SUPERUSER_PASSWORD": SECRET},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "all settings active" in proc.stderr + proc.stdout
 
 
 def test_apply_without_superuser_password_changes_nothing(tmp_path):
