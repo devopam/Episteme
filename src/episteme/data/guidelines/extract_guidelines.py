@@ -176,10 +176,8 @@ _YEAR_COLUMN_CANDIDATES = ("year", "publication_year", "pub_year")
 _LANGUAGE_COLUMN_CANDIDATES = ("language", "lang", "locale")
 _ID_COLUMN_CANDIDATES = ("id", "doc_id", "uid")
 
-# Serializes the mirror_only file-append across this process's worker threads
-# (the DB-level advisory lock in audit_trail.record() does nothing for a plain
-# file write). extract() itself stays parallel — only this block serializes.
-# Mirrors extract_pubmed.py / extract_apollo.py.
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 

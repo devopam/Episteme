@@ -123,8 +123,8 @@ _LICENSE_RAW = "text mining / applicable copyright"
 
 _PMCID_RE = re.compile(r"PMC\d+")
 
-# Serializes the mirror_only file-append across worker threads (mirrors
-# extract_pubmed.py / extract_europepmc_preprints.py).
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 

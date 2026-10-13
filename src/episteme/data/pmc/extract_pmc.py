@@ -61,13 +61,8 @@ _LOG = logging.getLogger(__name__)
 
 SOURCE = "pmc"
 
-# audit_trail.record() now takes a Postgres transaction-scoped advisory lock
-# (pg_advisory_xact_lock) that serializes chain-appends across every process,
-# so this Python-level lock is no longer needed for that. It is retained
-# specifically to serialize the mirror_only fallback's file-append (a plain
-# file write that the DB-level lock does nothing for) across this process's
-# worker threads. extract() itself stays fully parallel -- only this block
-# serializes.
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 

@@ -84,8 +84,8 @@ _LOG = logging.getLogger(__name__)
 
 SOURCE = "europepmc_preprint"
 
-# Serializes the mirror_only file-append across worker threads (mirrors
-# extract_pubmed.py / extract_apollo.py).
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 

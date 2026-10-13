@@ -321,11 +321,11 @@ bash scripts/data/run_pipeline.sh pubmed load --bulk
 **After a hard kill** (Task Manager, `Stop-Process`, a crash), no trap runs and the indexes stay dropped. The saved state survives, and the next `--bulk` refuses to start (exit 2). Check and finish it:
 
 ```bash
-bash scripts/data/db/bulk_load_indexes.sh status    # exit 0 when nothing is pending, 1 while a rebuild is pending, 3 on error
+bash scripts/data/db/bulk_load_indexes.sh status    # exit 0 when nothing is pending, 1 while a rebuild is pending, 3 on error, 2 if a required env key is missing
 bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 ```
 
-`status` exits 3 on an error, for example migration 0005 not applied or a refused connection.
+`status` exits 3 on an error, for example migration 0005 not applied, a refused connection or a guard-refused database. It exits 2 if a required env key (`EPISTEME_ACTOR`, `EPISTEME_SYS_ADMIN_PASSWORD`) is missing.
 
 **Stopping runs:**
 

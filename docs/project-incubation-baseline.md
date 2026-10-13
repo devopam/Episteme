@@ -228,12 +228,12 @@
     - `.gz` reads go through python-isal (`episteme.data.gz.open_gz`; the `isal` dependency is in the `data` extra).
     - The loader builds COPY tuples column-wise and reports `read_sec`, `copy_sec` and `rows_per_sec` per shard.
     - `run_pipeline.sh <source> load --bulk` drops the six secondary indexes of `episteme.articles` and always rebuilds them. The work is audited (`bulk_index_drop` and `bulk_index_rebuild`) and its state is kept in migration 0005's `episteme._bulk_index_state`.
-    - Audit mirror appends take a cross-process file lock.
   - **Corrections to the spec:**
     - The `pubmed` graph does not re-read the pubmed XML (it reads the database). `graph_builder`'s only gzip reader is the MeSH one, and that is the one switched to isal.
     - The loader's equivalence is tested at the COPY boundary, not by a side-by-side `pg` load, because the old path no longer exists.
     - Rebuild audits are per index (ruling: the spec's "every step audited" outranks "one audit row").
     - Mirror appends now take a cross-process file lock.
+    - The loader's JSONL fallback is column-wise too (the spec kept its dict path); tested on both formats.
   - **Deferred:**
     - A full Arrow-to-COPY encoder. Decide only from the Stage 2 `read_sec`/`copy_sec` measurements.
     - The other serializers stay as they are (DuckDB already uses every core; mesh, ontologies and cdisc_ct are single-file).
@@ -242,4 +242,4 @@
     - Repair: a forced, audited reload of `SDTM__2026-09-25` (seq 474-477) restored the 1,310 rows, plus a `manual_correction` audit row (seq 478) that explains seq 465-473.
     - The audit mirror is short for seq 465-473, because their mirror lines went to pytest temp folders. A backfill of those lines is left to the operator.
     - Fix: `pg_conn` now pins every settings-based connection to `episteme_test`, with restricted mode and the production name as a second wall. A regression test was added (`tests/data/test_pg_isolation.py`), and `test_migrations` has the same check.
-    - Follow-up: `tests/test_db_guard.py::test_read_only_mode_blocks_writes` is a pg test that does not use `pg_conn`.
+    - Follow-up (done): `tests/test_db_guard.py::test_read_only_mode_blocks_writes` now takes `pg_conn`, which moved to `tests/conftest.py` so every `pg` test shares it.

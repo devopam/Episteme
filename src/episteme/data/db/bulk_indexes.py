@@ -222,14 +222,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", choices=("drop", "rebuild", "status"))
     args = p.parse_args(argv)
 
+    failure = 3 if args.action == "status" else 1
     try:
         settings = get_settings()
         dsn = db_connection.admin_dsn_from_settings()
     except (ProductionDatabaseGuardError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return failure
 
-    failure = 3 if args.action == "status" else 1
     try:
         with psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
             if args.action == "status":

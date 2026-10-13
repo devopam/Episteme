@@ -6,6 +6,8 @@
 #   bulk_load_indexes.sh drop      # exit 2 if a previous rebuild is pending
 #   bulk_load_indexes.sh rebuild   # idempotent; safe to re-run after a failure
 #   bulk_load_indexes.sh status    # exit 1 while a rebuild is pending, 3 on error
+# A missing EPISTEME_ACTOR / EPISTEME_SYS_ADMIN_PASSWORD exits 2 (require_env),
+# for status too.
 # run_pipeline.sh <source> load --bulk runs drop and rebuild around the load.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

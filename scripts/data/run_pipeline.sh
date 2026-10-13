@@ -317,6 +317,9 @@ _bulk_on_exit() {
     trap - EXIT
     _bulk_rebuild
     local rrc=$?
+    if [ "$rrc" -ne 0 ]; then
+        log ERROR "bulk: index rebuild failed (rc=$rrc); the secondary indexes are still dropped — finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
+    fi
     [ "$rc" -ne 0 ] && exit "$rc"
     exit "$rrc"
 }

@@ -84,6 +84,27 @@ def test_main_refuses_under_the_guard_without_connecting(monkeypatch, capsys):
     assert "Refusing" in capsys.readouterr().err
 
 
+def test_status_exits_3_when_the_guard_refuses(monkeypatch, capsys):
+    refused = SimpleNamespace(
+        db_mode="restricted",
+        pg_database="episteme",
+        production_database="episteme",
+        pg_host="localhost",
+        pg_port=5433,
+        sys_admin_password="x",
+    )
+    monkeypatch.setattr(
+        connection, "admin_dsn_from_settings", lambda: connection.admin_dsn(refused)
+    )
+
+    def _no_connect(*_a, **_k):
+        raise AssertionError("connected despite the guard")
+
+    monkeypatch.setattr(bulk_indexes.psycopg, "connect", _no_connect)
+    assert bulk_indexes.main(["status"]) == 3
+    assert "Refusing" in capsys.readouterr().err
+
+
 def test_main_rejects_an_unknown_action():
     with pytest.raises(SystemExit) as exc:
         bulk_indexes.main(["vacuum"])

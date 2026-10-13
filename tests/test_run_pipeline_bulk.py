@@ -128,6 +128,13 @@ def test_bulk_rebuild_failure_is_the_exit_code_and_runs_once(tree):
     assert calls == ["run_start", "bulk drop", "load", "bulk rebuild", "run_end"]
 
 
+def test_bulk_trap_rebuild_failure_is_logged_and_keeps_the_load_exit_code(tree):
+    proc, calls = _run(tree, "load", "--bulk", FAKE_LOAD="fail", FAKE_REBUILD_RC="1")
+    assert proc.returncode == 1, proc.stderr
+    assert calls == ["run_start", "bulk drop", "load", "run_end", "bulk rebuild"]
+    assert "index rebuild failed" in proc.stderr
+
+
 def test_bulk_drop_failure_never_starts_the_load(tree):
     proc, calls = _run(tree, "load", "--bulk", FAKE_DROP_RC="2")
     assert proc.returncode == 2, proc.stderr

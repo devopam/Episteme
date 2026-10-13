@@ -240,7 +240,7 @@ def _get_positive_int_or_default(name: str, default: int) -> int:
 
   - In `get_settings()`'s `Settings(...)` call, after `duckdb_memory_limit=...`, add:
 
-```python
+```text
         # Worker processes per extract/serialize stage (physical cores minus one).
         extract_workers=_get_positive_int_or_default(
             "EPISTEME_EXTRACT_WORKERS", DEFAULT_EXTRACT_WORKERS
@@ -281,7 +281,7 @@ def admin_dsn_from_settings() -> str:
 - [ ] **Step 6: Block it in non-pg tests.**
   - In `tests/conftest.py::_block_real_db_audit`, after the existing `dsn_from_settings` line, add:
 
-```python
+```text
     monkeypatch.setattr(
         "episteme.data.db.connection.admin_dsn_from_settings", _no_db, raising=True
     )
@@ -856,9 +856,24 @@ REPO = Path(__file__).resolve().parents[2]
 SP2 = REPO / "tests" / "fixtures" / "sp2"
 CASES = [
     ("episteme.data.pubmed.extract_pubmed", "extract_pubmed", SP2 / "pubmed", "pubmed"),
-    ("episteme.data.pmc.extract_pmc", "extract_pmc", REPO / "tests" / "data" / "fixtures" / "pmc", "pmc"),
-    ("episteme.data.bookshelf.extract_bookshelf", "extract_bookshelf", SP2 / "bookshelf", "bookshelf"),
-    ("episteme.data.guidelines.extract_guidelines", "extract_guidelines", SP2 / "guidelines", "guidelines"),
+    (
+        "episteme.data.pmc.extract_pmc",
+        "extract_pmc",
+        REPO / "tests" / "data" / "fixtures" / "pmc",
+        "pmc",
+    ),
+    (
+        "episteme.data.bookshelf.extract_bookshelf",
+        "extract_bookshelf",
+        SP2 / "bookshelf",
+        "bookshelf",
+    ),
+    (
+        "episteme.data.guidelines.extract_guidelines",
+        "extract_guidelines",
+        SP2 / "guidelines",
+        "guidelines",
+    ),
     ("episteme.data.apollo.extract_apollo", "extract_apollo", SP2 / "apollo", "apollo"),
     (
         "episteme.data.europepmc.preprints.extract_europepmc_preprints",
@@ -1358,9 +1373,7 @@ def test_result_carries_timing_fields(tmp_path):
   - Replace `_iter_batches` with:
 
 ```python
-def _iter_batches(
-    staging_path: Path, fmt: str, batch_size: int
-) -> Iterator[dict[str, list[Any]]]:
+def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[dict[str, list[Any]]]:
     """Per batch of at most ``batch_size`` rows: every ``ARTICLE_COLUMNS`` name ->
     its values, one per row (never the whole shard). Parquet columns are
     converted once per column (``to_pylist``), not once per row as a dict. A
@@ -1378,9 +1391,7 @@ def _iter_batches(
             present = [c for c in columns if c in names]
             for rb in pf.iter_batches(batch_size=batch_size, columns=present):
                 n = rb.num_rows
-                yield {
-                    c: (rb.column(c).to_pylist() if c in names else [None] * n) for c in columns
-                }
+                yield {c: (rb.column(c).to_pylist() if c in names else [None] * n) for c in columns}
         return
     it = _iter_jsonl(staging_path)
     while batch := list(itertools.islice(it, batch_size)):
@@ -1687,7 +1698,11 @@ def bulk(pg_conn, monkeypatch, tmp_path):
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute(ext.read())
         cur.execute(sch.read())
-        for m in ("0002_container_and_book_parts", "0004_articles_load_indexes", "0005_bulk_index_state"):
+        for m in (
+            "0002_container_and_book_parts",
+            "0004_articles_load_indexes",
+            "0005_bulk_index_state",
+        ):
             cur.execute((MIG / f"{m}.sql").read_text(encoding="utf-8"))
     pg_conn.commit()
     return bulk_indexes, audit_trail
@@ -1752,7 +1767,9 @@ def test_drop_then_rebuild_restores_every_index_exactly(pg_conn, bulk):
     assert _pending(pg_conn) == []
 
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM pg_inherits WHERE inhparent = 'episteme.articles'::regclass")
+        cur.execute(
+            "SELECT count(*) FROM pg_inherits WHERE inhparent = 'episteme.articles'::regclass"
+        )
         (direct_partitions,) = cur.fetchone()
         cur.execute(
             "SELECT c.relname, count(inh.inhrelid) FROM pg_class c "
@@ -1812,7 +1829,9 @@ def test_interrupted_rebuild_keeps_the_rest_and_resumes(pg_conn, bulk):
     name = "episteme.articles_doi_idx"  # second in index_name order, after authors
     good = _definition(pg_conn, name)
     _set_definition(
-        pg_conn, name, "CREATE INDEX articles_doi_idx ON ONLY episteme.articles USING btree (no_such_column)"
+        pg_conn,
+        name,
+        "CREATE INDEX articles_doi_idx ON ONLY episteme.articles USING btree (no_such_column)",
     )
     with pytest.raises(psycopg.Error):
         bi.rebuild(pg_conn, run_id="r1")
@@ -1923,7 +1942,9 @@ def rebuild_sql(definition: str) -> str:
         raise BulkIndexError(
             f"saved definition is not a parent index on episteme.articles: {definition!r}"
         )
-    return definition.replace(" ON ONLY episteme.articles USING ", " ON episteme.articles USING ", 1)
+    return definition.replace(
+        " ON ONLY episteme.articles USING ", " ON episteme.articles USING ", 1
+    )
 
 
 def status(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -2065,7 +2086,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "status":
                 rows = status(conn)
                 for r in rows:
-                    print(f"pending {r['index_name']} run_id={r['run_id']} dropped_at={r['dropped_at']}")
+                    print(
+                        f"pending {r['index_name']} run_id={r['run_id']} dropped_at={r['dropped_at']}"
+                    )
                 print(f"pending={len(rows)}")
                 return 1 if rows else 0
             if args.action == "drop":
@@ -2077,7 +2100,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"dropped {len(names)}: {', '.join(names)}")
                 return 0
             names = rebuild(conn, run_id=settings.run_id)
-            print(f"rebuilt {len(names)}: {', '.join(names)}" if names else "rebuilt 0 (nothing pending)")
+            print(
+                f"rebuilt {len(names)}: {', '.join(names)}"
+                if names
+                else "rebuilt 0 (nothing pending)"
+            )
             return 0
     except (BulkIndexError, psycopg.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -211,9 +211,8 @@ _OPENALEX_LICENSE_RAW = (
     "work's per-article OA licence (a separate, per-record field)."
 )
 
-# Serializes the mirror_only file-append across this process's worker threads
-# (the DB-level advisory lock in audit_trail.record() does nothing for a plain
-# file write). Mirrors extract_pubmed.py / every prior SP4 structured serializer.
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 

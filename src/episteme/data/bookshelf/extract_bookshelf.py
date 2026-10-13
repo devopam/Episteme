@@ -88,10 +88,8 @@ _LOG = logging.getLogger(__name__)
 
 SOURCE = "bookshelf"
 
-# Serializes the mirror_only file-append across this process's worker threads
-# (the DB-level advisory lock in audit_trail.record() does nothing for a plain
-# file write). extract() itself stays parallel -- only this block serializes.
-# Mirrors extract_pubmed.py / extract_pmc.py.
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 # A part whose <book-part-meta><title> matches this (case-insensitive, full
