@@ -222,3 +222,24 @@
   - **Real-data memory check** (largest python working set, sampled every 30 s): `chembl` serialize peaked at 5.4 GB, above the 4 GB `EPISTEME_DUCKDB_MEMORY_LIMIT` (the cap excludes Python and Arrow overhead). `chembl` load peaked at 2.6 GB, against a target of about 2 GB. Free RAM never fell below 5.3 GB on the 16 GB machine. Both are bounded, not proportional to input size. The machine slept for 1.8 h during the load, so the sampling has a gap.
   - **Download defect (this branch):** a stopped segmented aria2c download can already be full size with unfetched holes, because aria2c writes later segments first. `size_match_skip` compared only sizes, so after a restart it kept two such `pubmed` baseline files (`n0914`, `n1220`) next to their `.aria2` control files. Both fail NCBI's MD5. Fix: `size_match_skip` never skips a file that has an `.aria2` control file.
   - **Operations:** the machine slept twice during long runs (8 h 40 min during the `pubmed` download), so sleep on mains power should be off during loads. The `pubmed` baseline download fell from about 3 MiB/s to 100–260 KiB/s over about 20 hours; a restart got 7–8 MiB/s straight away. Claude Code's low-memory notices reported the run driver stopped twice more; each time it was still running. Database queries now go through the MCPg MCP server. On this Windows machine `bash` resolves to WSL, so the server is started through Git Bash's path.
+- 2026-10-13: Pipeline throughput on fixed hardware (branch `feat/pipeline-throughput`; spec and plan under `docs/superpowers/`).
+  - **Landed:**
+    - The seven literature extractors and the `openalex` serializer run their per-file work in worker processes through `episteme.data.parallel.run_per_file`, using the spawn context. `EPISTEME_EXTRACT_WORKERS` defaults to 3; an invalid value falls back to 3 with a warning. Shards are identical with 1 and 3 workers.
+    - `.gz` reads go through python-isal (`episteme.data.gz.open_gz`; the `isal` dependency is in the `data` extra).
+    - The loader builds COPY tuples column-wise and reports `read_sec`, `copy_sec` and `rows_per_sec` per shard.
+    - `run_pipeline.sh <source> load --bulk` drops the six secondary indexes of `episteme.articles` and always rebuilds them. The work is audited (`bulk_index_drop` and `bulk_index_rebuild`) and its state is kept in migration 0005's `episteme._bulk_index_state`.
+    - Audit mirror appends take a cross-process file lock.
+  - **Corrections to the spec:**
+    - The `pubmed` graph does not re-read the pubmed XML (it reads the database). `graph_builder`'s only gzip reader is the MeSH one, and that is the one switched to isal.
+    - The loader's equivalence is tested at the COPY boundary, not by a side-by-side `pg` load, because the old path no longer exists.
+    - Rebuild audits are per index (ruling: the spec's "every step audited" outranks "one audit row").
+    - Mirror appends now take a cross-process file lock.
+  - **Deferred:**
+    - A full Arrow-to-COPY encoder. Decide only from the Stage 2 `read_sec`/`copy_sec` measurements.
+    - The other serializers stay as they are (DuckDB already uses every core; mesh, ontologies and cdisc_ct are single-file).
+    - `load_articles --workers` stays reserved: loading stays sequential.
+  - **Incident (2026-10-13):** A pre-existing pg test, `tests/data/test_load_articles.py::test_only_loads_the_newer_sdtm_shard_and_never_the_older`, called `load_articles.main()`. Its connection followed `.env`, which named the production database in unrestricted mode, because the `pg_conn` fixture checked only its own DSN. Three runs during this branch's work replaced 2 real `cdisc_ct` SDTM rows with fixture rows and appended 9 audit rows (seq 465-473).
+    - Repair: a forced, audited reload of `SDTM__2026-09-25` (seq 474-477) restored the 1,310 rows, plus a `manual_correction` audit row (seq 478) that explains seq 465-473.
+    - The audit mirror is short for seq 465-473, because their mirror lines went to pytest temp folders. A backfill of those lines is left to the operator.
+    - Fix: `pg_conn` now pins every settings-based connection to `episteme_test`, with restricted mode and the production name as a second wall. A regression test was added (`tests/data/test_pg_isolation.py`), and `test_migrations` has the same check.
+    - Follow-up: `tests/test_db_guard.py::test_read_only_mode_blocks_writes` is a pg test that does not use `pg_conn`.
