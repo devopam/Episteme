@@ -109,7 +109,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connection used by the Python stages (role `episteme_app` at runtime). `PGDATABASE` is what the guard checks (section 3). |
 | `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
 | `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
-| `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh` (operator only; see section 2). |
+| `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh`, and for `tune_postgres.sh apply` (operator only; see section 2). |
 | `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
@@ -189,6 +189,39 @@ PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c 
 ```
 
 On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0004 and tracks them. Do not run it on the local build.
+
+### 2.4 Server settings for bulk loads
+
+PostgreSQL's defaults suit a small shared server, not a single-user bulk load. On the local build (4 cores, 16 GB RAM, data directory on a 5,400 rpm USB HDD) these settings are recommended before a full load. They are cluster-wide, so they apply to `episteme` and `episteme_test` alike.
+
+| Setting | Default | Recommended | Restart | Why |
+|---|---|---|---|---|
+| `shared_buffers` | 128MB | 2GB | yes | keeps the hot index pages of `articles_default` in memory during loads |
+| `max_wal_size` | 1GB | 16GB | no | fewer forced checkpoints during a load |
+| `min_wal_size` | 80MB | 2GB | no | keeps recycled WAL segments instead of recreating them |
+| `checkpoint_timeout` | 5min | 30min | no | fewer checkpoints, so fewer full-page images in the WAL |
+| `wal_compression` | off | lz4 | no | compresses those full-page images (needs a build with lz4; the local PG19 has it) |
+| `maintenance_work_mem` | 64MB | 1GB | no | faster `CREATE INDEX` and index rebuilds |
+| `effective_cache_size` | 4GB | 8GB | no | planner hint only; allocates nothing |
+
+`fsync`, `full_page_writes` and data checksums stay on (GxP data integrity, docs/11). Memory budget on 16 GB: 2 GB of shared buffers, up to 4 GB of DuckDB during a serialize (`EPISTEME_DUCKDB_MEMORY_LIMIT`), and the Python workers, with headroom for the operating system cache.
+
+Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs. `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, sets each value, reloads, and lists the settings that wait for a restart. The MCPg server cannot do this: its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
+
+```bash
+bash scripts/data/db/tune_postgres.sh check
+bash scripts/data/db/tune_postgres.sh apply     # then restart the postgresql-x64-19 service
+```
+
+**Write-ahead log on a faster disk (recommended).** With the data directory on one slow HDD, the sequential WAL writes compete with the random table and index writes. Moving `pg_wal` to the internal NVMe SSD separates them. It is an operator task, run elevated, with the service stopped:
+
+1. Stop `postgresql-x64-19` and confirm `postmaster.pid` is gone from the data directory.
+2. Copy `<data>\pg_wal` to the new location (for example `C:\pgwal\episteme19\pg_wal`) and compare file counts and byte totals.
+3. Grant the service account (`NT AUTHORITY\NetworkService`) full control of the new directory.
+4. Rename `<data>\pg_wal` to `pg_wal.old` and create a junction in its place: `New-Item -ItemType Junction -Path <data>\pg_wal -Target C:\pgwal\episteme19\pg_wal`. This is the layout `initdb --waldir` creates on Windows.
+5. Start the service, check that the server is not in recovery, run a `CHECKPOINT`, verify the audit chain, then delete `pg_wal.old`.
+
+Cost: the database then depends on both drives; back-ups must cover both. Size the WAL directory for `max_wal_size` plus a margin (about 18 GB at 16GB).
 
 ---
 
