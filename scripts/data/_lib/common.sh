@@ -164,6 +164,9 @@ resolve_dest() { # resolve_dest SOURCE [SUBPATH] -> <raw root>/SOURCE[/SUBPATH]
 size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS this url (local matches remote size)
     local local_path="$1" url="$2"
     [ -s "$local_path" ] || return 1
+    # an aria2c control file means unfinished: a stopped segmented download can
+    # already be full size with unfetched holes (2026-10-13: two pubmed files)
+    [ -e "$local_path.aria2" ] && return 1
     command -v curl >/dev/null 2>&1 || return 1   # can't verify -> fetch
     local remote_len local_len
     remote_len="$(curl -sSIL --connect-timeout 20 --max-time 90 "$url" 2>/dev/null \
