@@ -105,7 +105,7 @@ def _block_real_db_audit(request, monkeypatch):
     ``extract_commit`` rows to the real hash-chained audit log.
 
     Force the mirror path for every test *without* the ``pg`` marker by
-    patching all three chokepoints in ``episteme.data.db.connection``:
+    patching all four chokepoints in ``episteme.data.db.connection``:
     ``connection`` (the lazy-import seam most extractors use),
     ``get_pool`` (the pool factory ``connection()`` itself calls internally
     -- patching this also closes a module-top-import caller like
@@ -115,6 +115,7 @@ def _block_real_db_audit(request, monkeypatch):
     patch here is still seen), and ``dsn_from_settings`` (the DSN builder a
     direct caller like ``corpus_materializer.py`` uses to hand a raw DSN to
     DuckDB's ``ATTACH``, bypassing ``connection()``/``get_pool()`` entirely).
+    ``admin_dsn_from_settings`` is the bulk-index entry point's DSN builder (table-owner role).
     ``pg``-marked tests are left alone — they target ``episteme_test`` via
     ``TEST_PG_DSN`` on purpose.
     """
@@ -130,6 +131,7 @@ def _block_real_db_audit(request, monkeypatch):
     monkeypatch.setattr("episteme.data.db.connection.connection", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.get_pool", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.dsn_from_settings", _no_db, raising=True)
+    monkeypatch.setattr("episteme.data.db.connection.admin_dsn_from_settings", _no_db, raising=True)
 
 
 @pytest.fixture(autouse=True)

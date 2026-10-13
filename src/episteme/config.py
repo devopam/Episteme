@@ -9,12 +9,15 @@ license rules) live next to the code that uses them, not here.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+_LOG = logging.getLogger(__name__)
 
 
 class ConfigError(RuntimeError):
@@ -28,6 +31,7 @@ class ConfigError(RuntimeError):
 _SOURCES: dict[str, str] = {}
 
 DB_MODES = ("read-only", "restricted", "unrestricted")
+DEFAULT_EXTRACT_WORKERS = 3
 
 
 def _get(name: str, default: str | None = None) -> str | None:
@@ -75,6 +79,23 @@ def _get_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _get_positive_int_or_default(name: str, default: int) -> int:
+    """Like ``_get_int`` but never raises: a non-integer or a value below 1
+    logs a warning and returns ``default`` (a bad worker count must not stop
+    a run)."""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        _LOG.warning("%s must be an integer >= 1, got %r; using %d", name, raw, default)
+        return default
+    return value
 
 
 def _find_project_dotenv() -> str | None:
@@ -138,6 +159,8 @@ class Settings:
     production_database: str = "episteme"
     pg_database_secondary: str | None = None
     duckdb_memory_limit: str = "4GB"
+    extract_workers: int = DEFAULT_EXTRACT_WORKERS
+    sys_admin_password: str = ""
 
     def pg_dsn(self) -> str:
         return (
@@ -218,6 +241,12 @@ def get_settings() -> Settings:
         production_database=_get("EPISTEME_PRODUCTION_DATABASE", "episteme"),
         pg_database_secondary=secondary,
         duckdb_memory_limit=(_get("EPISTEME_DUCKDB_MEMORY_LIMIT") or "4GB").strip(),
+        # Worker processes per extract/serialize stage (physical cores minus one).
+        extract_workers=_get_positive_int_or_default(
+            "EPISTEME_EXTRACT_WORKERS", DEFAULT_EXTRACT_WORKERS
+        ),
+        # episteme_sys_admin's password: bulk-load index work runs as the table owner.
+        sys_admin_password=_get("EPISTEME_SYS_ADMIN_PASSWORD", "") or "",
     )
 
 
