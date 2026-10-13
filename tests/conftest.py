@@ -184,3 +184,36 @@ def _redirect_audit_mirror(request, monkeypatch, tmp_path_factory):
         return redirect_dir
 
     monkeypatch.setattr(_audit_trail, "_mirror_dir", _mirror_dir, raising=True)
+
+
+@pytest.fixture
+def spawn_child_env(monkeypatch, tmp_path):
+    """Environment for a test that starts worker processes or subprocesses.
+
+    A spawned child imports ``episteme`` afresh: none of this file's
+    monkeypatches (``_block_real_db_audit``, ``_redirect_audit_mirror``) reach
+    it, and its ``get_settings()`` would load the developer's ``.env`` (which
+    may point at the production database). Spawn copies the parent's
+    ``os.environ``, and real environment values beat ``.env``, so this pins
+    the child to:
+
+    * a database the DB-mode guard refuses before any connection attempt
+      (``restricted`` mode, ``PGDATABASE`` == ``EPISTEME_PRODUCTION_DATABASE``),
+      on a dead host/port as a second wall -- the extractors' best-effort
+      audit then falls back to ``mirror_only``;
+    * a ``processed_root`` (and so an audit mirror) under ``tmp_path``.
+
+    Returns that ``processed_root``.
+    """
+    processed = tmp_path / "spawn_processed"
+    monkeypatch.setenv("EPISTEME_DB_MODE", "restricted")
+    monkeypatch.setenv("EPISTEME_DB_TARGET", "primary")
+    monkeypatch.delenv("PGDATABASE_SECONDARY", raising=False)
+    monkeypatch.setenv("PGDATABASE", "episteme_spawn_blocked")
+    monkeypatch.setenv("EPISTEME_PRODUCTION_DATABASE", "episteme_spawn_blocked")
+    monkeypatch.setenv("PGHOST", "127.0.0.1")
+    monkeypatch.setenv("PGPORT", "9")
+    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(processed))
+    monkeypatch.setenv("EPISTEME_ACTOR", "pytest-spawn")
+    monkeypatch.delenv("EPISTEME_RUN_ID", raising=False)
+    return processed
