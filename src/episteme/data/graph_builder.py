@@ -58,7 +58,6 @@ via ``audit_trail``.
 
 from __future__ import annotations
 
-import gzip
 import sys
 from pathlib import Path
 from typing import Any
@@ -68,6 +67,7 @@ import psycopg
 
 from episteme import audit_trail
 from episteme.data.checkpoint_markers import find_input_by_key
+from episteme.data.gz import open_gz
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
 # cites/mesh; the rest contribute ``article_parts`` (book -> part) edges only.
@@ -163,7 +163,7 @@ def _open_mesh_source(xml_path: Path):
     """Binary file handle for ``xml_path`` -- transparently gzip-decompressing
     when its suffix is ``.gz``. Mirrors ``serialize_mesh.py``'s own
     ``_open_source`` helper (same real-world ``desc<year>.gz`` shape)."""
-    return gzip.open(xml_path, "rb") if xml_path.suffix == ".gz" else xml_path.open("rb")
+    return open_gz(xml_path, "rb") if xml_path.suffix == ".gz" else xml_path.open("rb")
 
 
 def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:

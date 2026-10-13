@@ -29,7 +29,6 @@ Roadmap CLI (§4.7):
 from __future__ import annotations
 
 import argparse
-import gzip
 import logging
 import re
 import sys
@@ -65,6 +64,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import run_per_file  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
@@ -264,7 +264,7 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
     sharing a basename in different subdirectories under ``raw_dir`` must not
     collapse to the same ``source_file`` value on the rows themselves.
     """
-    opener = gzip.open if path.name.endswith(".gz") else open
+    opener = open_gz if path.name.endswith(".gz") else open
     source_file = source_file or path.name
     with opener(path, "rb") as f:
         it = _safe_iterparse(f, events=("start", "end"))

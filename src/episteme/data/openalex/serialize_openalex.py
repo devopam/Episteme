@@ -154,7 +154,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import gzip
 import json
 import logging
 import re
@@ -188,6 +187,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import run_per_file  # noqa: E402
 from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
@@ -373,7 +373,7 @@ def _open_maybe_gzip(path: Path):
     file may be a plain, uncompressed ``.jsonl`` -- both are supported,
     detected by suffix."""
     if path.suffix == ".gz":
-        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+        return open_gz(path, "rt", encoding="utf-8", errors="replace")
     return path.open("r", encoding="utf-8", errors="replace")
 
 
