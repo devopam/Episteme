@@ -28,7 +28,11 @@ import socket
 
 # subprocess is used only for a fixed `git rev-parse` arg list, no shell.
 import subprocess  # nosec B404
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -38,9 +42,9 @@ from episteme.config import get_settings, require_actor
 
 _LOG = logging.getLogger(__name__)
 
-# Frozen event-type set (phase-0 data roadmap Sec 4.8). The roadmap text is the
-# tiebreaker over any other count: it lists exactly these 13 names. record()
-# rejects anything else with ValueError *before* any config or DB work.
+# Closed event-type set. The phase-0 data roadmap (Sec 4.8) fixed the first 13
+# names; bulk_index_drop / bulk_index_rebuild (bulk-load mode, 2026-10) make 15.
+# record() rejects anything else with ValueError *before* any config or DB work.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
         "run_start",
@@ -56,6 +60,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "integrity_check",
         "manual_correction",
         "config_change",
+        "bulk_index_drop",
+        "bulk_index_rebuild",
     }
 )
 
@@ -126,6 +132,50 @@ def _mirror_dir():
 def _mirror_path():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     return _mirror_dir() / f"audit-{stamp}.jsonl"
+
+
+_MIRROR_LOCK_NAME = ".mirror.lock"
+_MIRROR_LOCK_TIMEOUT_SEC = 60.0
+
+
+@contextmanager
+def _mirror_append_lock(mirror_dir: Path) -> Iterator[None]:
+    """Exclusive lock, across processes, for one append to the mirror.
+
+    The extractors run in worker processes (``episteme.data.parallel``).
+    ``record()``'s advisory lock serialises ``record()`` callers only;
+    ``mirror_only()`` never takes it, and an append is not atomic across
+    processes on Windows. So every mirror append holds this lock: a one-byte
+    lock on a sidecar file in the mirror directory (the ``audit-*.jsonl``
+    globs never match it).
+    """
+    with open(Path(mirror_dir) / _MIRROR_LOCK_NAME, "a+b") as lf:
+        if os.name == "nt":
+            import msvcrt
+
+            deadline = time.monotonic() + _MIRROR_LOCK_TIMEOUT_SEC
+            lf.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                lf.seek(0)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
 def record(
@@ -224,8 +274,12 @@ def record(
     mirror_record["record_hash"] = rec_hash
     mirror_record["ts"] = datetime.now(timezone.utc).isoformat()
     try:
-        _mirror_dir().mkdir(parents=True, exist_ok=True)
-        with open(_mirror_path(), "a", encoding="utf-8") as fh:
+        mirror_dir = _mirror_dir()
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            _mirror_append_lock(mirror_dir),
+            open(_mirror_path(), "a", encoding="utf-8") as fh,
+        ):
             fh.write(_canonical_json(mirror_record) + "\n")
     except OSError:
         # Resolution 6: a broken mirror must be loud, not silent. The DB row is
@@ -363,8 +417,12 @@ def mirror_only(event_type: str, **fields: Any) -> None:
         **fields,
     }
     try:
-        _mirror_dir().mkdir(parents=True, exist_ok=True)
-        with open(_mirror_path(), "a", encoding="utf-8") as fh:
+        mirror_dir = _mirror_dir()
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            _mirror_append_lock(mirror_dir),
+            open(_mirror_path(), "a", encoding="utf-8") as fh,
+        ):
             fh.write(_canonical_json(mirror_record) + "\n")
     except OSError:
         _LOG.exception("mirror_only write failed for event_type=%s", event_type)

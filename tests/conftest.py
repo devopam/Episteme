@@ -105,7 +105,7 @@ def _block_real_db_audit(request, monkeypatch):
     ``extract_commit`` rows to the real hash-chained audit log.
 
     Force the mirror path for every test *without* the ``pg`` marker by
-    patching all three chokepoints in ``episteme.data.db.connection``:
+    patching all four chokepoints in ``episteme.data.db.connection``:
     ``connection`` (the lazy-import seam most extractors use),
     ``get_pool`` (the pool factory ``connection()`` itself calls internally
     -- patching this also closes a module-top-import caller like
@@ -115,6 +115,7 @@ def _block_real_db_audit(request, monkeypatch):
     patch here is still seen), and ``dsn_from_settings`` (the DSN builder a
     direct caller like ``corpus_materializer.py`` uses to hand a raw DSN to
     DuckDB's ``ATTACH``, bypassing ``connection()``/``get_pool()`` entirely).
+    ``admin_dsn_from_settings`` is the bulk-index entry point's DSN builder (table-owner role).
     ``pg``-marked tests are left alone — they target ``episteme_test`` via
     ``TEST_PG_DSN`` on purpose.
     """
@@ -130,6 +131,7 @@ def _block_real_db_audit(request, monkeypatch):
     monkeypatch.setattr("episteme.data.db.connection.connection", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.get_pool", _no_db, raising=True)
     monkeypatch.setattr("episteme.data.db.connection.dsn_from_settings", _no_db, raising=True)
+    monkeypatch.setattr("episteme.data.db.connection.admin_dsn_from_settings", _no_db, raising=True)
 
 
 @pytest.fixture(autouse=True)
@@ -182,3 +184,101 @@ def _redirect_audit_mirror(request, monkeypatch, tmp_path_factory):
         return redirect_dir
 
     monkeypatch.setattr(_audit_trail, "_mirror_dir", _mirror_dir, raising=True)
+
+
+@pytest.fixture
+def spawn_child_env(monkeypatch, tmp_path):
+    """Environment for a test that starts worker processes or subprocesses.
+
+    A spawned child imports ``episteme`` afresh: none of this file's
+    monkeypatches (``_block_real_db_audit``, ``_redirect_audit_mirror``) reach
+    it, and its ``get_settings()`` would load the developer's ``.env`` (which
+    may point at the production database). Spawn copies the parent's
+    ``os.environ``, and real environment values beat ``.env``, so this pins
+    the child to:
+
+    * a database the DB-mode guard refuses before any connection attempt
+      (``restricted`` mode, ``PGDATABASE`` == ``EPISTEME_PRODUCTION_DATABASE``),
+      on a dead host/port as a second wall -- the extractors' best-effort
+      audit then falls back to ``mirror_only``;
+    * a ``processed_root`` (and so an audit mirror) under ``tmp_path``.
+
+    Returns that ``processed_root``.
+    """
+    processed = tmp_path / "spawn_processed"
+    monkeypatch.setenv("EPISTEME_DB_MODE", "restricted")
+    monkeypatch.setenv("EPISTEME_DB_TARGET", "primary")
+    monkeypatch.delenv("PGDATABASE_SECONDARY", raising=False)
+    monkeypatch.setenv("PGDATABASE", "episteme_spawn_blocked")
+    monkeypatch.setenv("EPISTEME_PRODUCTION_DATABASE", "episteme_spawn_blocked")
+    monkeypatch.setenv("PGHOST", "127.0.0.1")
+    monkeypatch.setenv("PGPORT", "9")
+    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(processed))
+    monkeypatch.setenv("EPISTEME_ACTOR", "pytest-spawn")
+    monkeypatch.delenv("EPISTEME_RUN_ID", raising=False)
+    return processed
+
+
+def _reset_settings_and_pool(monkeypatch) -> None:
+    """Drop cached Settings everywhere they may be bound, and the pool.
+
+    Other pg tests ``importlib.reload(episteme.config)``, which rebinds
+    ``episteme.config.get_settings`` while ``connection.py`` keeps the
+    object it imported, so clear both. Drop the pool so it is rebuilt
+    from the pinned settings."""
+    import episteme.config as cfg
+    import episteme.data.db.connection as conn_mod
+
+    cfg.get_settings.cache_clear()
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
+
+
+@pytest.fixture
+def pg_conn(monkeypatch):
+    dsn = os.environ.get("TEST_PG_DSN")
+    if not dsn:
+        pytest.skip("TEST_PG_DSN not set")
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    # Guard against a misconfigured TEST_PG_DSN pointing at the real
+    # `episteme` database: 7 `pg`-marked test files run
+    # `DROP SCHEMA IF EXISTS episteme CASCADE` as their first act using this
+    # fixture's connection. Refuse anything whose dbname isn't
+    # episteme_test, rather than risk dropping the real schema.
+    parts = conninfo_to_dict(dsn)
+    dbname = parts.get("dbname")
+    if dbname != "episteme_test":
+        pytest.fail(
+            f"TEST_PG_DSN does not target episteme_test (dbname={dbname!r}); "
+            "refusing to run a pg test that DROPs SCHEMA against it"
+        )
+
+    # Pin every settings-based connection (pool, connection(), CLIs such as
+    # load_articles.main / retire.main) to the same database as this fixture.
+    # Without this they follow .env -- which on a developer machine may name
+    # the production database (incident 2026-10-13: a pg test loaded fixture
+    # rows into production). restricted mode + the production name is the
+    # second wall: the guard refuses `episteme` before any connection.
+    monkeypatch.setenv("PGDATABASE", dbname)
+    for key, env in (
+        ("host", "PGHOST"),
+        ("port", "PGPORT"),
+        ("user", "PGUSER"),
+        ("password", "PGPASSWORD"),
+    ):
+        if parts.get(key):
+            monkeypatch.setenv(env, str(parts[key]))
+    monkeypatch.setenv("EPISTEME_DB_MODE", "restricted")
+    monkeypatch.setenv("EPISTEME_PRODUCTION_DATABASE", "episteme")
+    monkeypatch.setenv("EPISTEME_DB_TARGET", "primary")
+    monkeypatch.delenv("PGDATABASE_SECONDARY", raising=False)
+    _reset_settings_and_pool(monkeypatch)
+
+    conn = psycopg.connect(dsn, autocommit=False)
+    try:
+        yield conn
+    finally:
+        conn.rollback()
+        conn.close()

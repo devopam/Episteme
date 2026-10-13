@@ -80,7 +80,7 @@ The JSONL mirror is written to `<processed_root>/_ops/_audit/audit-YYYYMMDD.json
 | `pid` | int | Attributable | process id |
 | `run_id` | text | Attributable | correlates events of one pipeline run |
 | `code_version` | text | Original / Accurate | `git rev-parse --short HEAD`, or `unknown` |
-| `event_type` | text NOT NULL | (context) | closed set of 13, section 4 |
+| `event_type` | text NOT NULL | (context) | closed set of 15, section 4 |
 | `object` | text | (context) | what was acted on, e.g. `<source> <file>` |
 | `input_content_hash` | text | Original | hash of the input, when the caller supplies it |
 | `rows_affected` | int | Accurate | counts supplied by the caller |
@@ -122,6 +122,8 @@ exists in `src/`.
 | `serialize_commit` | a structured-source serializer output was committed; added after the original design, which had no such type | the serializers' `_best_effort_audit`: `record()` on a fresh connection, committed immediately (chained DB row); `mirror_only` only as a fallback if that fails |
 | `load_commit` | a shard was loaded with nothing replaced | `postgres_loader` (DB row) |
 | `load_replace` | a shard load replaced existing rows (delete count recorded) | `postgres_loader` (DB row) |
+| `bulk_index_drop` | bulk-load mode dropped the secondary indexes of `episteme.articles` (object names them) | `bulk_indexes drop` (DB row, in the same transaction as the drop) |
+| `bulk_index_rebuild` | bulk-load mode re-created one index (object names it) | `bulk_indexes rebuild` (DB row in the same transaction as that index's build; one per index) |
 | `graph_commit` | graph build output for a source file | `graph_builder` (DB row) |
 | `corpus_materialize` | corpus materialization | `corpus_materializer` (DB row) |
 | `schema_migration` | a schema migration was applied | **no call site**; reserved (only reachable via `python -m episteme.audit_trail record schema_migration --reason ...`; `--reason` is required, section 6) |
@@ -184,7 +186,7 @@ the code wins):
 | Monthly partitions created by a rotation script / `create_audit_partition()` | **Implemented,** as a rotation script (not a `create_audit_partition()` function -- the design text's name for it). `scripts/data/db/ensure_audit_partitions.sh [target_db] [months_ahead]` creates `episteme._audit_YYYYMM` partitions for a rolling window of `months_ahead` calendar months starting this month (default `6`). It is idempotent (`CREATE TABLE IF NOT EXISTS`) and re-applies `REVOKE UPDATE, DELETE ... FROM episteme_app` on every partition it touches that run, not only newly created ones; both behaviours are covered by `tests/data/test_ensure_audit_partitions.py` (pg-marked). It is not invoked automatically by any pipeline stage or scheduler in this repo -- an operator or external scheduler must run it periodically (go-live checklist, section 8). Any month whose partition was never created this way (for example because the script was never run within its rolling window) still lands in `_audit_default`, same as before Task 2. `schema.sql`'s own comment near the `_audit` table (SP6 close-out item 6) now names `ensure_audit_partitions.sh` directly instead of saying a rotation script "is not yet built". |
 | Verifier walks the chain across both table and mirror and reports the first divergence | **Partly.** The chain is verified on the table only; the mirror is checked by line count only (both `.jsonl` and `.jsonl.gz`, above). It reports all problems, not just the first. |
 | `reason` is required for `force_override`, `manual_correction`, `schema_migration` | **Partly.** See section 6. `record()` now enforces a non-empty `reason` for `manual_correction` and `schema_migration` -- it raises `ValueError` when `reason` is `None` or empty, checked right after the closed-set `event_type` check and before `require_actor()` or any database work. That covers every caller of `record()`, including the `python -m episteme.audit_trail record` CLI. `force_override`'s reason is still enforced only at the CLI layer (`load_articles --force`); `record()` itself accepts `force_override` with `reason=None` without raising. |
-| Event set of 12 types | The code has 13 (adds `serialize_commit`). Three types have no emitter (section 4). |
+| Event set of 12 types | The code has 15 (adds `serialize_commit`, and the bulk-load events `bulk_index_drop` and `bulk_index_rebuild`). Three types have no emitter (section 4). |
 | No silent drops: every event produces an audit record | **Not guaranteed,** but a double failure is no longer silent. The extract and serialize stages and `enrich_openmetadata` treat auditing as best-effort: an audit failure does not stop or fail the stage. When `record()` fails, the extract/serialize `_best_effort_audit` helpers fall back to `mirror_only()`, writing an unchained JSONL line with `note: db_unavailable_or_failed`; when that fallback call *also* raises, `_best_effort_audit` now logs the double failure with `_LOG.warning(..., exc_info=True)` instead of swallowing it silently -- still non-fatal to the pipeline (the stage still succeeds; this changes observability only, not ingestion behaviour). `run_pipeline.sh` likewise continues past a failed `run_start`/`run_end` (section 6). |
 
 ## 6. Actor and reason rules

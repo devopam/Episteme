@@ -9,7 +9,7 @@ from ._repo import REPO, doc, lit_sources, structured_sources, wrapper_table
 
 RUNBOOK = "10-data-sources-runbook.md"
 STAGES = {"all", "download", "extract", "load", "graph", "materialize", "enrich", "serialize"}
-DISPATCHER_FLAGS = {"--dry-run", "--force", "--reason", "--max-files"}
+DISPATCHER_FLAGS = {"--dry-run", "--force", "--reason", "--max-files", "--bulk"}
 # flags that consume the next token as their value
 VALUE_FLAGS = {"--reason", "--max-files", "--since", "--raw-dir", "--repo-type"}
 # stages that honour --max-files (extract/serialize/download) or forward it (all)
@@ -143,6 +143,8 @@ def test_flags_are_real_and_used_sensibly():
             assert "--reason" in flags, f"--force needs --reason: {rest}"
         if "--dry-run" in flags:
             assert stage == "download", f"--dry-run is download-only: {rest}"
+        if "--bulk" in flags:
+            assert stage == "load", f"--bulk is load-only: {rest}"
         if "--max-files" in flags:
             assert stage in MAX_FILES_STAGES, f"--max-files is ignored by {stage}: {rest}"
             if stage == "download":

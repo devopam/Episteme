@@ -116,6 +116,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
 | `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
 | `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `<processed root>/_ops/_duckdb_tmp`). |
+| `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (default 3: the physical cores minus one, about 400 MB each). `--workers N` on a module overrides it. |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
 | `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
@@ -165,7 +166,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0004 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0005 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -175,20 +176,21 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0002_container_and_book_parts.sql` | `articles.container_id` and `book_meta`, the `bookshelf` partitions, `article_parts` | Required before **any** load (the loader writes those columns) and before `graph`. |
 | `0003_mesh_hierarchy.sql` | `episteme.mesh_hierarchy` | Required before `mesh` graph. |
 | `0004_articles_load_indexes.sql` | `articles (source, source_file)` and `articles (id)` indexes (per partition) | Recommended before any large load: without them each per-file delete scans the whole `articles_default` partition. Apply it with **no load running**: `CREATE INDEX` on the partitioned parent blocks writes to every partition while it builds (`CONCURRENTLY` is not possible on a partitioned parent). |
+| `0005_bulk_index_state.sql` | `episteme._bulk_index_state`, the bookkeeping of bulk-load mode (section 4.6) | Required before `load --bulk`. |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002, 0003 or 0004, apply those three directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
-
-```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
-```
-
-Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t`; the fourth column is 0004's `articles_id_idx`):
+Because `migrate_database.sh` dies at 0001 and never reaches 0002, 0003, 0004 or 0005, apply those four directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$), to_regclass(\$\$episteme.articles_id_idx\$\$) is not null"'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0004 and tracks them. Do not run it on the local build.
+Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t`; the fourth column is 0004's `articles_id_idx` and the fifth is 0005's table):
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$), to_regclass(\$\$episteme.articles_id_idx\$\$) is not null, to_regclass(\$\$episteme._bulk_index_state\$\$) is not null"'
+```
+
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0005 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -284,6 +286,7 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
   - `load`, `graph`, `enrich`, `materialize`: ignored.
   - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` makes the wrapper die with its own exit code 2 when run directly; through `run_pipeline.sh` the observable rc is 1 (`stage failed: download`, `resume with: ...`).
   - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
+- **`--bulk`** is supported on `load` only: drop the secondary indexes of `episteme.articles`, load, always rebuild them (section 4.6).
 - **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
 
 ### 4.4 Audit bracket and resume
@@ -298,6 +301,38 @@ Every non-dry run records `run_start` and, on completion, `run_end`, both with o
 | `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
 | `load` | `--force --reason R` only |
 | `graph`, `enrich`, `materialize` | nothing |
+
+### 4.6 Bulk-load mode (`load --bulk`)
+
+For a large load into `episteme.articles` (the `pubmed` baseline, `openalex`), `--bulk` drops the secondary indexes first and rebuilds them once at the end. Building an index once is much cheaper than updating it for every row:
+
+```bash
+bash scripts/data/run_pipeline.sh pubmed load --bulk
+```
+
+- **Dropped:** `articles_pmid_idx`, `articles_pmcid_idx`, `articles_doi_idx`, `articles_mesh_gin`, `articles_authors_gin` and `articles_publication_types_gin`, on every partition.
+- **Kept:** `articles_source_file_idx` and `articles_id_idx` (the loader's deletes use them) and `articles_retrieved_at_brin`.
+- **While the load runs**, queries by PMID, PMCID, DOI or MeSH are slow. Run nothing else against `articles`.
+- **Rebuild:** after the load, `rebuild` re-creates each index on every partition and writes one `bulk_index_rebuild` audit row per index, in the same transaction as that index's build. `ANALYZE episteme.articles` runs after the last index and has no audit row. The drop wrote `bulk_index_drop`. Expect the rebuild to take tens of minutes on a full table.
+- **Refusals:** `rebuild` refuses a saved definition that is not a parent index on `episteme.articles`, contains `;`, or names a different index. It also refuses when an existing valid index of that name has a different definition. In each case it exits 1 and leaves that row pending.
+- **When it rebuilds:** always — after a successful, failed or interrupted (Ctrl+C) load. The exit code is the load's if the load failed, else the rebuild's. A failed drop never starts the load.
+- **Prerequisites:** migration 0005 (section 2.3), `EPISTEME_ACTOR` (`drop` and `rebuild` both require it before doing anything) and `EPISTEME_SYS_ADMIN_PASSWORD`. The index work runs as `episteme_sys_admin`, the table owner, and the database-mode guard applies.
+
+**After a hard kill** (Task Manager, `Stop-Process`, a crash), no trap runs and the indexes stay dropped. The saved state survives, and the next `--bulk` refuses to start (exit 2). Check and finish it:
+
+```bash
+bash scripts/data/db/bulk_load_indexes.sh status    # exit 0 when nothing is pending, 1 while a rebuild is pending, 3 on error, 2 if a required env key is missing
+bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
+```
+
+`status` exits 3 on an error, for example migration 0005 not applied, a refused connection or a guard-refused database. It exits 2 if a required env key (`EPISTEME_ACTOR`, `EPISTEME_SYS_ADMIN_PASSWORD`) is missing.
+
+**Stopping runs:**
+
+- **Extract (worker processes).** Stop the parent python *and its workers*: `taskkill /T /F /PID <parent pid>`. `Stop-Process` on the parent alone leaves the workers running. Files that finished keep their success markers; a re-run resumes from the rest.
+- **A `--bulk` load.** Stop the python load process, not the bash driver, so the driver's trap still rebuilds. If the driver was killed too, run `bulk_load_indexes.sh status`, then `rebuild`.
+
+**Loader timing:** every `ok` line of a load now ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
 
 ---
 

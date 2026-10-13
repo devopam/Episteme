@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import gzip
 import logging
 import sys
 import threading
@@ -102,6 +101,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ def _iter_fasta_records(path: Path) -> Iterator[tuple[str, str]]:
     so this must not materialize the whole file in memory (mirrors
     ``extract_pubmed.py``'s streaming XML parser, not chembl's
     whole-join-in-memory DuckDB read)."""
-    open_func = gzip.open if path.suffix == ".gz" else open
+    open_func = open_gz if path.suffix == ".gz" else open
     header: str | None = None
     seq_parts: list[str] = []
     with open_func(path, "rt", encoding="utf-8") as f:

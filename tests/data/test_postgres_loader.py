@@ -333,7 +333,8 @@ def _scenario(conn, tmp_path, *, batch_size: int, fmt: str) -> tuple[dict, list[
             batch_size=batch_size,
         )
         conn.commit()
-        res.pop("staging_path")
+        for volatile in ("staging_path", "read_sec", "copy_sec", "rows_per_sec"):
+            res.pop(volatile)  # timings differ run to run
         results.append(res)
     return _snapshot(conn), results
 

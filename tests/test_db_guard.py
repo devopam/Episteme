@@ -105,28 +105,23 @@ def test_db_modes_constant():
 
 
 @pytest.mark.pg
-def test_read_only_mode_blocks_writes(monkeypatch):
-    """Through the real pool, against episteme_test only."""
+def test_read_only_mode_blocks_writes(pg_conn, monkeypatch):
+    """Through the real pool. ``pg_conn`` pins every settings-based connection
+    to episteme_test (restricted mode, production name as a second wall); this
+    test then switches to read-only."""
     import psycopg
 
     import episteme.data.db.connection as conn_mod
 
-    monkeypatch.setenv("PGDATABASE", "episteme_test")
     monkeypatch.setenv("EPISTEME_DB_MODE", "read-only")
     get_settings.cache_clear()
     # connection.py did `from episteme.config import get_settings` at its own
-    # first import. Several other pg-marked test files (e.g. test_audit_trail,
-    # test_graph_builder, test_postgres_loader) call
+    # first import. Several other pg-marked test files call
     # importlib.reload(episteme.config), which rebinds episteme.config's
-    # module-level get_settings to a brand-new lru_cache-wrapped closure. If
-    # connection.py's first import happens (lazily, right here) after one of
-    # those reloads already ran earlier in the same `-m pg` session,
-    # conn_mod.get_settings is that NEW object while the `get_settings`
-    # imported at the top of *this* file is the original, pre-reload one --
-    # clearing the latter's cache above does nothing to the former, and
-    # connection() can return a stale cached Settings (wrong db_mode) from an
-    # earlier test. Clear the cache on whichever object connection.py
-    # actually calls, not just the name this test file happens to import.
+    # module-level get_settings to a brand-new lru_cache-wrapped closure, so
+    # the name imported at the top of this file may be a stale object.
+    # Clear the cache on whichever object connection.py actually calls too.
+    _cfg.get_settings.cache_clear()
     conn_mod.get_settings.cache_clear()
     monkeypatch.setattr(conn_mod, "_POOL", None)
     try:
@@ -137,4 +132,5 @@ def test_read_only_mode_blocks_writes(monkeypatch):
         if conn_mod._POOL is not None:
             conn_mod._POOL.close()
         get_settings.cache_clear()
+        _cfg.get_settings.cache_clear()
         conn_mod.get_settings.cache_clear()

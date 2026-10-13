@@ -153,7 +153,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import gzip
 import logging
 import sys
 import threading
@@ -190,6 +189,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ def _open_source(path: Path):
     when its suffix is ``.gz`` (covers both the real ``desc<year>.gz`` shape
     and a hypothetical ``desc<year>.xml.gz``; ``Path.suffix`` returns only
     the final extension either way)."""
-    return gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb")
+    return open_gz(path, "rb") if path.suffix == ".gz" else path.open("rb")
 
 
 def _is_descriptor_file(path: Path) -> bool:

@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -30,6 +30,7 @@ shift 2 || true
 require_env EPISTEME_ACTOR
 
 FORCE=0
+BULK=0
 REASON=""
 MAX_FILES=""
 # I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
@@ -51,12 +52,19 @@ while [ $# -gt 0 ]; do
         # env-only signal for the fetch engine / wrappers; never appended to
         # any *_args array. Exported so every downstream subprocess sees it.
         --dry-run) export EPISTEME_DRY_RUN=1; shift ;;
+        # load stage only: drop the secondary indexes of episteme.articles,
+        # load, always rebuild them (scripts/data/db/bulk_load_indexes.sh).
+        --bulk) BULK=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
 
 if [ "$FORCE" = "1" ] && [ -z "$REASON" ]; then
     die "--force requires --reason" 2
+fi
+if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ]; then
+    log ERROR "--bulk is only valid with the load stage"
+    exit 2
 fi
 
 # source token -> download wrapper path (relative to $HERE). SP3 wires the
@@ -292,6 +300,44 @@ fi
 # M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
 bash "$HERE/_lib/check_prereqs.sh" >&2 || true
 
+# --bulk: drop the secondary indexes of episteme.articles before the load and
+# always rebuild them -- explicitly after a successful load (so the rebuild's
+# audit row lands before run_end), and from the EXIT trap after a failed or
+# interrupted one. A hard kill skips the trap; the saved state then blocks
+# the next --bulk, and `bulk_load_indexes.sh rebuild` finishes the job.
+BULK_PENDING=0
+_bulk_rebuild() {
+    [ "$BULK_PENDING" = "1" ] || return 0
+    BULK_PENDING=0
+    log INFO "bulk: rebuilding the secondary indexes of episteme.articles"
+    bash "$HERE/db/bulk_load_indexes.sh" rebuild
+}
+_bulk_on_exit() {
+    local rc=$?
+    trap - EXIT
+    _bulk_rebuild
+    local rrc=$?
+    if [ "$rrc" -ne 0 ]; then
+        log ERROR "bulk: index rebuild failed (rc=$rrc); the secondary indexes are still dropped — finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
+    fi
+    [ "$rc" -ne 0 ] && exit "$rc"
+    exit "$rrc"
+}
+if [ "$BULK" = "1" ]; then
+    log INFO "bulk: dropping the secondary indexes of episteme.articles"
+    bash "$HERE/db/bulk_load_indexes.sh" drop
+    drop_rc=$?
+    if [ "$drop_rc" -ne 0 ]; then
+        log ERROR "bulk: index drop failed (rc=$drop_rc); the load was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index drop)" >/dev/null 2>&1 || true
+        exit "$drop_rc"
+    fi
+    BULK_PENDING=1
+    trap _bulk_on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+
 if [ "$SOURCE" = "pmc" ]; then
     # pmc keeps its full stage chain.
     case "$STAGE" in
@@ -360,6 +406,16 @@ else
             fi
             ;;
     esac
+fi
+
+if [ "$BULK" = "1" ]; then
+    _bulk_rebuild
+    rebuild_rc=$?
+    if [ "$rebuild_rc" -ne 0 ]; then
+        log ERROR "bulk: index rebuild failed (rc=$rebuild_rc); finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index rebuild)" >/dev/null 2>&1 || true
+        exit "$rebuild_rc"
+    fi
 fi
 
 if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then

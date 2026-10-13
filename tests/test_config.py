@@ -1,4 +1,5 @@
 import importlib
+import logging
 import os
 from pathlib import Path
 
@@ -198,3 +199,28 @@ def test_duckdb_memory_limit_default(fresh_config):
 def test_duckdb_memory_limit_override(fresh_config):
     cfg = fresh_config("EPISTEME_DUCKDB_MEMORY_LIMIT=2GB\n")
     assert cfg.get_settings().duckdb_memory_limit == "2GB"
+
+
+def test_extract_workers_default(fresh_config):
+    assert fresh_config("").get_settings().extract_workers == 3
+
+
+def test_extract_workers_override(fresh_config):
+    assert fresh_config("EPISTEME_EXTRACT_WORKERS=5\n").get_settings().extract_workers == 5
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-2", "2.5"])
+def test_extract_workers_invalid_falls_back_with_warning(fresh_config, caplog, bad):
+    cfg = fresh_config(f"EPISTEME_EXTRACT_WORKERS={bad}\n")
+    with caplog.at_level(logging.WARNING, logger="episteme.config"):
+        assert cfg.get_settings().extract_workers == 3
+    assert "EPISTEME_EXTRACT_WORKERS" in caplog.text
+
+
+def test_sys_admin_password_read(fresh_config):
+    s = fresh_config("EPISTEME_SYS_ADMIN_PASSWORD=s3cret\n").get_settings()
+    assert s.sys_admin_password == "s3cret"
+
+
+def test_sys_admin_password_default_empty(fresh_config):
+    assert fresh_config("").get_settings().sys_admin_password == ""

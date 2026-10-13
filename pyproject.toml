@@ -32,6 +32,7 @@ data = [
     "pgvector>=0.3",
     "duckdb>=1.5.6",
     "defusedxml>=0.7",
+    "isal>=1.8.0",
     "jsonschema>=4.0.0",
     "pronto>=2.7",
 ]

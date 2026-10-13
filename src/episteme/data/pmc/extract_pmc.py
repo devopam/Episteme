@@ -29,7 +29,6 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -55,19 +54,15 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     write_run_manifest,
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
+from episteme.data.parallel import run_per_file  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
 
 SOURCE = "pmc"
 
-# audit_trail.record() now takes a Postgres transaction-scoped advisory lock
-# (pg_advisory_xact_lock) that serializes chain-appends across every process,
-# so this Python-level lock is no longer needed for that. It is retained
-# specifically to serialize the mirror_only fallback's file-append (a plain
-# file write that the DB-level lock does nothing for) across this process's
-# worker threads. extract() itself stays fully parallel -- only this block
-# serializes.
+# Guards the in-process (workers=1) path only. Across worker processes, the mirror
+# append lock in audit_trail and the DB advisory lock serialise audit writes.
 _AUDIT_LOCK = threading.Lock()
 
 
@@ -385,34 +380,17 @@ def extract_pmc(
         files = files[:max_files]
 
     workers = max(1, int(workers))
-    results: list[dict[str, Any]] = []
     t0 = time.time()
 
-    if workers == 1:
-        for fp in files:
-            result = process_one(fp, raw_dir=raw_dir, processed_dir=processed_dir, force=force)
-            results.append(result)
-            if verbose:
-                _print_verbose(result)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {
-                ex.submit(
-                    process_one,
-                    fp,
-                    raw_dir=raw_dir,
-                    processed_dir=processed_dir,
-                    force=force,
-                ): fp
-                for fp in files
-            }
-            # Completion order is non-deterministic above one worker, so
-            # verbose output above --workers 1 is per-file but unordered.
-            for fut in as_completed(futs):
-                result = fut.result()
-                results.append(result)
-                if verbose:
-                    _print_verbose(result)
+    results = run_per_file(
+        process_one,
+        files,
+        workers=workers,
+        on_result=_print_verbose if verbose else None,
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+        force=force,
+    )
 
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
@@ -455,10 +433,16 @@ def main(argv: list[str] | None = None) -> int:
         default=settings.sample_limit,
         help="0 = all discovered metadata JSON files (env: EPISTEME_SAMPLE_LIMIT)",
     )
-    p.add_argument("--workers", type=int, default=1, help="Parallel file workers")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes (default: EPISTEME_EXTRACT_WORKERS, 3)",
+    )
     p.add_argument("--force", action="store_true")
     p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per file to stderr")
     args = p.parse_args(argv)
+    workers = settings.extract_workers if args.workers is None else max(1, args.workers)
 
     raw_dir: Path = args.raw_dir
     processed_dir: Path = args.processed_dir
@@ -468,14 +452,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"schema={SCHEMA_VERSION} source={SOURCE}")
-    print(f"raw_dir={raw_dir.resolve()} workers={max(1, args.workers)}")
+    print(f"raw_dir={raw_dir.resolve()} workers={workers}")
 
     res = extract_pmc(
         raw_dir,
         processed_dir,
         max_files=args.max_files,
         force=args.force,
-        workers=args.workers,
+        workers=workers,
         verbose=args.verbose,
     )
 

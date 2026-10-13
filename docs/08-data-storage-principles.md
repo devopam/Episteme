@@ -108,6 +108,7 @@ Notes on what is and is not code-backed:
 | `episteme.id_map` | none | PMID / PMCID / DOI cross-references |
 | `episteme.chunks` | `HASH (article_id)`, 8 buckets | Phase 1 RAG scaffold; `embedding` and `chunk_tsv` need migration 0001 and pgvector / pg_search |
 | `episteme._runs`, `episteme._lineage` | none, fillfactor 100 | Run and load-stage records |
+| `episteme._bulk_index_state` | none (migration 0005) | Indexes dropped by bulk-load mode, pending their rebuild; empty except during a `--bulk` load |
 | `episteme._audit` | `RANGE (recorded_at)` monthly plus `DEFAULT` | Append-only hash-chained audit trail |
 
 ## 7. Implementation Phasing (shipped state)

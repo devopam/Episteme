@@ -13,10 +13,17 @@ MIGRATION_0003 = REPO / "src/episteme/data/db/migrations/0003_mesh_hierarchy.sql
 @pytest.fixture(scope="module")
 def sa_conn():
     import psycopg
+    from psycopg.conninfo import conninfo_to_dict
 
     dsn = os.environ.get("TEST_PG_DSN")
     if not dsn:
         pytest.skip("TEST_PG_DSN not set")
+    dbname = conninfo_to_dict(dsn).get("dbname")
+    if dbname != "episteme_test":
+        pytest.fail(
+            f"TEST_PG_DSN does not target episteme_test (dbname={dbname!r}); "
+            "refusing to run a migration test against it"
+        )
     with psycopg.connect(dsn, autocommit=True) as c:
         # 0002 and 0003 are idempotent; apply them here so these assertions hold
         # regardless of test-ordering (other pg tests DROP SCHEMA episteme CASCADE +
