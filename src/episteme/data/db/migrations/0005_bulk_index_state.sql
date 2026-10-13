@@ -6,7 +6,10 @@
 -- Apply as episteme_sys_admin (so that role owns the table). Like 0002-0004
 -- it is applied by hand and not tracked in episteme._migrations:
 --   psql -d <db> -f src/episteme/data/db/migrations/0005_bulk_index_state.sql
--- No grant to episteme_app: only the table owner drops and creates indexes.
+-- No access for episteme_app: only the table owner drops and creates indexes,
+-- and a deleted row would hide a pending rebuild. schema.sql's ALTER DEFAULT
+-- PRIVILEGES grants episteme_app SELECT/INSERT/UPDATE/DELETE on every new table
+-- episteme_sys_admin creates, so the REVOKE below is required, not decorative.
 
 CREATE TABLE IF NOT EXISTS episteme._bulk_index_state (
     index_name  text PRIMARY KEY,      -- schema-qualified parent index on episteme.articles
@@ -14,3 +17,5 @@ CREATE TABLE IF NOT EXISTS episteme._bulk_index_state (
     run_id      text,
     dropped_at  timestamptz NOT NULL DEFAULT now()
 );
+
+REVOKE ALL ON episteme._bulk_index_state FROM episteme_app;

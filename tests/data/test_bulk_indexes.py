@@ -241,3 +241,22 @@ def test_rebuild_refuses_a_valid_index_that_differs_from_the_saved_definition(pg
     with pytest.raises(bi.BulkIndexError, match="articles_pmid_idx"):
         bi.rebuild(pg_conn, run_id="r1")
     assert "episteme.articles_pmid_idx" in _pending(pg_conn)
+
+
+def test_migration_0005_leaves_episteme_app_no_access(pg_conn, bulk):
+    # schema.sql's ALTER DEFAULT PRIVILEGES grants episteme_app DML on every new
+    # table episteme_sys_admin creates; simulate that grant, then re-apply 0005
+    # (idempotent) and check its REVOKE removes it.
+    privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON episteme._bulk_index_state TO episteme_app"
+        )
+        cur.execute((MIG / "0005_bulk_index_state.sql").read_text(encoding="utf-8"))
+        for priv in privileges:
+            cur.execute(
+                "SELECT has_table_privilege('episteme_app', 'episteme._bulk_index_state', %s)",
+                (priv,),
+            )
+            assert cur.fetchone()[0] is False, priv
+    pg_conn.commit()
