@@ -33,8 +33,10 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import time
 from collections import Counter
 from collections.abc import Iterator
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -147,18 +149,61 @@ def _iter_jsonl(staging_path: Path) -> Iterator[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[list[dict[str, Any]]]:
-    """Row dicts in batches of at most ``batch_size`` -- never the whole shard."""
+def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[dict[str, list[Any]]]:
+    """Per batch of at most ``batch_size`` rows: every ``ARTICLE_COLUMNS`` name ->
+    its values, one per row (never the whole shard). Parquet columns are
+    converted once per column (``to_pylist``), not once per row as a dict. A
+    column absent from the shard reads as all ``None``, as ``dict.get`` did.
+    ``id`` and ``source_file`` are required (``KeyError`` if absent), as before."""
+    columns = article_schema.ARTICLE_COLUMNS
     if fmt == "parquet":
         import pyarrow.parquet as pq
 
         with pq.ParquetFile(staging_path) as pf:
-            for rb in pf.iter_batches(batch_size=batch_size):
-                yield rb.to_pylist()
+            names = set(pf.schema_arrow.names)
+            for required in ("id", "source_file"):
+                if required not in names:
+                    raise KeyError(required)
+            present = [c for c in columns if c in names]
+            for rb in pf.iter_batches(batch_size=batch_size, columns=present):
+                n = rb.num_rows
+                yield {c: (rb.column(c).to_pylist() if c in names else [None] * n) for c in columns}
         return
     it = _iter_jsonl(staging_path)
     while batch := list(itertools.islice(it, batch_size)):
-        yield batch
+        cols = {c: [r.get(c) for r in batch] for c in columns}
+        cols["id"] = [r["id"] for r in batch]
+        cols["source_file"] = [r["source_file"] for r in batch]
+        yield cols
+
+
+def _batch_tuples(cols: dict[str, list[Any]]) -> tuple[list[tuple], list[tuple]]:
+    """(episteme.articles tuples in HOT_COLUMNS order, episteme.article_body
+    tuples in BODY_COLUMNS order) -- the same values the old per-row dict path
+    produced (``_coerce_year``, ``_coerce_retrieved_at`` applied per value)."""
+    years = [_coerce_year(v) for v in cols["year"]]
+    hot_lists = []
+    for c in HOT_COLUMNS:
+        if c == "year":
+            hot_lists.append(years)
+        elif c == "retrieved_at":
+            hot_lists.append([_coerce_retrieved_at(v) for v in cols[c]])
+        else:
+            hot_lists.append(cols[c])
+    hot = list(zip(*hot_lists, strict=True))
+    body = list(
+        zip(
+            cols["id"],
+            cols["source"],
+            years,
+            cols["title"],
+            cols["abstract"],
+            cols["body_text"],
+            cols["text"],
+            strict=True,
+        )
+    )
+    return hot, body
 
 
 def _iter_id_batches(
@@ -190,10 +235,14 @@ def load_source_file(
     One transaction; the caller commits. Rows stream through in batches of
     ``batch_size``, so peak memory is bounded by the batch, not the shard.
     Returns a stats dict:
-    ``{source_file, rows, deleted, body_deleted, event, staging_path}``.
+    ``{source_file, rows, deleted, body_deleted, event, staging_path, read_sec,
+    copy_sec, rows_per_sec}``. ``read_sec`` is time reading and tuple-building,
+    ``copy_sec`` time in COPY; ``rows_per_sec`` is over the whole call (hash,
+    deletes, COPY).
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    t_start = time.perf_counter()
     staging_path = Path(staging_path)
 
     if source in _ID_MAP_SOURCES:
@@ -287,25 +336,27 @@ def load_source_file(
         body_cols_sql = ", ".join(BODY_COLUMNS)
         per_file_inserted: Counter[str] = Counter()
         total = 0
-        for batch in _iter_batches(staging_path, fmt, batch_size):
-            with cur.copy(f"COPY episteme.articles ({hot_cols_sql}) FROM STDIN") as cp:
-                for r in batch:
-                    cp.write_row(tuple(_hot_value(r, c) for c in HOT_COLUMNS))
-            with cur.copy(f"COPY episteme.article_body ({body_cols_sql}) FROM STDIN") as cp:
-                for r in batch:
-                    cp.write_row(
-                        (
-                            r["id"],
-                            r.get("source"),
-                            _coerce_year(r.get("year")),
-                            r.get("title"),
-                            r.get("abstract"),
-                            r.get("body_text"),
-                            r.get("text"),
-                        )
-                    )
-            per_file_inserted.update(r["source_file"] for r in batch)
-            total += len(batch)
+        read_sec = 0.0
+        copy_sec = 0.0
+        with closing(_iter_batches(staging_path, fmt, batch_size)) as batches:
+            while True:
+                t0 = time.perf_counter()
+                cols = next(batches, None)
+                if cols is None:
+                    read_sec += time.perf_counter() - t0
+                    break
+                hot, body = _batch_tuples(cols)
+                t1 = time.perf_counter()
+                read_sec += t1 - t0
+                with cur.copy(f"COPY episteme.articles ({hot_cols_sql}) FROM STDIN") as cp:
+                    for row in hot:
+                        cp.write_row(row)
+                with cur.copy(f"COPY episteme.article_body ({body_cols_sql}) FROM STDIN") as cp:
+                    for row in body:
+                        cp.write_row(row)
+                copy_sec += time.perf_counter() - t1
+                per_file_inserted.update(cols["source_file"])
+                total += len(cols["id"])
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:
@@ -318,6 +369,8 @@ def load_source_file(
                 """,
                 (source, sf, run_id, content_hash, per_file_inserted[sf], per_file_deleted[sf]),
             )
+
+    elapsed = time.perf_counter() - t_start
 
     # (h) audit -- in conn's transaction, no commit.
     event = "load_replace" if deleted else "load_commit"
@@ -337,6 +390,9 @@ def load_source_file(
         "body_deleted": body_deleted,
         "event": event,
         "staging_path": str(staging_path),
+        "read_sec": round(read_sec, 3),
+        "copy_sec": round(copy_sec, 3),
+        "rows_per_sec": round(total / elapsed, 1) if elapsed > 0 else 0.0,
     }
 
 

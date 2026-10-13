@@ -175,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_load_success(processed_dir, source, name, result)
             print(
                 f"ok {name} rows={result['rows']} deleted={result['deleted']} "
-                f"body_deleted={result['body_deleted']} event={result['event']}"
+                f"body_deleted={result['body_deleted']} event={result['event']} "
+                f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
+                f"rows_per_sec={result['rows_per_sec']}"
             )
 
         if own_bracket:
