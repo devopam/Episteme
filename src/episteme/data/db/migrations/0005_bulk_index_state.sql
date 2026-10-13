@@ -10,6 +10,10 @@
 -- and a deleted row would hide a pending rebuild. schema.sql's ALTER DEFAULT
 -- PRIVILEGES grants episteme_app SELECT/INSERT/UPDATE/DELETE on every new table
 -- episteme_sys_admin creates, so the REVOKE below is required, not decorative.
+-- One transaction: an interrupted first application must not leave the table
+-- created with the default grant still in place.
+
+BEGIN;
 
 CREATE TABLE IF NOT EXISTS episteme._bulk_index_state (
     index_name  text PRIMARY KEY,      -- schema-qualified parent index on episteme.articles
@@ -19,3 +23,5 @@ CREATE TABLE IF NOT EXISTS episteme._bulk_index_state (
 );
 
 REVOKE ALL ON episteme._bulk_index_state FROM episteme_app;
+
+COMMIT;
