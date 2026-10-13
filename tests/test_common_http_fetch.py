@@ -198,6 +198,39 @@ def test_aria2c_success_does_not_call_curl(tmp_path):
     assert calls == []
 
 
+def test_size_match_skip_refuses_file_with_aria2_control_file(tmp_path):
+    # 2026-10-13: segmented aria2c writes the last segment early, so a stopped
+    # download can be full size with holes; its `.aria2` file is the only sign.
+    # Size-matched skip kept two such files and both failed their MD5 check.
+    lib = tmp_path / "scripts" / "data" / "_lib"
+    shutil.copytree(LIB, lib)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    # a HEAD that always reports the local file's size: only the control file differs
+    (fake / "curl").write_bytes(b"#!/usr/bin/env bash\nprintf 'Content-Length: 4\\r\\n'\n")
+    (fake / "curl").chmod(0o755)
+    data = tmp_path / "f.gz"
+    data.write_bytes(b"abcd")
+    script = (
+        'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
+        'export PATH="$fb:$PATH"; . "$LIB/common.sh"; '
+        'size_match_skip "$F" https://example.invalid/f.gz && echo SKIP || echo FETCH'
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
+    env.update({"LIB": lib.as_posix(), "FAKEBIN": fake.as_posix(), "F": data.as_posix()})
+
+    def run() -> str:
+        proc = subprocess.run(
+            [_bash(), "-c", script], env=env, capture_output=True, text=True, timeout=60
+        )
+        return proc.stdout.strip().splitlines()[-1]
+
+    assert run() == "SKIP"
+    (tmp_path / "f.gz.aria2").write_bytes(b"control")
+    assert run() == "FETCH"
+
+
 def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
     # aria2c finished a.txt (its server may give no Content-Length and reject a
     # range at EOF, so it must not be re-requested) and failed b.txt
