@@ -9,6 +9,7 @@ from episteme.data.article_schema import (
     SCHEMA_VERSION,
     SOURCES,
     build_text,
+    cap_list_elements,
     decide_extract_status,
     finalize_row,
     normalize_license,
@@ -17,7 +18,7 @@ from episteme.data.article_schema import (
 
 
 def test_schema_version_and_columns():
-    assert SCHEMA_VERSION == "1.4"
+    assert SCHEMA_VERSION == "1.5"
     assert ARTICLE_COLUMNS[-2:] == ["container_id", "book_meta"]
     assert "isbn" in BOOK_META_KEYS
 
@@ -200,7 +201,10 @@ def test_finalize_row_caps_gin_indexed_list_elements():
     assert row["mesh"][0] == "D000001"
     assert row["authors"][1].startswith("COVID Laboratory Team: Srima Adhikari")
     assert row["authors"][1].endswith("…")
-    row["authors"][2].encode("utf-8")  # cut on a character boundary, still valid UTF-8
+    for v in (row["authors"][2], row["publication_types"][0], row["mesh"][1]):
+        assert v.endswith("…")
+        v.encode("utf-8")  # cut on a character boundary, still valid UTF-8
+    assert row["authors"][2].startswith("Angélique Doré")
     assert MAX_LIST_ELEMENT_BYTES < 2712
 
 
@@ -208,3 +212,9 @@ def test_finalize_row_leaves_short_and_missing_lists_alone():
     row = finalize_row({"id": "pmid:2", "title": "t", "authors": ["A B", "C D"]})
     assert row["authors"] == ["A B", "C D"]
     assert row["mesh"] is None
+
+
+def test_cap_list_elements_passes_none_and_non_strings_through():
+    assert cap_list_elements(None) is None
+    assert cap_list_elements([]) == []
+    assert cap_list_elements(["a", None]) == ["a", None]

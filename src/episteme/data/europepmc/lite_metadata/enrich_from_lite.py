@@ -66,6 +66,8 @@ from xml.etree import ElementTree as ET
 
 from defusedxml.ElementTree import iterparse as _safe_iterparse
 
+from episteme.data.article_schema import cap_list_elements
+
 # Batch size for the set-based UPDATE ... FROM (VALUES ...) flush. Kept modest
 # (not tens of thousands) so a single UPDATE statement's parameter count and
 # VALUES-list size stay comfortably within psycopg/Postgres limits.
@@ -104,7 +106,7 @@ def _mesh_terms(elem: ET.Element) -> list[str] | None:
         for d in mesh_list.findall("meshHeading/descriptorName")
         if d.text and d.text.strip()
     ]
-    return terms or None
+    return cap_list_elements(terms) or None
 
 
 def _iter_records(fileobj: IO[bytes]):

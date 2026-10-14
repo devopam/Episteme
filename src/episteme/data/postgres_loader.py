@@ -188,6 +188,9 @@ def _batch_tuples(cols: dict[str, list[Any]]) -> tuple[list[tuple], list[tuple]]
             hot_lists.append(years)
         elif c == "retrieved_at":
             hot_lists.append([_coerce_retrieved_at(v) for v in cols[c]])
+        elif c in article_schema.GIN_LIST_COLUMNS:
+            # Shards staged before the cap (schema 1.5) can still hold oversized elements.
+            hot_lists.append([article_schema.cap_list_elements(v) for v in cols[c]])
         else:
             hot_lists.append(cols[c])
     hot = list(zip(*hot_lists, strict=True))
