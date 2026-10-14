@@ -63,6 +63,8 @@ def test_articles_for_mesh_major_only(conn):
 
 
 def test_cited_by_and_cites_ignore_null_dst(conn):
+    # The SQL is already NULL-safe (join / <> drop NULL dst); these rows guard against
+    # regressions. The PGQ NULL filter is proven in test_graph_queries_unit.py.
     assert gb.neighbours(conn, "2", kind="cited_by") == ["1"]
     assert gb.neighbours(conn, "1", kind="cited_by") == []
     assert gb.neighbours(conn, "1", kind="cites", hops=3) == ["2"]

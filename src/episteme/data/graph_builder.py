@@ -741,7 +741,7 @@ def _neighbours_pgq(conn, pmid: str, hops: int) -> list[str]:
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(query, (pmid,))
-            return sorted({r[0] for r in cur.fetchall()})
+            return sorted({r[0] for r in cur.fetchall() if r[0] is not None})
     except psycopg.Error as exc:
         raise RuntimeError("SQL/PGQ neighbours query failed; use the CTE path") from exc
 
