@@ -14,7 +14,12 @@ article's raw JATS XML under ``raw_dir`` and derives two edge sets per
     ``qualifiers`` are ``NULL``. ``neighbours(kind="mesh")`` falls back to
     ``descriptor_name`` when ``descriptor_ui`` is absent.
 
-For every SP2 literature source (``pmc`` plus ``pubmed``, ``apollo``,
+``pubmed`` is routed to ``graph_load.build_pubmed_graph``: it loads the
+extractor's per-relation graph files (mesh, cites, comments, chemicals,
+keywords, authors) and derives MeSH facets, one committed transaction per
+source file. The phases below do not run for pubmed.
+
+For every other SP2 literature source (``pmc``, ``apollo``,
 ``europepmc_manuscript``, ``europepmc_preprint``, ``guidelines``, ``bookshelf``
 -- see ``_GRAPH_SOURCES``) ``build`` also derives a third set, straight from the
 loaded rows with no raw XML involved:
@@ -66,11 +71,14 @@ import defusedxml.ElementTree as ET
 import psycopg
 
 from episteme import audit_trail
+from episteme.data import graph_load
 from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
+from episteme.data.pubmed.relations import normalize_orcid
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
-# cites/mesh; the rest contribute ``article_parts`` (book -> part) edges only.
+# cites/mesh; ``pubmed`` loads graph files (``graph_load``); the rest contribute
+# ``article_parts`` (book -> part) edges only.
 # Anything outside this set is still ``NotImplementedError`` (e.g. ``chembl``).
 _GRAPH_SOURCES = (
     "pmc",
@@ -205,7 +213,16 @@ def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
     return out
 
 
-def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, Any]:
+def build(
+    conn,
+    *,
+    source: str,
+    raw_dir: Path | str | None,
+    run_id: str,
+    processed_dir: Path | str | None = None,
+    force: bool = False,
+    reason: str | None = None,
+) -> dict[str, Any]:
     """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc,
     raw MeSH descriptor XML for mesh).
 
@@ -236,10 +253,22 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
       existing (silently skipped, no warning).
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
-    mesh_hierarchy, mesh_empty_parse}``.
+    mesh_hierarchy, mesh_tree, mesh_empty_parse}``.
+
+    ``source="pubmed"`` is different: it loads the extractor's per-relation graph
+    files from ``processed_dir`` via :func:`graph_load.build_pubmed_graph` (one
+    committed transaction per source file; ``raw_dir`` is unused) and returns that
+    function's ``{files, loaded, skipped, failed, rows, facets}``.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
+
+    if source == "pubmed":
+        if processed_dir is None:
+            raise ValueError("processed_dir is required for source 'pubmed'")
+        return graph_load.build_pubmed_graph(
+            conn, processed_dir=Path(processed_dir), run_id=run_id, force=force, reason=reason
+        )
 
     raw_dir = Path(raw_dir)
 
@@ -354,6 +383,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     # from the raw descriptor release XML (same architectural pattern as the
     # pmc cites/mesh phase above -- no persisted "extra fields" column).
     total_mesh_hierarchy = 0
+    total_mesh_tree = 0
     empty_parse = 0
     if source == "mesh":
         with conn.cursor() as cur:
@@ -406,14 +436,24 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
                 if edges:
                     cur.executemany(_MESH_HIERARCHY_INSERT, edges)
 
+            tree_rows = [(ui, t, src_file) for ui, trees in descriptors.items() for t in trees]
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM episteme.mesh_tree WHERE source_file = %s", (src_file,))
+                with cur.copy(
+                    "COPY episteme.mesh_tree (descriptor_ui, tree_number, source_file) FROM STDIN"
+                ) as cp:
+                    for r in tree_rows:
+                        cp.write_row(r)
+
             audit_trail.record(
                 "graph_commit",
                 conn=conn,
                 object=f"mesh {src_file}",
-                rows_affected=len(edges),
+                rows_affected=len(edges) + len(tree_rows),
                 run_id=run_id,
             )
             total_mesh_hierarchy += len(edges)
+            total_mesh_tree += len(tree_rows)
 
     return {
         "source_files": handled,
@@ -423,11 +463,33 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "skipped_no_pmid": skipped_no_pmid,
         "parts": total_parts,
         "mesh_hierarchy": total_mesh_hierarchy,
+        "mesh_tree": total_mesh_tree,
         "mesh_empty_parse": empty_parse,
     }
 
 
-def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
+_KINDS = (
+    "mesh",
+    "cites",
+    "part",
+    "mesh_parent",
+    "mesh_child",
+    "cited_by",
+    "comments",
+    "chemical",
+    "keyword",
+    "author",
+    "facet",
+)
+_KINDS_MSG = (
+    "unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', 'mesh_parent', "
+    "'mesh_child', 'cited_by', 'comments', 'chemical', 'keyword', 'author' or 'facet'"
+)
+
+
+def neighbours(
+    conn, pmid: str, hops: int = 1, kind: str = "mesh", ref_type: str | None = None
+) -> list[str]:
     """Hop-bounded neighbours of ``pmid``.
 
     ``kind="mesh"``: sorted distinct ``COALESCE(descriptor_ui, descriptor_name)``
@@ -450,21 +512,27 @@ def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
     ``hops`` is IGNORED. Always answered via the recursive-CTE back end
     (never routed through SQL/PGQ), same as ``part``.
 
+    ``kind="cited_by"``: sorted distinct ``src_pmid`` of articles citing ``pmid``
+    (direct only). ``"comments"``: ``"<ref_type>:<ref_pmid or ''>"`` (optionally
+    filtered by ``ref_type``). ``"chemical"``: ``substance_ui``. ``"keyword"``:
+    ``lower(keyword)``. ``"author"``: ``"<position>:<name>:<orcid or ''>"``.
+    ``"facet"``: ``"<facet>:<descriptor_ui>"``. All direct lookups; ``hops`` is
+    IGNORED.
+
     Any other ``kind`` raises ``ValueError``. When the ``episteme_graph``
     property graph exists, ``cites`` is answered via SQL/PGQ; otherwise (and
     always on this build) via a recursive CTE.
     """
-    if kind not in ("mesh", "cites", "part", "mesh_parent", "mesh_child"):
-        raise ValueError(
-            f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
-            "'mesh_parent' or 'mesh_child'"
-        )
+    if kind not in _KINDS:
+        raise ValueError(_KINDS_MSG.format(kind=kind))
     if kind == "cites" and _pgq_available(conn):
         return _neighbours_pgq(conn, pmid, hops)
-    return _neighbours_cte(conn, pmid, hops, kind)
+    return _neighbours_cte(conn, pmid, hops, kind, ref_type)
 
 
-def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
+def _neighbours_cte(
+    conn, pmid: str, hops: int, kind: str, ref_type: str | None = None
+) -> list[str]:
     """Recursive-CTE / direct-lookup back end for :func:`neighbours`."""
     if kind == "mesh":
         with conn.cursor() as cur:
@@ -484,12 +552,12 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
                 WITH RECURSIVE walk(dst_pmid, depth) AS (
                     SELECT dst_pmid, 1
                       FROM episteme.article_cites
-                     WHERE src_pmid = %(pmid)s
+                     WHERE src_pmid = %(pmid)s AND dst_pmid IS NOT NULL
                     UNION ALL
                     SELECT c.dst_pmid, w.depth + 1
                       FROM episteme.article_cites c
                       JOIN walk w ON c.src_pmid = w.dst_pmid
-                     WHERE w.depth < %(hops)s
+                     WHERE w.depth < %(hops)s AND c.dst_pmid IS NOT NULL
                 )
                 SELECT DISTINCT dst_pmid
                   FROM walk
@@ -528,10 +596,106 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
             )
             return [r[0] for r in cur.fetchall()]
 
-    raise ValueError(
-        f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
-        "'mesh_parent' or 'mesh_child'"
-    )
+    simple = {
+        "cited_by": (
+            "SELECT DISTINCT src_pmid FROM episteme.article_cites "
+            "WHERE dst_pmid = %s AND src_pmid IS NOT NULL ORDER BY 1",
+            (pmid,),
+        ),
+        "comments": (
+            "SELECT DISTINCT ref_type || ':' || COALESCE(ref_pmid, '') AS v "
+            "FROM episteme.article_comments WHERE pmid = %s "
+            "AND ref_type IS NOT NULL AND (%s::text IS NULL OR ref_type = %s) ORDER BY v",
+            (pmid, ref_type, ref_type),
+        ),
+        "chemical": (
+            "SELECT DISTINCT substance_ui FROM episteme.article_chemicals "
+            "WHERE pmid = %s AND substance_ui IS NOT NULL ORDER BY 1",
+            (pmid,),
+        ),
+        "keyword": (
+            "SELECT DISTINCT lower(keyword) AS v FROM episteme.article_keywords "
+            "WHERE pmid = %s AND keyword IS NOT NULL ORDER BY v",
+            (pmid,),
+        ),
+        "author": (
+            "SELECT DISTINCT position::text || ':' || "
+            "COALESCE(collective_name, trim(COALESCE(fore_name, '') || ' ' "
+            "|| COALESCE(last_name, ''))) || ':' || COALESCE(orcid, '') AS v "
+            "FROM episteme.article_authors WHERE pmid = %s ORDER BY v",
+            (pmid,),
+        ),
+        "facet": (
+            "SELECT DISTINCT facet || ':' || descriptor_ui AS v "
+            "FROM episteme.article_facets WHERE pmid = %s ORDER BY v",
+            (pmid,),
+        ),
+    }
+    if kind in simple:
+        sql, params = simple[kind]
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [r[0] for r in cur.fetchall()]
+
+    raise ValueError(_KINDS_MSG.format(kind=kind))
+
+
+def articles_for_mesh(
+    conn,
+    descriptor_ui: str,
+    include_descendants: bool = True,
+    major_only: bool = False,
+    limit: int = 1000,
+) -> list[str]:
+    """Sorted distinct pmids tagged with ``descriptor_ui`` (and, by default, any
+    descriptor beneath it in ``mesh_tree``). ``major_only`` keeps major-topic tags."""
+    uis = [descriptor_ui]
+    if include_descendants:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT d.descriptor_ui FROM episteme.mesh_tree t "
+                "JOIN episteme.mesh_tree d ON d.tree_number = t.tree_number "
+                "OR d.tree_number LIKE t.tree_number || '.%%' "
+                "WHERE t.descriptor_ui = %s",
+                (descriptor_ui,),
+            )
+            uis = sorted({descriptor_ui, *(r[0] for r in cur.fetchall())})
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_mesh "
+            "WHERE descriptor_ui = ANY(%s) AND (NOT %s OR major_topic IS TRUE) "
+            "ORDER BY pmid LIMIT %s",
+            (uis, major_only, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def articles_for_facet(
+    conn, facet: str, descriptor_ui: str | None = None, limit: int = 1000
+) -> list[str]:
+    """Sorted distinct pmids carrying ``facet`` (optionally one descriptor)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_facets "
+            "WHERE facet = %s AND (%s::text IS NULL OR descriptor_ui = %s) "
+            "ORDER BY pmid LIMIT %s",
+            (facet, descriptor_ui, descriptor_ui, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def articles_by_orcid(conn, orcid: str, limit: int = 1000) -> list[str]:
+    """Sorted distinct pmids with an author carrying ``orcid`` (any URL/bare form)."""
+    norm = normalize_orcid(orcid)
+    if norm is None:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_authors "
+            "WHERE orcid = %s ORDER BY pmid LIMIT %s",
+            (norm, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
 
 
 def _pgq_available(conn) -> bool:
@@ -577,9 +741,45 @@ def _neighbours_pgq(conn, pmid: str, hops: int) -> list[str]:
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(query, (pmid,))
-            return sorted({r[0] for r in cur.fetchall()})
+            return sorted({r[0] for r in cur.fetchall() if r[0] is not None})
     except psycopg.Error as exc:
         raise RuntimeError("SQL/PGQ neighbours query failed; use the CTE path") from exc
+
+
+def _facets_main(argv: list[str]) -> int:
+    import argparse
+    from datetime import datetime, timezone
+
+    from episteme.config import get_settings
+    from episteme.data.db.connection import connection
+
+    p = argparse.ArgumentParser(prog="graph_builder facets", description="MeSH facet maintenance")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--rebuild", action="store_true", help="recompute stale facets per file")
+    mode.add_argument("--status", action="store_true", help="exit 1 when facets are stale")
+    p.add_argument("--force", action="store_true", help="rebuild every file (needs --reason)")
+    p.add_argument("--reason", default=None, help="why --force is used (recorded in the audit)")
+    args = p.parse_args(argv)
+
+    if args.status:
+        with connection() as conn:
+            st = graph_load.facet_status(conn)
+        print(" ".join(f"{k}={v}" for k, v in st.items()))
+        return 1 if st["stale_rows"] else 0
+
+    run_id = get_settings().run_id or (
+        f"facets-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    try:
+        with connection() as conn:
+            res = graph_load.rebuild_facets(
+                conn, run_id=run_id, force=args.force, reason=args.reason
+            )
+    except graph_load.GraphLoadError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"done rebuilt={res['rebuilt']} skipped={res['skipped']}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -589,6 +789,11 @@ def main(argv: list[str] | None = None) -> int:
     from episteme.config import get_settings
     from episteme.data.db.connection import connection
 
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "facets":
+        return _facets_main(argv[1:])
+
     settings = get_settings()
     p = argparse.ArgumentParser(description="Build article_cites/article_mesh from raw JATS")
     p.add_argument("--source", required=True)
@@ -596,10 +801,59 @@ def main(argv: list[str] | None = None) -> int:
         "--raw-dir",
         type=Path,
         default=None,
-        help="defaults to <raw_root>/pmc/oa_comm/xml for source=pmc",
+        help="defaults to <raw_root>/pmc/oa_comm/xml for source=pmc; unused for pubmed",
     )
+    p.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=settings.processed_root,
+        help="pubmed: where the extractor wrote its markers and graph files",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="pubmed: reload files whose graph hash is unchanged (needs --reason; audited)",
+    )
+    p.add_argument("--reason", default=None, help="why --force is used (recorded in the audit)")
     args = p.parse_args(argv)
 
+    run_id = (
+        settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+
+    if args.source == "pubmed":
+        try:
+            with connection() as conn:
+                res = build(
+                    conn,
+                    source="pubmed",
+                    raw_dir=args.raw_dir,
+                    run_id=run_id,
+                    processed_dir=args.processed_dir,
+                    force=args.force,
+                    reason=args.reason,
+                )
+        except graph_load.GraphLoadError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        if res["files"] == 0:
+            print(
+                f"WARNING: no pubmed graph files found under {args.processed_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
+        print(
+            f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
+            f"failed={len(res['failed'])} facets={res['facets']} {rows}"
+        )
+        if res["failed"]:
+            print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
+            return 1
+        return 0
+
+    if args.force:
+        print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
     raw_dir = args.raw_dir
     if raw_dir is None:
         if args.source == "pmc":
@@ -608,9 +862,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
             return 2
 
-    run_id = (
-        settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    )
     with connection() as conn:
         res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
         conn.commit()
@@ -618,7 +869,8 @@ def main(argv: list[str] | None = None) -> int:
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
         f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
-        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_empty_parse={res['mesh_empty_parse']}"
+        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
+        f"mesh_empty_parse={res['mesh_empty_parse']}"
     )
     return 0
 

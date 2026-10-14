@@ -167,7 +167,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0005 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0006 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -178,11 +178,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0003_mesh_hierarchy.sql` | `episteme.mesh_hierarchy` | Required before `mesh` graph. |
 | `0004_articles_load_indexes.sql` | `articles (source, source_file)` and `articles (id)` indexes (per partition) | Recommended before any large load: without them each per-file delete scans the whole `articles_default` partition. Apply it with **no load running**: `CREATE INDEX` on the partitioned parent blocks writes to every partition while it builds (`CONCURRENTLY` is not possible on a partitioned parent). |
 | `0005_bulk_index_state.sql` | `episteme._bulk_index_state`, the bookkeeping of bulk-load mode (section 4.6) | Required before `load --bulk`. |
+| `0006_pubmed_graph.sql` | Graph tables `article_comments`, `article_chemicals`, `article_keywords`, `article_authors`, `article_facets`, `mesh_tree`, `mesh_facet_rule` (seeded, rule_version 1) and `_graph_lineage`; new columns on `article_mesh` and `article_cites`; the `bulk_indexes` group `pubmed_graph` covers their secondary indexes | Required before `pubmed graph` and `mesh graph` (which fills `mesh_tree`). Needs schema 1.6 shards (docs/09 section 4.5). |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002, 0003, 0004 or 0005, apply those four directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0006, apply those five directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t`; the fourth column is 0004's `articles_id_idx` and the fifth is 0005's table):
@@ -191,7 +192,9 @@ Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t`; th
 PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select to_regclass(\$\$episteme.article_parts\$\$) is not null, to_regclass(\$\$episteme.mesh_hierarchy\$\$) is not null, exists(select 1 from information_schema.columns where table_schema=\$\$episteme\$\$ and table_name=\$\$articles\$\$ and column_name=\$\$container_id\$\$), to_regclass(\$\$episteme.articles_id_idx\$\$) is not null, to_regclass(\$\$episteme._bulk_index_state\$\$) is not null"'
 ```
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0005 and tracks them. Do not run it on the local build.
+**Migration 0006 through MCPg.** Where the database is reached through the MCPg MCP server, apply 0006's DDL with `run_ddl` (it is idempotent). `run_ddl` refuses GRANT and REVOKE, so the operator then runs the file's single `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON episteme.mesh_facet_rule FROM episteme_app;` line once as `episteme_sys_admin` (the psql loop above does this itself). The pipeline writes as `episteme_app`, so every other new table keeps the standard DML grants; only `mesh_facet_rule` is read-only to it, so facet rules change only through `episteme_sys_admin`. Check: `to_regclass('episteme.article_authors')` and `to_regclass('episteme._graph_lineage')` are not null, and `episteme.mesh_facet_rule` holds 31 rows.
+
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0006 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -297,7 +300,7 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
   - `load`, `graph`, `enrich`, `materialize`: ignored.
   - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` makes the wrapper die with its own exit code 2 when run directly; through `run_pipeline.sh` the observable rc is 1 (`stage failed: download`, `resume with: ...`).
   - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
-- **`--bulk`** is supported on `load` only: drop the secondary indexes of `episteme.articles`, load, always rebuild them (section 4.6).
+- **`--bulk`** is supported on `load` and `graph`: drop the secondary indexes of the stage's index group, run the stage, always rebuild them (section 4.6). `load` uses group `articles`; `graph` uses group `pubmed_graph` for every source. Any other stage exits with `--bulk is only valid with the load or graph stage`.
 - **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
 
 ### 4.4 Audit bracket and resume
@@ -311,39 +314,50 @@ Every non-dry run records `run_start` and, on completion, `run_end`, both with o
 | `download` | `--max-files N`, `--force --reason R`, tokens it does not recognise; `--dry-run` as `EPISTEME_DRY_RUN=1` |
 | `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
 | `load` | `--force --reason R` only |
-| `graph`, `enrich`, `materialize` | nothing |
+| `graph` | `--force --reason R` when forced (reloads files whose graph hash is unchanged; `pubmed` only acts on it) |
+| `enrich`, `materialize` | nothing |
 
-### 4.6 Bulk-load mode (`load --bulk`)
+### 4.6 Bulk-load mode (`--bulk` on `load` and `graph`)
 
-For a large load into `episteme.articles` (the `pubmed` baseline, `openalex`), `--bulk` drops the secondary indexes first and rebuilds them once at the end. Building an index once is much cheaper than updating it for every row:
+For a large load, `--bulk` drops the secondary indexes of an index group first and rebuilds them once at the end. Building an index once is much cheaper than updating it for every row:
 
 ```bash
 bash scripts/data/run_pipeline.sh pubmed load --bulk
+bash scripts/data/run_pipeline.sh pubmed graph --bulk
 ```
 
-- **Dropped:** `articles_pmid_idx`, `articles_pmcid_idx`, `articles_doi_idx`, `articles_mesh_gin`, `articles_authors_gin` and `articles_publication_types_gin`, on every partition.
-- **Kept:** `articles_source_file_idx` and `articles_id_idx` (the loader's deletes use them) and `articles_retrieved_at_brin`.
-- **While the load runs**, queries by PMID, PMCID, DOI or MeSH are slow. Run nothing else against `articles`.
-- **Rebuild:** after the load, `rebuild` re-creates each index on every partition and writes one `bulk_index_rebuild` audit row per index, in the same transaction as that index's build. `ANALYZE episteme.articles` runs after the last index and has no audit row. The drop wrote `bulk_index_drop`. Expect the rebuild to take tens of minutes on a full table.
-- **Refusals:** `rebuild` refuses a saved definition that is not a parent index on `episteme.articles`, contains `;`, or names a different index. It also refuses when an existing valid index of that name has a different definition. In each case it exits 1 and leaves that row pending.
-- **When it rebuilds:** always — after a successful, failed or interrupted (Ctrl+C) load. The exit code is the load's if the load failed, else the rebuild's. A failed drop never starts the load.
-- **Prerequisites:** migration 0005 (section 2.3), `EPISTEME_ACTOR` (`drop` and `rebuild` both require it before doing anything) and `EPISTEME_SYS_ADMIN_PASSWORD`. The index work runs as `episteme_sys_admin`, the table owner, and the database-mode guard applies.
+Index groups (`episteme.data.db.bulk_indexes.INDEX_GROUPS`):
 
-**After a hard kill** (Task Manager, `Stop-Process`, a crash), no trap runs and the indexes stay dropped. The saved state survives, and the next `--bulk` refuses to start (exit 2). Check and finish it:
+| Group | Used by | Indexes dropped (on every partition) |
+|---|---|---|
+| `articles` | `<source> load --bulk` (the default group) | `articles_pmid_idx`, `articles_pmcid_idx`, `articles_doi_idx`, `articles_mesh_gin`, `articles_authors_gin`, `articles_publication_types_gin` |
+| `pubmed_graph` | `<source> graph --bulk` | the 14 secondary indexes of `article_mesh`, `article_cites`, `article_comments`, `article_chemicals`, `article_keywords`, `article_authors` and `article_facets` (two each: the pmid or src_pmid index plus one lookup index) |
+
+- **`graph --bulk` maps every source to `pubmed_graph`.** It is meant for `pubmed` (and `pmc`, which also writes `article_mesh` and `article_cites`). `mesh graph --bulk` would only waste an index rebuild.
+- **Kept:** every `<table>_source_file_idx` (the per-file deletes use them), `articles_id_idx` and `articles_retrieved_at_brin`.
+- **While the stage runs**, lookups on the affected tables are slow. Run nothing else against them.
+- **Rebuild:** after the stage, `rebuild` re-creates each saved index on every partition and writes one `bulk_index_rebuild` audit row per index, in the same transaction as that index's build. `rebuild` takes no group: it rebuilds every pending row, whatever its group. `ANALYZE` runs after the last index and has no audit row. Expect tens of minutes on a full table.
+- **Refusals:** `rebuild` refuses a saved definition that is not a parent index on an `episteme` table, contains `;`, or names a different index. It also refuses when an existing valid index of that name has a different definition. In each case it exits 1 and leaves that row pending. `drop` refuses (exit 2) while any rebuild is pending, whatever the group.
+- **When it rebuilds:** always, after a successful, failed or interrupted (Ctrl+C) stage. The exit code is the stage's if it failed, else the rebuild's. A failed drop never starts the stage.
+- **Audit strings.** `bulk_index_drop` writes one row with object `<group> <comma-separated index names>`, for example `pubmed_graph article_mesh_pmid_idx,...`; before the groups existed the `articles` drop read `episteme.articles <names>`. `bulk_index_rebuild` writes one row per index with object `episteme.<table> <index>`.
+- **Manual use.** `bash scripts/data/db/bulk_load_indexes.sh <action> [--group G]`: `drop` (default group `articles`; `--group articles|pubmed_graph`), `rebuild` (no group), `status` (exit 1 while a rebuild is pending, 3 on error). Use `rebuild` to finish after a failed rebuild.
+- **Prerequisites:** migration 0005 (section 2.3), plus 0006 for the `pubmed_graph` group; `EPISTEME_ACTOR` (`drop` and `rebuild` both require it before doing anything) and `EPISTEME_SYS_ADMIN_PASSWORD`. The index work runs as `episteme_sys_admin`, the table owner, and the database-mode guard applies.
+
+**After a hard kill** (Task Manager, `Stop-Process`, a crash), no trap runs and the indexes stay dropped. The saved state survives, and the next `--bulk` (either stage, any group) refuses to start (exit 2). Check and finish it:
 
 ```bash
 bash scripts/data/db/bulk_load_indexes.sh status    # exit 0 when nothing is pending, 1 while a rebuild is pending, 3 on error, 2 if a required env key is missing
 bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 ```
 
-`status` exits 3 on an error, for example migration 0005 not applied, a refused connection or a guard-refused database. It exits 2 if a required env key (`EPISTEME_ACTOR`, `EPISTEME_SYS_ADMIN_PASSWORD`) is missing.
+`status` exits 3 on an error, for example migration 0005 not applied (or 0006, for the `pubmed_graph` group), a refused connection or a guard-refused database. It exits 2 if a required env key (`EPISTEME_ACTOR`, `EPISTEME_SYS_ADMIN_PASSWORD`) is missing.
 
 **Stopping runs:**
 
 - **Extract (worker processes).** Stop the parent python *and its workers*: `taskkill /T /F /PID <parent pid>`. `Stop-Process` on the parent alone leaves the workers running. Files that finished keep their success markers; a re-run resumes from the rest.
-- **A `--bulk` load.** Stop the python load process, not the bash driver, so the driver's trap still rebuilds. If the driver was killed too, run `bulk_load_indexes.sh status`, then `rebuild`.
+- **A `--bulk` load or graph.** Stop the python load process, not the bash driver, so the driver's trap still rebuilds. If the driver was killed too, run `bulk_load_indexes.sh status`, then `rebuild`.
 
-**Loader timing:** every `ok` line of a load now ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
+**Loader timing:** every `ok` line of a load ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
 
 ---
 
@@ -353,7 +367,7 @@ Each block gives what it is, where it lands, the first-time commands, the increm
 
 ### 5.1 Literature (download, extract, load, graph)
 
-Row contract and status rules: `docs/09-extraction-contract.md`. Load and graph need migration 0002 (section 2.3).
+Row contract and status rules: `docs/09-extraction-contract.md`. Load and graph need migration 0002; `pubmed` graph also needs 0006 (section 2.3).
 
 #### PubMed (`pubmed`)
 
@@ -364,6 +378,8 @@ Citation and abstract XML: baseline (annual) and daily update files, from `PUBME
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed download --max-files 2
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract --max-files 1
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
+# graph: mesh first (it fills mesh_tree, which pubmed graph requires), then pubmed
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh mesh graph
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed graph
 
 # whole baseline in one go (large; unbounded)
@@ -374,6 +390,36 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed download updat
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
 ```
+
+**Graph and facets (schema 1.6).** `extract` writes the six relation files next to each shard (docs/09 section 4.5). `pubmed graph` loads them per raw file in one transaction: it deletes that file's earlier edge and facet rows, COPYs the six relations, derives the file's facets and writes one `graph_commit` audit row plus the `_graph_lineage` row. A failed file rolls back alone (an unreadable, e.g. truncated, success marker fails that file with `unreadable success marker`); the run goes on and exits non-zero with the failed count. If no pubmed graph files are found at all, it prints `WARNING: no pubmed graph files found under <processed_dir>` to stderr and exits 1. The wrapper `graph_pubmed.sh` passes no directory arguments: the processed root comes from `config.py` (`EPISTEME_PROCESSED_ROOT`, else `EPISTEME_DATA_ROOT/02_processed`), the same as extract; a direct `--processed-dir` after the wrapper still overrides it. A file whose `graph_sha256` in `_graph_lineage` is unchanged is skipped; `pubmed graph --force --reason "<why>"` reloads it and is audited (`force_override`); `run_pipeline.sh` forwards `--force --reason` to the graph wrapper. `pubmed graph` refuses to start when `mesh_tree` is empty (run `mesh graph` first), and refuses a shard with no graph info (`re-extract with schema >= 1.6`). `--force` is only acted on for `pubmed`; for any other graph source it prints `NOTE: --force has no effect for source <src> graph` to stderr and nothing is audited. `extract` redoes any file whose success marker lacks `graph_relations` even without `--force`; a file with a 1.6 marker is skipped. Add `--bulk` for a full-baseline load (section 4.6).
+
+MeSH facets (`condition`, `test`, `demographic`, `special_population`, `drug`) live in `article_facets`, a plain table kept current per file (no materialized views). The rules are rows in `mesh_facet_rule` (rule_version 1 is seeded by migration 0006; edit them as `episteme_sys_admin` only, and bump `rule_version`). After a rule change or a new MeSH release:
+
+```bash
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.graph_builder facets --status
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.graph_builder facets --rebuild
+```
+
+`--status` prints `rule_version`, `stale_rows`, `stale_files` and `files`, and exits 1 when any `article_facets` row carries an older `rule_version` than the newest rule, else 0. `--rebuild` recomputes one source file per transaction, with one `graph_commit` audit row per file (and a `force_override` row per file with `--force`); it is restartable (files already at the newest `rule_version` are skipped), and `--rebuild --force --reason "<why>"` redoes every file. `--force` without `--reason` exits 2.
+
+**Data-quality audit.** Read-only, no database access (DuckDB over the shards and graph files):
+
+```bash
+.venv/Scripts/python.exe -m episteme.data.audit.pubmed_audit [--processed-dir DIR] [--raw-dir DIR] [--out-dir DIR] [--sample-files N] [--memory-limit 2GB] [--duckdb-temp DIR]
+```
+
+It writes `pubmed_audit.json` and `pubmed_audit.md` under `<processed>/_ops/pubmed/audit/` (override with `--out-dir`) and prints the report path. `--sample-files N` (default 5) is the number of raw files re-read for the DOI probe, which compares each record's stored DOI with the record's own `ArticleIdList`. The default `--memory-limit` is 2GB, deliberately below the 4GB `EPISTEME_DUCKDB_MEMORY_LIMIT` so the audit can share the machine with PostgreSQL; `--duckdb-temp` is the spill directory. The report also carries `graph_btree_max_bytes` (the longest value in bytes per btree-indexed graph column: `mesh.descriptor_ui`, `cites.src_pmid`, `cites.dst_pmid`, `comments.ref_pmid`, `chemicals.substance_ui`, `keywords.keyword`, `authors.orcid`; keys `columns`, `max`, `limit` = 2000 and `over_limit`) and `shards_without_graph` (pubmed shards whose success marker lacks `graph_relations` or whose six graph files are not all present). Exit codes: 0 pass; 1 when any btree column exceeds 2000 bytes, when `shards_without_graph` is above 0, when the DOI probe did not run (its status is not `ok`, for example no raw directory) or found a mismatch; `--sample-files 0` skips the probe, so only the first two conditions can fail it. Each failing condition prints a `WARNING:` line. Treat exit 1 as a failed gate.
+
+**Rollout order for the full baseline** (spec `docs/superpowers/specs/2026-10-14-pubmed-graph-design.md`):
+
+1. Finish any pending index rebuild (`bulk_load_indexes.sh status` reports `pending=0`).
+2. Apply migration 0006 (section 2.3, including the operator REVOKE).
+3. Trial on one file (`pubmed26n1300`): extract it, run the audit, graph it; inspect the graph files and the DOI fix.
+4. Re-extract all 1,334 files with `--force --reason "schema 1.6"`.
+5. Audit again. Stop here for review before loading.
+6. `pubmed load --bulk --force --reason "schema 1.6: DOI and retraction fixes"`.
+7. `mesh graph`, then check the seed descriptor UIs of `mesh_facet_rule` against the production `mesh` rows (read-only; the fixtures hold no real MeSH), then `pubmed graph --bulk`.
+8. Verify: the audit chain (`verify_audit_trail.sh`), every index valid with its `bulk_index_rebuild` audit row, `facets --status`, `neighbours` for each kind, `articles_for_mesh` with descendants, and facet counts per facet.
 
 Verify downloaded checksums locally (offline): `bash scripts/data/pubmed/verify_pubmed.sh all`; add `--repair` to re-fetch failures. Exit 1 iff a file fails; a missing `.md5` alone is a warning.
 

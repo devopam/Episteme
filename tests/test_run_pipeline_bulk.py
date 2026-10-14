@@ -150,5 +150,40 @@ def test_load_without_bulk_touches_no_index(tree):
 def test_bulk_on_another_stage_is_a_usage_error(tree):
     proc, calls = _run(tree, "extract", "--bulk")
     assert proc.returncode == 2
-    assert "--bulk" in proc.stderr
+    assert "--bulk is only valid with the load or graph stage" in proc.stderr
     assert calls == []
+
+
+def test_bulk_graph_passes_validation_and_uses_the_pubmed_graph_group(tree):
+    data = tree[0].parent
+    _write(data / "db" / "bulk_load_indexes.sh", FAKE_BULK.replace('$1"', '$*"'))
+    _write(data / "pubmed" / "graph_pubmed.sh", FAKE_LOAD.replace('"load"', '"graph"'))
+    proc, calls = _run(tree, "graph", "--bulk")
+    assert proc.returncode == 0, proc.stderr
+    assert "--bulk is only valid" not in proc.stderr
+    assert calls == [
+        "run_start",
+        "bulk drop --group pubmed_graph",
+        "graph",
+        "bulk rebuild",
+        "run_end",
+    ]
+
+
+FAKE_GRAPH = """#!/usr/bin/env bash
+echo "graph $*" >> "$CALLS"
+exit 0
+"""
+
+
+def test_graph_forwards_force_and_reason_only_when_forced(tree):
+    script, calls, _ = tree
+    _write(script.parent / "pubmed" / "graph_pubmed.sh", FAKE_GRAPH)
+    proc, lines = _run(tree, "graph", "--force", "--reason", "R one")
+    assert proc.returncode == 0, proc.stderr
+    assert "graph --force --reason R one" in lines
+    calls.unlink()
+    proc, lines = _run(tree, "graph")
+    assert proc.returncode == 0, proc.stderr
+    assert "graph " in lines or "graph" in lines
+    assert not any(ln.startswith("graph ") and "--force" in ln for ln in lines)

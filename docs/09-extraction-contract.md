@@ -1,8 +1,10 @@
-# Episteme — Extraction Contract (v1.2)
+# Episteme — Extraction Contract (v1.3)
 
-**Status:** Active (v1.2 reconciled with the implemented Postgres pipeline, SP5, 2026-09-21)
+**Status:** Active (v1.3: PubMed graph files and schema 1.6, 2026-10-14; v1.2 reconciled with the implemented Postgres pipeline, SP5, 2026-09-21)
 **Scope:** Phase 0 open-literature extraction into a single analytical / training table
 **Principles:** Restartability first · sample-before-scale · Postgres as the store of record (Iceberg superseded, see §4) · license-safe subsets · transparency over silent drops
+
+**Changelog (v1.2 → v1.3, PubMed graph):** Row schema 1.6 (`SCHEMA_VERSION`). `pubmed` now writes graph files for six relations next to its shard (§4.5), reads `doi` and `pmcid` only from the record's own `ArticleIdList`, and sets `is_retracted` by a narrower rule. Schema 1.5 (2026-10-14) added the 2,000-byte cap on GIN-indexed list elements.
 
 **Changelog (v1.1 → v1.2, SP5):** Reconciled with the code. Storage is Postgres (`episteme.articles` + `episteme.article_body`), not Iceberg (ADR-0001, ADR-0002). Licence vocabulary gains `permissive` and `public_domain` (a governance override that `normalize_license` never returns). Adds the structured-source serialisation contract, the shared input-identity rule (`input_key`), and real entrypoint paths. Where this document and the code disagree, the code wins and the gap is named in §4.4 and §12. Audit obligations are in `docs/11-gxp-data-integrity.md`.
 
@@ -48,7 +50,7 @@ There is no “partial success” for a unit: either full commit + marker, or re
   failed/
     <input_key>.json                  # error_class, message, stats, traceback tail
   load_success/<input_key>.ok         # written by the load stage
-  graph_success/<input_key>.ok        # written by the graph stage
+  graph_success/<input_key>.ok        # written by the graph stage (not used by pubmed: its graph state is the _graph_lineage table, section 4.5)
   runs/
     run_<run_id>.json                 # run config, schema version, totals
 ```
@@ -238,6 +240,37 @@ OpenMetadata: register table and columns on first successful sample load; tag li
 
 ---
 
+### 4.5 PubMed graph files (schema 1.6)
+
+`extract_pubmed` writes, besides the article shard, one Parquet file per relation per raw file. The graph stage (`graph_load`) loads them; nothing in the files is a database default.
+
+```text
+02_processed/staging/pubmed_graph/<relation>/<stem>.parquet
+```
+
+`<stem>` is the file's `input_key` with a trailing `.gz` and then `.xml` removed (`pubmed26n1300.xml.gz` gives `pubmed26n1300`; a nested raw path keeps its `__` joins). A file is written for every relation even with zero rows, so "no edges" differs from "not extracted". Every row carries `source_file` = the raw file's `input_key`. Each file is written under a temporary name and renamed; the existing success marker is written last and now records, in its `stats`, `graph_relations` (the relation names), `graph_sha256` (one hash over the relation files in a fixed order), `graph_rows` (rows per relation) and the extract counters `orcid_dropped` and `edges_skipped_no_pmid`. A file with no marker, or a marker without `graph_relations` (or an unreadable one), is redone in full; the extractor enforces this on a plain run, and at the start of any (re)processing of a file it first deletes the file's old success marker, so a crash mid-file never leaves a marker claiming success. The graph stage refuses such a pre-1.6 shard with `re-extract with schema >= 1.6`.
+
+Relation row shapes (`graph_files.RELATION_COLUMNS`; `major_topic` is boolean, `position` int32, the three list columns are `list<string>`, everything else is string):
+
+| Relation | Columns | Loads into |
+|---|---|---|
+| `mesh` | `pmid`, `descriptor_ui`, `descriptor_name`, `major_topic`, `qualifier_uis`, `qualifiers`, `source_file` | `article_mesh` |
+| `cites` | `src_pmid`, `dst_pmid`, `dst_doi`, `ref_text`, `source_file` | `article_cites` |
+| `comments` | `pmid`, `ref_type`, `ref_pmid`, `ref_text`, `source_file` | `article_comments` |
+| `chemicals` | `pmid`, `substance_ui`, `name`, `registry_number`, `source_file` | `article_chemicals` |
+| `keywords` | `pmid`, `keyword`, `owner`, `major_topic`, `source_file` | `article_keywords` |
+| `authors` | `pmid`, `position`, `last_name`, `fore_name`, `initials`, `collective_name`, `orcid`, `affiliations`, `source_file` | `article_authors` |
+
+Rules:
+
+- **Own ids only.** `doi` and `pmcid` come from `PubmedData/ArticleIdList/ArticleId`, direct children only (IdType compared case-insensitively, values stripped). Before 1.6 the parser walked every `ArticleId` under `PubmedData`, which includes `ReferenceList/Reference/ArticleIdList`, so a cited reference's DOI could overwrite the record's own. In `pubmed26n1300`, 2,075 of 30,000 records (6.9%) carried a cited reference's DOI. PMCID follows the same rule. A reference's own ids go to `cites.dst_pmid` and `cites.dst_doi`, never to the article row.
+- **Retraction.** `is_retracted` is true only when a publication type is exactly `Retracted Publication`, or a `CommentsCorrections` of `RefType="RetractionIn"` exists. "Retraction of Publication" is the notice, not a retracted paper, and no longer sets the flag.
+- **`major_topic`** (mesh) is true when the descriptor or any qualifier has `MajorTopicYN="Y"`; qualifier-level flags are not kept.
+- **ORCID** is read from `Identifier Source="ORCID"`, taken from a URL form when present and normalised to `0000-0000-0000-000X`. A value that does not match after normalisation is dropped and counted (`orcid_dropped`), never stored malformed.
+- **Cap.** Every element of a list column, and `ref_text` and `keyword`, is cut to 2,000 bytes (`cap_list_elements`), below the 2,712-byte GIN index-row limit. An overlong value is capped and counted, never stored raw.
+- **References without a PMID** (or without a DOI) keep their `cites` row with that column NULL. A record without a PMID writes no edges at all; that is counted as `edges_skipped_no_pmid`.
+- **Graph state** is the `_graph_lineage` table (`source`, `source_file`, `graph_sha256`, per-relation `rows`), not a `graph_success` marker file; the §2.2 listing of `graph_success/` predates it and no code writes it for `pubmed`.
+
 ## 5. Text normalisation (v1.1)
 
 1. Prefer `title` + `\n\n` + `abstract` when body is absent (typical PubMed).
@@ -398,3 +431,4 @@ Audit obligations (who records what, hash chaining, verification, the operator i
 | v1 | 2026-08-31 | Initial contract |
 | v1.1 | 2026-08-31 | Sample audit incorporation; PMC columns; status/license rules; known corrupt ID map |
 | v1.2 | 2026-09-21 | SP5: Postgres storage (Iceberg superseded), `permissive` / `public_domain` licence codes, structured-source contract, `input_key` identity, real entrypoints, docs/11 cross-reference |
+| v1.3 | 2026-10-14 | PubMed graph: schema 1.6, graph-file layout and relation shapes (§4.5), own-id DOI/PMCID rule, retraction rule, ORCID normalisation |

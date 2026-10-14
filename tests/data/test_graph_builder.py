@@ -183,11 +183,9 @@ def test_build_populates_article_parts(pg_conn, tmp_path, monkeypatch):
 
 
 def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
-    _setup_schema(pg_conn)  # existing helper
-    with pg_conn.cursor() as cur:
-        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
-        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
-    pg_conn.commit()
+    from ._graph_schema import setup_graph_schema
+
+    setup_graph_schema(pg_conn)  # 0002-0006: mesh_tree needs 0006
 
     # a tiny real-shaped MeSH descriptor XML: D003920 (child) under D003924's
     # tree number prefix (parent), per NLM's DescriptorRecordSet shape.
@@ -233,6 +231,47 @@ def test_build_populates_mesh_hierarchy(pg_conn, tmp_path, monkeypatch):
         assert cur.fetchone()[0] == 1
 
 
+def test_build_populates_mesh_tree(pg_conn, tmp_path, monkeypatch):
+    from ._graph_schema import setup_graph_schema
+
+    _configure(tmp_path, monkeypatch)
+    setup_graph_schema(pg_conn)
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "desc2026.xml").write_text(
+        "<DescriptorRecordSet>"
+        "<DescriptorRecord><DescriptorUI>D003924</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750</TreeNumber>"
+        "<TreeNumber>C19.246</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "<DescriptorRecord><DescriptorUI>D003920</DescriptorUI>"
+        "<DescriptorName><String>Diabetes Mellitus, Type 2</String></DescriptorName>"
+        "<TreeNumberList><TreeNumber>C18.452.394.750.149</TreeNumber></TreeNumberList>"
+        "</DescriptorRecord>"
+        "</DescriptorRecordSet>",
+        encoding="utf-8",
+    )
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file, source_record_id) "
+            "VALUES (%s, 'mesh', %s, %s), (%s, 'mesh', %s, %s)",
+            ("mesh:D003924", "desc2026.xml", "D003924", "mesh:D003920", "desc2026.xml", "D003920"),
+        )
+    pg_conn.commit()
+
+    from episteme.data.graph_builder import build
+
+    for run_id in ("t", "t2"):
+        res = build(pg_conn, source="mesh", raw_dir=raw, run_id=run_id)
+        pg_conn.commit()
+        assert res["mesh_tree"] == 3
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM episteme.mesh_tree")
+            assert cur.fetchone()[0] == 3
+
+
 def test_build_populates_mesh_hierarchy_gzip(pg_conn, tmp_path, monkeypatch):
     # FIX 1 (whole-branch review): serialize_mesh.py's real-world discovery
     # accepts desc*.xml.gz/desc*.gz and writes the COMPRESSED basename as
@@ -242,11 +281,9 @@ def test_build_populates_mesh_hierarchy_gzip(pg_conn, tmp_path, monkeypatch):
     # silently returns {} -- mesh_hierarchy ends up 0, not 1).
     import gzip
 
-    _setup_schema(pg_conn)
-    with pg_conn.cursor() as cur:
-        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
-        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
-    pg_conn.commit()
+    from ._graph_schema import setup_graph_schema
+
+    setup_graph_schema(pg_conn)  # 0002-0006: mesh_tree needs 0006
 
     # identical synthetic descriptor content to test_build_populates_mesh_hierarchy,
     # written gzip-compressed instead of plain .xml -- mirrors what a real
@@ -291,11 +328,9 @@ def test_build_finds_mesh_file_by_nested_source_file_key(pg_conn, tmp_path):
     # SP4.1: serialize_mesh now stores the raw-dir-relative input key
     # ("nlm__desc2026.xml" for raw/nlm/desc2026.xml) as source_file. The mesh
     # phase must resolve that key back to the file, not rglob for it verbatim.
-    _setup_schema(pg_conn)
-    with pg_conn.cursor() as cur:
-        cur.execute(MIGRATION_0002.read_text(encoding="utf-8"))
-        cur.execute(MIGRATION_0003.read_text(encoding="utf-8"))
-    pg_conn.commit()
+    from ._graph_schema import setup_graph_schema
+
+    setup_graph_schema(pg_conn)  # 0002-0006: mesh_tree needs 0006
 
     raw = tmp_path / "raw"
     (raw / "nlm").mkdir(parents=True)

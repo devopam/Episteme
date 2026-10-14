@@ -62,10 +62,17 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     is_success,
     mark_failed,
     mark_success,
+    success_marker_path,
     write_run_manifest,
 )
+from episteme.data.graph_files import GraphFileWriter, marker_graph_info  # noqa: E402
 from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import run_per_file  # noqa: E402
+from episteme.data.pubmed.relations import (  # noqa: E402
+    extract_relations,
+    own_article_ids,
+    retracted,
+)
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
@@ -88,8 +95,10 @@ def _child_text(parent: Element, name: str) -> str:
     return ""
 
 
-def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
-    """One ``<PubmedArticle>`` element -> a finalized ``episteme.articles`` row.
+def parse_pubmed_record(
+    art: Element, source_file: str
+) -> tuple[dict[str, Any], dict[str, list[dict]], dict[str, int]]:
+    """One ``<PubmedArticle>`` -> ``(article row, graph edges, counters)``.
 
     Lifted from the retired ``extract.py`` (streaming ``_local``/``_child_text``
     walk); the year path additionally falls back to the first 4 digits of
@@ -106,7 +115,6 @@ def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
     mesh: list[str] = []
     pub_types: list[str] = []
     language = ""
-    is_retracted = False
 
     medline = None
     for c in art:
@@ -179,8 +187,6 @@ def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
                         val = "".join(pt.itertext()).strip()
                         if val:
                             pub_types.append(val)
-                            if "retract" in val.lower():
-                                is_retracted = True
 
     # Mesh
     if medline is not None:
@@ -196,21 +202,15 @@ def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
                         if val:
                             mesh.append(val)
 
-    # PubmedData ArticleIds
-    for c in art:
-        if _local(c.tag) != "PubmedData":
-            continue
-        for node in c.iter():
-            if _local(node.tag) != "ArticleId":
-                continue
-            id_type = (node.get("IdType") or "").lower()
-            val = (node.text or "").strip()
-            if id_type == "doi":
-                doi = val
-            elif id_type == "pmc":
-                pmcid = val if val.upper().startswith("PMC") else f"PMC{val}"
-            elif id_type == "pubmed" and not pmid:
-                pmid = val
+    # The record's OWN ids only (a cited reference's ArticleIdList is ignored).
+    ids = own_article_ids(art)
+    doi = ids.get("doi", "")
+    pmc = ids.get("pmc", "")
+    pmcid = pmc if not pmc or pmc.upper().startswith("PMC") else f"PMC{pmc}"
+    if not pmid:
+        pmid = ids.get("pubmed", "")
+    edges, counters = extract_relations(art, pmid, source_file)
+    is_retracted = retracted(pub_types, edges["comments"])
 
     abstract = "\n".join(abstract_parts) if abstract_parts else None
     # PubMed records carry no licence text -> unknown / open_metadata.
@@ -246,7 +246,28 @@ def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
         "container_id": None,
         "book_meta": None,
     }
-    return finalize_row(row)
+    return finalize_row(row), edges, counters
+
+
+def parse_pubmed_article(art: Element, source_file: str) -> dict[str, Any]:
+    """The article row only; see ``parse_pubmed_record``."""
+    return parse_pubmed_record(art, source_file)[0]
+
+
+def iter_records_from_file(path: Path, *, source_file: str):
+    """Like ``iter_rows_from_file`` but yields ``(row, edges, counters)``."""
+    opener = open_gz if path.name.endswith(".gz") else open
+    with opener(path, "rb") as f:
+        it = _safe_iterparse(f, events=("start", "end"))
+        _, root = next(it)
+        for event, elem in it:
+            if event != "end" or _local(elem.tag) != "PubmedArticle":
+                continue
+            try:
+                yield parse_pubmed_record(elem, source_file)
+            finally:
+                elem.clear()
+                root.clear()
 
 
 def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
@@ -262,19 +283,8 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
     sharing a basename in different subdirectories under ``raw_dir`` must not
     collapse to the same ``source_file`` value on the rows themselves.
     """
-    opener = open_gz if path.name.endswith(".gz") else open
-    source_file = source_file or path.name
-    with opener(path, "rb") as f:
-        it = _safe_iterparse(f, events=("start", "end"))
-        _, root = next(it)
-        for event, elem in it:
-            if event != "end" or _local(elem.tag) != "PubmedArticle":
-                continue
-            try:
-                yield parse_pubmed_article(elem, source_file)
-            finally:
-                elem.clear()
-                root.clear()
+    for rec in iter_records_from_file(path, source_file=source_file or path.name):
+        yield rec[0]
 
 
 def discover_pubmed_files(raw_dir: Path) -> list[Path]:
@@ -345,6 +355,13 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                 )
 
 
+def _has_graph_info(processed_dir: Path, basename: str) -> bool:
+    try:
+        return marker_graph_info(processed_dir, SOURCE, basename) is not None
+    except ValueError:  # truncated marker: treat as absent and redo the file
+        return False
+
+
 def process_one(
     path: Path,
     *,
@@ -358,23 +375,33 @@ def process_one(
     # enforced either -- see discover_pubmed_files) must not collapse to the
     # same marker/source_file identity.
     basename = input_key(path, raw_dir)
-    if not force and is_success(processed_dir, SOURCE, basename):
+    # A marker without graph_relations (pre-1.6 shard) is redone in full.
+    if (
+        not force
+        and is_success(processed_dir, SOURCE, basename)
+        and _has_graph_info(processed_dir, basename)
+    ):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
+    # Drop any old marker first: a crash mid-file must never leave a stale success claim.
+    success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
+    counters: Counter[str] = Counter()
     try:
-        for row in iter_rows_from_file(path, source_file=basename):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
+        with GraphFileWriter(processed_dir, SOURCE, basename) as gw:
+            for row, edges, rec_counters in iter_records_from_file(path, source_file=basename):
+                status_counts[str(row.get("extract_status"))] += 1
+                rows.append(row)
+                counters.update(rec_counters)
+                for rel_name, rel_rows in edges.items():
+                    if rel_rows:
+                        gw.add(rel_name, rel_rows)
+            graph_info = gw.close()
 
         write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
+            rows, processed_dir, source=SOURCE, source_file=basename, prefer_parquet=True
         )
         elapsed = round(time.time() - t0, 4)
         stats = {
@@ -382,6 +409,9 @@ def process_one(
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
+            **graph_info,
+            "orcid_dropped": counters["orcid_dropped"],
+            "edges_skipped_no_pmid": counters["edges_skipped_no_pmid"],
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
         _best_effort_audit(basename, len(rows))

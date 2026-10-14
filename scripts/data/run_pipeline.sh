@@ -52,8 +52,9 @@ while [ $# -gt 0 ]; do
         # env-only signal for the fetch engine / wrappers; never appended to
         # any *_args array. Exported so every downstream subprocess sees it.
         --dry-run) export EPISTEME_DRY_RUN=1; shift ;;
-        # load stage only: drop the secondary indexes of episteme.articles,
-        # load, always rebuild them (scripts/data/db/bulk_load_indexes.sh).
+        # load or graph stage only: drop the secondary indexes of the stage's group
+        # (load: articles; graph: pubmed_graph), run the stage, always rebuild them
+        # (scripts/data/db/bulk_load_indexes.sh).
         --bulk) BULK=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
@@ -62,8 +63,8 @@ done
 if [ "$FORCE" = "1" ] && [ -z "$REASON" ]; then
     die "--force requires --reason" 2
 fi
-if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ]; then
-    log ERROR "--bulk is only valid with the load stage"
+if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
+    log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
 
@@ -255,8 +256,10 @@ fi
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
-# `load` reuses load_args above; `graph` gets no extra args (graph_builder.main
-# takes only --source/--raw-dir and errors on anything else, PF-8).
+# `load` reuses load_args above; `graph` gets --force --reason R only when forced
+# (graph_builder.main takes --source/--raw-dir/--processed-dir/--force/--reason).
+graph_args=()
+[ "$FORCE" = "1" ] && graph_args=(--force --reason "$REASON")
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
@@ -300,16 +303,18 @@ fi
 # M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
 bash "$HERE/_lib/check_prereqs.sh" >&2 || true
 
-# --bulk: drop the secondary indexes of episteme.articles before the load and
-# always rebuild them -- explicitly after a successful load (so the rebuild's
-# audit row lands before run_end), and from the EXIT trap after a failed or
-# interrupted one. A hard kill skips the trap; the saved state then blocks
+# --bulk: drop the secondary-index group of the stage (load: articles; graph:
+# pubmed_graph) before it and always rebuild them -- explicitly after a
+# successful stage (so the rebuild's audit row lands before run_end), and from
+# the EXIT trap after a failed or interrupted one. A hard kill skips the trap; the saved state then blocks
 # the next --bulk, and `bulk_load_indexes.sh rebuild` finishes the job.
 BULK_PENDING=0
+BULK_GROUP=articles
+[ "$STAGE" = "graph" ] && BULK_GROUP=pubmed_graph
 _bulk_rebuild() {
     [ "$BULK_PENDING" = "1" ] || return 0
     BULK_PENDING=0
-    log INFO "bulk: rebuilding the secondary indexes of episteme.articles"
+    log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
     bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 _bulk_on_exit() {
@@ -324,12 +329,12 @@ _bulk_on_exit() {
     exit "$rrc"
 }
 if [ "$BULK" = "1" ]; then
-    log INFO "bulk: dropping the secondary indexes of episteme.articles"
-    bash "$HERE/db/bulk_load_indexes.sh" drop
+    log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"
+    bash "$HERE/db/bulk_load_indexes.sh" drop --group "$BULK_GROUP"
     drop_rc=$?
     if [ "$drop_rc" -ne 0 ]; then
-        log ERROR "bulk: index drop failed (rc=$drop_rc); the load was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index drop)" >/dev/null 2>&1 || true
+        log ERROR "bulk: index drop failed (rc=$drop_rc); the $STAGE was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index drop)" >/dev/null 2>&1 || true
         exit "$drop_rc"
     fi
     BULK_PENDING=1
@@ -344,14 +349,14 @@ if [ "$SOURCE" = "pmc" ]; then
         download)    run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}" ;;
         extract)     run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}" ;;
         load)        run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}" ;;
-        graph)       run_stage graph "$HERE/pmc/graph_pmc.sh" ;;
+        graph)       run_stage graph "$HERE/pmc/graph_pmc.sh" "${graph_args[@]}" ;;
         materialize) run_stage materialize "$HERE/materialize_corpus.sh" ;;
         enrich)      run_stage enrich "$HERE/pmc/enrich_pmc.sh" ;;
         all)
             run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}"
             run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}"
             run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}"
-            run_stage graph "$HERE/pmc/graph_pmc.sh"
+            run_stage graph "$HERE/pmc/graph_pmc.sh" "${graph_args[@]}"
             run_stage materialize "$HERE/materialize_corpus.sh"
             run_stage enrich "$HERE/pmc/enrich_pmc.sh"
             ;;
@@ -380,7 +385,7 @@ else
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
             fi
             ;;
-        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
+        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}" ;;
         serialize) run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
@@ -395,12 +400,12 @@ else
                 run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
                 if [ "$SOURCE" = "mesh" ]; then
-                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
                 fi
             elif _is_lit "$SOURCE"; then
                 run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
-                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
             else
                 log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi
@@ -413,7 +418,7 @@ if [ "$BULK" = "1" ]; then
     rebuild_rc=$?
     if [ "$rebuild_rc" -ne 0 ]; then
         log ERROR "bulk: index rebuild failed (rc=$rebuild_rc); finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index rebuild)" >/dev/null 2>&1 || true
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index rebuild)" >/dev/null 2>&1 || true
         exit "$rebuild_rc"
     fi
 fi
