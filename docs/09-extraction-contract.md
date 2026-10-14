@@ -50,7 +50,7 @@ There is no “partial success” for a unit: either full commit + marker, or re
   failed/
     <input_key>.json                  # error_class, message, stats, traceback tail
   load_success/<input_key>.ok         # written by the load stage
-  graph_success/<input_key>.ok        # written by the graph stage
+  graph_success/<input_key>.ok        # written by the graph stage (not used by pubmed: its graph state is the _graph_lineage table, section 4.5)
   runs/
     run_<run_id>.json                 # run config, schema version, totals
 ```

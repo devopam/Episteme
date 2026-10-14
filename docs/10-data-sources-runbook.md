@@ -314,7 +314,8 @@ Every non-dry run records `run_start` and, on completion, `run_end`, both with o
 | `download` | `--max-files N`, `--force --reason R`, tokens it does not recognise; `--dry-run` as `EPISTEME_DRY_RUN=1` |
 | `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
 | `load` | `--force --reason R` only |
-| `graph`, `enrich`, `materialize` | nothing |
+| `graph` | `--force --reason R` when forced (reloads files whose graph hash is unchanged; `pubmed` only acts on it) |
+| `enrich`, `materialize` | nothing |
 
 ### 4.6 Bulk-load mode (`--bulk` on `load` and `graph`)
 
@@ -341,6 +342,24 @@ Index groups (`episteme.data.db.bulk_indexes.INDEX_GROUPS`):
 - **Audit strings.** `bulk_index_drop` writes one row with object `<group> <comma-separated index names>`, for example `pubmed_graph article_mesh_pmid_idx,...`; before the groups existed the `articles` drop read `episteme.articles <names>`. `bulk_index_rebuild` writes one row per index with object `episteme.<table> <index>`.
 - **Manual use.** `bash scripts/data/db/bulk_load_indexes.sh <action> [--group G]`: `drop` (default group `articles`; `--group articles|pubmed_graph`), `rebuild` (no group), `status` (exit 1 while a rebuild is pending, 3 on error). Use `rebuild` to finish after a failed rebuild.
 - **Prerequisites:** migration 0005 (section 2.3), plus 0006 for the `pubmed_graph` group; `EPISTEME_ACTOR` (`drop` and `rebuild` both require it before doing anything) and `EPISTEME_SYS_ADMIN_PASSWORD`. The index work runs as `episteme_sys_admin`, the table owner, and the database-mode guard applies.
+
+**After a hard kill** (Task Manager, `Stop-Process`, a crash), no trap runs and the indexes stay dropped. The saved state survives, and the next `--bulk` (either stage, any group) refuses to start (exit 2). Check and finish it:
+
+```bash
+bash scripts/data/db/bulk_load_indexes.sh status    # exit 0 when nothing is pending, 1 while a rebuild is pending, 3 on error, 2 if a required env key is missing
+bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
+```
+
+`status` exits 3 on an error, for example migration 0005 not applied (or 0006, for the `pubmed_graph` group), a refused connection or a guard-refused database. It exits 2 if a required env key (`EPISTEME_ACTOR`, `EPISTEME_SYS_ADMIN_PASSWORD`) is missing.
+
+**Stopping runs:**
+
+- **Extract (worker processes).** Stop the parent python *and its workers*: `taskkill /T /F /PID <parent pid>`. `Stop-Process` on the parent alone leaves the workers running. Files that finished keep their success markers; a re-run resumes from the rest.
+- **A `--bulk` load or graph.** Stop the python load process, not the bash driver, so the driver's trap still rebuilds. If the driver was killed too, run `bulk_load_indexes.sh status`, then `rebuild`.
+
+**Loader timing:** every `ok` line of a load ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
+
+---
 
 ## 5. Sources
 
@@ -372,7 +391,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
 ```
 
-**Graph and facets (schema 1.6).** `extract` writes the six relation files next to each shard (docs/09 section 4.5). `pubmed graph` loads them per raw file in one transaction: it deletes that file's earlier edge and facet rows, COPYs the six relations, derives the file's facets and writes one `graph_commit` audit row plus the `_graph_lineage` row. A failed file rolls back alone; the run goes on and exits non-zero with the failed count. A file whose `graph_sha256` in `_graph_lineage` is unchanged is skipped; `--force --reason "<why>"` reloads it and is audited (`force_override`). `pubmed graph` refuses to start when `mesh_tree` is empty (run `mesh graph` first), and refuses a shard with no graph info (`re-extract with schema >= 1.6`). Add `--bulk` for a full-baseline load (section 4.6).
+**Graph and facets (schema 1.6).** `extract` writes the six relation files next to each shard (docs/09 section 4.5). `pubmed graph` loads them per raw file in one transaction: it deletes that file's earlier edge and facet rows, COPYs the six relations, derives the file's facets and writes one `graph_commit` audit row plus the `_graph_lineage` row. A failed file rolls back alone; the run goes on and exits non-zero with the failed count. A file whose `graph_sha256` in `_graph_lineage` is unchanged is skipped; `pubmed graph --force --reason "<why>"` reloads it and is audited (`force_override`); `run_pipeline.sh` forwards `--force --reason` to the graph wrapper. `pubmed graph` refuses to start when `mesh_tree` is empty (run `mesh graph` first), and refuses a shard with no graph info (`re-extract with schema >= 1.6`). Add `--bulk` for a full-baseline load (section 4.6).
 
 MeSH facets (`condition`, `test`, `demographic`, `special_population`, `drug`) live in `article_facets`, a plain table kept current per file (no materialized views). The rules are rows in `mesh_facet_rule` (rule_version 1 is seeded by migration 0006; edit them as `episteme_sys_admin` only, and bump `rule_version`). After a rule change or a new MeSH release:
 
@@ -381,7 +400,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.graph_builder
 PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.graph_builder facets --rebuild
 ```
 
-`--status` prints `rule_version`, `stale_rows`, `stale_files` and `files`, and exits 1 when any `article_facets` row carries an older `rule_version` than the newest rule, else 0. `--rebuild` recomputes one source file per transaction, with one audit row per file; it is restartable (files already at the newest `rule_version` are skipped), and `--rebuild --force --reason "<why>"` redoes every file. `--force` without `--reason` exits 2.
+`--status` prints `rule_version`, `stale_rows`, `stale_files` and `files`, and exits 1 when any `article_facets` row carries an older `rule_version` than the newest rule, else 0. `--rebuild` recomputes one source file per transaction, with one `graph_commit` audit row per file (and a `force_override` row per file with `--force`); it is restartable (files already at the newest `rule_version` are skipped), and `--rebuild --force --reason "<why>"` redoes every file. `--force` without `--reason` exits 2.
 
 **Data-quality audit.** Read-only, no database access (DuckDB over the shards and graph files):
 

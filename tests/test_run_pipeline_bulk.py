@@ -168,3 +168,22 @@ def test_bulk_graph_passes_validation_and_uses_the_pubmed_graph_group(tree):
         "bulk rebuild",
         "run_end",
     ]
+
+
+FAKE_GRAPH = """#!/usr/bin/env bash
+echo "graph $*" >> "$CALLS"
+exit 0
+"""
+
+
+def test_graph_forwards_force_and_reason_only_when_forced(tree):
+    script, calls, _ = tree
+    _write(script.parent / "pubmed" / "graph_pubmed.sh", FAKE_GRAPH)
+    proc, lines = _run(tree, "graph", "--force", "--reason", "R one")
+    assert proc.returncode == 0, proc.stderr
+    assert "graph --force --reason R one" in lines
+    calls.unlink()
+    proc, lines = _run(tree, "graph")
+    assert proc.returncode == 0, proc.stderr
+    assert "graph " in lines or "graph" in lines
+    assert not any(ln.startswith("graph ") and "--force" in ln for ln in lines)

@@ -255,8 +255,10 @@ fi
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
-# `load` reuses load_args above; `graph` gets no extra args (graph_builder.main
-# takes only --source/--raw-dir and errors on anything else, PF-8).
+# `load` reuses load_args above; `graph` gets --force --reason R only when forced
+# (graph_builder.main takes --source/--raw-dir/--processed-dir/--force/--reason).
+graph_args=()
+[ "$FORCE" = "1" ] && graph_args=(--force --reason "$REASON")
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
@@ -346,14 +348,14 @@ if [ "$SOURCE" = "pmc" ]; then
         download)    run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}" ;;
         extract)     run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}" ;;
         load)        run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}" ;;
-        graph)       run_stage graph "$HERE/pmc/graph_pmc.sh" ;;
+        graph)       run_stage graph "$HERE/pmc/graph_pmc.sh" "${graph_args[@]}" ;;
         materialize) run_stage materialize "$HERE/materialize_corpus.sh" ;;
         enrich)      run_stage enrich "$HERE/pmc/enrich_pmc.sh" ;;
         all)
             run_stage download "$HERE/pmc/download_pmc.sh" "${download_args[@]}"
             run_stage extract "$HERE/pmc/extract_pmc.sh" "${extract_args[@]}"
             run_stage load "$HERE/pmc/load_pmc.sh" "${load_args[@]}"
-            run_stage graph "$HERE/pmc/graph_pmc.sh"
+            run_stage graph "$HERE/pmc/graph_pmc.sh" "${graph_args[@]}"
             run_stage materialize "$HERE/materialize_corpus.sh"
             run_stage enrich "$HERE/pmc/enrich_pmc.sh"
             ;;
@@ -382,7 +384,7 @@ else
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
             fi
             ;;
-        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" ;;
+        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}" ;;
         serialize) run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
@@ -397,12 +399,12 @@ else
                 run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
                 if [ "$SOURCE" = "mesh" ]; then
-                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
                 fi
             elif _is_lit "$SOURCE"; then
                 run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
-                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh"
+                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
             else
                 log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi
