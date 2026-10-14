@@ -24,11 +24,16 @@ if [ -f "$here/.env" ]; then
   set +a
 fi
 
+usage="usage: mcpg-episteme.sh [episteme|episteme_test] [--admin]"
+if [ $# -gt 2 ]; then echo "mcpg-episteme.sh: too many arguments; $usage" >&2; exit 2; fi
 primary="${1:-episteme}"                     # episteme | episteme_test
 mode="${2:-}"
+case "$primary" in
+  -*|"") echo "mcpg-episteme.sh: expected a database name first, got '$primary'; $usage" >&2; exit 2 ;;
+esac
 case "$mode" in
   ""|--admin) ;;
-  *) echo "mcpg-episteme.sh: unknown option '$mode' (expected --admin)" >&2; exit 2 ;;
+  *) echo "mcpg-episteme.sh: unknown option '$mode'; $usage" >&2; exit 2 ;;
 esac
 host="${PGHOST:-localhost}"
 port="${PGPORT:-5433}"

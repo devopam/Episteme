@@ -97,9 +97,16 @@ def test_admin_server_is_superuser_with_alter_system_allowlist(tmp_path):
     assert v["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
     assert v["MCPG_ALLOW_ALTER_SYSTEM"] == "true"
     assert v["MCPG_ACCESS_MODE"] == "unrestricted"
-    allow = v["MCPG_ALTER_SYSTEM_ALLOWLIST"].split(",")
-    expected = {"shared_buffers", "max_wal_size", "checkpoint_timeout", "maintenance_work_mem"}
-    assert expected <= set(allow)
+    assert v["MCPG_ALTER_SYSTEM_ALLOWLIST"].split(",") == [
+        "shared_buffers",
+        "max_wal_size",
+        "min_wal_size",
+        "checkpoint_timeout",
+        "wal_compression",
+        "maintenance_work_mem",
+        "effective_cache_size",
+        "max_parallel_maintenance_workers",
+    ]
 
 
 def test_admin_superuser_defaults_to_postgres(tmp_path):
@@ -116,7 +123,22 @@ def test_admin_without_superuser_password_fails_without_printing_secrets(tmp_pat
     assert SECRET not in r.stdout + r.stderr
 
 
-def test_unknown_option_is_rejected(tmp_path):
-    r = _run(tmp_path, ["episteme", "--superuser"], {"EPISTEME_SYS_ADMIN_PASSWORD": "pw"})
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["episteme", "--superuser"],
+        ["--admin"],
+        ["episteme", "--admin", "extra"],
+        ["episteme", "", "--admin"],
+    ],
+)
+def test_bad_arguments_never_start_mcpg(tmp_path, args):
+    quoted = [f"'{a}'" for a in args]
+    r = _run(
+        tmp_path,
+        quoted,
+        {"EPISTEME_SYS_ADMIN_PASSWORD": "pw", "POSTGRES_SUPERUSER_PASSWORD": "pw"},
+    )
     assert r.returncode == 2
-    assert "unknown option" in r.stderr
+    assert "usage: mcpg-episteme.sh" in r.stderr
+    assert "MCPG_DATABASE_URL" not in r.stdout
