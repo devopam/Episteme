@@ -74,6 +74,7 @@ from episteme import audit_trail
 from episteme.data import graph_load
 from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
+from episteme.data.pubmed.relations import normalize_orcid
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
 # cites/mesh; ``pubmed`` loads graph files (``graph_load``); the rest contribute
@@ -467,7 +468,28 @@ def build(
     }
 
 
-def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
+_KINDS = (
+    "mesh",
+    "cites",
+    "part",
+    "mesh_parent",
+    "mesh_child",
+    "cited_by",
+    "comments",
+    "chemical",
+    "keyword",
+    "author",
+    "facet",
+)
+_KINDS_MSG = (
+    "unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', 'mesh_parent', "
+    "'mesh_child', 'cited_by', 'comments', 'chemical', 'keyword', 'author' or 'facet'"
+)
+
+
+def neighbours(
+    conn, pmid: str, hops: int = 1, kind: str = "mesh", ref_type: str | None = None
+) -> list[str]:
     """Hop-bounded neighbours of ``pmid``.
 
     ``kind="mesh"``: sorted distinct ``COALESCE(descriptor_ui, descriptor_name)``
@@ -490,21 +512,27 @@ def neighbours(conn, pmid: str, hops: int = 1, kind: str = "mesh") -> list[str]:
     ``hops`` is IGNORED. Always answered via the recursive-CTE back end
     (never routed through SQL/PGQ), same as ``part``.
 
+    ``kind="cited_by"``: sorted distinct ``src_pmid`` of articles citing ``pmid``
+    (direct only). ``"comments"``: ``"<ref_type>:<ref_pmid or ''>"`` (optionally
+    filtered by ``ref_type``). ``"chemical"``: ``substance_ui``. ``"keyword"``:
+    ``lower(keyword)``. ``"author"``: ``"<position>:<name>:<orcid or ''>"``.
+    ``"facet"``: ``"<facet>:<descriptor_ui>"``. All direct lookups; ``hops`` is
+    IGNORED.
+
     Any other ``kind`` raises ``ValueError``. When the ``episteme_graph``
     property graph exists, ``cites`` is answered via SQL/PGQ; otherwise (and
     always on this build) via a recursive CTE.
     """
-    if kind not in ("mesh", "cites", "part", "mesh_parent", "mesh_child"):
-        raise ValueError(
-            f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
-            "'mesh_parent' or 'mesh_child'"
-        )
+    if kind not in _KINDS:
+        raise ValueError(_KINDS_MSG.format(kind=kind))
     if kind == "cites" and _pgq_available(conn):
         return _neighbours_pgq(conn, pmid, hops)
-    return _neighbours_cte(conn, pmid, hops, kind)
+    return _neighbours_cte(conn, pmid, hops, kind, ref_type)
 
 
-def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
+def _neighbours_cte(
+    conn, pmid: str, hops: int, kind: str, ref_type: str | None = None
+) -> list[str]:
     """Recursive-CTE / direct-lookup back end for :func:`neighbours`."""
     if kind == "mesh":
         with conn.cursor() as cur:
@@ -524,12 +552,12 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
                 WITH RECURSIVE walk(dst_pmid, depth) AS (
                     SELECT dst_pmid, 1
                       FROM episteme.article_cites
-                     WHERE src_pmid = %(pmid)s
+                     WHERE src_pmid = %(pmid)s AND dst_pmid IS NOT NULL
                     UNION ALL
                     SELECT c.dst_pmid, w.depth + 1
                       FROM episteme.article_cites c
                       JOIN walk w ON c.src_pmid = w.dst_pmid
-                     WHERE w.depth < %(hops)s
+                     WHERE w.depth < %(hops)s AND c.dst_pmid IS NOT NULL
                 )
                 SELECT DISTINCT dst_pmid
                   FROM walk
@@ -568,10 +596,106 @@ def _neighbours_cte(conn, pmid: str, hops: int, kind: str) -> list[str]:
             )
             return [r[0] for r in cur.fetchall()]
 
-    raise ValueError(
-        f"unknown neighbours kind {kind!r}; expected 'mesh', 'cites', 'part', "
-        "'mesh_parent' or 'mesh_child'"
-    )
+    simple = {
+        "cited_by": (
+            "SELECT DISTINCT src_pmid FROM episteme.article_cites "
+            "WHERE dst_pmid = %s AND src_pmid IS NOT NULL ORDER BY 1",
+            (pmid,),
+        ),
+        "comments": (
+            "SELECT DISTINCT ref_type || ':' || COALESCE(ref_pmid, '') AS v "
+            "FROM episteme.article_comments WHERE pmid = %s "
+            "AND ref_type IS NOT NULL AND (%s::text IS NULL OR ref_type = %s) ORDER BY v",
+            (pmid, ref_type, ref_type),
+        ),
+        "chemical": (
+            "SELECT DISTINCT substance_ui FROM episteme.article_chemicals "
+            "WHERE pmid = %s AND substance_ui IS NOT NULL ORDER BY 1",
+            (pmid,),
+        ),
+        "keyword": (
+            "SELECT DISTINCT lower(keyword) AS v FROM episteme.article_keywords "
+            "WHERE pmid = %s AND keyword IS NOT NULL ORDER BY v",
+            (pmid,),
+        ),
+        "author": (
+            "SELECT DISTINCT position::text || ':' || "
+            "COALESCE(collective_name, trim(COALESCE(fore_name, '') || ' ' "
+            "|| COALESCE(last_name, ''))) || ':' || COALESCE(orcid, '') AS v "
+            "FROM episteme.article_authors WHERE pmid = %s ORDER BY v",
+            (pmid,),
+        ),
+        "facet": (
+            "SELECT DISTINCT facet || ':' || descriptor_ui AS v "
+            "FROM episteme.article_facets WHERE pmid = %s ORDER BY v",
+            (pmid,),
+        ),
+    }
+    if kind in simple:
+        sql, params = simple[kind]
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [r[0] for r in cur.fetchall()]
+
+    raise ValueError(_KINDS_MSG.format(kind=kind))
+
+
+def articles_for_mesh(
+    conn,
+    descriptor_ui: str,
+    include_descendants: bool = True,
+    major_only: bool = False,
+    limit: int = 1000,
+) -> list[str]:
+    """Sorted distinct pmids tagged with ``descriptor_ui`` (and, by default, any
+    descriptor beneath it in ``mesh_tree``). ``major_only`` keeps major-topic tags."""
+    uis = [descriptor_ui]
+    if include_descendants:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT d.descriptor_ui FROM episteme.mesh_tree t "
+                "JOIN episteme.mesh_tree d ON d.tree_number = t.tree_number "
+                "OR d.tree_number LIKE t.tree_number || '.%%' "
+                "WHERE t.descriptor_ui = %s",
+                (descriptor_ui,),
+            )
+            uis = sorted({descriptor_ui, *(r[0] for r in cur.fetchall())})
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_mesh "
+            "WHERE descriptor_ui = ANY(%s) AND (NOT %s OR major_topic IS TRUE) "
+            "ORDER BY pmid LIMIT %s",
+            (uis, major_only, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def articles_for_facet(
+    conn, facet: str, descriptor_ui: str | None = None, limit: int = 1000
+) -> list[str]:
+    """Sorted distinct pmids carrying ``facet`` (optionally one descriptor)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_facets "
+            "WHERE facet = %s AND (%s::text IS NULL OR descriptor_ui = %s) "
+            "ORDER BY pmid LIMIT %s",
+            (facet, descriptor_ui, descriptor_ui, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def articles_by_orcid(conn, orcid: str, limit: int = 1000) -> list[str]:
+    """Sorted distinct pmids with an author carrying ``orcid`` (any URL/bare form)."""
+    norm = normalize_orcid(orcid)
+    if norm is None:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT pmid FROM episteme.article_authors "
+            "WHERE orcid = %s ORDER BY pmid LIMIT %s",
+            (norm, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
 
 
 def _pgq_available(conn) -> bool:
