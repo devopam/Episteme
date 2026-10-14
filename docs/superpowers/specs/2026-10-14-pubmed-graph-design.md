@@ -125,10 +125,12 @@ REVOKEs are run by the operator, as for 0005.
 
   The seed lists descriptor UIs, not names, and is checked against the loaded `mesh` source in
   a pg test.
-- **Privileges.** `episteme_app` keeps SELECT only on every new or changed table. The
-  migration REVOKEs INSERT, UPDATE and DELETE (the 0005 lesson: `schema.sql`'s default
-  privileges grant DML). `mesh_facet_rule` is SELECT for `episteme_app`; only
-  `episteme_sys_admin` edits rules. `_graph_lineage` gets no `episteme_app` privileges.
+- **Privileges.** The pipeline writes as `episteme_app` (the article loader, the `pmc` graph and
+  `_lineage` all do), so the new data tables and `_graph_lineage` keep `schema.sql`'s standard
+  grants, like `articles` and `_lineage`. The only exception is `mesh_facet_rule`: the migration
+  REVOKEs INSERT, UPDATE, DELETE and TRUNCATE on it from `episteme_app`, so only
+  `episteme_sys_admin` edits facet rules. (Corrected while planning: an earlier draft said
+  "SELECT only on every new table", which would have stopped the graph load itself.)
 
 ### 3. Graph load (`run_pipeline.sh pubmed graph`)
 
