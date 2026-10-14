@@ -14,7 +14,12 @@ article's raw JATS XML under ``raw_dir`` and derives two edge sets per
     ``qualifiers`` are ``NULL``. ``neighbours(kind="mesh")`` falls back to
     ``descriptor_name`` when ``descriptor_ui`` is absent.
 
-For every SP2 literature source (``pmc`` plus ``pubmed``, ``apollo``,
+``pubmed`` is routed to ``graph_load.build_pubmed_graph``: it loads the
+extractor's per-relation graph files (mesh, cites, comments, chemicals,
+keywords, authors) and derives MeSH facets, one committed transaction per
+source file. The phases below do not run for pubmed.
+
+For every other SP2 literature source (``pmc``, ``apollo``,
 ``europepmc_manuscript``, ``europepmc_preprint``, ``guidelines``, ``bookshelf``
 -- see ``_GRAPH_SOURCES``) ``build`` also derives a third set, straight from the
 loaded rows with no raw XML involved:
@@ -66,11 +71,13 @@ import defusedxml.ElementTree as ET
 import psycopg
 
 from episteme import audit_trail
+from episteme.data import graph_load
 from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
-# cites/mesh; the rest contribute ``article_parts`` (book -> part) edges only.
+# cites/mesh; ``pubmed`` loads graph files (``graph_load``); the rest contribute
+# ``article_parts`` (book -> part) edges only.
 # Anything outside this set is still ``NotImplementedError`` (e.g. ``chembl``).
 _GRAPH_SOURCES = (
     "pmc",
@@ -205,7 +212,16 @@ def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
     return out
 
 
-def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, Any]:
+def build(
+    conn,
+    *,
+    source: str,
+    raw_dir: Path | str | None,
+    run_id: str,
+    processed_dir: Path | str | None = None,
+    force: bool = False,
+    reason: str | None = None,
+) -> dict[str, Any]:
     """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc,
     raw MeSH descriptor XML for mesh).
 
@@ -237,9 +253,21 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
     mesh_hierarchy, mesh_tree, mesh_empty_parse}``.
+
+    ``source="pubmed"`` is different: it loads the extractor's per-relation graph
+    files from ``processed_dir`` via :func:`graph_load.build_pubmed_graph` (one
+    committed transaction per source file; ``raw_dir`` is unused) and returns that
+    function's ``{files, loaded, skipped, failed, rows, facets}``.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
+
+    if source == "pubmed":
+        if processed_dir is None:
+            raise ValueError("processed_dir is required for source 'pubmed'")
+        return graph_load.build_pubmed_graph(
+            conn, processed_dir=Path(processed_dir), run_id=run_id, force=force, reason=reason
+        )
 
     raw_dir = Path(raw_dir)
 
@@ -608,9 +636,50 @@ def main(argv: list[str] | None = None) -> int:
         "--raw-dir",
         type=Path,
         default=None,
-        help="defaults to <raw_root>/pmc/oa_comm/xml for source=pmc",
+        help="defaults to <raw_root>/pmc/oa_comm/xml for source=pmc; unused for pubmed",
     )
+    p.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=settings.processed_root,
+        help="pubmed: where the extractor wrote its markers and graph files",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="pubmed: reload files whose graph hash is unchanged (needs --reason; audited)",
+    )
+    p.add_argument("--reason", default=None, help="why --force is used (recorded in the audit)")
     args = p.parse_args(argv)
+
+    run_id = (
+        settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+
+    if args.source == "pubmed":
+        try:
+            with connection() as conn:
+                res = build(
+                    conn,
+                    source="pubmed",
+                    raw_dir=args.raw_dir,
+                    run_id=run_id,
+                    processed_dir=args.processed_dir,
+                    force=args.force,
+                    reason=args.reason,
+                )
+        except graph_load.GraphLoadError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
+        print(
+            f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
+            f"failed={len(res['failed'])} facets={res['facets']} {rows}"
+        )
+        if res["failed"]:
+            print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
+            return 1
+        return 0
 
     raw_dir = args.raw_dir
     if raw_dir is None:
@@ -620,9 +689,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
             return 2
 
-    run_id = (
-        settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    )
     with connection() as conn:
         res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
         conn.commit()

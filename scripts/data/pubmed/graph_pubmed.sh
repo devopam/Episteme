@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# SP2 knowledge-graph wrapper: pubmed raw dir -> episteme.article_cites /
-# article_mesh (+ article_parts). Thin shell over `python -m
-# episteme.data.graph_builder --source pubmed --raw-dir <raw>/pubmed`.
-# graph_builder.main() takes only --source/--raw-dir, so run_pipeline.sh passes
-# NO extra args; "$@" is kept for forward-compat / direct invocation only.
+# PubMed knowledge-graph wrapper: the extractor's per-relation graph files under
+# <processed>/staging/pubmed_graph -> episteme.article_mesh / article_cites /
+# article_comments / article_chemicals / article_keywords / article_authors and
+# article_facets, one transaction per source file. Thin shell over `python -m
+# episteme.data.graph_builder --source pubmed --processed-dir <processed>`.
+# "$@" passes through --force --reason "..." (audited) for direct invocation.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
@@ -20,4 +21,5 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 exec "$PY" -m episteme.data.graph_builder --source pubmed \
-    --raw-dir "${EPISTEME_RAW_ROOT:-./01_raw}/pubmed" "$@"
+    --raw-dir "${EPISTEME_RAW_ROOT:-./01_raw}/pubmed" \
+    --processed-dir "${EPISTEME_PROCESSED_ROOT:-./02_processed}" "$@"
