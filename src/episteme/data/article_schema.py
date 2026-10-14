@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 # Schema changelog:
 #   1.1  contract v1.1 (2026-08-31 sample audit): PMC provenance cols, license norm, status rules.
 #   1.2  (SP1-α, 2026-09-02): SOURCES extended to the full Phase-0 roadmap list.
@@ -29,6 +29,9 @@ SCHEMA_VERSION = "1.4"
 #        an exact SPDX-identifier match (apache-2.0 / mit / bsd-*-clause / isc, see
 #        _PERMISSIVE_LICENSE_IDS) -> license="permissive" -> subset="commercial".
 #        No column/type change; row shape unchanged.
+#   1.5  (2026-10-14): authors / mesh / publication_types elements over
+#        MAX_LIST_ELEMENT_BYTES (2,000) are cut on a character boundary and end in an
+#        ellipsis (GIN index entries are limited to 2,712 bytes). Row shape unchanged.
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200
@@ -275,6 +278,29 @@ def subset_from_license(license_code: str, *, default: str = "open_metadata") ->
     return default
 
 
+# authors, mesh and publication_types carry GIN indexes (schema.sql). A GIN entry
+# over 2,712 bytes fails CREATE INDEX (and an insert while the index exists), and
+# PubMed CollectiveName entries can hold a whole member list (5,658 chars seen).
+# Elements longer than this are cut on a character boundary and end in "…".
+MAX_LIST_ELEMENT_BYTES = 2000
+GIN_LIST_COLUMNS = ("authors", "mesh", "publication_types")
+
+
+def _cap_list_element(s: str) -> str:
+    b = s.encode("utf-8")
+    if len(b) <= MAX_LIST_ELEMENT_BYTES:
+        return s
+    cut = b[: MAX_LIST_ELEMENT_BYTES - 3].decode("utf-8", errors="ignore")
+    return cut + "…"
+
+
+def cap_list_elements(values: list[Any] | None) -> list[Any] | None:
+    """``values`` with every string over ``MAX_LIST_ELEMENT_BYTES`` cut (see above)."""
+    if not values:
+        return values
+    return [_cap_list_element(v) if isinstance(v, str) else v for v in values]
+
+
 def empty_article_row() -> dict[str, Any]:
     return {c: None for c in ARTICLE_COLUMNS}
 
@@ -283,6 +309,9 @@ def finalize_row(row: dict[str, Any]) -> dict[str, Any]:
     """Fill text, status, hash, retrieved_at if missing."""
     out = empty_article_row()
     out.update({k: v for k, v in row.items() if k in out})
+
+    for col in GIN_LIST_COLUMNS:
+        out[col] = cap_list_elements(out.get(col))
 
     if not out.get("text"):
         text = build_text(out.get("title"), out.get("abstract"), out.get("body_text"))

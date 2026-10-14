@@ -4,18 +4,21 @@ from episteme.data.article_schema import (
     ARTICLE_COLUMNS,
     BOOK_META_KEYS,
     LICENSE_PUBLIC_DOMAIN,
+    MAX_LIST_ELEMENT_BYTES,
     MIN_OK_TEXT_LEN,
     SCHEMA_VERSION,
     SOURCES,
     build_text,
+    cap_list_elements,
     decide_extract_status,
+    finalize_row,
     normalize_license,
     subset_from_license,
 )
 
 
 def test_schema_version_and_columns():
-    assert SCHEMA_VERSION == "1.4"
+    assert SCHEMA_VERSION == "1.5"
     assert ARTICLE_COLUMNS[-2:] == ["container_id", "book_meta"]
     assert "isbn" in BOOK_META_KEYS
 
@@ -175,3 +178,43 @@ def test_creativecommons_url_is_case_insensitive():
 
 def test_creativecommons_by_url_without_version_is_cc_by():
     assert normalize_license("https://creativecommons.org/licenses/by/")[0] == "CC BY"
+
+
+def test_finalize_row_caps_gin_indexed_list_elements():
+    # PubMed CollectiveName entries can hold a whole member list (5,658 chars seen,
+    # pmid 32611914); a GIN index entry over 2,712 bytes fails CREATE INDEX.
+    long_ascii = "COVID Laboratory Team: " + "Srima Adhikari, " * 400
+    long_utf8 = "Angélique Doré " * 400
+    row = finalize_row(
+        {
+            "id": "pmid:1",
+            "title": "t",
+            "authors": ["Jane Doe", long_ascii, long_utf8],
+            "mesh": ["D000001", long_ascii],
+            "publication_types": [long_utf8],
+        }
+    )
+    for col in ("authors", "mesh", "publication_types"):
+        for el in row[col]:
+            assert len(el.encode("utf-8")) <= MAX_LIST_ELEMENT_BYTES
+    assert row["authors"][0] == "Jane Doe"
+    assert row["mesh"][0] == "D000001"
+    assert row["authors"][1].startswith("COVID Laboratory Team: Srima Adhikari")
+    assert row["authors"][1].endswith("…")
+    for v in (row["authors"][2], row["publication_types"][0], row["mesh"][1]):
+        assert v.endswith("…")
+        v.encode("utf-8")  # cut on a character boundary, still valid UTF-8
+    assert row["authors"][2].startswith("Angélique Doré")
+    assert MAX_LIST_ELEMENT_BYTES < 2712
+
+
+def test_finalize_row_leaves_short_and_missing_lists_alone():
+    row = finalize_row({"id": "pmid:2", "title": "t", "authors": ["A B", "C D"]})
+    assert row["authors"] == ["A B", "C D"]
+    assert row["mesh"] is None
+
+
+def test_cap_list_elements_passes_none_and_non_strings_through():
+    assert cap_list_elements(None) is None
+    assert cap_list_elements([]) == []
+    assert cap_list_elements(["a", None]) == ["a", None]

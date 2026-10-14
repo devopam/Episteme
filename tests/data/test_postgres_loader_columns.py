@@ -150,3 +150,27 @@ def test_result_carries_timing_fields(tmp_path):
     for key in ("read_sec", "copy_sec", "rows_per_sec"):
         assert isinstance(result[key], float), key
         assert result[key] >= 0.0, key
+
+
+def test_batch_tuples_cap_oversized_list_elements_from_old_shards():
+    # A shard staged before the cap (schema < 1.5) can carry a 5,658-byte
+    # CollectiveName; the COPY path caps it so the GIN index accepts the row.
+    from episteme.data.article_schema import GIN_LIST_COLUMNS, MAX_LIST_ELEMENT_BYTES
+
+    row = {c: None for c in postgres_loader.article_schema.ARTICLE_COLUMNS}
+    row.update(
+        id="pmid:9",
+        source="pubmed",
+        year=2020,
+        authors=["Jane Doe", "Team: " + "X Y, " * 2000],
+        mesh=None,
+        publication_types=["Journal Article"],
+    )
+    cols = {c: [row[c]] for c in row}
+    hot, _ = postgres_loader._batch_tuples(cols)
+    for c in GIN_LIST_COLUMNS:
+        v = hot[0][postgres_loader.HOT_COLUMNS.index(c)]
+        assert v is None or all(len(e.encode("utf-8")) <= MAX_LIST_ELEMENT_BYTES for e in v)
+    authors = hot[0][postgres_loader.HOT_COLUMNS.index("authors")]
+    assert authors[0] == "Jane Doe"
+    assert authors[1].endswith("…")
