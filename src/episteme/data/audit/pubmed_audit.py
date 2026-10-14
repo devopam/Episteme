@@ -5,7 +5,14 @@ data. Writes ``pubmed_audit.json`` and ``pubmed_audit.md`` and returns the
 report dict.
 
     python -m episteme.data.audit.pubmed_audit [--processed-dir] [--raw-dir]
-        [--out-dir] [--sample-files N]
+        [--out-dir] [--sample-files N] [--duckdb-temp DIR]
+
+The default DuckDB memory limit (2GB) is deliberately below the 4GB
+EPISTEME_DUCKDB_MEMORY_LIMIT so the audit can share the machine with
+PostgreSQL. The DOI probe uses the same ``own_article_ids`` as the extractor,
+so it catches stale shards written by older extractor code, not bugs inside
+``own_article_ids`` itself. ``doi_probe["status"]`` is "ok", "skipped_no_raw_dir",
+"no_records" or (only for ``sample_files <= 0``) "skipped_by_request".
 """
 
 from __future__ import annotations
@@ -53,13 +60,18 @@ def _norm_doi(doi: str | None) -> str | None:
     return doi.strip().lower() if doi and doi.strip() else None
 
 
-def _doi_probe(con, raw_dir: Path | None, sample_files: int) -> dict[str, int]:
+def _doi_probe(con, raw_dir: Path | None, sample_files: int) -> dict[str, Any]:
     """Re-read evenly spaced raw files; compare each record's own DOI to the shard's."""
-    probe = {"files": 0, "records": 0, "mismatch": 0}
-    if raw_dir is None or sample_files <= 0:
+    probe: dict[str, Any] = {"files": 0, "records": 0, "mismatch": 0, "status": "ok"}
+    if sample_files <= 0:
+        probe["status"] = "skipped_by_request"
+        return probe
+    if raw_dir is None or not Path(raw_dir).is_dir():
+        probe["status"] = "skipped_no_raw_dir"
         return probe
     files = sorted(discover_pubmed_files(raw_dir))
     if not files:
+        probe["status"] = "no_records"
         return probe
     n = min(sample_files, len(files))
     picks = sorted({files[(i * len(files)) // n] for i in range(n)})
@@ -91,6 +103,8 @@ def _doi_probe(con, raw_dir: Path | None, sample_files: int) -> dict[str, int]:
                 probe["records"] += 1
                 if own != _norm_doi(stored[pmid]):
                     probe["mismatch"] += 1
+    if probe["records"] == 0:
+        probe["status"] = "no_records"
     return probe
 
 
@@ -108,7 +122,16 @@ def run_audit(
     out_dir.mkdir(parents=True, exist_ok=True)
     temp = Path(duckdb_temp) if duckdb_temp else out_dir / "_duckdb_tmp"
     con = duckdb_conn.connect(memory_limit=memory_limit, temp_dir=temp)
-    con.execute("set preserve_insertion_order=false")
+    try:
+        con.execute("set preserve_insertion_order=false")
+        return _audit(con, processed_dir, raw_dir, out_dir, sample_files)
+    finally:
+        con.close()
+
+
+def _audit(
+    con, processed_dir: Path, raw_dir: Path | None, out_dir: Path, sample_files: int
+) -> dict[str, Any]:
 
     glob = (processed_dir / "staging" / SOURCE / "*.parquet").as_posix().replace("'", "''")
     t0 = time.time()
@@ -312,7 +335,6 @@ def run_audit(
     R["doi_probe"] = _doi_probe(con, raw_dir, sample_files)
 
     R["total_sec"] = round(time.time() - t0, 1)
-    con.close()
 
     (out_dir / "pubmed_audit.json").write_text(
         json.dumps(R, indent=1, default=str), encoding="utf-8"
@@ -333,7 +355,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--raw-dir", type=Path, default=s.raw_root / SOURCE)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--sample-files", type=int, default=5)
-    ap.add_argument("--memory-limit", default="2GB")
+    ap.add_argument(
+        "--memory-limit",
+        default="2GB",
+        help="DuckDB memory limit; deliberately below the 4GB EPISTEME_DUCKDB_MEMORY_LIMIT "
+        "so the audit can share the machine with PostgreSQL",
+    )
+    ap.add_argument("--duckdb-temp", type=Path, default=None, help="spill directory (use the NVMe)")
     args = ap.parse_args(argv)
     out_dir = args.out_dir or args.processed_dir / "_ops" / "pubmed" / "audit"
     R = run_audit(
@@ -342,9 +370,19 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=out_dir,
         sample_files=args.sample_files,
         memory_limit=args.memory_limit,
+        duckdb_temp=args.duckdb_temp,
     )
     print(out_dir / "pubmed_audit.md")
-    print(f"rows={R['rows']:,} doi_probe={R['doi_probe']}")
+    probe = R["doi_probe"]
+    print(f"rows={R['rows']:,} doi_probe={probe}")
+    if args.sample_files == 0:
+        return 0
+    if probe["status"] != "ok":
+        print(f"WARNING: DOI probe did not run ({probe['status']}); the gate is NOT verified")
+        return 1
+    if probe["mismatch"] > 0:
+        print(f"WARNING: DOI probe found {probe['mismatch']} mismatches")
+        return 1
     return 0
 
 
