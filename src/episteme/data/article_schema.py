@@ -301,6 +301,13 @@ def cap_list_elements(values: list[Any] | None) -> list[Any] | None:
     return [_cap_list_element(v) if isinstance(v, str) else v for v in values]
 
 
+def cap_text(s: str | None) -> str | None:
+    """One string under the same ``MAX_LIST_ELEMENT_BYTES`` cap as list elements."""
+    if s is None:
+        return None
+    return cap_list_elements([s])[0]
+
+
 def empty_article_row() -> dict[str, Any]:
     return {c: None for c in ARTICLE_COLUMNS}
 
