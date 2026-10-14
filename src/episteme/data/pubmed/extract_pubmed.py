@@ -64,6 +64,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.graph_files import GraphFileWriter  # noqa: E402
 from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import run_per_file  # noqa: E402
 from episteme.data.pubmed.relations import (  # noqa: E402
@@ -372,17 +373,20 @@ def process_one(
     t0 = time.time()
     status_counts: Counter[str] = Counter()
     rows: list[dict[str, Any]] = []
+    counters: Counter[str] = Counter()
     try:
-        for row in iter_rows_from_file(path, source_file=basename):
-            status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
+        with GraphFileWriter(processed_dir, SOURCE, basename) as gw:
+            for row, edges, rec_counters in iter_records_from_file(path, source_file=basename):
+                status_counts[str(row.get("extract_status"))] += 1
+                rows.append(row)
+                counters.update(rec_counters)
+                for rel_name, rel_rows in edges.items():
+                    if rel_rows:
+                        gw.add(rel_name, rel_rows)
+            graph_info = gw.close()
 
         write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
+            rows, processed_dir, source=SOURCE, source_file=basename, prefer_parquet=True
         )
         elapsed = round(time.time() - t0, 4)
         stats = {
@@ -390,6 +394,9 @@ def process_one(
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
+            **graph_info,
+            "orcid_dropped": counters["orcid_dropped"],
+            "edges_skipped_no_pmid": counters["edges_skipped_no_pmid"],
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
         _best_effort_audit(basename, len(rows))
