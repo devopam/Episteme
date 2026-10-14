@@ -275,6 +275,22 @@ def subset_from_license(license_code: str, *, default: str = "open_metadata") ->
     return default
 
 
+# authors, mesh and publication_types carry GIN indexes (schema.sql). A GIN entry
+# over 2,712 bytes fails CREATE INDEX (and an insert while the index exists), and
+# PubMed CollectiveName entries can hold a whole member list (5,658 chars seen).
+# Elements longer than this are cut on a character boundary and end in "…".
+MAX_LIST_ELEMENT_BYTES = 2000
+_GIN_LIST_COLUMNS = ("authors", "mesh", "publication_types")
+
+
+def _cap_list_element(s: str) -> str:
+    b = s.encode("utf-8")
+    if len(b) <= MAX_LIST_ELEMENT_BYTES:
+        return s
+    cut = b[: MAX_LIST_ELEMENT_BYTES - 3].decode("utf-8", errors="ignore")
+    return cut + "…"
+
+
 def empty_article_row() -> dict[str, Any]:
     return {c: None for c in ARTICLE_COLUMNS}
 
@@ -283,6 +299,10 @@ def finalize_row(row: dict[str, Any]) -> dict[str, Any]:
     """Fill text, status, hash, retrieved_at if missing."""
     out = empty_article_row()
     out.update({k: v for k, v in row.items() if k in out})
+
+    for col in _GIN_LIST_COLUMNS:
+        if out.get(col):
+            out[col] = [_cap_list_element(v) if isinstance(v, str) else v for v in out[col]]
 
     if not out.get("text"):
         text = build_text(out.get("title"), out.get("abstract"), out.get("body_text"))
