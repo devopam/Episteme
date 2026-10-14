@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = "1.5"
+SCHEMA_VERSION = "1.6"
 # Schema changelog:
 #   1.1  contract v1.1 (2026-08-31 sample audit): PMC provenance cols, license norm, status rules.
 #   1.2  (SP1-α, 2026-09-02): SOURCES extended to the full Phase-0 roadmap list.
@@ -32,6 +32,10 @@ SCHEMA_VERSION = "1.5"
 #   1.5  (2026-10-14): authors / mesh / publication_types elements over
 #        MAX_LIST_ELEMENT_BYTES (2,000) are cut on a character boundary and end in an
 #        ellipsis (GIN index entries are limited to 2,712 bytes). Row shape unchanged.
+#   1.6  (2026-10-14): pubmed doi/pmcid read only from the record's own
+#        PubmedData/ArticleIdList (1.5 and earlier could take a cited
+#        reference's DOI); is_retracted only for "Retracted Publication" or a
+#        RetractionIn link; pubmed writes graph relation files. Row shape unchanged.
 
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200

@@ -18,7 +18,7 @@ from episteme.data.article_schema import (
 
 
 def test_schema_version_and_columns():
-    assert SCHEMA_VERSION == "1.5"
+    assert SCHEMA_VERSION == "1.6"
     assert ARTICLE_COLUMNS[-2:] == ["container_id", "book_meta"]
     assert "isbn" in BOOK_META_KEYS
 
