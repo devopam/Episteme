@@ -101,14 +101,17 @@ Notes on what is and is not code-backed:
 |-------|--------------|-------|
 | `episteme.articles` | `LIST (source)`; `pmc` sub-partitioned `RANGE (year)`; `DEFAULT` catch-all (`bookshelf` also has a year ladder via migration 0002) | Narrow hot row per article (no text columns) |
 | `episteme.article_body` | `LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002) | `title`, `abstract`, `body_text`, `text`; primary key `(article_id, source)` |
-| `episteme.article_cites` | `HASH (src_pmid)`, 8 buckets | Citation edges `(src_pmid, dst_pmid, source_file)` |
-| `episteme.article_mesh` | `HASH (pmid)`, 8 buckets | `pmid`, `descriptor_ui`, `descriptor_name`, `major_topic`, `qualifiers`, `source_file` |
+| `episteme.article_cites` | `HASH (src_pmid)`, 8 buckets | Citation edges `(src_pmid, dst_pmid, dst_doi, ref_text, source_file)`; `dst_pmid` is nullable (migration 0006) |
+| `episteme.article_mesh` | `HASH (pmid)`, 8 buckets | `pmid`, `descriptor_ui`, `descriptor_name`, `major_topic`, `qualifier_uis` (migration 0006), `qualifiers`, `source_file` |
 | `episteme.article_parts` | `HASH`, 8 buckets (migration 0002) | Book to part edges |
 | `episteme.mesh_hierarchy` | unpartitioned (migration 0003) | MeSH parent/child descriptor edges |
 | `episteme.id_map` | none | PMID / PMCID / DOI cross-references |
 | `episteme.chunks` | `HASH (article_id)`, 8 buckets | Phase 1 RAG scaffold; `embedding` and `chunk_tsv` need migration 0001 and pgvector / pg_search |
 | `episteme._runs`, `episteme._lineage` | none, fillfactor 100 | Run and load-stage records |
-| `episteme._bulk_index_state` | none (migration 0005) | Indexes dropped by bulk-load mode, pending their rebuild; empty except during a `--bulk` load |
+| `episteme._bulk_index_state` | none (migration 0005) | Indexes dropped by bulk-load mode (groups `articles` and `pubmed_graph`), pending their rebuild; empty except during a `--bulk` stage |
+| `episteme.article_comments`, `article_chemicals`, `article_keywords`, `article_authors`, `article_facets` | `HASH (pmid)`, 8 buckets (migration 0006) | PubMed graph relations and MeSH facets, each with a permanent `(source_file)` index; docs/09 section 4.5 |
+| `episteme.mesh_tree`, `episteme.mesh_facet_rule` | none (migration 0006) | MeSH descriptor tree numbers (filled by `mesh graph`); facet rules (seeded, read-only to `episteme_app`) |
+| `episteme._graph_lineage` | none (migration 0006) | One row per graphed raw file: `graph_sha256`, rows per relation, run id |
 | `episteme._audit` | `RANGE (recorded_at)` monthly plus `DEFAULT` | Append-only hash-chained audit trail |
 
 ## 7. Implementation Phasing (shipped state)

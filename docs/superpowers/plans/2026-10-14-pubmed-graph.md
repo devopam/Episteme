@@ -567,7 +567,11 @@ def test_comments_chemicals_keywords():
     )
     assert chem[1]["registry_number"] == "EC 1.1.1.1"
     kw = edges["keywords"][0]
-    assert (kw["keyword"], kw["owner"], kw["major_topic"]) == ("insulin resistance", "NOTNLM", False)
+    assert (kw["keyword"], kw["owner"], kw["major_topic"]) == (
+        "insulin resistance",
+        "NOTNLM",
+        False,
+    )
 
 
 def test_authors_orcid_and_affiliations():

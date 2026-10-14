@@ -117,13 +117,18 @@ REVOKEs are run by the operator, as for 0005.
 - `mesh_facet_rule` is seeded by the migration with rule_version 1:
   - **condition:** tree prefixes `C`, `F03`;
   - **test:** `E01`, `E05`;
-  - **demographic:** the check-tag descriptors (Humans, Animals, Male, Female) and the `M01.060`
-    age-group prefix;
-  - **special_population:** Pregnancy, Pregnant People, Infant Newborn, Infant Premature,
-    Aged 80 and over, and the `M01` population-group prefixes other than `M01.060`;
+  - **demographic:** the check-tag descriptors Humans (D006801), Animals (D000818), Male
+    (D008297) and Female (D005260), and the tree prefixes `M01.060` (age groups), `M01.390`
+    (Men) and `M01.975` (Women);
+  - **special_population:** the five descriptors Pregnancy, Pregnant People, Infant Newborn,
+    Infant Premature and Aged 80 and over, and the specific `M01` population-group prefixes
+    seeded in migration 0006 (`M01.066`, `M01.150`, `M01.169`, `M01.189`, `M01.270`,
+    `M01.325`, `M01.385`, `M01.686`, `M01.729`, `M01.755`, `M01.873`, `M01.920`, `M01.925`,
+    `M01.930`); not every `M01` group other than `M01.060`;
   - **drug:** tree prefix `D`.
 
-  The seed lists descriptor UIs, not names, and is checked against the loaded `mesh` source in
+  The seed lists descriptor UIs, not names. The fixtures hold no real MeSH, so the check of the
+  seed UIs against the production `mesh` rows is a read-only rollout step (Rollout step 8), not
   a pg test.
 - **Privileges.** The pipeline writes as `episteme_app` (the article loader, the `pmc` graph and
   `_lineage` all do), so the new data tables and `_graph_lineage` keep `schema.sql`'s standard
@@ -251,7 +256,7 @@ under `<processed>/_ops/pubmed/audit/`. Checks:
   - per-file facets, `facets --rebuild` and `--status`;
   - every new helper, including descendant lookup;
   - `bulk_indexes` groups (drop, rebuild, status for `pubmed_graph`);
-  - the seed descriptor UIs exist in a loaded `mesh` fixture.
+  - the migration seeds 31 rules (2 + 2 + 1 + 7 + 19 across the five facets).
 - **No-DB tests:** the dispatcher accepts `graph --bulk`; the audit module runs on fixture
   shards.
 
@@ -271,7 +276,8 @@ One big process at a time, in this order:
 6. Audit v2. **Stop here for the user's review before loading.**
 7. `pubmed load --bulk --force --reason "schema 1.6: DOI and retraction fixes"`. Estimated
    10–14 hours; the trial in step 4 will refine this.
-8. `mesh graph` (fills `mesh_tree`), then `pubmed graph --bulk`.
+8. `mesh graph` (fills `mesh_tree`), then check the seed descriptor UIs of
+   `mesh_facet_rule` against the production `mesh` rows (read-only), then `pubmed graph --bulk`.
 9. Verify:
    - the audit chain;
    - that every index is valid and has its audit row;

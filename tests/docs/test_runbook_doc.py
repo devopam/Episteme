@@ -144,7 +144,7 @@ def test_flags_are_real_and_used_sensibly():
         if "--dry-run" in flags:
             assert stage == "download", f"--dry-run is download-only: {rest}"
         if "--bulk" in flags:
-            assert stage == "load", f"--bulk is load-only: {rest}"
+            assert stage in ("load", "graph"), f"--bulk is load- and graph-only: {rest}"
         if "--max-files" in flags:
             assert stage in MAX_FILES_STAGES, f"--max-files is ignored by {stage}: {rest}"
             if stage == "download":
