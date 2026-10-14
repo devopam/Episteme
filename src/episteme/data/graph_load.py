@@ -260,3 +260,92 @@ def build_pubmed_graph(
         out["facets"] += res["facets"]
     out["failed"].sort()
     return out
+
+
+_STALE_SQL = """
+WITH rv AS (SELECT max(rule_version) v FROM episteme.mesh_facet_rule)
+SELECT rv.v,
+       count(f.*) FILTER (WHERE f.rule_version < rv.v),
+       count(DISTINCT f.source_file) FILTER (WHERE f.rule_version < rv.v)
+  FROM rv LEFT JOIN episteme.article_facets f ON true
+ GROUP BY rv.v
+"""
+
+_FACET_FILES_SQL = """
+SELECT m.source_file
+  FROM (SELECT DISTINCT source_file FROM episteme.article_mesh) m
+  JOIN (SELECT DISTINCT source_file FROM episteme._graph_lineage) l USING (source_file)
+ ORDER BY 1
+"""
+
+
+def facet_status(conn) -> dict[str, int]:
+    """Newest rule version and how many facet rows / files are stale against it."""
+    with conn.cursor() as cur:
+        cur.execute(_STALE_SQL)
+        row = cur.fetchone()
+        cur.execute(_FACET_FILES_SQL)
+        files = len(cur.fetchall())
+    conn.rollback()  # read-only; end the transaction
+    return {
+        "rule_version": row[0] if row and row[0] is not None else 0,
+        "stale_rows": row[1] if row else 0,
+        "stale_files": row[2] if row else 0,
+        "files": files,
+    }
+
+
+def rebuild_facets(
+    conn, *, run_id: str, force: bool = False, reason: str | None = None
+) -> dict[str, int]:
+    """Re-derive facets per source file under the newest rule version.
+
+    A file is skipped when it has facet rows and none is stale (unless ``force``).
+    Each rebuilt file is one committed transaction, so the run is restartable.
+    """
+    if force and not reason:
+        raise GraphLoadError("--force requires --reason")
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(rule_version) FROM episteme.mesh_facet_rule")
+        newest = cur.fetchone()[0]
+        cur.execute(_FACET_FILES_SQL)
+        files = [r[0] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT source_file, bool_or(rule_version < %s) FROM episteme.article_facets "
+            "GROUP BY source_file",
+            (newest,),
+        )
+        stale_by_file = dict(cur.fetchall())
+    conn.rollback()
+    out = {"rebuilt": 0, "skipped": 0}
+    for sf in files:
+        if not force and stale_by_file.get(sf) is False:
+            out["skipped"] += 1
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM episteme.article_facets WHERE source_file = %s", (sf,))
+                cur.execute(FACET_SQL, {"sf": sf})
+                facets = cur.rowcount
+            if force:
+                audit_trail.record(
+                    "force_override",
+                    conn=conn,
+                    object=f"facets {sf}",
+                    reason=reason,
+                    run_id=run_id,
+                )
+            audit_trail.record(
+                "graph_commit",
+                conn=conn,
+                object=f"facets {sf}",
+                rows_affected=facets,
+                new_value={"rule_version": newest, "facets": facets},
+                run_id=run_id,
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        out["rebuilt"] += 1
+    return out

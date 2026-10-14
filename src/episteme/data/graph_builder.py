@@ -622,12 +622,53 @@ def _neighbours_pgq(conn, pmid: str, hops: int) -> list[str]:
         raise RuntimeError("SQL/PGQ neighbours query failed; use the CTE path") from exc
 
 
+def _facets_main(argv: list[str]) -> int:
+    import argparse
+    from datetime import datetime, timezone
+
+    from episteme.config import get_settings
+    from episteme.data.db.connection import connection
+
+    p = argparse.ArgumentParser(prog="graph_builder facets", description="MeSH facet maintenance")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--rebuild", action="store_true", help="recompute stale facets per file")
+    mode.add_argument("--status", action="store_true", help="exit 1 when facets are stale")
+    p.add_argument("--force", action="store_true", help="rebuild every file (needs --reason)")
+    p.add_argument("--reason", default=None, help="why --force is used (recorded in the audit)")
+    args = p.parse_args(argv)
+
+    if args.status:
+        with connection() as conn:
+            st = graph_load.facet_status(conn)
+        print(" ".join(f"{k}={v}" for k, v in st.items()))
+        return 1 if st["stale_rows"] else 0
+
+    run_id = get_settings().run_id or (
+        f"facets-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    try:
+        with connection() as conn:
+            res = graph_load.rebuild_facets(
+                conn, run_id=run_id, force=args.force, reason=args.reason
+            )
+    except graph_load.GraphLoadError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"done rebuilt={res['rebuilt']} skipped={res['skipped']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     from datetime import datetime, timezone
 
     from episteme.config import get_settings
     from episteme.data.db.connection import connection
+
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "facets":
+        return _facets_main(argv[1:])
 
     settings = get_settings()
     p = argparse.ArgumentParser(description="Build article_cites/article_mesh from raw JATS")

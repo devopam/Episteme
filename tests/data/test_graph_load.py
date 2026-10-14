@@ -396,3 +396,84 @@ def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys):
     out = capsys.readouterr()
     assert "failed=1" in out.out
     assert "re-extract" in out.err
+
+
+def _add_rule_v2(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.mesh_facet_rule (facet, kind, value, rule_version) "
+            "SELECT facet, kind, value, 2 FROM episteme.mesh_facet_rule WHERE rule_version = 1"
+        )
+        cur.execute("INSERT INTO episteme.mesh_facet_rule VALUES ('test', 'tree_prefix', 'C19', 2)")
+    conn.commit()
+
+
+def test_facet_rebuild_and_status(env):
+    from episteme.data import graph_load
+
+    conn, processed = env
+    _write(processed, SF_A)
+    graph_load.load_one(
+        conn, source="pubmed", source_file=SF_A, processed_dir=processed, run_id="r1"
+    )
+    assert graph_load.facet_status(conn) == {
+        "rule_version": 1,
+        "stale_rows": 0,
+        "stale_files": 0,
+        "files": 1,
+    }
+    _add_rule_v2(conn)
+    st = graph_load.facet_status(conn)
+    assert st["rule_version"] == 2
+    assert st["stale_files"] == 1
+    assert st["stale_rows"] == len(EXPECTED_FACETS)
+
+    res = graph_load.rebuild_facets(conn, run_id="r2")
+    assert res == {"rebuilt": 1, "skipped": 0}
+    facets = _facets(conn, SF_A)
+    assert (PMID, "test", "D003920") in facets
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT rule_version FROM episteme.article_facets WHERE source_file = %s",
+            (SF_A,),
+        )
+        assert cur.fetchall() == [(2,)]
+    assert graph_load.facet_status(conn)["stale_rows"] == 0
+    assert [o for o, *_ in _audit(conn, "graph_commit")][-1] == f"facets {SF_A}"
+
+    assert graph_load.rebuild_facets(conn, run_id="r3") == {"rebuilt": 0, "skipped": 1}
+
+
+def test_facet_rebuild_force_needs_reason_and_is_audited(env):
+    from episteme.data import graph_load
+
+    conn, processed = env
+    _write(processed, SF_A)
+    graph_load.load_one(
+        conn, source="pubmed", source_file=SF_A, processed_dir=processed, run_id="r1"
+    )
+    with pytest.raises(graph_load.GraphLoadError, match="--force requires --reason"):
+        graph_load.rebuild_facets(conn, run_id="r2", force=True)
+    res = graph_load.rebuild_facets(conn, run_id="r2", force=True, reason="re-derive")
+    assert res == {"rebuilt": 1, "skipped": 0}
+    ov = _audit(conn, "force_override")
+    assert [(o, r) for o, _, r, _ in ov] == [(f"facets {SF_A}", "re-derive")]
+    assert len(_facets(conn, SF_A)) == len(EXPECTED_FACETS)
+
+
+def test_facets_cli_status_exit_code_and_rebuild(env, capsys):
+    from episteme.data import graph_builder, graph_load
+
+    conn, processed = env
+    _write(processed, SF_A)
+    graph_load.load_one(
+        conn, source="pubmed", source_file=SF_A, processed_dir=processed, run_id="r1"
+    )
+    assert graph_builder.main(["facets", "--status"]) == 0
+    _add_rule_v2(conn)
+    assert graph_builder.main(["facets", "--status"]) == 1
+    assert "stale_files=1" in capsys.readouterr().out
+    assert graph_builder.main(["facets", "--rebuild"]) == 0
+    assert "rebuilt=1" in capsys.readouterr().out
+    assert graph_builder.main(["facets", "--status"]) == 0
+    assert graph_builder.main(["facets", "--rebuild", "--force"]) == 2
