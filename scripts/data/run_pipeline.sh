@@ -62,8 +62,8 @@ done
 if [ "$FORCE" = "1" ] && [ -z "$REASON" ]; then
     die "--force requires --reason" 2
 fi
-if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ]; then
-    log ERROR "--bulk is only valid with the load stage"
+if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
+    log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
 
@@ -300,16 +300,18 @@ fi
 # M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
 bash "$HERE/_lib/check_prereqs.sh" >&2 || true
 
-# --bulk: drop the secondary indexes of episteme.articles before the load and
-# always rebuild them -- explicitly after a successful load (so the rebuild's
-# audit row lands before run_end), and from the EXIT trap after a failed or
-# interrupted one. A hard kill skips the trap; the saved state then blocks
+# --bulk: drop the secondary-index group of the stage (load: articles; graph:
+# pubmed_graph) before it and always rebuild them -- explicitly after a
+# successful stage (so the rebuild's audit row lands before run_end), and from
+# the EXIT trap after a failed or interrupted one. A hard kill skips the trap; the saved state then blocks
 # the next --bulk, and `bulk_load_indexes.sh rebuild` finishes the job.
 BULK_PENDING=0
+BULK_GROUP=articles
+[ "$STAGE" = "graph" ] && BULK_GROUP=pubmed_graph
 _bulk_rebuild() {
     [ "$BULK_PENDING" = "1" ] || return 0
     BULK_PENDING=0
-    log INFO "bulk: rebuilding the secondary indexes of episteme.articles"
+    log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
     bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 _bulk_on_exit() {
@@ -324,12 +326,12 @@ _bulk_on_exit() {
     exit "$rrc"
 }
 if [ "$BULK" = "1" ]; then
-    log INFO "bulk: dropping the secondary indexes of episteme.articles"
-    bash "$HERE/db/bulk_load_indexes.sh" drop
+    log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"
+    bash "$HERE/db/bulk_load_indexes.sh" drop --group "$BULK_GROUP"
     drop_rc=$?
     if [ "$drop_rc" -ne 0 ]; then
-        log ERROR "bulk: index drop failed (rc=$drop_rc); the load was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index drop)" >/dev/null 2>&1 || true
+        log ERROR "bulk: index drop failed (rc=$drop_rc); the $STAGE was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index drop)" >/dev/null 2>&1 || true
         exit "$drop_rc"
     fi
     BULK_PENDING=1
@@ -413,7 +415,7 @@ if [ "$BULK" = "1" ]; then
     rebuild_rc=$?
     if [ "$rebuild_rc" -ne 0 ]; then
         log ERROR "bulk: index rebuild failed (rc=$rebuild_rc); finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage load (bulk index rebuild)" >/dev/null 2>&1 || true
+        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index rebuild)" >/dev/null 2>&1 || true
         exit "$rebuild_rc"
     fi
 fi

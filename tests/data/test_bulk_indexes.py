@@ -260,3 +260,48 @@ def test_migration_0005_leaves_episteme_app_no_access(pg_conn, bulk):
             )
             assert cur.fetchone()[0] is False, priv
     pg_conn.commit()
+
+
+def test_pubmed_graph_group_drops_and_rebuilds_the_14_indexes(pg_conn, bulk):
+    from ._graph_schema import setup_graph_schema
+
+    setup_graph_schema(pg_conn)  # 0002-0006 into a fresh schema
+    bi, audit_trail = bulk
+    names = [n for _, n in bi.INDEX_GROUPS["pubmed_graph"]]
+    assert len(names) == 14
+
+    prefixes = tuple(f"{t}_" for t in sorted({t for t, _ in bi.INDEX_GROUPS["pubmed_graph"]}))
+
+    def present() -> set[str]:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.relname FROM pg_class c "
+                "WHERE c.relkind = 'I' AND c.relnamespace = 'episteme'::regnamespace"
+            )
+            rows = {
+                r[0] for r in cur.fetchall() if r[0].endswith("_idx") and r[0].startswith(prefixes)
+            }
+        pg_conn.commit()
+        return rows
+
+    source_file = {n for n in present() if n.endswith("_source_file_idx")}
+    assert len(source_file) == 7
+    assert set(names) <= present()
+
+    assert bi.drop(pg_conn, run_id="r1", group="pubmed_graph") == names
+    assert present() == source_file
+    assert len(_pending(pg_conn)) == 14
+
+    assert len(bi.rebuild(pg_conn, run_id="r1")) == 14
+    assert present() == source_file | set(names)
+    assert _pending(pg_conn) == []
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_index WHERE NOT indisvalid "
+            "AND indexrelid = ANY(%s::regclass[])",
+            ([f"episteme.{n}" for n in names],),
+        )
+        assert cur.fetchone()[0] == 0
+    pg_conn.commit()
+    assert _events(pg_conn) == ["bulk_index_drop"] + ["bulk_index_rebuild"] * 14
+    assert audit_trail.verify(pg_conn) == []

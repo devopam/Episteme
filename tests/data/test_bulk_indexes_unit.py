@@ -31,7 +31,7 @@ def test_rebuild_sql_builds_on_every_partition(name):
     [
         "CREATE INDEX x ON episteme.articles USING btree (pmid)",
         "CREATE UNIQUE INDEX x ON ONLY episteme.articles USING btree (pmid)",
-        "CREATE INDEX x ON ONLY episteme.other USING btree (pmid)",
+        "CREATE INDEX x ON ONLY public.other USING btree (pmid)",
         "DROP TABLE episteme.articles; CREATE INDEX x ON ONLY episteme.articles USING gin (mesh)",
         "",
     ],
@@ -129,3 +129,21 @@ def test_main_passes_pool_kwargs_and_status_error_exits_3(monkeypatch):
     monkeypatch.setattr(bulk_indexes.psycopg, "connect", _connect)
     assert bulk_indexes.main(["status"]) == 3
     assert captured["options"] == "-c default_transaction_read_only=on"
+
+
+def test_rebuild_sql_accepts_any_episteme_table():
+    from episteme.data.db.bulk_indexes import rebuild_sql
+
+    d = "CREATE INDEX article_mesh_pmid_idx ON ONLY episteme.article_mesh USING btree (pmid)"
+    assert rebuild_sql(d, "article_mesh_pmid_idx") == (
+        "CREATE INDEX article_mesh_pmid_idx ON episteme.article_mesh USING btree (pmid)"
+    )
+
+
+def test_groups_cover_the_spec_indexes_and_never_source_file():
+    from episteme.data.db.bulk_indexes import COVERED_INDEXES, INDEX_GROUPS
+
+    assert tuple(n for _, n in INDEX_GROUPS["articles"]) == COVERED_INDEXES
+    names = [n for _, n in INDEX_GROUPS["pubmed_graph"]]
+    assert len(names) == 14
+    assert not any(n.endswith("_source_file_idx") for n in names)

@@ -150,5 +150,21 @@ def test_load_without_bulk_touches_no_index(tree):
 def test_bulk_on_another_stage_is_a_usage_error(tree):
     proc, calls = _run(tree, "extract", "--bulk")
     assert proc.returncode == 2
-    assert "--bulk" in proc.stderr
+    assert "--bulk is only valid with the load or graph stage" in proc.stderr
     assert calls == []
+
+
+def test_bulk_graph_passes_validation_and_uses_the_pubmed_graph_group(tree):
+    data = tree[0].parent
+    _write(data / "db" / "bulk_load_indexes.sh", FAKE_BULK.replace('$1"', '$*"'))
+    _write(data / "pubmed" / "graph_pubmed.sh", FAKE_LOAD.replace('"load"', '"graph"'))
+    proc, calls = _run(tree, "graph", "--bulk")
+    assert proc.returncode == 0, proc.stderr
+    assert "--bulk is only valid" not in proc.stderr
+    assert calls == [
+        "run_start",
+        "bulk drop --group pubmed_graph",
+        "graph",
+        "bulk rebuild",
+        "run_end",
+    ]
