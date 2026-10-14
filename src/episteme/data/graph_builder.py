@@ -836,6 +836,12 @@ def main(argv: list[str] | None = None) -> int:
         except graph_load.GraphLoadError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
+        if res["files"] == 0:
+            print(
+                f"WARNING: no pubmed graph files found under {args.processed_dir}",
+                file=sys.stderr,
+            )
+            return 1
         rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
         print(
             f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
@@ -846,6 +852,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
+    if args.force:
+        print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
     raw_dir = args.raw_dir
     if raw_dir is None:
         if args.source == "pmc":

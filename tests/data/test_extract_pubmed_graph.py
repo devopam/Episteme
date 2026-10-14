@@ -72,3 +72,38 @@ def test_one_and_three_workers_write_identical_graph_files(tmp_path, rel):
         t1 = pq.read_table(gf.graph_file_path(tmp_path / "w1", "pubmed", rel, key))
         t3 = pq.read_table(gf.graph_file_path(tmp_path / "w3", "pubmed", rel, key))
         assert t1.equals(t3)
+
+
+KEY = "baseline__pubmed26n0001.xml.gz"
+
+
+def test_marker_without_graph_relations_is_redone(tmp_path):
+    from episteme.data.checkpoint_markers import mark_success
+
+    raw, out = _raw(tmp_path), tmp_path / "out"
+    mark_success(out, "pubmed", KEY, stats={"n_rows": 1})
+    assert gf.marker_graph_info(out, "pubmed", KEY) is None
+    res = ep.extract_pubmed(raw, out, workers=1)
+    assert res["ok"] == 1
+    assert gf.marker_graph_info(out, "pubmed", KEY) is not None
+
+
+def test_marker_with_graph_info_is_skipped_without_force(tmp_path):
+    raw, out = _raw(tmp_path), tmp_path / "out"
+    assert ep.extract_pubmed(raw, out, workers=1)["ok"] == 1
+    res = ep.extract_pubmed(raw, out, workers=1)
+    assert res["ok"] == 0 and res["failed"] == 0
+
+
+def test_forced_crash_leaves_no_success_marker(tmp_path, monkeypatch):
+    raw, out = _raw(tmp_path), tmp_path / "out"
+    assert ep.extract_pubmed(raw, out, workers=1)["ok"] == 1
+    assert is_success(out, "pubmed", KEY)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(ep, "write_rows", boom)
+    res = ep.extract_pubmed(raw, out, workers=1, force=True)
+    assert res["failed"] == 1
+    assert not is_success(out, "pubmed", KEY)

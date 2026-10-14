@@ -28,7 +28,7 @@ from defusedxml.ElementTree import iterparse as _safe_iterparse
 from episteme.config import get_settings
 from episteme.data import duckdb_conn
 from episteme.data.checkpoint_markers import input_key
-from episteme.data.graph_files import RELATIONS
+from episteme.data.graph_files import RELATIONS, graph_file_path, marker_graph_info
 from episteme.data.gz import open_gz
 from episteme.data.pubmed.extract_pubmed import discover_pubmed_files
 from episteme.data.pubmed.relations import own_article_ids
@@ -36,6 +36,19 @@ from episteme.data.pubmed.relations import own_article_ids
 SOURCE = "pubmed"
 _PMCID_RE = "^PMC[0-9]+$"
 _DOI_RE = "^10\\.[0-9]{4,9}/\\S+$"
+
+# Graph text columns carrying a btree index (strlen = UTF-8 bytes in DuckDB);
+# a value over the limit breaks the index build.
+BTREE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("mesh", "descriptor_ui"),
+    ("cites", "src_pmid"),
+    ("cites", "dst_pmid"),
+    ("comments", "ref_pmid"),
+    ("chemicals", "substance_ui"),
+    ("keywords", "keyword"),
+    ("authors", "orcid"),
+)
+BTREE_LIMIT_BYTES = 2000
 
 
 def orcid_check_ok(orcid: str) -> bool:
@@ -275,6 +288,31 @@ def _audit(
         g = rel_glob(rel)
         R["graph_rows"][rel] = one(f"select count(*) from read_parquet('{g}')") if g else 0
 
+    btree: dict[str, int] = {}
+    for rel, col in BTREE_COLUMNS:
+        g = rel_glob(rel)
+        btree[f"{rel}.{col}"] = (
+            int(one(f"select coalesce(max(strlen({col})), 0) from read_parquet('{g}')")) if g else 0
+        )
+    R["graph_btree_max_bytes"] = {
+        "columns": btree,
+        "max": max(btree.values(), default=0),
+        "limit": BTREE_LIMIT_BYTES,
+        "over_limit": [c for c, n in btree.items() if n > BTREE_LIMIT_BYTES],
+    }
+
+    # Shards whose marker lacks graph info, or whose six graph files are not all present.
+    R["shards_without_graph"] = 0
+    for (sf,) in q("select distinct source_file from a order by 1"):
+        try:
+            has_info = marker_graph_info(processed_dir, SOURCE, sf) is not None
+        except ValueError:  # truncated marker
+            has_info = False
+        if not has_info or not all(
+            graph_file_path(processed_dir, SOURCE, rel, sf).is_file() for rel in RELATIONS
+        ):
+            R["shards_without_graph"] += 1
+
     mesh_g = rel_glob("mesh")
     mesh_shards = processed_dir / "staging" / "mesh"
     R["mesh_ui_known_pct"] = None
@@ -375,15 +413,29 @@ def main(argv: list[str] | None = None) -> int:
     print(out_dir / "pubmed_audit.md")
     probe = R["doi_probe"]
     print(f"rows={R['rows']:,} doi_probe={probe}")
+    failed = False
+    btree = R["graph_btree_max_bytes"]
+    if btree["over_limit"]:
+        print(
+            f"WARNING: btree-indexed graph columns over {btree['limit']} bytes: "
+            f"{', '.join(btree['over_limit'])} (max {btree['max']})"
+        )
+        failed = True
+    if R["shards_without_graph"] > 0:
+        print(
+            f"WARNING: {R['shards_without_graph']} pubmed shards lack graph info or graph "
+            "files; re-extract them"
+        )
+        failed = True
     if args.sample_files == 0:
-        return 0
+        return 1 if failed else 0
     if probe["status"] != "ok":
         print(f"WARNING: DOI probe did not run ({probe['status']}); the gate is NOT verified")
-        return 1
-    if probe["mismatch"] > 0:
+        failed = True
+    elif probe["mismatch"] > 0:
         print(f"WARNING: DOI probe found {probe['mismatch']} mismatches")
-        return 1
-    return 0
+        failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

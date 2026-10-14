@@ -52,8 +52,9 @@ while [ $# -gt 0 ]; do
         # env-only signal for the fetch engine / wrappers; never appended to
         # any *_args array. Exported so every downstream subprocess sees it.
         --dry-run) export EPISTEME_DRY_RUN=1; shift ;;
-        # load stage only: drop the secondary indexes of episteme.articles,
-        # load, always rebuild them (scripts/data/db/bulk_load_indexes.sh).
+        # load or graph stage only: drop the secondary indexes of the stage's group
+        # (load: articles; graph: pubmed_graph), run the stage, always rebuild them
+        # (scripts/data/db/bulk_load_indexes.sh).
         --bulk) BULK=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac

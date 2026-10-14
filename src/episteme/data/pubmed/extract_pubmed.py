@@ -62,9 +62,10 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     is_success,
     mark_failed,
     mark_success,
+    success_marker_path,
     write_run_manifest,
 )
-from episteme.data.graph_files import GraphFileWriter  # noqa: E402
+from episteme.data.graph_files import GraphFileWriter, marker_graph_info  # noqa: E402
 from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import run_per_file  # noqa: E402
 from episteme.data.pubmed.relations import (  # noqa: E402
@@ -354,6 +355,13 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                 )
 
 
+def _has_graph_info(processed_dir: Path, basename: str) -> bool:
+    try:
+        return marker_graph_info(processed_dir, SOURCE, basename) is not None
+    except ValueError:  # truncated marker: treat as absent and redo the file
+        return False
+
+
 def process_one(
     path: Path,
     *,
@@ -367,8 +375,15 @@ def process_one(
     # enforced either -- see discover_pubmed_files) must not collapse to the
     # same marker/source_file identity.
     basename = input_key(path, raw_dir)
-    if not force and is_success(processed_dir, SOURCE, basename):
+    # A marker without graph_relations (pre-1.6 shard) is redone in full.
+    if (
+        not force
+        and is_success(processed_dir, SOURCE, basename)
+        and _has_graph_info(processed_dir, basename)
+    ):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
+    # Drop any old marker first: a crash mid-file must never leave a stale success claim.
+    success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()

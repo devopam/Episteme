@@ -123,3 +123,48 @@ def test_main_exit_codes(tmp_path, capsys):
     assert (
         pubmed_audit.main([*base, "--raw-dir", str(tmp_path / "nope"), "--sample-files", "0"]) == 0
     )
+
+
+def test_shards_without_graph_and_btree_max_clean(tmp_path):
+    raw, out = _tree(tmp_path)
+    r = run_audit(out, raw_dir=raw, out_dir=tmp_path / "a", sample_files=2)
+    assert r["shards_without_graph"] == 0
+    assert r["graph_btree_max_bytes"]["max"] == 0
+    assert r["graph_btree_max_bytes"]["over_limit"] == []
+    base = ["--processed-dir", str(out), "--out-dir", str(tmp_path / "b"), "--raw-dir", str(raw)]
+    assert pubmed_audit.main(base) == 0
+
+
+def test_shard_missing_a_graph_file_fails_the_gate(tmp_path, capsys):
+    raw, out = _tree(tmp_path)
+    graph_file_path(out, "pubmed", "keywords", "updates__pubmed26n0001.xml.gz").unlink()
+    r = run_audit(out, raw_dir=raw, out_dir=tmp_path / "a", sample_files=2)
+    assert r["shards_without_graph"] == 1
+    base = ["--processed-dir", str(out), "--out-dir", str(tmp_path / "b"), "--raw-dir", str(raw)]
+    assert pubmed_audit.main(base) == 1
+    assert "WARNING" in capsys.readouterr().out
+    assert pubmed_audit.main([*base, "--sample-files", "0"]) == 1
+
+
+def test_marker_without_graph_relations_counts_as_without_graph(tmp_path):
+    from episteme.data.checkpoint_markers import mark_success
+
+    raw, out = _tree(tmp_path)
+    mark_success(out, "pubmed", "baseline__pubmed26n0001.xml.gz", stats={"n_rows": 1})
+    r = run_audit(out, raw_dir=raw, out_dir=tmp_path / "a", sample_files=2)
+    assert r["shards_without_graph"] == 1
+
+
+def test_oversized_btree_value_fails_the_gate(tmp_path, capsys):
+    raw, out = _tree(tmp_path)
+    key = "baseline__pubmed26n0001.xml.gz"
+    _write_rel(out, "keywords", key, [{"pmid": "1", "keyword": "k" * 2500}])
+    _write_rel(out, "mesh", key, [{"pmid": "1", "descriptor_ui": "D001"}])
+    r = run_audit(out, raw_dir=raw, out_dir=tmp_path / "a", sample_files=2)
+    assert r["graph_btree_max_bytes"]["columns"]["keywords.keyword"] == 2500
+    assert r["graph_btree_max_bytes"]["columns"]["mesh.descriptor_ui"] == 4
+    assert r["graph_btree_max_bytes"]["max"] == 2500
+    assert r["graph_btree_max_bytes"]["over_limit"] == ["keywords.keyword"]
+    base = ["--processed-dir", str(out), "--out-dir", str(tmp_path / "b"), "--raw-dir", str(raw)]
+    assert pubmed_audit.main(base) == 1
+    assert "2000" in capsys.readouterr().out

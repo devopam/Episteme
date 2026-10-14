@@ -77,17 +77,24 @@ SELECT pmid, facet, descriptor_ui, rule_version, %(sf)s FROM hits
 _REEXTRACT = "no graph files in its marker; re-extract with schema >= 1.6"
 
 
-def _success_markers(processed_dir: Path, source: str) -> tuple[list[str], list[str]]:
-    """``(graphed, no_graph_info)`` source files from the success markers, each sorted."""
+def _success_markers(processed_dir: Path, source: str) -> tuple[list[str], list[str], list[str]]:
+    """``(graphed, no_graph_info, corrupt)`` source files from the success markers, each
+    sorted. ``corrupt`` are markers that are not valid JSON (e.g. truncated)."""
     success = ops_root(processed_dir, source) / "success"
     if not success.is_dir():
-        return [], []
+        return [], [], []
     graphed: list[str] = []
     old: list[str] = []
+    corrupt: list[str] = []
     for p in success.glob("*.ok"):
         sf = p.name[: -len(".ok")]
-        (graphed if marker_graph_info(processed_dir, source, sf) is not None else old).append(sf)
-    return sorted(graphed), sorted(old)
+        try:
+            info = marker_graph_info(processed_dir, source, sf)
+        except ValueError:  # JSONDecodeError is a ValueError
+            corrupt.append(sf)
+            continue
+        (graphed if info is not None else old).append(sf)
+    return sorted(graphed), sorted(old), sorted(corrupt)
 
 
 def graphed_files(processed_dir: Path, source: str) -> list[str]:
@@ -223,9 +230,9 @@ def build_pubmed_graph(
     if not has_tree:
         raise GraphLoadError("mesh_tree is empty; run `run_pipeline.sh mesh graph` first")
 
-    graphed, old = _success_markers(processed_dir, source)
+    graphed, old, corrupt = _success_markers(processed_dir, source)
     out: dict[str, Any] = {
-        "files": len(graphed) + len(old),
+        "files": len(graphed) + len(old) + len(corrupt),
         "loaded": 0,
         "skipped": 0,
         "failed": [],
@@ -234,6 +241,12 @@ def build_pubmed_graph(
     }
     for sf in old:
         print(f"ERROR: graph load {sf}: {_REEXTRACT}", file=sys.stderr)
+        out["failed"].append(sf)
+    for sf in corrupt:
+        print(
+            f"ERROR: graph load {sf}: unreadable success marker; re-extract the file",
+            file=sys.stderr,
+        )
         out["failed"].append(sf)
     for sf in graphed:
         try:
@@ -272,10 +285,7 @@ SELECT rv.v,
 """
 
 _FACET_FILES_SQL = """
-SELECT m.source_file
-  FROM (SELECT DISTINCT source_file FROM episteme.article_mesh) m
-  JOIN (SELECT DISTINCT source_file FROM episteme._graph_lineage) l USING (source_file)
- ORDER BY 1
+SELECT source_file FROM episteme._graph_lineage WHERE source = 'pubmed' ORDER BY 1
 """
 
 

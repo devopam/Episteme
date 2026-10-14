@@ -477,3 +477,19 @@ def test_facets_cli_status_exit_code_and_rebuild(env, capsys):
     assert "rebuilt=1" in capsys.readouterr().out
     assert graph_builder.main(["facets", "--status"]) == 0
     assert graph_builder.main(["facets", "--rebuild", "--force"]) == 2
+
+
+def test_truncated_marker_fails_that_file_and_the_run_continues(env, capsys):
+    from episteme.data import graph_load
+    from episteme.data.checkpoint_markers import success_marker_path
+
+    conn, processed = env
+    info_b = _write(processed, SF_B, pmid="101")
+    _write(processed, SF_A, pmid="100")
+    success_marker_path(processed, "pubmed", SF_A).write_text('{"stats": {"graph_', "utf-8")
+    res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
+    assert res["failed"] == [SF_A]
+    assert res["files"] == 2
+    assert res["loaded"] == 1
+    assert _counts(conn, SF_B) == info_b["graph_rows"]
+    assert "unreadable success marker" in capsys.readouterr().err

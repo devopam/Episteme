@@ -3,7 +3,8 @@
 # <processed>/staging/pubmed_graph -> episteme.article_mesh / article_cites /
 # article_comments / article_chemicals / article_keywords / article_authors and
 # article_facets, one transaction per source file. Thin shell over `python -m
-# episteme.data.graph_builder --source pubmed --processed-dir <processed>`.
+# episteme.data.graph_builder --source pubmed`; the processed root comes from
+# config.py (EPISTEME_PROCESSED_ROOT, else EPISTEME_DATA_ROOT/02_processed).
 # "$@" passes through --force --reason "..." (audited) for direct invocation.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,4 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-exec "$PY" -m episteme.data.graph_builder --source pubmed \
-    --raw-dir "${EPISTEME_RAW_ROOT:-./01_raw}/pubmed" \
-    --processed-dir "${EPISTEME_PROCESSED_ROOT:-./02_processed}" "$@"
+exec "$PY" -m episteme.data.graph_builder --source pubmed "$@"

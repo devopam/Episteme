@@ -31,3 +31,19 @@ def test_table_for_covers_every_relation():
 
     assert set(graph_load.TABLE_FOR) == set(RELATIONS)
     assert graph_load.TABLE_FOR["mesh"] == "episteme.article_mesh"
+
+
+def test_truncated_marker_is_reported_corrupt_not_raised(tmp_path):
+    mark_success(
+        tmp_path,
+        "pubmed",
+        "baseline__a.xml.gz",
+        stats={"graph_relations": ["mesh"], "graph_sha256": "x", "graph_rows": {"mesh": 1}},
+    )
+    bad = tmp_path / "_ops" / "pubmed" / "success" / "baseline__bad.xml.gz.ok"
+    bad.write_text('{"stats": {"graph_rel', encoding="utf-8")
+    graphed, old, corrupt = graph_load._success_markers(tmp_path, "pubmed")
+    assert graphed == ["baseline__a.xml.gz"]
+    assert old == []
+    assert corrupt == ["baseline__bad.xml.gz"]
+    assert graph_load.graphed_files(tmp_path, "pubmed") == ["baseline__a.xml.gz"]
