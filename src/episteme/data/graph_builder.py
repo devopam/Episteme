@@ -236,7 +236,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
       existing (silently skipped, no warning).
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
-    mesh_hierarchy, mesh_empty_parse}``.
+    mesh_hierarchy, mesh_tree, mesh_empty_parse}``.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
@@ -354,6 +354,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
     # from the raw descriptor release XML (same architectural pattern as the
     # pmc cites/mesh phase above -- no persisted "extra fields" column).
     total_mesh_hierarchy = 0
+    total_mesh_tree = 0
     empty_parse = 0
     if source == "mesh":
         with conn.cursor() as cur:
@@ -406,14 +407,24 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
                 if edges:
                     cur.executemany(_MESH_HIERARCHY_INSERT, edges)
 
+            tree_rows = [(ui, t, src_file) for ui, trees in descriptors.items() for t in trees]
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM episteme.mesh_tree WHERE source_file = %s", (src_file,))
+                with cur.copy(
+                    "COPY episteme.mesh_tree (descriptor_ui, tree_number, source_file) FROM STDIN"
+                ) as cp:
+                    for r in tree_rows:
+                        cp.write_row(r)
+
             audit_trail.record(
                 "graph_commit",
                 conn=conn,
                 object=f"mesh {src_file}",
-                rows_affected=len(edges),
+                rows_affected=len(edges) + len(tree_rows),
                 run_id=run_id,
             )
             total_mesh_hierarchy += len(edges)
+            total_mesh_tree += len(tree_rows)
 
     return {
         "source_files": handled,
@@ -423,6 +434,7 @@ def build(conn, *, source: str, raw_dir: Path | str, run_id: str) -> dict[str, A
         "skipped_no_pmid": skipped_no_pmid,
         "parts": total_parts,
         "mesh_hierarchy": total_mesh_hierarchy,
+        "mesh_tree": total_mesh_tree,
         "mesh_empty_parse": empty_parse,
     }
 
@@ -618,7 +630,8 @@ def main(argv: list[str] | None = None) -> int:
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
         f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
-        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_empty_parse={res['mesh_empty_parse']}"
+        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
+        f"mesh_empty_parse={res['mesh_empty_parse']}"
     )
     return 0
 
