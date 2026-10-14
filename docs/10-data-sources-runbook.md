@@ -109,7 +109,8 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connection used by the Python stages (role `episteme_app` at runtime). `PGDATABASE` is what the guard checks (section 3). |
 | `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
 | `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
-| `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh`, and for `tune_postgres.sh apply` (operator only; see section 2). |
+| `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh`, for `tune_postgres.sh apply`, and for the MCPg admin server (operator only; see section 2). |
+| `MCPG_ALTER_SYSTEM_ALLOWLIST` | Optional. Comma-separated settings the MCPg admin server may change (default: the section 2.4 settings plus `max_parallel_maintenance_workers`). `scripts/mcpg-episteme.sh` sets `MCPG_ALLOW_ALTER_SYSTEM` itself: on for `--admin`, off otherwise. |
 | `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
@@ -208,7 +209,17 @@ PostgreSQL's defaults suit a small shared server, not a single-user bulk load. O
 
 `fsync`, `full_page_writes` and data checksums stay on (GxP data integrity, docs/11). Memory budget on 16 GB: 2 GB of shared buffers, up to 4 GB of DuckDB during a serialize (`EPISTEME_DUCKDB_MEMORY_LIMIT`), and the Python workers, with headroom for the operating system cache.
 
-Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs, if a restart is pending, or if an `ALTER ROLE`/`ALTER DATABASE ... SET` override of one of these settings exists (it would beat the server value for, say, `episteme_app` sessions). `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, validates every name and value first (nothing is written if one is invalid), sets each value, reloads, and confirms each one is active or waiting for a restart. Every connection uses `PGCONNECT_TIMEOUT` (default 10 seconds). The MCPg server cannot do this: its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
+Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs, if a restart is pending, or if an `ALTER ROLE`/`ALTER DATABASE ... SET` override of one of these settings exists (it would beat the server value for, say, `episteme_app` sessions). `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, validates every name and value first (nothing is written if one is invalid), sets each value, reloads, and confirms each one is active or waiting for a restart. Every connection uses `PGCONNECT_TIMEOUT` (default 10 seconds). The everyday MCPg server cannot do this: it connects as `episteme_sys_admin`, and its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
+
+**MCPg admin server (optional).** MCPg 0.8 adds `alter_system`, `alter_system_reset_all` and `reload_config` tools, plus a read-only `inspect_guc` that shows a setting's live value and whether it needs a reload or a restart. `scripts/mcpg-episteme.sh episteme --admin` starts MCPg as `POSTGRES_SUPERUSER` with those tools on, `MCPG_ACCESS_MODE=unrestricted`, no secondary database, and an allowlist (`MCPG_ALTER_SYSTEM_ALLOWLIST`). Without `--admin` the launcher always turns them off. Each change takes two calls: the first returns a warning and a confirmation token, and the second applies it with `confirm=true` and that token. `ALTER SYSTEM` is not transactional; a `postmaster` setting such as `shared_buffers` still needs a service restart. `alter_system_reset_all` clears every `ALTER SYSTEM` override, including the section 2.4 tuning; MCPg refuses it while any override is outside the allowlist. Do not change settings through MCPg while `tune_postgres.sh apply` runs: both write `postgresql.auto.conf`, and the last write wins.
+
+Because every MCPg tool on the admin server runs as the superuser, keep it disabled and enable it in `/mcp` only while changing settings. Example entry (in `.mcp.json`, or in the user config with Git Bash's absolute path on Windows):
+
+```json
+"mcpg-admin": { "command": "bash", "args": ["scripts/mcpg-episteme.sh", "episteme", "--admin"], "env": {} }
+```
+
+Disable it when you add it. For a `.mcp.json` entry, list it in `disabledMcpjsonServers` in `.claude/settings.local.json`, for example `{"disabledMcpjsonServers": ["mcpg-admin"]}`. For a user-config entry, toggle it off in `/mcp` straight after adding it; Claude Code remembers that per project.
 
 ```bash
 bash scripts/data/db/tune_postgres.sh check
