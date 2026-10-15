@@ -19,7 +19,7 @@ def _base_schema(conn) -> None:
     conn.commit()
 
 
-def _insert_pubmed(cur, pmid: str, year: int) -> None:
+def _insert_pubmed(cur, pmid: str, year: int | None) -> None:
     cur.execute(
         "INSERT INTO episteme.articles (id, source, source_record_id, pmid, year, license, "
         "source_file) VALUES (%s, 'pubmed', %s, %s, %s, 'open_metadata', 'f.xml.gz')",
@@ -41,10 +41,11 @@ def test_0007_routes_pubmed_rows_to_their_own_partitions(pg_conn):
             "SELECT count(*) FROM pg_inherits "
             "WHERE inhparent = 'episteme.articles_pubmed'::regclass"
         )
-        assert cur.fetchone()[0] == 13
+        assert cur.fetchone()[0] == 14  # 13 year ranges + DEFAULT
         _insert_pubmed(cur, "1", 2021)
         _insert_pubmed(cur, "2", 0)
         _insert_pubmed(cur, "3", 1781)
+        _insert_pubmed(cur, "4", None)  # e.g. enrich_from_lite setting a NULL year
         cur.execute(
             "SELECT tableoid::regclass::text, pmid FROM episteme.articles "
             "WHERE source = 'pubmed' ORDER BY pmid"
@@ -53,6 +54,7 @@ def test_0007_routes_pubmed_rows_to_their_own_partitions(pg_conn):
             ("episteme.articles_pubmed_2020_2025", "1"),
             ("episteme.articles_pubmed_y0", "2"),
             ("episteme.articles_pubmed_pre1950", "3"),
+            ("episteme.articles_pubmed_default", "4"),
         ]
         cur.execute("SELECT DISTINCT tableoid::regclass::text FROM episteme.article_body")
         assert cur.fetchall() == [("episteme.article_body_pubmed",)]

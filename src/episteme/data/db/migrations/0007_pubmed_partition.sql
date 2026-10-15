@@ -4,7 +4,9 @@
 -- Until now pubmed rows fell into articles_default / article_body_default next to
 -- chembl, clinvar and the rest. A full pubmed reload then had to delete ~40M rows
 -- scattered through those tables (~7 min per shard on the 5,400 rpm USB disk).
--- With its own partitions a full reload can TRUNCATE them instead.
+-- With its own partitions a full reload can TRUNCATE them (an audited operator
+-- step for now: the loader still replaces shard by shard, which is fast while
+-- the partitions are empty; a truncate path in the loader is backlog).
 --
 -- PRECONDITION: the default partitions hold no pubmed row. CREATE TABLE ...
 -- PARTITION OF scans the DEFAULT partition and fails if any row matches the new
@@ -53,6 +55,11 @@ CREATE TABLE IF NOT EXISTS episteme.articles_pubmed_2025_2030
     PARTITION OF episteme.articles_pubmed FOR VALUES FROM (2025) TO (2030);
 CREATE TABLE IF NOT EXISTS episteme.articles_pubmed_future
     PARTITION OF episteme.articles_pubmed FOR VALUES FROM (2030) TO (10000);
+-- Catch-all for a NULL or out-of-range year: the loader maps NULL -> 0, but
+-- enrich_from_lite's CASE can set a year-0 row's year to a NULL from the matched
+-- record, and a row with no matching range would fail the whole batch.
+CREATE TABLE IF NOT EXISTS episteme.articles_pubmed_default
+    PARTITION OF episteme.articles_pubmed DEFAULT;
 
 -- article_body: one partition per source, no year split (as pmc / bookshelf).
 CREATE TABLE IF NOT EXISTS episteme.article_body_pubmed
