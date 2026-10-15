@@ -117,7 +117,8 @@ def _partitions(parent: str) -> list[str]:
 
 
 def test_articles_partition_ladders_match_docs_08():
-    """pmc (schema.sql) and bookshelf (migration 0002) have year ladders; nothing else does."""
+    """pmc (schema.sql), bookshelf (migration 0002) and pubmed (migration 0007) have year
+    ladders; nothing else does."""
     schema = _SCHEMA.read_text(encoding="utf-8")
     mig2 = next(_MIGRATIONS.glob("0002_*.sql")).read_text(encoding="utf-8")
     assert re.search(
@@ -131,12 +132,20 @@ def test_articles_partition_ladders_match_docs_08():
         r"\('bookshelf'\)\s+PARTITION BY RANGE \(year\)",
         mig2,
     )
-    assert len(re.findall(r"PARTITION BY RANGE \(year\)", _sql_text())) == 2
+    mig7 = next(_MIGRATIONS.glob("0007_*.sql")).read_text(encoding="utf-8")
+    assert re.search(
+        r"articles_pubmed\s+PARTITION OF episteme\.articles\s+FOR VALUES IN "
+        r"\('pubmed'\)\s+PARTITION BY RANGE \(year\)",
+        mig7,
+    )
+    assert len(re.findall(r"PARTITION BY RANGE \(year\)", _sql_text())) == 3
     assert len(_partitions("articles_pmc")) >= 3
     assert len(_partitions("articles_bookshelf")) >= 3
+    assert len(_partitions("articles_pubmed")) >= 3
     t = doc("08-data-storage-principles.md")
     assert "`pmc` sub-partitioned `RANGE (year)`" in t
     assert "`bookshelf` also has a year ladder" in t
+    assert "`pubmed` has one via migration 0007" in t
 
 
 def test_article_body_is_list_source_only():
@@ -144,6 +153,7 @@ def test_article_body_is_list_source_only():
         "article_body_pmc",
         "article_body_default",
         "article_body_bookshelf",
+        "article_body_pubmed",
     }
     assert re.search(
         r"CREATE TABLE episteme\.article_body \(.*?\) PARTITION BY LIST \(source\)",
@@ -151,7 +161,10 @@ def test_article_body_is_list_source_only():
         re.S,
     )
     t = doc("08-data-storage-principles.md")
-    assert "`LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002)" in t
+    assert (
+        "`LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002, "
+        "`pubmed` via migration 0007)" in t
+    )
 
 
 def test_hash_keys_and_bucket_counts_named_in_docs_08_match_schema():
