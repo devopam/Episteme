@@ -5,7 +5,7 @@
 -- RANGE (year) with no DEFAULT, so a row whose year is NULL or outside every range
 -- (below 0, or 10000 and over) has no partition and fails its whole batch. The loader
 -- maps a NULL year to 0, but an UPDATE can still produce one (enrich_from_lite set a
--- year-0 row's year to the feed's NULL until this change; it now keeps 0). Migration
+-- year-0 row's year to the feed's NULL until this change; it now stores 0). Migration
 -- 0007 gave articles_pubmed the same catch-all.
 --
 -- A new DEFAULT partition needs no scan of the existing year partitions, and the

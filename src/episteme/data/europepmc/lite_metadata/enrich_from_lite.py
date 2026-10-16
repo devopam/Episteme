@@ -150,8 +150,8 @@ def _iter_all_records(tgz_path: Path):
 _UPDATE_SQL = """
 UPDATE episteme.articles AS a
    SET journal = coalesce(a.journal, v.journal),
-       year    = CASE WHEN (a.year IS NULL OR a.year = 0) AND v.year IS NOT NULL
-                      THEN v.year ELSE a.year END,
+       year    = coalesce(CASE WHEN a.year IS NULL OR a.year = 0 THEN v.year
+                               ELSE a.year END, 0),
        mesh    = CASE WHEN a.mesh IS NULL OR a.mesh = '{}' THEN v.mesh ELSE a.mesh END
   FROM (VALUES %s) AS v (pmcid, journal, year, mesh)
  WHERE a.pmcid = v.pmcid
