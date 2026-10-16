@@ -245,3 +245,34 @@ def test_enrich_from_lite_moves_row_across_year_partitions_for_pmc_source(pg_con
         after_year, after_partition = cur.fetchone()
         assert after_year == 1999
         assert after_partition == "episteme.articles_pmc_1995_2000"
+
+
+def test_enrich_from_lite_keeps_year_0_when_the_feed_has_no_year(pg_conn, tmp_path):
+    """A matched lite record without <PubYear> must not turn the year-0 sentinel into
+    NULL: on the year-partitioned pmc table that would move the row out of
+    articles_pmc_y0 into no partition (schema.sql alone has no DEFAULT) and fail the
+    whole batch."""
+    _setup_schema(pg_conn)
+
+    from episteme.data.europepmc.lite_metadata.enrich_from_lite import enrich_from_lite
+
+    with pg_conn.cursor() as cur:
+        _seed_article(cur, id_="pmcid:PMCNOYEAR", pmcid="PMCNOYEAR", year=0, source="pmc")
+    pg_conn.commit()
+
+    synthetic = _build_tgz(
+        tmp_path,
+        "synthetic_noyear.tgz",
+        "<PMC_ARTICLE><pmcid>PMCNOYEAR</pmcid><JournalTitle>No Year Journal</JournalTitle>"
+        "</PMC_ARTICLE>",
+    )
+    res = enrich_from_lite(synthetic, pg_conn)
+    pg_conn.commit()
+    assert res["rows_matched"] == 1
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT year, journal, tableoid::regclass::text FROM episteme.articles WHERE id = %s",
+            ("pmcid:PMCNOYEAR",),
+        )
+        assert cur.fetchone() == (0, "No Year Journal", "episteme.articles_pmc_y0")
