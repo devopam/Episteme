@@ -50,7 +50,7 @@ dev = [
     "pytest>=7.0.0",
     "jsonschema>=4.0.0",
     "pyyaml>=6.0",
-    "ruff>=0.16.10,<0.17",
+    "ruff>=0.17.0,<0.18",
     "bandit>=1.7.8",
     "pre-commit>=4.0.0",
 ]
@@ -83,7 +83,7 @@ dev = [
     "pytest>=7.0.0",
     "jsonschema>=4.0.0",
     "pyyaml>=6.0",
-    "ruff>=0.16.10,<0.17",
+    "ruff>=0.17.0,<0.18",
     "bandit>=1.7.8",
     "pre-commit>=4.0.0",
 ]
