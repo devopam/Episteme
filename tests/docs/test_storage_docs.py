@@ -148,6 +148,16 @@ def test_articles_partition_ladders_match_docs_08():
     assert "`pubmed` has one via migration 0007" in t
 
 
+def test_every_year_ladder_has_a_default_partition():
+    """A NULL or out-of-range year must land somewhere rather than fail its batch:
+    pubmed via migration 0007, pmc and bookshelf via migration 0008."""
+    sql = _sql_text()
+    for parent in ("articles_pmc", "articles_bookshelf", "articles_pubmed"):
+        assert re.search(rf"PARTITION OF episteme\.{parent} DEFAULT", sql), parent
+    t = doc("08-data-storage-principles.md")
+    assert "`pmc` and `bookshelf` via migration 0008" in t
+
+
 def test_article_body_is_list_source_only():
     assert set(_partitions("article_body")) == {
         "article_body_pmc",

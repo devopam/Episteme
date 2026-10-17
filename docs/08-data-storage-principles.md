@@ -99,7 +99,7 @@ Notes on what is and is not code-backed:
 
 | Table | Partitioning | Holds |
 |-------|--------------|-------|
-| `episteme.articles` | `LIST (source)`; `pmc` sub-partitioned `RANGE (year)`; `DEFAULT` catch-all (`bookshelf` also has a year ladder via migration 0002; `pubmed` has one via migration 0007) | Narrow hot row per article (no text columns) |
+| `episteme.articles` | `LIST (source)`; `pmc` sub-partitioned `RANGE (year)`; `DEFAULT` catch-all (`bookshelf` also has a year ladder via migration 0002; `pubmed` has one via migration 0007; each year ladder has a `DEFAULT` sub-partition for a NULL or out-of-range year, `pmc` and `bookshelf` via migration 0008) | Narrow hot row per article (no text columns) |
 | `episteme.article_body` | `LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002, `pubmed` via migration 0007) | `title`, `abstract`, `body_text`, `text`; primary key `(article_id, source)` |
 | `episteme.article_cites` | `HASH (src_pmid)`, 8 buckets | Citation edges `(src_pmid, dst_pmid, dst_doi, ref_text, source_file)`; `dst_pmid` is nullable (migration 0006) |
 | `episteme.article_mesh` | `HASH (pmid)`, 8 buckets | `pmid`, `descriptor_ui`, `descriptor_name`, `major_topic`, `qualifier_uis` (migration 0006), `qualifiers`, `source_file` |
