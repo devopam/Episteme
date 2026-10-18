@@ -432,3 +432,35 @@ def test_fetch_inventory_deletes_a_damaged_file(tmp_path, monkeypatch):
     monkeypatch.setattr(dp, "download_to_file", fake_download)
     assert dp.fetch_inventory(tmp_path) is None
     assert not list(tmp_path.rglob("bad.csv.gz"))
+
+
+def test_each_thread_reuses_one_session():
+    import threading
+
+    first = dp._session()
+    assert dp._session() is first
+    other: list = []
+    t = threading.Thread(target=lambda: other.append(dp._session()))
+    t.start()
+    t.join()
+    assert other and other[0] is not first
+
+
+def test_http_get_checked_uses_the_thread_session(monkeypatch):
+    calls: list[str] = []
+
+    class FakeSession:
+        def get(self, url, timeout, stream):
+            calls.append(url)
+            return _Status(404)
+
+    class _Status:
+        def __init__(self, code):
+            self.status_code = code
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(dp, "_session", lambda: FakeSession())
+    assert dp.http_get_checked("https://example.invalid/x") is None
+    assert calls == ["https://example.invalid/x"]

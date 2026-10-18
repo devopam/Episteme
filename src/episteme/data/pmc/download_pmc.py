@@ -46,6 +46,7 @@ import gzip
 import json
 import re
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterable
@@ -55,6 +56,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
 from episteme.config import get_settings
@@ -106,6 +108,22 @@ class FetchError(Exception):
     not parse."""
 
 
+_LOCAL = threading.local()
+
+
+def _session() -> requests.Session:
+    """One requests.Session per thread. A bare requests.get opens a new TLS
+    connection for every call; to the us-east-1 bucket from far away that cost
+    about a second per request and held the full run to ~3 articles/s
+    (2026-10-18). A Session keeps the connection open between calls."""
+    s = getattr(_LOCAL, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=2))
+        _LOCAL.session = s
+    return s
+
+
 def http_get_checked(
     url: str,
     *,
@@ -117,9 +135,10 @@ def http_get_checked(
     last = "no attempt"
     for attempt in range(retries):
         try:
-            r = requests.get(url, timeout=timeout, stream=stream)
+            r = _session().get(url, timeout=timeout, stream=stream)
             if r.status_code == 200:
                 return r
+            r.close()  # give the connection back to the pool
             if r.status_code == 404:
                 return None
             last = f"HTTP {r.status_code}"
@@ -573,8 +592,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threads",
         type=int,
-        default=16,
-        help="Parallel download workers",
+        default=48,
+        help="Parallel download workers (each keeps its own connection open)",
     )
     parser.add_argument(
         "--dry-run",
