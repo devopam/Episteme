@@ -1,8 +1,9 @@
 # Dependabot: weekly version updates (Monday 06:00 UTC), minor and patch bumps grouped
 # into one pull request per ecosystem, each major bump in its own pull request, and
 # security updates grouped as `security-fixes`. The dependabot-auto-merge workflow
-# turns on auto-merge for every Dependabot pull request, so each one merges by itself
-# once the required CI `tests` check passes (the same set-up as MCPg).
+# auto-merges `security-fixes` only (once the required CI `tests` check passes, and
+# only while every commit is Dependabot's own, signed by GitHub); version updates
+# wait for a person.
 #
 # Commit messages follow Conventional Commits: `chore(deps): ...` for uv,
 # `ci(deps): ...` for GitHub Actions (`include: scope` adds the `(deps)`).
