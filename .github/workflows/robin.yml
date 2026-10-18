@@ -1,5 +1,10 @@
 name: Robin
 
+# Hardening (2026-10-18): the reusable workflow is pinned to a reviewed release commit
+# (it receives the LLM_* secrets, so a change on its main branch must not reach them
+# unreviewed; update the pin on purpose), and a comment starts the job only when its
+# author is the repo owner, a member or a collaborator -- on a public repo any GitHub
+# user can comment.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
@@ -13,7 +18,11 @@ permissions:
 
 jobs:
   review:
-    uses: antongulin/robin/.github/workflows/review.yml@main
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    uses: antongulin/robin/.github/workflows/review.yml@fc0bf915b634bf2f8b88ff1392acefdfb54e28d9 # v2.12.0
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
