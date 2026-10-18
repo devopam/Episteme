@@ -170,7 +170,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0008 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0009 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -184,11 +184,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0006_pubmed_graph.sql` | Graph tables `article_comments`, `article_chemicals`, `article_keywords`, `article_authors`, `article_facets`, `mesh_tree`, `mesh_facet_rule` (seeded, rule_version 1) and `_graph_lineage`; new columns on `article_mesh` and `article_cites`; the `bulk_indexes` group `pubmed_graph` covers their secondary indexes | Required before `pubmed graph` and `mesh graph` (which fills `mesh_tree`). Needs schema 1.6 shards (docs/09 section 4.5). |
 | `0007_pubmed_partition.sql` | `pubmed` LIST partitions: `articles_pubmed` (year ladder: 13 ranges plus a `DEFAULT` for a NULL or out-of-range year) and `article_body_pubmed` | A full `pubmed` reload can `TRUNCATE` these (an audited operator step for now; the loader still replaces shard by shard, fast while the partitions are empty) instead of deleting rows scattered through the default partition. **Precondition:** no `pubmed` row in `articles_default` / `article_body_default` (the `CREATE TABLE ... PARTITION OF` scans the default partition and fails otherwise), so on a loaded database purge `pubmed` first (one audited `DELETE ... WHERE source = 'pubmed'`). Apply with no load running. |
 | `0008_pmc_bookshelf_default_partition.sql` | `DEFAULT` year partitions `articles_pmc_default` and `articles_bookshelf_default` | A `pmc` or `bookshelf` row with a NULL or out-of-range year lands there instead of failing its batch. No precondition and no scan of the year partitions; apply before the first `pmc` or `bookshelf` load. |
+| `0009_apollo_pubchem_partitions.sql` | `apollo` and `pubchem` LIST partitions: `articles_apollo`, `articles_pubchem`, `article_body_apollo`, `article_body_pubchem` (no year split) | Keeps the loader's per-shard id deletes off the ~30-million-row default partition (an apollo shard spent an hour or more there). **Precondition:** no `apollo` or `pubchem` row in `articles_default` / `article_body_default` (the `CREATE TABLE ... PARTITION OF` scans the default partition and fails otherwise), so on a loaded database purge first (audited `DELETE ... WHERE source = ...`, and remove the purged shards' load markers and `_lineage` rows). Apply with no load running. |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0008, apply those seven directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0009, apply those eight directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t`; the fourth column is 0004's `articles_id_idx` and the fifth is 0005's table):
@@ -199,7 +200,7 @@ PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c 
 
 **Migration 0006 through MCPg.** Where the database is reached through the MCPg MCP server, apply 0006's DDL with `run_ddl` (it is idempotent). `run_ddl` refuses GRANT and REVOKE, so the operator then runs the file's single `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON episteme.mesh_facet_rule FROM episteme_app;` line once as `episteme_sys_admin` (the psql loop above does this itself). The pipeline writes as `episteme_app`, so every other new table keeps the standard DML grants; only `mesh_facet_rule` is read-only to it, so facet rules change only through `episteme_sys_admin`. Check: `to_regclass('episteme.article_authors')` and `to_regclass('episteme._graph_lineage')` are not null, and `episteme.mesh_facet_rule` holds 31 rows.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0008 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0009 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
