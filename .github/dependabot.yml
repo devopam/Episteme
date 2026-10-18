@@ -1,21 +1,56 @@
-# Dependabot: weekly routine updates (one pull request per package, merged by a person)
-# and security updates grouped as `security-fixes`, which the dependabot-auto-merge
-# workflow merges automatically once the CI `tests` check passes.
+# Dependabot: weekly version updates (Monday 06:00 UTC), minor and patch bumps grouped
+# into one pull request per ecosystem, each major bump in its own pull request, and
+# security updates grouped as `security-fixes`. The dependabot-auto-merge workflow
+# turns on auto-merge for every Dependabot pull request, so each one merges by itself
+# once the required CI `tests` check passes (the same set-up as MCPg).
+#
+# Commit messages follow Conventional Commits: `chore(deps): ...` for uv,
+# `ci(deps): ...` for GitHub Actions (`include: scope` adds the `(deps)`).
 version: 2
 updates:
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
     groups:
       security-fixes:
         applies-to: security-updates
         patterns: ["*"]
+      uv-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
     groups:
       security-fixes:
         applies-to: security-updates
         patterns: ["*"]
+      gh-actions-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"

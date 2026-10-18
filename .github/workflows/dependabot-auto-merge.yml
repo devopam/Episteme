@@ -1,5 +1,6 @@
-# Enables auto-merge on Dependabot SECURITY pull requests (group `security-fixes`).
-# The merge happens only after the required `tests` check passes (ruleset on main).
+# Enables auto-merge on every Dependabot pull request: grouped minor/patch version
+# updates, single major bumps and `security-fixes`. GitHub merges it only after the
+# required `tests` check passes (ruleset on main); a failing bump waits for a person.
 # Never checks out or runs pull-request code.
 name: dependabot-auto-merge
 on:
@@ -15,14 +16,14 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Fetch Dependabot metadata
-        id: meta
-        uses: dependabot/fetch-metadata@v3
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Enable auto-merge for security fixes
-        if: steps.meta.outputs.dependency-group == 'security-fixes'
+      - name: Enable auto-merge
         run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Report failure
+        if: failure()
+        run: gh pr comment "$PR_URL" --body "Auto-merge could not be enabled on this Dependabot pull request; it needs a manual review."
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
