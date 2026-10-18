@@ -99,6 +99,8 @@ Configuration is read from three places. Shell scripts load them in this order, 
 
 `scripts/data/_lib/check_prereqs.sh` prints this tool table (it never fails) at the start of every `run_pipeline.sh` run.
 
+`hf_fetch` (`scripts/data/_lib/hf_download.sh`) downloads the pinned repo type only. It tries up to `EPISTEME_HF_TRIES` times (default 3, waiting `EPISTEME_HF_RETRY_DELAY` × attempt seconds, default 30); the CLI resumes the files it already has. It sets `HF_HUB_DOWNLOAD_TIMEOUT` and `HF_HUB_ETAG_TIMEOUT` to 60 s unless they are set. When the CLI says the repo "cannot be accessed", it exits 0 and returns the old local folder, so the step used to report success with nothing downloaded; `hf_fetch` treats that as a failed attempt. Behind a 401, 403 or 404 (a gated repo without `HF_TOKEN` or with its terms not accepted, a private repo, a wrong repo or type) it fails at once; behind a timeout, a lost connection or a hub 5xx it tries again.
+
 ### 1.2 Keys (names only)
 
 Values are never shown in this document. Put them in `.env` (gitignored) or the real environment.
@@ -537,7 +539,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf graph
 
 #### Guidelines (`guidelines`)
 
-Hugging Face dataset `GUIDELINES_HF_REPO` (`epfl-llm/guidelines`); rows are `unknown` licence, subset `other` (docs/12). Raw: `<raw>/guidelines/`. Download ignores `--max-files`.
+Hugging Face dataset `GUIDELINES_HF_REPO` (`epfl-llm/guidelines`); rows are `unknown` licence, subset `other` (docs/12). Raw: `<raw>/guidelines/`. Download ignores `--max-files`. The dataset is gated: accept its terms on the dataset page with your Hugging Face account, and put a read token in `.env` as `HF_TOKEN`.
 
 ```bash
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines download
