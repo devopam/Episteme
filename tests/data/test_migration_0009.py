@@ -63,6 +63,13 @@ def test_0009_routes_apollo_and_pubchem_to_their_own_partitions(pg_conn):
             "AND indexdef LIKE '%(source, source_file)%'"
         )
         assert cur.fetchone()[0] == 2
+        # article_body has no source_file; its primary key cascades instead
+        cur.execute(
+            "SELECT count(*) FROM pg_indexes WHERE schemaname = 'episteme' "
+            "AND tablename IN ('article_body_apollo', 'article_body_pubchem') "
+            "AND indexdef LIKE 'CREATE UNIQUE INDEX%(article_id, source)%'"
+        )
+        assert cur.fetchone()[0] == 2
     pg_conn.rollback()
 
 

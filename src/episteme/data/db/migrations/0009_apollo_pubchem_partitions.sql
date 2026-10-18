@@ -20,7 +20,9 @@
 -- runs under an ACCESS EXCLUSIVE lock on articles / article_body: apply with no
 -- load running.
 --
--- Indexes: every index defined on the parent cascades to the new partitions.
+-- Indexes: every index defined on the parent cascades to the new partitions, including
+-- the articles (source, source_file) index that the loader's per-shard deletes use and
+-- the article_body primary key (article_id, source).
 -- Grants: DML through the parent checks the parent's privileges only, and
 -- schema.sql's ALTER DEFAULT PRIVILEGES covers the new tables as well.
 
