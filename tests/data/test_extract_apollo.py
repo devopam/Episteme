@@ -236,3 +236,44 @@ def test_discover_apollo_files_skips_benchmark_and_decontamination_files(tmp_pat
 
     found = {f.resolve() for f in discover_apollo_files(raw)}
     assert found == {p.resolve() for p in keep}
+
+
+def test_streamed_array_matches_a_full_parse_at_any_chunk_size(tmp_path):
+    """_iter_json_array must give the same records as json.loads, also when a
+    chunk boundary falls inside a string, a nested list or a number."""
+    import io
+    import json as _json
+
+    from episteme.data.apollo.extract_apollo import _iter_json_array
+
+    records = [
+        'plain text, with "quotes" and a comma',
+        ["q1", "a1", "q2", "a2"],
+        [["prompt", "answer"]],
+        {"text": "über 漢字 ✓", "n": 12345},
+        12345,
+        -0.5e-3,
+        "",
+        [],
+    ]
+    text = _json.dumps(records, ensure_ascii=False)
+    for chunk in (1, 2, 3, 7, 64, 1 << 22):
+        fh = io.StringIO(text[1:])  # positioned after the opening "["
+        assert list(_iter_json_array(fh, chunk=chunk)) == records, chunk
+
+
+def test_iter_records_handles_array_dict_and_jsonl_files(tmp_path):
+    from episteme.data.apollo.extract_apollo import _iter_records
+
+    arr = tmp_path / "a.json"
+    arr.write_text('  \n[ "x", ["q", "a"] ]\n', encoding="utf-8")
+    assert list(_iter_records(arr)) == ["x", ["q", "a"]]
+    obj = tmp_path / "b.json"
+    obj.write_text('{"data": ["y", "z"]}', encoding="utf-8")
+    assert list(_iter_records(obj)) == ["y", "z"]
+    jl = tmp_path / "c.jsonl"
+    jl.write_text('{"text": "t1"}\nnot json\n\n{"text": "t2"}\n', encoding="utf-8")
+    assert list(_iter_records(jl)) == [{"text": "t1"}, "not json", {"text": "t2"}]
+    empty = tmp_path / "d.json"
+    empty.write_text("   \n", encoding="utf-8")
+    assert list(_iter_records(empty)) == []
