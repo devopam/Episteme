@@ -87,3 +87,17 @@ def test_find_input_by_key_handles_filenames_containing_double_underscore(tmp_pa
     key = input_key(f, raw)
     assert key == "d__we__ird.txt"
     assert find_input_by_key(raw, key) == f
+
+
+def test_discover_input_files_skips_hidden_directories(tmp_path):
+    """`hf download --local-dir` keeps `.cache/huggingface/trees/<sha>.json` under the
+    raw dir; it must not be discovered as a source file."""
+    from episteme.data.checkpoint_markers import discover_input_files
+
+    raw = tmp_path / "apollo"
+    data = raw / "train" / "a.json"
+    cache = raw / ".cache" / "huggingface" / "trees" / "abc.json"
+    for p in (data, cache):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("[]", encoding="utf-8")
+    assert discover_input_files(raw, ["*.json"]) == [data]
