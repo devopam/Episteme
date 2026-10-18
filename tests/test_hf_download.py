@@ -19,15 +19,17 @@ REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "scripts" / "data" / "_lib"
 
 FAKE_HF = r"""#!/usr/bin/env bash
-# exit codes from $FAKE_HF_CODES, one per call; "nr" = print the no-repo message, exit 0
+# exit codes from $FAKE_HF_CODES, one per call. "nr401" / "nrto" print the
+# no-repo message (as huggingface_hub logs it) for a 401 or a timeout, and exit 0.
 echo "$*" >> "$FAKE_HF_LOG"
 n=$(wc -l < "$FAKE_HF_LOG")
 code=$(echo $FAKE_HF_CODES | cut -d' ' -f"$n")
 code=${code:-0}
-if [ "$code" = nr ]; then
-    echo "Returning existing local_dir as remote repo cannot be accessed (401)" >&2
-    exit 0
-fi
+msg="Returning existing local_dir x as remote repo cannot be accessed in snapshot_download"
+case "$code" in
+    nr401) echo "$msg (401 Client Error. Repository Not Found for url: u)." >&2; exit 0 ;;
+    nrto) echo "$msg (Read timed out. (read timeout=10))." >&2; exit 0 ;;
+esac
 exit "$code"
 """
 
@@ -39,7 +41,7 @@ def _bash() -> str:
     pytest.skip("no POSIX bash")
 
 
-def _run(tmp_path: Path, codes: str, rtype: str = "dataset"):
+def _run(tmp_path: Path, codes: str, rtype: str = "dataset", prefix: str = ""):
     fake = tmp_path / "fakebin"
     fake.mkdir()
     (fake / "hf").write_bytes(FAKE_HF.encode("utf-8"))
@@ -48,7 +50,7 @@ def _run(tmp_path: Path, codes: str, rtype: str = "dataset"):
     script = (
         'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
         'export PATH="$fb:/usr/bin:/bin"; '
-        '. "$LIB/hf_download.sh"; hf_fetch org/repo "$RTYPE" "$DEST"'
+        f'{prefix}. "$LIB/hf_download.sh"; hf_fetch org/repo "$RTYPE" "$DEST"'
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith(("EPISTEME_", "HF_"))}
     env.update(
@@ -92,11 +94,31 @@ def test_every_call_failing_fails_without_a_model_fallback(tmp_path):
     assert "retrying as model" not in proc.stderr
 
 
-def test_the_no_repo_message_with_exit_0_is_a_failure(tmp_path):
-    proc, calls = _run(tmp_path, "nr 0")
+def test_no_access_with_exit_0_fails_at_once(tmp_path):
+    """A 401 behind the no-repo message (gated repo, no token): exit 0 from the CLI,
+    a failure here, and no retry."""
+    proc, calls = _run(tmp_path, "nr401 0")
     assert proc.returncode == 1
     assert len(calls) == 1
     assert "HF_TOKEN" in proc.stderr
+
+
+def test_a_timeout_behind_the_no_repo_message_is_retried(tmp_path):
+    proc, calls = _run(tmp_path, "nrto 0")
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 2
+
+
+def test_the_no_repo_message_on_every_attempt_fails(tmp_path):
+    proc, calls = _run(tmp_path, "nrto nrto nrto")
+    assert proc.returncode == 1
+    assert len(calls) == 3
+
+
+def test_a_caller_with_set_e_still_gets_the_retries(tmp_path):
+    proc, calls = _run(tmp_path, "1 0", prefix="set -e; ")
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 2
 
 
 def test_hub_timeouts_default_to_60_seconds(tmp_path):

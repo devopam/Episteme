@@ -5,10 +5,13 @@
 # the sourcing wrapper and abort it on any unguarded ${VAR}).
 set -o pipefail
 
-# The CLI prints this, with exit 0, when it cannot read the repo (a gated repo
-# without a token, a wrong repo type) and returns the existing --local-dir as if
-# it were the snapshot. That is a failure, not a download.
+# huggingface_hub's snapshot_download logs this, and the CLI exits 0, when its
+# repo_info call fails and --local-dir is not empty: it returns the old folder as
+# if it were the snapshot. That is never a download. The call fails on a timeout,
+# a lost connection or a hub 5xx (worth a retry) and on 401 / 403 / 404 (a gated
+# or private repo without access, a wrong repo or type: no retry helps).
 _HF_NO_REPO_MSG="as remote repo cannot be accessed"
+_HF_NO_ACCESS='(401|403|404) Client Error|Repository Not Found|gated'
 
 hf_fetch() {
     local repo="$1" rtype="${2:-dataset}" dest="$3" rev="${4:-}"
@@ -43,22 +46,24 @@ hf_fetch() {
     # resumes the files it already has.
     local tries="${EPISTEME_HF_TRIES:-3}" delay="${EPISTEME_HF_RETRY_DELAY:-30}"
     local errf attempt rc
-    errf="$(mktemp)"
+    # The CLI's stderr goes to a file that is read after each attempt; if the file
+    # cannot be made or written, the attempt fails rather than skip the check.
+    errf="$(mktemp)" || { echo "ERROR: hf_fetch: mktemp failed" >&2; return 1; }
     for ((attempt = 1; attempt <= tries; attempt++)); do
-        "$bin" "${args[@]}" 2> >(tee "$errf" >&2)
-        rc=$?
-        wait # let tee finish writing $errf
-        if grep -q "$_HF_NO_REPO_MSG" "$errf"; then
-            echo "ERROR: $bin cannot read $repo (type=$rtype): a gated repo needs HF_TOKEN and accepted terms" >&2
-            rm -f "$errf"
-            return 1
-        fi
-        if [ "$rc" -eq 0 ]; then
+        # in a condition, so a caller's `set -e` cannot end the loop early
+        if "$bin" "${args[@]}" 2>"$errf"; then rc=0; else rc=$?; fi
+        cat "$errf" >&2
+        if [ "$rc" -eq 0 ] && ! grep -q "$_HF_NO_REPO_MSG" "$errf"; then
             rm -f "$errf"
             return 0
         fi
+        if grep -q "$_HF_NO_REPO_MSG" "$errf" && grep -Eq "$_HF_NO_ACCESS" "$errf"; then
+            echo "ERROR: $bin cannot read $repo (type=$rtype): no access (a gated repo needs HF_TOKEN and accepted terms) or no such repo" >&2
+            rm -f "$errf"
+            return 1
+        fi
         echo "WARN: $bin download $repo failed (rc=$rc, attempt $attempt of $tries)" >&2
-        [ "$attempt" -lt "$tries" ] && sleep "$((delay * attempt))"
+        if [ "$attempt" -lt "$tries" ]; then sleep "$((delay * attempt))"; fi
     done
     rm -f "$errf"
     return 1
