@@ -5,6 +5,11 @@
 # the sourcing wrapper and abort it on any unguarded ${VAR}).
 set -o pipefail
 
+# The CLI prints this, with exit 0, when it cannot read the repo (a gated repo
+# without a token, a wrong repo type) and returns the existing --local-dir as if
+# it were the snapshot. That is a failure, not a download.
+_HF_NO_REPO_MSG="as remote repo cannot be accessed"
+
 hf_fetch() {
     local repo="$1" rtype="${2:-dataset}" dest="$3" rev="${4:-}"
     local bin=""
@@ -23,16 +28,38 @@ hf_fetch() {
        || { command -v python3 >/dev/null 2>&1 && python3 -c 'import hf_transfer' >/dev/null 2>&1; }; then
         export HF_HUB_ENABLE_HF_TRANSFER=1
     fi
+    # The hub's 10 s defaults time out on a busy link (2026-10-18: apollo and
+    # guidelines both failed so); the caller's own values win.
+    export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-60}"
+    export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-60}"
+
     local -a args=(download "$repo" --local-dir "$dest")
     [ "$rtype" != "model" ] && args+=(--repo-type "$rtype")
     [ -n "$rev" ] && args+=(--revision "$rev")
-    if "$bin" "${args[@]}"; then return 0; fi
-    if [ "$rtype" = "model" ]; then
-        return 1   # already the no-type form; nothing left to fall back to
-    fi
-    # retry as model-type: drop --repo-type (model is the HF CLI default). Batch-
-    # script behaviour — some repos are published as model, not dataset.
-    echo "WARN: $bin download as $rtype failed; retrying as model" >&2
-    args=(download "$repo" --local-dir "$dest"); [ -n "$rev" ] && args+=(--revision "$rev")
-    "$bin" "${args[@]}"
+
+    # No fallback to another repo type: each wrapper pins its repo and type, and the
+    # old retry "as model" ended in the no-repo message above with exit 0, so a
+    # failed download reported success. A failed call is retried as it is; the CLI
+    # resumes the files it already has.
+    local tries="${EPISTEME_HF_TRIES:-3}" delay="${EPISTEME_HF_RETRY_DELAY:-30}"
+    local errf attempt rc
+    errf="$(mktemp)"
+    for ((attempt = 1; attempt <= tries; attempt++)); do
+        "$bin" "${args[@]}" 2> >(tee "$errf" >&2)
+        rc=$?
+        wait # let tee finish writing $errf
+        if grep -q "$_HF_NO_REPO_MSG" "$errf"; then
+            echo "ERROR: $bin cannot read $repo (type=$rtype): a gated repo needs HF_TOKEN and accepted terms" >&2
+            rm -f "$errf"
+            return 1
+        fi
+        if [ "$rc" -eq 0 ]; then
+            rm -f "$errf"
+            return 0
+        fi
+        echo "WARN: $bin download $repo failed (rc=$rc, attempt $attempt of $tries)" >&2
+        [ "$attempt" -lt "$tries" ] && sleep "$((delay * attempt))"
+    done
+    rm -f "$errf"
+    return 1
 }
