@@ -224,3 +224,12 @@ def test_sys_admin_password_read(fresh_config):
 
 def test_sys_admin_password_default_empty(fresh_config):
     assert fresh_config("").get_settings().sys_admin_password == ""
+
+
+def test_duckdb_temp_dir_default_is_none(fresh_config):
+    assert fresh_config("").get_settings().duckdb_temp_dir is None
+
+
+def test_duckdb_temp_dir_override(fresh_config, tmp_path):
+    cfg = fresh_config(f"EPISTEME_DUCKDB_TEMP_DIR={tmp_path.as_posix()}\n")
+    assert cfg.get_settings().duckdb_temp_dir == tmp_path

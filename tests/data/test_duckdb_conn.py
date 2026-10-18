@@ -33,6 +33,8 @@ def settings_root(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path))
     monkeypatch.setenv("EPISTEME_DUCKDB_MEMORY_LIMIT", "256MB")
+    # empty, not unset: an operator .env value would otherwise be loaded back
+    monkeypatch.setenv("EPISTEME_DUCKDB_TEMP_DIR", "")
     duckdb_conn.get_settings.cache_clear()
     yield tmp_path
     duckdb_conn.get_settings.cache_clear()
@@ -97,3 +99,15 @@ def test_fetch_batches_sizes():
 
 def test_fetch_batches_default_size():
     assert duckdb_conn.FETCH_BATCH_ROWS == 50_000
+
+
+def test_connect_spills_under_the_configured_temp_dir(settings_root, tmp_path, monkeypatch):
+    """EPISTEME_DUCKDB_TEMP_DIR moves the spill root (to a fast local disk)."""
+    fast = tmp_path / "fast_disk"
+    monkeypatch.setenv("EPISTEME_DUCKDB_TEMP_DIR", str(fast))
+    duckdb_conn.get_settings.cache_clear()
+    con = duckdb_conn.connect()
+    try:
+        assert _temp_directory(con).parent == fast
+    finally:
+        con.close()

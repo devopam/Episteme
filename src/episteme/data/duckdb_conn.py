@@ -22,7 +22,10 @@ def connect(
     """In-memory connection with a memory cap and its own spill directory.
 
     Each connection spills to a fresh ``<spill root>/<uuid4 hex>`` subdirectory
-    (the root is ``temp_dir`` or ``<processed_root>/_ops/_duckdb_tmp``). Spill
+    (the root is ``temp_dir``, else ``EPISTEME_DUCKDB_TEMP_DIR``, else
+    ``<processed_root>/_ops/_duckdb_tmp``). On a slow data disk (a 5,400 rpm USB
+    HDD) a large join spills there at random-I/O speed and slows every other job on
+    the disk, so the env key lets a fast local disk take the spill. Spill
     file names are not unique across connections, and closing a connection
     deletes every ``duckdb_temp_*`` file in its temp directory -- with a shared
     directory, closing one connection crashed another one still spilling
@@ -36,7 +39,12 @@ def connect(
     limit = (memory_limit if memory_limit is not None else settings.duckdb_memory_limit).strip()
     if not _MEMORY_LIMIT_RE.match(limit):
         raise ValueError(f"invalid DuckDB memory limit: {limit!r}")
-    root = temp_dir if temp_dir is not None else settings.processed_root / "_ops" / "_duckdb_tmp"
+    if temp_dir is not None:
+        root = temp_dir
+    elif settings.duckdb_temp_dir is not None:
+        root = settings.duckdb_temp_dir
+    else:
+        root = settings.processed_root / "_ops" / "_duckdb_tmp"
     root.mkdir(parents=True, exist_ok=True)
     spill = root / uuid.uuid4().hex
     con = duckdb.connect()
