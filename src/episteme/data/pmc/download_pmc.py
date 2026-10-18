@@ -6,10 +6,12 @@ Source of the article list, in order:
   1. --filelist (a local CSV/TSV), when given
   2. the bucket's daily S3 inventory of metadata JSON objects (the bucket
      README, section 5.2): one row per article version, so every version of
-     every PMCID is known without listing ~8 million prefixes
-  3. NCBI ESearch with commercial licence filters, only when the inventory
-     cannot be read; ESearch returns at most 9,999 ids, so it refuses a larger
-     request instead of failing part way through
+     every PMCID is known without listing ~8 million prefixes. When the newest
+     inventory cannot be read (not yet published, or a file is damaged), the
+     next older one is used.
+  3. NCBI ESearch with commercial licence filters, only when no inventory can
+     be read; ESearch returns at most 9,999 ids, so it refuses a larger request
+     instead of failing part way through
   Always verify license_code from metadata JSON before saving.
 
 Live object layout (since the 2026-08-24 cutover, which removed the oa_comm
@@ -21,9 +23,16 @@ filelists, the FTP oa_bulk packages and the baseline packages):
   (xml_url / text_url inside metadata JSON)
 
 One version per PMCID: the highest-numbered commercial version. Version numbers
-reflect processing order, so this is the latest one PMC processed. A PMCID whose
-versions are all non-commercial is recorded in filelists/noncommercial.txt, so a
-restart does not fetch its metadata again (delete the file to re-check them).
+reflect processing order, so this is the latest one PMC processed. Without the
+inventory (paths 1 and 3) the versions of a PMCID come from a ListObjectsV2 call
+on its ``PMC{id}.`` prefix.
+
+A PMCID whose versions are all non-commercial is recorded in
+filelists/noncommercial.txt as ``PMC{id}.{highest version}``; a re-run skips it
+while the inventory shows the same highest version, and checks it again when a
+newer version appears. Delete the file to re-check every PMCID. A metadata
+request that fails (anything but a 404) counts as a failure: the PMCID is not
+recorded, no older version is chosen in its place, and the run exits 1.
 
 Commercial license_code values kept:
   CC0, CC BY, CC BY-SA, CC BY-ND
@@ -39,7 +48,7 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -54,16 +63,20 @@ S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
 
 INVENTORY_PREFIX = "inventory-reports/pmc-oa-opendata/metadata/"
 _INVENTORY_DATE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}Z)/$")
-_INVENTORY_KEY = re.compile(r"^metadata/(PMC\d+)\.(\d+)\.json$")
+_INVENTORY_KEY = re.compile(r"^metadata/PMC(\d+)\.(\d+)\.json$")
 # One inventory is ~15 csv.gz files (~250 MB); one lost file would drop the run to
 # the ESearch fallback, so each file gets more attempts than an article does.
 INVENTORY_RETRIES = 8
+# The newest inventories tried, newest first, before the ESearch fallback.
+INVENTORY_DATES_TRIED = 3
 
 # ESearch never returns an id past position 9,999.
 ESEARCH_MAX_IDS = 9999
 
 NONCOMMERCIAL_LEDGER = "noncommercial.txt"
 NONCOMMERCIAL_REASON = "non-commercial"
+REQUEST_FAILED = "request failed"
+MISSING = "metadata not found"
 
 # Futures in flight at once; main() submits the id list in batches of this size so
 # ~8 million ids never become ~8 million pending futures.
@@ -88,14 +101,20 @@ COMMERCIAL_LICENSE_CODES = {
 }
 
 
-def http_get(
+class FetchError(Exception):
+    """A request that failed after its retries (not a 404), or a reply that does
+    not parse."""
+
+
+def http_get_checked(
     url: str,
     *,
     timeout: int = 60,
     stream: bool = False,
     retries: int = 3,
 ) -> requests.Response | None:
-    last_err: Exception | None = None
+    """GET with retries: the response on 200, None on 404, FetchError otherwise."""
+    last = "no attempt"
     for attempt in range(retries):
         try:
             r = requests.get(url, timeout=timeout, stream=stream)
@@ -103,72 +122,122 @@ def http_get(
                 return r
             if r.status_code == 404:
                 return None
+            last = f"HTTP {r.status_code}"
         except Exception as e:  # noqa: BLE001
-            last_err = e
+            last = str(e)
         time.sleep(1.5 * (attempt + 1))
-    if last_err:
-        print(f"  warn: GET failed {url}: {last_err}", file=sys.stderr)
-    return None
+    raise FetchError(f"GET {url}: {last}")
+
+
+def http_get(
+    url: str,
+    *,
+    timeout: int = 60,
+    stream: bool = False,
+    retries: int = 3,
+) -> requests.Response | None:
+    """Like http_get_checked, but a failure is a warning and returns None."""
+    try:
+        return http_get_checked(url, timeout=timeout, stream=stream, retries=retries)
+    except FetchError as e:
+        print(f"  warn: {e}", file=sys.stderr)
+        return None
+
+
+def inventory_dates(list_xml: str) -> list[str]:
+    """The ``YYYY-MM-DDTHH-MMZ`` folders in a ListObjectsV2 reply for
+    INVENTORY_PREFIX with ``delimiter=/``, newest first (the ``data/`` and
+    ``hive/`` folders do not match the date pattern)."""
+    prefixes = re.findall(r"<Prefix>([^<]+)</Prefix>", list_xml)
+    return sorted({m.group(1) for p in prefixes if (m := _INVENTORY_DATE.search(p))}, reverse=True)
 
 
 def latest_inventory_date(list_xml: str) -> str | None:
-    """The newest ``YYYY-MM-DDTHH-MMZ`` folder in a ListObjectsV2 reply for
-    INVENTORY_PREFIX with ``delimiter=/`` (the ``data/`` and ``hive/`` folders do
-    not match the date pattern)."""
-    prefixes = re.findall(r"<Prefix>([^<]+)</Prefix>", list_xml)
-    dates = [m.group(1) for p in prefixes if (m := _INVENTORY_DATE.search(p))]
-    return max(dates) if dates else None
+    dates = inventory_dates(list_xml)
+    return dates[0] if dates else None
 
 
-def inventory_versions(rows: Iterable[list[str]]) -> dict[str, list[int]]:
-    """Map PMCID -> its version numbers, highest first, from inventory CSV rows
-    (``bucket, key, last_modified, etag``; ``key`` is ``metadata/PMC{id}.{ver}.json``).
-    Rows with any other key are ignored."""
-    found: dict[str, set[int]] = {}
+# The full inventory holds ~9.3 million PMCIDs and ~98% have one version, so it is
+# kept compact: PMC number -> its one version as an int, or a tuple (highest first)
+# when there are several. A dict of str -> set took 3.4 GiB at peak; this form needs
+# about a third of that.
+Versions = int | tuple[int, ...]
+
+
+def _versions_of(value: Versions) -> tuple[int, ...]:
+    return (value,) if isinstance(value, int) else value
+
+
+def _add_inventory_rows(found: dict[int, Versions], rows: Iterable[list[str]]) -> None:
     for row in rows:
         if len(row) < 2:
             continue
         m = _INVENTORY_KEY.match(row[1].strip())
-        if m:
-            found.setdefault(m.group(1), set()).add(int(m.group(2)))
-    return {pmcid: sorted(vers, reverse=True) for pmcid, vers in found.items()}
+        if not m:
+            continue
+        n, v = int(m.group(1)), int(m.group(2))
+        cur = found.get(n)
+        if cur is None:
+            found[n] = v
+        elif v not in _versions_of(cur):
+            found[n] = tuple(sorted({*_versions_of(cur), v}, reverse=True))
 
 
-def fetch_inventory(dest_dir: Path) -> tuple[str, dict[str, list[int]]] | None:
-    """Download the newest bucket inventory into ``dest_dir/<date>/`` (a file
-    already there is reused) and return ``(date, versions)``, or None when the
-    inventory cannot be read."""
+def inventory_versions(rows: Iterable[list[str]]) -> dict[str, tuple[int, ...]]:
+    """Map PMCID -> its version numbers, highest first, from inventory CSV rows
+    (``bucket, key, last_modified, etag``; ``key`` is ``metadata/PMC{id}.{ver}.json``).
+    Rows with any other key are ignored."""
+    found: dict[int, Versions] = {}
+    _add_inventory_rows(found, rows)
+    return {f"PMC{n}": _versions_of(v) for n, v in found.items()}
+
+
+def _read_inventory(dest_dir: Path, date: str) -> dict[int, Versions] | None:
+    """Versions from one inventory date, or None when its manifest or a file
+    cannot be read. A damaged local file is deleted so the next run downloads it
+    again."""
+    local: Path | None = None
+    try:
+        manifest_r = http_get(f"{S3_HTTP}/{INVENTORY_PREFIX}{date}/manifest.json", timeout=60)
+        if manifest_r is None:
+            print(f"Inventory {date}: manifest.json not readable.", file=sys.stderr)
+            return None
+        keys = [f["key"] for f in manifest_r.json().get("files", []) if f.get("key")]
+        if not keys:
+            print(f"Inventory {date}: manifest lists no files.", file=sys.stderr)
+            return None
+        found: dict[int, Versions] = {}
+        for key in keys:
+            local = dest_dir / date / key.rsplit("/", 1)[-1]
+            if not download_to_file(f"{S3_HTTP}/{key}", local, retries=INVENTORY_RETRIES):
+                print(f"Inventory {date}: cannot download {key}.", file=sys.stderr)
+                return None
+            with gzip.open(local, "rt", encoding="utf-8", newline="") as fh:
+                _add_inventory_rows(found, csv.reader(fh))
+        print(f"Inventory {date}: {len(found):,} PMCIDs from {len(keys)} file(s)")
+        return found
+    except (ValueError, KeyError, TypeError, OSError, EOFError, csv.Error) as e:
+        print(f"Inventory {date}: not readable ({type(e).__name__}: {e}).", file=sys.stderr)
+        if local is not None:
+            local.unlink(missing_ok=True)
+        return None
+
+
+def fetch_inventory(dest_dir: Path) -> tuple[str, dict[int, Versions]] | None:
+    """Read the newest readable bucket inventory (up to INVENTORY_DATES_TRIED
+    dates, newest first) into ``dest_dir/<date>/`` (a file already there is
+    reused) and return ``(date, versions)``: PMC number -> Versions."""
     query = urlencode({"list-type": "2", "prefix": INVENTORY_PREFIX, "delimiter": "/"})
     listing = http_get(f"{S3_HTTP}/?{query}", timeout=60)
-    date = latest_inventory_date(listing.text) if listing is not None else None
-    if date is None:
+    dates = inventory_dates(listing.text) if listing is not None else []
+    if not dates:
         print("No bucket inventory found.", file=sys.stderr)
         return None
-    manifest_r = http_get(f"{S3_HTTP}/{INVENTORY_PREFIX}{date}/manifest.json", timeout=60)
-    if manifest_r is None:
-        print(f"Inventory {date}: manifest.json not readable.", file=sys.stderr)
-        return None
-    keys = [f["key"] for f in manifest_r.json().get("files", []) if f.get("key")]
-    if not keys:
-        print(f"Inventory {date}: manifest lists no files.", file=sys.stderr)
-        return None
-    inv_dir = dest_dir / date
-    versions: dict[str, list[int]] = {}
-    for key in keys:
-        local = inv_dir / key.rsplit("/", 1)[-1]
-        if not download_to_file(f"{S3_HTTP}/{key}", local, retries=INVENTORY_RETRIES):
-            print(f"Inventory {date}: cannot download {key}.", file=sys.stderr)
-            return None
-        with gzip.open(local, "rt", encoding="utf-8", newline="") as fh:
-            for pmcid, vers in inventory_versions(csv.reader(fh)).items():
-                versions[pmcid] = sorted(set(versions.get(pmcid, [])) | set(vers), reverse=True)
-    print(f"Inventory {date}: {len(versions):,} PMCIDs from {len(keys)} file(s)")
-    return date, versions
-
-
-def _pmc_number(pmcid: str) -> int:
-    digits = pmcid[3:]
-    return int(digits) if digits.isdigit() else 0
+    for date in dates[:INVENTORY_DATES_TRIED]:
+        versions = _read_inventory(dest_dir, date)
+        if versions is not None:
+            return date, versions
+    return None
 
 
 def parse_filelist(path: Path) -> list[dict[str, str]]:
@@ -275,15 +344,30 @@ def esearch_commercial_ids(limit: int, api_key: str | None = None) -> list[str]:
 
 
 def load_metadata(version_id: str) -> dict[str, Any] | None:
-    """Load metadata/PMC{id}.{ver}.json"""
-    url = f"{S3_HTTP}/metadata/{version_id}.json"
-    r = http_get(url, timeout=20)
+    """metadata/PMC{id}.{ver}.json, or None on a 404. A failed request or a
+    reply that is not a JSON object raises FetchError."""
+    r = http_get_checked(f"{S3_HTTP}/metadata/{version_id}.json", timeout=20)
     if r is None:
         return None
     try:
-        return r.json()
-    except Exception:
-        return None
+        meta = r.json()
+    except ValueError as e:
+        raise FetchError(f"metadata {version_id}: not JSON ({e})") from e
+    if not isinstance(meta, dict):
+        raise FetchError(f"metadata {version_id}: not a JSON object")
+    return meta
+
+
+def list_versions(pmcid: str) -> tuple[int, ...]:
+    """The versions of ``pmcid`` in the bucket, highest first, from a
+    ListObjectsV2 call on its ``PMC{id}.`` prefix (the README's section 5.1 step
+    5). Used when the inventory is not the id source."""
+    query = urlencode({"list-type": "2", "prefix": f"{pmcid}.", "delimiter": "/"})
+    r = http_get_checked(f"{S3_HTTP}/?{query}", timeout=30)
+    if r is None:
+        return ()
+    found = re.findall(rf"<Prefix>{re.escape(pmcid)}\.(\d+)/</Prefix>", r.text)
+    return tuple(sorted({int(v) for v in found}, reverse=True))
 
 
 def _normalise_pmcid(pmcid: str) -> str:
@@ -294,20 +378,6 @@ def _normalise_pmcid(pmcid: str) -> str:
     if not pmcid.startswith("PMC"):
         pmcid = f"PMC{pmcid}"
     return pmcid
-
-
-def resolve_version_id(pmcid: str) -> tuple[str, dict[str, Any]] | None:
-    """
-    pmcid may be 'PMC123' or '123'. Try version 1..3.
-    Returns (version_id, meta).
-    """
-    pmcid = _normalise_pmcid(pmcid)
-    for ver in (1, 2, 3):
-        version_id = f"{pmcid}.{ver}"
-        meta = load_metadata(version_id)
-        if meta:
-            return version_id, meta
-    return None
 
 
 def is_commercial_meta(meta: dict[str, Any]) -> bool:
@@ -335,6 +405,8 @@ def s3_to_http(s3_url: str) -> str:
 
 
 def download_to_file(url: str, out_path: Path, dry_run: bool = False, retries: int = 3) -> bool:
+    """Download ``url`` to ``out_path`` through a temp file. A non-empty file
+    already there counts as done; an empty reply is a failure (nothing is kept)."""
     if dry_run:
         return True
     if out_path.exists() and out_path.stat().st_size > 0:
@@ -349,6 +421,9 @@ def download_to_file(url: str, out_path: Path, dry_run: bool = False, retries: i
             for chunk in r.iter_content(chunk_size=1 << 16):
                 if chunk:
                     f.write(chunk)
+        if tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            return False
         tmp.replace(out_path)
         return True
     except Exception:
@@ -365,16 +440,16 @@ def _out_file(output_dir: Path, version_id: str, fmt: str) -> Path:
     return output_dir / ("txt" if fmt == "text" else fmt) / f"{version_id}.{ext}"
 
 
-def _already_downloaded(output_dir: Path, version_ids: list[str], formats: list[str]) -> bool:
-    """True when one of ``version_ids`` has its metadata JSON and every requested
-    format on disk, so a restart can skip it without any request."""
-    wanted = [f for f in formats if f in _FMT_KEY]
-    for vid in version_ids:
-        if not (output_dir / "metadata" / f"{vid}.json").is_file():
-            continue
-        if all(_out_file(output_dir, vid, f).is_file() for f in wanted):
-            return True
-    return False
+def _nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _already_downloaded(output_dir: Path, version_id: str, formats: list[str]) -> bool:
+    """True when ``version_id`` has its metadata JSON and every requested format
+    on disk, none of them empty."""
+    if not _nonempty(output_dir / "metadata" / f"{version_id}.json"):
+        return False
+    return all(_nonempty(_out_file(output_dir, version_id, f)) for f in formats if f in _FMT_KEY)
 
 
 def process_one(
@@ -382,19 +457,27 @@ def process_one(
     output_dir: Path,
     formats: list[str],
     dry_run: bool,
-    versions: list[int] | None = None,
+    versions: Iterable[int] | None = None,
 ) -> tuple[str, bool, str | None]:
-    """Download one article. With ``versions`` (from the inventory, highest
-    first) the highest commercial version is kept; without them the first of
-    versions 1..3 that exists is used, as before."""
-    if versions:
-        pmcid = _normalise_pmcid(pmcid)
-        candidates = [f"{pmcid}.{v}" for v in versions]
-        if _already_downloaded(output_dir, candidates, formats):
-            return pmcid, True, None
+    """Download one article: the highest commercial version of ``pmcid``.
+
+    ``versions`` (highest first) come from the inventory; without them they are
+    listed from the bucket. Versions are checked from the highest down: one
+    already on disk ends the check with no request, and a non-commercial one is
+    passed over. A failed request ends it with a REQUEST_FAILED error, so no older
+    version is chosen in place of a version that could not be read.
+    """
+    pmcid = _normalise_pmcid(pmcid)
+    try:
+        vers = tuple(versions) if versions else list_versions(pmcid)
+        if not vers:
+            return pmcid, False, MISSING
+        candidates = [f"{pmcid}.{v}" for v in vers]
         resolved = None
         seen_codes: list[Any] = []
         for vid in candidates:
+            if _already_downloaded(output_dir, vid, formats):
+                return pmcid, True, None
             meta = load_metadata(vid)
             if meta is None:
                 continue
@@ -402,25 +485,23 @@ def process_one(
                 resolved = (vid, meta)
                 break
             seen_codes.append(meta.get("license_code"))
-        if resolved is None:
-            if seen_codes:
-                return pmcid, False, f"{NONCOMMERCIAL_REASON} license_code={seen_codes[0]!r}"
-            return pmcid, False, "metadata not found"
-    else:
-        resolved = resolve_version_id(pmcid)
-        if not resolved:
-            return pmcid, False, "metadata not found"
+    except FetchError as e:
+        return pmcid, False, f"{REQUEST_FAILED}: {e}"
+    if resolved is None:
+        if seen_codes:
+            return (
+                pmcid,
+                False,
+                f"{NONCOMMERCIAL_REASON} license_code={seen_codes[0]!r} highest={candidates[0]}",
+            )
+        return pmcid, False, MISSING
     version_id, meta = resolved
-
-    if not is_commercial_meta(meta):
-        return pmcid, False, f"{NONCOMMERCIAL_REASON} license_code={meta.get('license_code')!r}"
 
     # Persist metadata
     meta_dir = output_dir / "metadata"
     meta_path = meta_dir / f"{version_id}.json"
     if not dry_run:
         meta_dir.mkdir(parents=True, exist_ok=True)
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     for fmt in formats:
         key = _FMT_KEY.get(fmt)
@@ -434,6 +515,9 @@ def process_one(
         if not ok:
             return pmcid, False, f"failed download {fmt}"
 
+    # Written last: the metadata JSON marks the version complete for a re-run.
+    if not dry_run:
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return pmcid, True, None
 
 
@@ -451,14 +535,15 @@ def collect_ids_from_filelist(path: Path, limit: int) -> list[str]:
 
 
 def read_noncommercial(path: Path) -> set[str]:
+    """Ledger lines: ``PMC{id}.{highest version}`` (a bare ``PMC{id}`` from an
+    older run is kept as it is)."""
     if not path.is_file():
         return set()
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
-def _batches(items: list[Any], size: int) -> Iterator[list[Any]]:
-    for i in range(0, len(items), size):
-        yield items[i : i + size]
+def _ledger_entry(pmcid: str, err: str) -> str:
+    return err.rsplit("highest=", 1)[1] if "highest=" in err else pmcid
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -483,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=10,
-        help="Max articles (0 = all available via chosen ID source)",
+        help="Stop after this many articles are downloaded (0 = all)",
     )
     parser.add_argument(
         "--threads",
@@ -536,7 +621,7 @@ def main() -> None:
     filelists.mkdir(parents=True, exist_ok=True)
 
     ids: list[str] = []
-    versions: dict[str, list[int]] = {}
+    inventory: dict[int, Versions] = {}
     id_source = ""
 
     # 1) Explicit local filelist
@@ -545,30 +630,41 @@ def main() -> None:
         ids = collect_ids_from_filelist(args.filelist, args.limit)
         id_source = f"filelist:{args.filelist}"
     else:
-        # 2) Bucket inventory
+        # 2) Bucket inventory; --limit counts downloads, so every id is kept
         inv = fetch_inventory(filelists / "inventory")
         if inv is not None:
-            inv_date, versions = inv
-            ids = sorted(versions, key=_pmc_number)
-            if args.limit > 0:
-                ids = ids[: args.limit]
+            inv_date, inventory = inv
             id_source = f"inventory:{inv_date}"
         else:
             # 3) ESearch commercial-only
             ids = esearch_commercial_ids(args.limit, api_key=args.api_key)
             id_source = "esearch"
-    print(f"IDs from {id_source or 'nowhere'}: {len(ids):,}")
+    n_ids = len(inventory) or len(ids)
+    print(f"IDs from {id_source or 'nowhere'}: {n_ids:,}")
 
-    if not ids:
+    if not n_ids:
         print("No commercial IDs to download.")
         sys.exit(1)
 
-    ledger = filelists / NONCOMMERCIAL_LEDGER
-    known_nc = read_noncommercial(ledger)
-    todo = [i for i in ids if i not in known_nc]
+    # With the inventory a PMCID is skipped only while its highest version is the
+    # one recorded in the ledger; without it, any record of the PMCID skips it.
+    # Inventory items stay PMC numbers (ints) until they are submitted.
+    ledger_path = filelists / NONCOMMERCIAL_LEDGER
+    ledger = read_noncommercial(ledger_path)
+    todo: list[int] | list[str]
+    if inventory:
+        todo = [
+            n for n in sorted(inventory) if f"PMC{n}.{_versions_of(inventory[n])[0]}" not in ledger
+        ]
+    else:
+        ledger_ids = {e.split(".", 1)[0] for e in ledger}
+        todo = [i for i in ids if _normalise_pmcid(i) not in ledger_ids]
+    skipped_nc = n_ids - len(todo)
+    del ledger
     print(
-        f"Starting download of {len(todo):,} articles ({len(ids) - len(todo):,} known "
+        f"Starting download of {len(todo):,} articles ({skipped_nc:,} known "
         f"non-commercial skipped), formats={formats}, threads={args.threads}"
+        + (f", stop after {args.limit:,} downloads" if args.limit > 0 else "")
     )
 
     ok_n = 0
@@ -579,33 +675,39 @@ def main() -> None:
 
     with (
         ThreadPoolExecutor(max_workers=args.threads) as ex,
-        ledger.open("a", encoding="utf-8") as ledger_fh,
-        tqdm(total=len(todo), desc="PMC commercial") as bar,
+        ledger_path.open("a", encoding="utf-8") as ledger_fh,
+        tqdm(total=args.limit if args.limit > 0 else len(todo), desc="PMC commercial") as bar,
     ):
-        for batch in _batches(todo, SUBMIT_BATCH):
-            futs = [
-                (
-                    pmcid,
-                    ex.submit(process_one, pmcid, out, formats, False, versions.get(pmcid)),
-                )
-                for pmcid in batch
-            ]
+        start = 0
+        while start < len(todo) and not (args.limit > 0 and ok_n >= args.limit):
+            size = SUBMIT_BATCH if args.limit <= 0 else max(1, min(SUBMIT_BATCH, args.limit - ok_n))
+            batch = todo[start : start + size]
+            start += size
+            futs = []
+            for item in batch:
+                if isinstance(item, int):
+                    pmcid, vers = f"PMC{item}", _versions_of(inventory[item])
+                else:
+                    pmcid, vers = item, None
+                futs.append((pmcid, ex.submit(process_one, pmcid, out, formats, False, vers)))
             for pmcid, fut in futs:
                 try:
                     pid, success, err = fut.result()
                 except Exception as e:  # noqa: BLE001
-                    pid, success, err = pmcid, False, str(e)
-                bar.update(1)
+                    pid, success, err = pmcid, False, f"{REQUEST_FAILED}: {e}"
                 if success:
                     ok_n += 1
+                    bar.update(1)
                     continue
+                if args.limit <= 0:
+                    bar.update(1)
                 err = err or "unknown"
                 if err.startswith(NONCOMMERCIAL_REASON):
                     nc_n += 1
-                    ledger_fh.write(f"{pmcid}\n")
+                    ledger_fh.write(f"{_ledger_entry(pid, err)}\n")
                 else:
                     fail_n += 1
-                    reasons[err.split(" license_code")[0]] += 1
+                    reasons[err.split(":")[0]] += 1
                     if len(samples) < 15:
                         samples.append((pid, err))
             ledger_fh.flush()
@@ -626,9 +728,9 @@ def main() -> None:
                 f"source={S3_HTTP}/",
                 f"id_source={id_source}",
                 "filter=commercial_license_only",
-                f"requested_ids={len(ids)}",
+                f"requested_ids={n_ids}",
                 f"succeeded={ok_n}",
-                f"noncommercial={nc_n + len(ids) - len(todo)}",
+                f"noncommercial={nc_n + skipped_nc}",
                 f"failed={fail_n}",
                 f"synced_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
                 "",
@@ -639,7 +741,7 @@ def main() -> None:
     # A failed article is retried by the next run (nothing marks it done). A
     # version missing from the bucket (the inventory lags it by up to a day) is
     # reported but does not fail the run.
-    if fail_n - reasons["metadata not found"]:
+    if fail_n - reasons[MISSING]:
         sys.exit(1)
 
 
