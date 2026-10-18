@@ -182,8 +182,22 @@ _safe_rel() { # _safe_rel REL — reject absolute paths and any '..' path compon
 }
 
 _scrape_listing() { # _scrape_listing BASE_URL -> cleaned filenames from an HTML/autoindex dir listing, one per line, sorted unique
-    local base="$1" listing
-    listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)" || return 1
+    local base="$1" listing="" attempt ok=0
+    # One failed request used to fail the whole source (2026-10-18:
+    # europepmc_abstracts during a network switch), so the listing gets
+    # EPISTEME_LIST_TRIES attempts (default 3), EPISTEME_LIST_RETRY_DELAY x attempt
+    # seconds apart (default 10).
+    local tries="${EPISTEME_LIST_TRIES:-3}" delay="${EPISTEME_LIST_RETRY_DELAY:-10}"
+    case "$tries" in ''|*[!0-9]*) tries=3 ;; esac
+    case "$delay" in ''|*[!0-9]*) delay=10 ;; esac
+    for ((attempt = 1; attempt <= tries; attempt++)); do
+        if listing="$(curl -sSL --fail --connect-timeout 30 --max-time 120 "$base/" 2>/dev/null)"; then
+            ok=1; break
+        fi
+        log WARN "_scrape_listing: cannot list $base/ (attempt $attempt of $tries)"
+        if [ "$attempt" -lt "$tries" ]; then sleep "$((delay * attempt))"; fi
+    done
+    [ "$ok" = 1 ] || return 1
     # The leading-`../` grep filter below is defence in depth; _safe_rel is the
     # authoritative gate — it also catches an *embedded* traversal (a/../../x)
     # that a remote-controlled autoindex could carry into `rm -f`/`curl -o`.

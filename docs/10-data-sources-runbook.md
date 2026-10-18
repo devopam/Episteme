@@ -23,7 +23,7 @@ Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/
 
 1. **Agents and CI run against `episteme_test`, never `episteme`.** Prefix every pipeline command with `PGDATABASE=episteme_test`. A real environment variable beats `.env`, so the prefix always wins. Each Bash invocation is a fresh shell in most agent harnesses, so an earlier `export` does not persist: put the prefix on every command.
 2. **Confirm the server before any DB step** (section 2.2). This machine can have more than one PostgreSQL installed (a PG 17 client is first on `PATH`); the pipeline database is the native PG19beta3 on `localhost:5433`.
-3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `./01_raw/pmc/oa_comm` relative to the current directory.
+3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `<EPISTEME_RAW_ROOT>/pmc/oa_comm`.
 4. **Never print `.env`.** It holds credentials. Section 1.3 shows how to check that a key is set without showing its value.
 5. **Do not run a bulk download unbounded** unless that is the actual task. Use `--max-files N` (section 4.3) and read section 5 for which sources honour it.
 
@@ -98,6 +98,8 @@ Configuration is read from three places. Shell scripts load them in this order, 
 | Hugging Face CLI (`hf`, or the older `huggingface-cli`) | `apollo`, `guidelines`, `hf_corpus` only | `hf --version` |
 
 `scripts/data/_lib/check_prereqs.sh` prints this tool table (it never fails) at the start of every `run_pipeline.sh` run.
+
+`hf_fetch` (`scripts/data/_lib/hf_download.sh`) downloads the pinned repo type only. It tries up to `EPISTEME_HF_TRIES` times (default 3, waiting `EPISTEME_HF_RETRY_DELAY` × attempt seconds, default 30); the CLI resumes the files it already has. It sets `HF_HUB_DOWNLOAD_TIMEOUT` and `HF_HUB_ETAG_TIMEOUT` to 60 s unless they are set. When the CLI says the repo "cannot be accessed", it exits 0 and returns the old local folder, so the step used to report success with nothing downloaded; `hf_fetch` treats that as a failed attempt. Behind a 401, 403 or 404 (a gated repo without `HF_TOKEN` or with its terms not accepted, a private repo, a wrong repo or type) it fails at once; behind a timeout, a lost connection or a hub 5xx it tries again.
 
 ### 1.2 Keys (names only)
 
@@ -433,7 +435,9 @@ Verify downloaded checksums locally (offline): `bash scripts/data/pubmed/verify_
 
 #### PMC commercial open access (`pmc`)
 
-Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects with `metadata/PMC{id}.{version}.json`), licence-filtered to the commercial-friendly set. Raw: `./01_raw/pmc/oa_comm/` **relative to the current directory** (the downloader's default output directory is not read from `EPISTEME_RAW_ROOT`; run from the repository root and keep `EPISTEME_RAW_ROOT=./01_raw`, or the extractor will not find the files). `pmc` also owns `materialize` and `enrich`.
+Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects with `metadata/PMC{id}.{version}.json`), licence-filtered to the commercial-friendly set. Raw: `<EPISTEME_RAW_ROOT>/pmc/oa_comm/` (`metadata/`, `xml/`, `filelists/`). `pmc` also owns `materialize` and `enrich`.
+
+The article list comes from the bucket's daily S3 inventory (`inventory-reports/pmc-oa-opendata/metadata/<date>/manifest.json` and the `csv.gz` files it names; the bucket README section 5.2). It lists every article version (about 8 million). The downloader saves the inventory under `filelists/inventory/<date>/` (when the newest one cannot be read, it tries the next two older dates and deletes a damaged file), then checks each PMCID's versions from the highest down and keeps the first with a commercial licence. A version already on disk (metadata JSON and XML, neither empty) ends the check without a request, so a stopped run restarts cheaply and a newer version is still found. A PMCID with no commercial version goes into `filelists/noncommercial.txt` as `PMC{id}.{highest version}`; a re-run skips it until the inventory shows a newer version. Delete that file to check every PMCID again. A failed metadata request (anything but a 404) is a failure: the PMCID is not recorded, no older version is chosen in its place, and the run exits 1; run it again to retry. `--max-files N` stops after N downloads. NCBI ESearch is the fallback only when no inventory can be read, and it refuses a request for more than 9,999 ids (ESearch returns no id past that position); on that path and with a local `--filelist`, each PMCID's versions come from a listing of its `PMC{id}.` prefix.
 
 ```bash
 # first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
@@ -449,12 +453,13 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --dry-ru
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc all
 ```
 
-Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits. `pmc enrich` writes the OpenMetadata manifest; ingest happens only if `OM_HOST` is set (otherwise the manifest file only).
+Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits (fallback path only). `pmc enrich` writes the OpenMetadata manifest; ingest happens only if `OM_HOST` is set (otherwise the manifest file only).
 
 | Issue | Mitigation |
 |---|---|
-| Legacy `oa_comm/xml/all/` bulk prefixes are empty since August 2026 | The downloader uses the per-article layout plus metadata JSON |
-| Full set is millions of articles | Bound with `--max-files`; use SSD and a long-lived session for a full pull |
+| NCBI removed the legacy `oa_comm` / `oa_noncomm` prefixes, their filelists, the FTP `oa_bulk` packages and the baseline packages in the week of 2026-08-24 | The downloader uses the bucket inventory, the per-article layout and the metadata JSON |
+| The inventory is regenerated daily, lags the bucket, and is kept for 30 days | A version listed but already removed is reported as `metadata not found` and does not fail the run |
+| Full set is millions of articles (about 2 requests per article; 16 threads by default) | Bound with `--max-files`; for a full pull (`--max-files 0`) use a long-lived session and re-run after a stop |
 | Authors or journal missing | JSON alone is incomplete; the extractor reads the JATS XML |
 
 #### Apollo corpus (`apollo`)
@@ -534,7 +539,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh bookshelf graph
 
 #### Guidelines (`guidelines`)
 
-Hugging Face dataset `GUIDELINES_HF_REPO` (`epfl-llm/guidelines`); rows are `unknown` licence, subset `other` (docs/12). Raw: `<raw>/guidelines/`. Download ignores `--max-files`.
+Hugging Face dataset `GUIDELINES_HF_REPO` (`epfl-llm/guidelines`); rows are `unknown` licence, subset `other` (docs/12). Raw: `<raw>/guidelines/`. Download ignores `--max-files`. The dataset is gated: accept its terms on the dataset page with your Hugging Face account, and put a read token in `.env` as `HF_TOKEN`.
 
 ```bash
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh guidelines download
