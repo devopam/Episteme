@@ -459,7 +459,7 @@ Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits (fallback path o
 |---|---|
 | NCBI removed the legacy `oa_comm` / `oa_noncomm` prefixes, their filelists, the FTP `oa_bulk` packages and the baseline packages in the week of 2026-08-24 | The downloader uses the bucket inventory, the per-article layout and the metadata JSON |
 | The inventory is regenerated daily, lags the bucket, and is kept for 30 days | A version listed but already removed is reported as `metadata not found` and does not fail the run |
-| Full set is millions of articles (about 2 requests per article; 16 threads by default) | Bound with `--max-files`; for a full pull (`--max-files 0`) use a long-lived session and re-run after a stop |
+| Full set is millions of articles (about 2 requests per article; 48 threads by default, each keeping its connection open) | Bound with `--max-files`; for a full pull (`--max-files 0`) use a long-lived session and re-run after a stop |
 | Authors or journal missing | JSON alone is incomplete; the extractor reads the JATS XML |
 
 #### Apollo corpus (`apollo`)
