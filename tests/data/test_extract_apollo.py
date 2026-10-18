@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from episteme.data import article_schema
 from episteme.data.apollo.extract_apollo import discover_apollo_files, extract_apollo, main
 
@@ -277,3 +279,27 @@ def test_iter_records_handles_array_dict_and_jsonl_files(tmp_path):
     empty = tmp_path / "d.json"
     empty.write_text("   \n", encoding="utf-8")
     assert list(_iter_records(empty)) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["1 2]", "1", '"a",', '"a",]', '"a"] x', '"a" "b"]', ",]"],
+)
+def test_streamed_array_rejects_malformed_input(body):
+    """Like json.loads: no missing separator, trailing comma, missing ']' or
+    trailing content (the text after the opening '[')."""
+    import io
+    import json as _json
+
+    from episteme.data.apollo.extract_apollo import _iter_json_array
+
+    with pytest.raises(_json.JSONDecodeError):
+        list(_iter_json_array(io.StringIO(body), chunk=2))
+
+
+def test_jsonl_lines_that_are_arrays_are_separate_records(tmp_path):
+    from episteme.data.apollo.extract_apollo import _iter_records
+
+    jl = tmp_path / "pairs.jsonl"
+    jl.write_text('["q","a"]\n["x","y"]\n', encoding="utf-8")
+    assert list(_iter_records(jl)) == [["q", "a"], ["x", "y"]]

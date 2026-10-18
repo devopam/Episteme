@@ -147,11 +147,20 @@ _LIST_KEYS = ("data", "records", "items", "texts", "conversations", "samples")
 _STREAM_CHUNK = 1 << 22  # 4 MiB of text per read
 
 
+_WS = " \t\r\n"
+
+
 def _iter_json_array(fh: Any, chunk: int = _STREAM_CHUNK) -> Iterator[Any]:
     """Yield the elements of the JSON array that ``fh`` (a text file positioned
     just after its opening ``[``) holds, one at a time. Memory stays at about one
     element plus one chunk, whatever the file size: the 2 GiB ApolloCorpus files
-    took 5 GiB and more per worker when read whole (2026-10-18)."""
+    took 5 GiB and more per worker when read whole (2026-10-18).
+
+    Strict, like ``json.loads``: elements are separated by one ``,``, the array
+    ends with ``]``, and only whitespace may follow it. A missing separator, a
+    trailing comma, a missing ``]`` or trailing content raises
+    ``json.JSONDecodeError``, so a damaged file fails instead of yielding part of
+    its records."""
     dec = json.JSONDecoder()
     buf = ""
     pos = 0
@@ -169,14 +178,28 @@ def _iter_json_array(fh: Any, chunk: int = _STREAM_CHUNK) -> Iterator[Any]:
         pos = 0
         return True
 
-    while True:
+    def next_char() -> str:
+        """Skip whitespace; the next character ('' at the end of the file)."""
+        nonlocal pos
         while True:
-            while pos < len(buf) and buf[pos] in " \t\r\n,":
+            while pos < len(buf) and buf[pos] in _WS:
                 pos += 1
-            if pos < len(buf) or not more():
-                break
-        if pos >= len(buf) or buf[pos] == "]":
-            return
+            if pos < len(buf):
+                return buf[pos]
+            if not more():
+                return ""
+
+    def fail(msg: str) -> json.JSONDecodeError:
+        return json.JSONDecodeError(msg, buf, pos)
+
+    first = True
+    while True:
+        c = next_char()
+        if c == "]" and first:
+            pos += 1
+            break
+        if c == "":
+            raise fail("unterminated array")
         while True:
             try:
                 obj, end = dec.raw_decode(buf, pos)
@@ -184,25 +207,53 @@ def _iter_json_array(fh: Any, chunk: int = _STREAM_CHUNK) -> Iterator[Any]:
                 if more():
                     continue
                 raise
-            # An array element must be followed by a separator. A number cut by
-            # the chunk ("-0.5e" of "-0.5e-3") decodes without error but is not;
-            # read on and decode it again.
-            if (end >= len(buf) or buf[end] not in " \t\r\n,]") and more():
+            # A number cut by the chunk ("-0.5e" of "-0.5e-3") decodes without
+            # error; an element must be followed by whitespace, "," or "]".
+            if (end >= len(buf) or buf[end] not in _WS + ",]") and more():
                 continue
             break
         yield obj
         pos = end
+        first = False
+        c = next_char()
+        if c == ",":
+            pos += 1
+            if next_char() == "]":
+                raise fail("trailing comma in array")
+            continue
+        if c == "]":
+            pos += 1
+            break
+        raise fail("expected ',' or ']' after an array element")
+    if next_char() != "":
+        raise fail("content after the end of the array")
+
+
+def _iter_jsonl(path: Path) -> Iterator[Any]:
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                yield line
 
 
 def _iter_records(path: Path) -> Iterator[Any]:
     """One apollo file -> its raw records (str, dict or nested list), one at a time.
 
-    Handles: a JSON array (of strings, objects, or nested QA lists -- the real
-    ApolloCorpus pretrain/sft shape), streamed element by element; a JSON
-    ``dict`` carrying a ``data``/``records``/``items``/... list (else the dict
-    itself is one record); otherwise line-delimited JSON (JSONL), read line by
-    line, with any non-JSON line kept as a raw string.
+    Handles: a ``.jsonl`` file, read line by line (a line may itself be an
+    array), with any non-JSON line kept as a raw string; a ``.json`` file whose
+    top level is an array (the real ApolloCorpus pretrain/sft shape), streamed
+    element by element; any other ``.json`` file, read whole (a ``dict`` carrying
+    a ``data``/``records``/``items``/... list, else the dict itself is one
+    record), falling back to line-by-line when it is not one JSON value.
     """
+    if path.suffix.lower() == ".jsonl":
+        yield from _iter_jsonl(path)
+        return
     with path.open(encoding="utf-8", errors="replace") as fh:
         head = fh.read(1)
         while head and head.isspace():
@@ -217,24 +268,16 @@ def _iter_records(path: Path) -> Iterator[Any]:
         obj = json.loads(raw)
     except json.JSONDecodeError:
         obj = None
-    if obj is not None:
-        if isinstance(obj, dict):
-            for k in _LIST_KEYS:
-                if isinstance(obj.get(k), list):
-                    yield from obj[k]
-                    return
-        yield obj
-        return
     del raw
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                yield line
+    if obj is None:
+        yield from _iter_jsonl(path)
+        return
+    if isinstance(obj, dict):
+        for k in _LIST_KEYS:
+            if isinstance(obj.get(k), list):
+                yield from obj[k]
+                return
+    yield obj
 
 
 def _load_records(path: Path) -> list[Any]:
