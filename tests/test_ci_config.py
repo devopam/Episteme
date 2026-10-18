@@ -161,14 +161,42 @@ def test_auto_merge_is_dependabot_only_and_never_checks_out():
     assert wf.get("permissions") == {"contents": "read"}
 
 
-def test_auto_merge_for_every_dependabot_pull_request():
-    """Every Dependabot pull request gets auto-merge; the required `tests` check is
-    the gate, so the step has no group or update-type condition."""
+def _step(job: dict, name_part: str) -> dict:
+    (step,) = [s for s in job["steps"] if name_part in s.get("name", "")]
+    return step
+
+
+def test_auto_merge_only_for_signed_security_fixes():
+    """Auto-merge is enabled only for the `security-fixes` group and only when every
+    commit is Dependabot's, signed by GitHub (user decision 2026-10-18)."""
     _, job = _am()
-    merges = [s for s in job["steps"] if "gh pr merge" in s.get("run", "")]
-    assert len(merges) == 1
-    step = merges[0]
-    assert "if" not in step
-    assert "--auto" in step["run"] and "--merge" in step["run"]
+    meta = _step(job, "Fetch Dependabot metadata")
+    assert meta["id"] == "meta"
+    signed = _step(job, "every commit is Dependabot's")
+    assert signed["id"] == "signed"
+    assert "steps.meta.outputs.dependency-group == 'security-fixes'" in signed["if"]
+    for term in ('"dependabot[bot]"', '"web-flow"', "verification.verified", "--paginate"):
+        assert term in signed["run"], term
+    enable = _step(job, "Enable auto-merge")
+    assert "steps.meta.outputs.dependency-group == 'security-fixes'" in enable["if"]
+    assert "steps.signed.outputs.ok == 'true'" in enable["if"]
+    assert "--auto" in enable["run"] and "--merge" in enable["run"]
+    merges = [s for s in job["steps"] if "gh pr merge --auto" in s.get("run", "")]
+    assert merges == [enable]
+
+
+def test_auto_merge_is_turned_off_after_a_foreign_commit():
+    _, job = _am()
+    off = _step(job, "Turn auto-merge off")
+    assert "steps.signed.outputs.ok == 'false'" in off["if"]
+    assert "--disable-auto" in off["run"]
     failure = [s for s in job["steps"] if s.get("if") == "failure()"]
     assert len(failure) == 1 and "gh pr comment" in failure[0]["run"]
+
+
+def test_fetch_metadata_is_pinned_to_a_commit():
+    _, job = _am()
+    uses = _step(job, "Fetch Dependabot metadata")["uses"]
+    name, ref = uses.split("@")
+    assert name == "dependabot/fetch-metadata"
+    assert len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)

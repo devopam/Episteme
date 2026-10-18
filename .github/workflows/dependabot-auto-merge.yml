@@ -1,7 +1,9 @@
-# Enables auto-merge on every Dependabot pull request: grouped minor/patch version
-# updates, single major bumps and `security-fixes`. GitHub merges it only after the
-# required `tests` check passes (ruleset on main); a failing bump waits for a person.
-# Never checks out or runs pull-request code.
+# Auto-merge for Dependabot SECURITY pull requests only (group `security-fixes`), and
+# only while every commit on the branch is Dependabot's own, signed by GitHub (author
+# dependabot[bot], committer web-flow, verified signature). A commit pushed by anyone
+# else stops it: auto-merge is turned off again. Version updates (grouped minor/patch
+# and single majors) wait for a person. GitHub merges only after the required `tests`
+# check passes (ruleset on main). Never checks out or runs pull-request code.
 name: dependabot-auto-merge
 on:
   pull_request:
@@ -16,14 +18,44 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Enable auto-merge
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check that every commit is Dependabot's, signed by GitHub
+        id: signed
+        if: steps.meta.outputs.dependency-group == 'security-fixes'
+        run: |
+          bad=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq \
+            '.[] | select(.author.login != "dependabot[bot]" or .committer.login != "web-flow" or .commit.verification.verified != true) | .sha')
+          if [ -n "$bad" ]; then
+            echo "::warning::commits not made and signed by Dependabot: $bad"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: Enable auto-merge for a signed security fix
+        if: steps.meta.outputs.dependency-group == 'security-fixes' && steps.signed.outputs.ok == 'true'
         run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Turn auto-merge off after a commit that is not Dependabot's
+        if: steps.meta.outputs.dependency-group == 'security-fixes' && steps.signed.outputs.ok == 'false'
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || true
+          gh pr comment "$PR_URL" --body "Auto-merge is off: this branch has a commit that Dependabot did not make and sign. It needs a manual review."
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Report failure
         if: failure()
-        run: gh pr comment "$PR_URL" --body "Auto-merge could not be enabled on this Dependabot pull request; it needs a manual review."
+        run: gh pr comment "$PR_URL" --body "The Dependabot auto-merge workflow failed on this pull request; it needs a manual review."
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
