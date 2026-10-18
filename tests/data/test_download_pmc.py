@@ -7,6 +7,14 @@ spacing/underscores, and accepts CC0 / CC BY / CC BY-SA / CC BY-ND (rejecting
 anything containing "NC").
 """
 
+import csv
+import gzip
+import io
+import sys
+
+import pytest
+
+from episteme.data.pmc import download_pmc as dp
 from episteme.data.pmc.download_pmc import (
     COMMERCIAL_LICENSE_CODES,
     is_commercial_meta,
@@ -64,3 +72,363 @@ def test_output_dir_defaults_to_configured_raw_root(tmp_path, monkeypatch):
         # Otherwise the next test to call get_settings() (without its own
         # monkeypatch) inherits this test's tmp_path-scoped Settings from cache.
         cfg.get_settings.cache_clear()
+
+
+# --- bucket inventory (post 2026-08-24 layout) --------------------------------
+
+_LISTING = """<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult><Prefix>inventory-reports/pmc-oa-opendata/metadata/</Prefix>
+<CommonPrefixes><Prefix>inventory-reports/pmc-oa-opendata/metadata/2026-10-16T01-00Z/</Prefix></CommonPrefixes>
+<CommonPrefixes><Prefix>inventory-reports/pmc-oa-opendata/metadata/2026-10-17T01-00Z/</Prefix></CommonPrefixes>
+<CommonPrefixes><Prefix>inventory-reports/pmc-oa-opendata/metadata/data/</Prefix></CommonPrefixes>
+<CommonPrefixes><Prefix>inventory-reports/pmc-oa-opendata/metadata/hive/</Prefix></CommonPrefixes>
+</ListBucketResult>"""
+
+_ROWS = [
+    ["pmc-oa-opendata", "metadata/PMC100.1.json", "2026-01-08T11:47:59.000Z", "e1"],
+    ["pmc-oa-opendata", "metadata/PMC100.2.json", "2026-01-08T11:47:59.000Z", "e2"],
+    ["pmc-oa-opendata", "metadata/PMC20.1.json", "2026-01-08T11:47:59.000Z", "e3"],
+    ["pmc-oa-opendata", "metadata/README.txt", "2026-01-08T11:47:59.000Z", "e4"],
+    ["pmc-oa-opendata"],
+]
+
+
+class _Resp:
+    def __init__(self, text="", payload=None):
+        self.text = text
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _gz_csv(rows) -> bytes:
+    buf = io.StringIO()
+    csv.writer(buf, quoting=csv.QUOTE_ALL).writerows(rows)
+    return gzip.compress(buf.getvalue().encode("utf-8"))
+
+
+def test_latest_inventory_date_picks_newest_dated_folder():
+    assert dp.latest_inventory_date(_LISTING) == "2026-10-17T01-00Z"
+    assert dp.latest_inventory_date("<ListBucketResult></ListBucketResult>") is None
+
+
+def test_inventory_versions_maps_pmcid_to_versions_highest_first():
+    assert dp.inventory_versions(_ROWS) == {"PMC100": (2, 1), "PMC20": (1,)}
+
+
+def test_fetch_inventory_reads_the_newest_manifest(tmp_path, monkeypatch):
+    data_key = "inventory-reports/pmc-oa-opendata/metadata/data/abc.csv.gz"
+    gets: list[str] = []
+
+    def fake_get(url, **kw):
+        gets.append(url)
+        if "list-type=2" in url:
+            return _Resp(text=_LISTING)
+        if url.endswith("2026-10-17T01-00Z/manifest.json"):
+            return _Resp(payload={"files": [{"key": data_key}]})
+        return None
+
+    def fake_download(url, out_path, dry_run=False, retries=3):
+        assert url.endswith(data_key)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(_gz_csv(_ROWS))
+        return True
+
+    monkeypatch.setattr(dp, "http_get", fake_get)
+    monkeypatch.setattr(dp, "download_to_file", fake_download)
+    date, versions = dp.fetch_inventory(tmp_path)
+    assert date == "2026-10-17T01-00Z"
+    assert versions == {100: (2, 1), 20: 1}
+    assert (tmp_path / date / "abc.csv.gz").is_file()
+
+
+def test_fetch_inventory_returns_none_without_a_dated_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(dp, "http_get", lambda url, **kw: _Resp(text="<ListBucketResult/>"))
+    assert dp.fetch_inventory(tmp_path) is None
+
+
+def _meta(vid, code):
+    return {
+        "license_code": code,
+        "xml_url": f"s3://pmc-oa-opendata/{vid}/{vid}.xml?md5=x",
+    }
+
+
+def _fake_store(monkeypatch, codes):
+    """Patch metadata reads to ``codes`` ({version_id: license_code}) and file
+    downloads to a stub that writes the file; return the list of metadata reads."""
+    reads: list[str] = []
+
+    def fake_load(vid):
+        reads.append(vid)
+        return _meta(vid, codes[vid]) if vid in codes else None
+
+    def fake_download(url, out_path, dry_run=False, retries=3):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("<article/>", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(dp, "load_metadata", fake_load)
+    monkeypatch.setattr(dp, "download_to_file", fake_download)
+    return reads
+
+
+def test_process_one_keeps_the_highest_commercial_version(tmp_path, monkeypatch):
+    _fake_store(monkeypatch, {"PMC100.2": "CC BY-NC", "PMC100.1": "CC BY"})
+    assert dp.process_one("PMC100", tmp_path, ["xml"], False, [2, 1]) == ("PMC100", True, None)
+    assert (tmp_path / "metadata" / "PMC100.1.json").is_file()
+    assert (tmp_path / "xml" / "PMC100.1.xml").is_file()
+    assert not (tmp_path / "metadata" / "PMC100.2.json").exists()
+
+
+def test_process_one_reports_non_commercial_when_no_version_is(tmp_path, monkeypatch):
+    _fake_store(monkeypatch, {"PMC100.2": "CC BY-NC", "PMC100.1": "CC BY-NC-ND"})
+    pmcid, ok, err = dp.process_one("PMC100", tmp_path, ["xml"], False, [2, 1])
+    assert (pmcid, ok) == ("PMC100", False)
+    assert err.startswith(dp.NONCOMMERCIAL_REASON)
+    assert not (tmp_path / "metadata").exists()
+
+
+def test_process_one_treats_a_null_licence_as_non_commercial(tmp_path, monkeypatch):
+    """Real metadata (PMC13915.1) has license_code null; that is a version without a
+    commercial licence, not a missing version."""
+    _fake_store(monkeypatch, {"PMC13915.1": None})
+    pmcid, ok, err = dp.process_one("PMC13915", tmp_path, ["xml"], False, [1])
+    assert ok is False
+    assert err == f"{dp.NONCOMMERCIAL_REASON} license_code=None highest=PMC13915.1"
+
+
+def test_process_one_skips_a_downloaded_article_without_requests(tmp_path, monkeypatch):
+    (tmp_path / "metadata").mkdir()
+    (tmp_path / "xml").mkdir()
+    (tmp_path / "metadata" / "PMC100.1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "xml" / "PMC100.1.xml").write_text("<article/>", encoding="utf-8")
+    reads = _fake_store(monkeypatch, {})
+    assert dp.process_one("PMC100", tmp_path, ["xml"], False, [1]) == ("PMC100", True, None)
+    assert reads == []
+
+
+def test_process_one_checks_a_newer_version_before_skipping(tmp_path, monkeypatch):
+    """PMC100.1 is on disk and the inventory now lists PMC100.2 (commercial): the
+    newer version is fetched, not skipped."""
+    (tmp_path / "metadata").mkdir()
+    (tmp_path / "xml").mkdir()
+    (tmp_path / "metadata" / "PMC100.1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "xml" / "PMC100.1.xml").write_text("<article/>", encoding="utf-8")
+    reads = _fake_store(monkeypatch, {"PMC100.2": "CC BY"})
+    assert dp.process_one("PMC100", tmp_path, ["xml"], False, [2, 1]) == ("PMC100", True, None)
+    assert reads == ["PMC100.2"]
+    assert (tmp_path / "xml" / "PMC100.2.xml").is_file()
+
+
+def test_process_one_does_not_skip_an_empty_file(tmp_path, monkeypatch):
+    (tmp_path / "metadata").mkdir()
+    (tmp_path / "xml").mkdir()
+    (tmp_path / "metadata" / "PMC100.1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "xml" / "PMC100.1.xml").write_text("", encoding="utf-8")
+    reads = _fake_store(monkeypatch, {"PMC100.1": "CC BY"})
+    assert dp.process_one("PMC100", tmp_path, ["xml"], False, [1]) == ("PMC100", True, None)
+    assert reads == ["PMC100.1"]
+
+
+def test_a_failed_metadata_request_is_a_failure_not_an_older_version(tmp_path, monkeypatch):
+    _fake_store(monkeypatch, {"PMC100.1": "CC BY"})
+
+    def flaky(vid):
+        if vid == "PMC100.2":
+            raise dp.FetchError("GET x: HTTP 503")
+        return _meta(vid, "CC BY")
+
+    monkeypatch.setattr(dp, "load_metadata", flaky)
+    pmcid, ok, err = dp.process_one("PMC100", tmp_path, ["xml"], False, [2, 1])
+    assert ok is False
+    assert err.startswith(dp.REQUEST_FAILED)
+    assert not (tmp_path / "xml").exists()
+
+
+def test_load_metadata_raises_on_a_reply_that_is_not_json(monkeypatch):
+    class Bad:
+        def json(self):
+            raise ValueError("Expecting value")
+
+    monkeypatch.setattr(dp, "http_get_checked", lambda url, **kw: Bad())
+    with pytest.raises(dp.FetchError):
+        dp.load_metadata("PMC1.1")
+    monkeypatch.setattr(dp, "http_get_checked", lambda url, **kw: None)
+    assert dp.load_metadata("PMC1.1") is None
+
+
+def test_download_to_file_rejects_an_empty_reply(tmp_path, monkeypatch):
+    class Empty:
+        def iter_content(self, chunk_size):
+            return iter([b""])
+
+    monkeypatch.setattr(dp, "http_get", lambda url, **kw: Empty())
+    out = tmp_path / "x.xml"
+    assert dp.download_to_file("https://example.invalid/x.xml", out) is False
+    assert not out.exists() and not (tmp_path / "x.xml.tmp").exists()
+
+
+def test_without_versions_process_one_lists_them_from_the_bucket(tmp_path, monkeypatch):
+    listing = (
+        "<ListBucketResult><CommonPrefixes><Prefix>PMC7.1/</Prefix></CommonPrefixes>"
+        "<CommonPrefixes><Prefix>PMC7.3/</Prefix></CommonPrefixes></ListBucketResult>"
+    )
+    monkeypatch.setattr(dp, "http_get_checked", lambda url, **kw: _Resp(text=listing))
+    assert dp.list_versions("PMC7") == (3, 1)
+    monkeypatch.setattr(dp, "list_versions", lambda pmcid: (3, 1))
+    reads = _fake_store(monkeypatch, {"PMC7.3": "CC BY-NC", "PMC7.1": "CC0"})
+    assert dp.process_one("7", tmp_path, ["xml"], False) == ("PMC7", True, None)
+    assert reads == ["PMC7.3", "PMC7.1"]
+    assert (tmp_path / "xml" / "PMC7.1.xml").is_file()
+
+
+def test_esearch_refuses_more_than_it_can_return(monkeypatch):
+    payload = {"esearchresult": {"count": "5501159", "idlist": [], "webenv": "w", "querykey": "1"}}
+    monkeypatch.setattr(dp, "http_get", lambda url, **kw: _Resp(payload=payload))
+    with pytest.raises(SystemExit) as exc:
+        dp.esearch_commercial_ids(0)
+    assert "9,999" in str(exc.value)
+
+
+def test_main_records_non_commercial_and_skips_them_on_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr("episteme.config._find_project_dotenv", lambda: None)
+    monkeypatch.setenv("EPISTEME_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    out = tmp_path / "oa_comm"
+    monkeypatch.setattr(
+        dp,
+        "fetch_inventory",
+        lambda dest: ("2026-10-17T01-00Z", {100: (2, 1), 20: 1, 3: 1}),
+    )
+    reads = _fake_store(monkeypatch, {"PMC100.2": "CC BY", "PMC20.1": "CC BY-NC", "PMC3.1": "CC0"})
+    monkeypatch.setattr(sys, "argv", ["download_pmc", "--output_dir", str(out), "--limit", "0"])
+    try:
+        dp.main()
+        assert sorted(reads) == ["PMC100.2", "PMC20.1", "PMC3.1"]
+        assert (out / "filelists" / dp.NONCOMMERCIAL_LEDGER).read_text().split() == ["PMC20.1"]
+        assert sorted(p.name for p in (out / "xml").iterdir()) == ["PMC100.2.xml", "PMC3.1.xml"]
+        meta = (out / "sync_meta.txt").read_text()
+        assert "id_source=inventory:2026-10-17T01-00Z" in meta
+        assert "succeeded=2" in meta and "noncommercial=1" in meta
+
+        reads.clear()
+        dp.main()
+        assert reads == []
+        assert "succeeded=2" in (out / "sync_meta.txt").read_text()
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def _main_env(tmp_path, monkeypatch):
+    monkeypatch.setattr("episteme.config._find_project_dotenv", lambda: None)
+    monkeypatch.setenv("EPISTEME_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("EPISTEME_ACTOR", "x")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    return cfg
+
+
+def test_main_rechecks_a_ledger_entry_when_a_newer_version_appears(tmp_path, monkeypatch):
+    cfg = _main_env(tmp_path, monkeypatch)
+    out = tmp_path / "oa_comm"
+    (out / "filelists").mkdir(parents=True)
+    (out / "filelists" / dp.NONCOMMERCIAL_LEDGER).write_text("PMC20.1\nPMC30.1\n")
+    monkeypatch.setattr(dp, "fetch_inventory", lambda dest: ("d", {20: (2, 1), 30: 1}))
+    reads = _fake_store(monkeypatch, {"PMC20.2": "CC BY", "PMC30.1": "CC BY"})
+    monkeypatch.setattr(sys, "argv", ["download_pmc", "--output_dir", str(out), "--limit", "0"])
+    try:
+        dp.main()
+        assert reads == ["PMC20.2"]
+        assert (out / "xml" / "PMC20.2.xml").is_file()
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_main_limit_counts_downloads_not_ids(tmp_path, monkeypatch):
+    cfg = _main_env(tmp_path, monkeypatch)
+    out = tmp_path / "oa_comm"
+    inv = {n: 1 for n in range(1, 8)}
+    monkeypatch.setattr(dp, "fetch_inventory", lambda dest: ("d", inv))
+    codes = {f"PMC{n}.1": "CC BY-NC" for n in range(1, 5)}
+    codes.update({f"PMC{n}.1": "CC BY" for n in range(5, 8)})
+    _fake_store(monkeypatch, codes)
+    monkeypatch.setattr(sys, "argv", ["download_pmc", "--output_dir", str(out), "--limit", "2"])
+    try:
+        dp.main()
+        assert sorted(p.name for p in (out / "xml").iterdir()) == ["PMC5.1.xml", "PMC6.1.xml"]
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_main_exits_1_on_a_failed_request_and_does_not_record_it(tmp_path, monkeypatch):
+    cfg = _main_env(tmp_path, monkeypatch)
+    out = tmp_path / "oa_comm"
+    monkeypatch.setattr(dp, "fetch_inventory", lambda dest: ("d", {9: 1}))
+
+    def boom(vid):
+        raise dp.FetchError("GET x: timed out")
+
+    monkeypatch.setattr(dp, "load_metadata", boom)
+    monkeypatch.setattr(sys, "argv", ["download_pmc", "--output_dir", str(out), "--limit", "0"])
+    try:
+        with pytest.raises(SystemExit) as exc:
+            dp.main()
+        assert exc.value.code == 1
+        assert (out / "filelists" / dp.NONCOMMERCIAL_LEDGER).read_text() == ""
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_fetch_inventory_falls_back_to_an_older_date(tmp_path, monkeypatch):
+    data_key = "inventory-reports/pmc-oa-opendata/metadata/data/old.csv.gz"
+
+    class BadJson:
+        def json(self):
+            raise ValueError("truncated")
+
+    def fake_get(url, **kw):
+        if "list-type=2" in url:
+            return _Resp(text=_LISTING)
+        if url.endswith("2026-10-17T01-00Z/manifest.json"):
+            return BadJson()
+        if url.endswith("2026-10-16T01-00Z/manifest.json"):
+            return _Resp(payload={"files": [{"key": data_key}]})
+        return None
+
+    def fake_download(url, out_path, dry_run=False, retries=3):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(_gz_csv(_ROWS))
+        return True
+
+    monkeypatch.setattr(dp, "http_get", fake_get)
+    monkeypatch.setattr(dp, "download_to_file", fake_download)
+    date, versions = dp.fetch_inventory(tmp_path)
+    assert date == "2026-10-16T01-00Z"
+    assert versions[100] == (2, 1)
+
+
+def test_fetch_inventory_deletes_a_damaged_file(tmp_path, monkeypatch):
+    data_key = "inventory-reports/pmc-oa-opendata/metadata/data/bad.csv.gz"
+
+    def fake_get(url, **kw):
+        if "list-type=2" in url:
+            return _Resp(text=_LISTING)
+        if url.endswith("manifest.json"):
+            return _Resp(payload={"files": [{"key": data_key}]})
+        return None
+
+    def fake_download(url, out_path, dry_run=False, retries=3):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"not gzip")
+        return True
+
+    monkeypatch.setattr(dp, "http_get", fake_get)
+    monkeypatch.setattr(dp, "download_to_file", fake_download)
+    assert dp.fetch_inventory(tmp_path) is None
+    assert not list(tmp_path.rglob("bad.csv.gz"))
