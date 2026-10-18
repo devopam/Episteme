@@ -23,7 +23,7 @@ Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/
 
 1. **Agents and CI run against `episteme_test`, never `episteme`.** Prefix every pipeline command with `PGDATABASE=episteme_test`. A real environment variable beats `.env`, so the prefix always wins. Each Bash invocation is a fresh shell in most agent harnesses, so an earlier `export` does not persist: put the prefix on every command.
 2. **Confirm the server before any DB step** (section 2.2). This machine can have more than one PostgreSQL installed (a PG 17 client is first on `PATH`); the pipeline database is the native PG19beta3 on `localhost:5433`.
-3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `./01_raw/pmc/oa_comm` relative to the current directory.
+3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `<EPISTEME_RAW_ROOT>/pmc/oa_comm`.
 4. **Never print `.env`.** It holds credentials. Section 1.3 shows how to check that a key is set without showing its value.
 5. **Do not run a bulk download unbounded** unless that is the actual task. Use `--max-files N` (section 4.3) and read section 5 for which sources honour it.
 
@@ -433,7 +433,9 @@ Verify downloaded checksums locally (offline): `bash scripts/data/pubmed/verify_
 
 #### PMC commercial open access (`pmc`)
 
-Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects with `metadata/PMC{id}.{version}.json`), licence-filtered to the commercial-friendly set. Raw: `./01_raw/pmc/oa_comm/` **relative to the current directory** (the downloader's default output directory is not read from `EPISTEME_RAW_ROOT`; run from the repository root and keep `EPISTEME_RAW_ROOT=./01_raw`, or the extractor will not find the files). `pmc` also owns `materialize` and `enrich`.
+Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects with `metadata/PMC{id}.{version}.json`), licence-filtered to the commercial-friendly set. Raw: `<EPISTEME_RAW_ROOT>/pmc/oa_comm/` (`metadata/`, `xml/`, `filelists/`). `pmc` also owns `materialize` and `enrich`.
+
+The article list comes from the bucket's daily S3 inventory (`inventory-reports/pmc-oa-opendata/metadata/<date>/manifest.json` and the `csv.gz` files it names; the bucket README section 5.2). It lists every article version (about 8 million). The downloader saves the inventory under `filelists/inventory/<date>/`, then reads each version's metadata JSON and keeps the highest-numbered version with a commercial licence. A PMCID with no commercial version goes into `filelists/noncommercial.txt`, and a re-run skips it without a request; delete that file to check those PMCIDs again. An article with its metadata JSON and XML already on disk is skipped without a request, so a stopped run restarts cheaply. A failed article (not a missing one) makes the run exit 1; run it again to retry. NCBI ESearch is the fallback only when the inventory cannot be read, and it refuses a request for more than 9,999 ids (ESearch returns no id past that position).
 
 ```bash
 # first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
@@ -449,12 +451,13 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --dry-ru
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc all
 ```
 
-Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits. `pmc enrich` writes the OpenMetadata manifest; ingest happens only if `OM_HOST` is set (otherwise the manifest file only).
+Optional `NCBI_API_KEY` (section 1.2) for higher ESearch limits (fallback path only). `pmc enrich` writes the OpenMetadata manifest; ingest happens only if `OM_HOST` is set (otherwise the manifest file only).
 
 | Issue | Mitigation |
 |---|---|
-| Legacy `oa_comm/xml/all/` bulk prefixes are empty since August 2026 | The downloader uses the per-article layout plus metadata JSON |
-| Full set is millions of articles | Bound with `--max-files`; use SSD and a long-lived session for a full pull |
+| NCBI removed the legacy `oa_comm` / `oa_noncomm` prefixes, their filelists, the FTP `oa_bulk` packages and the baseline packages in the week of 2026-08-24 | The downloader uses the bucket inventory, the per-article layout and the metadata JSON |
+| The inventory is regenerated daily, lags the bucket, and is kept for 30 days | A version listed but already removed is reported as `metadata not found` and does not fail the run |
+| Full set is millions of articles (about 2 requests per article; 16 threads by default) | Bound with `--max-files`; for a full pull (`--max-files 0`) use a long-lived session and re-run after a stop |
 | Authors or journal missing | JSON alone is incomplete; the extractor reads the JATS XML |
 
 #### Apollo corpus (`apollo`)
