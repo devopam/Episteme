@@ -855,10 +855,10 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 
 - **CI** (`.github/workflows/ci.yml`, check `tests`) runs on every pull request and every push to `main`: `uv sync --locked --extra dev`, `ruff format --check .`, `ruff check .`, and `pytest -m "not pg"` without `tests/test_run_pipeline_dispatch.py`. It includes the model smoke tests in `tests/model/`, which download a tiny Hugging Face model. The `pg` tests and the network dispatch smoke test stay local-only; run them before merging changes that touch the database or `run_pipeline.sh`.
 - **`main` requires the `tests` check.** Every change reaches `main` through a pull request; direct pushes (including GitHub web-editor commits) are refused.
-- **Dependabot** checks weekly for `uv` and GitHub Actions updates. Routine updates arrive one pull request per package and wait for a person. Security updates arrive grouped as `security-fixes`; `.github/workflows/dependabot-auto-merge.yml` enables auto-merge on them, so they merge by themselves once `tests` passes.
-- **A security pull request that did not merge** has a failed `tests` run: open its Checks tab, fix the break on the Dependabot branch (or wait for a newer Dependabot push), and it merges when `tests` goes green.
-- **Keep the required check.** Auto-merge relies on `main` requiring `tests`. Removing or renaming that check (in the ruleset or the workflow) turns auto-merge into an immediate merge of every Dependabot security pull request.
-- **Commits added to a Dependabot branch ride along.** Anyone with write access who pushes to a Dependabot security branch gets that commit auto-merged once `tests` passes; review such pushes as you would any change.
+- **Dependabot** checks every Monday at 06:00 UTC for `uv` and GitHub Actions updates. Minor and patch updates arrive as one grouped pull request per ecosystem (`uv-minor-patch`, `gh-actions-minor-patch`), each major update as its own pull request, and security updates grouped as `security-fixes`. Commit messages start `chore(deps):` (uv) or `ci(deps):` (Actions). `.github/workflows/dependabot-auto-merge.yml` enables auto-merge on every Dependabot pull request, so each one merges by itself once `tests` passes (the same set-up as MCPg).
+- **A Dependabot pull request that did not merge** has a failed `tests` run (a major bump is the usual cause): open its Checks tab, fix the break on the Dependabot branch (or wait for a newer Dependabot push), and it merges when `tests` goes green.
+- **Keep the required check.** Auto-merge relies on `main` requiring `tests`. Removing or renaming that check (in the ruleset or the workflow) turns auto-merge into an immediate merge of every Dependabot pull request.
+- **Commits added to a Dependabot branch ride along.** Anyone with write access who pushes to a Dependabot branch gets that commit auto-merged once `tests` passes; review such pushes as you would any change.
 
 ---
 

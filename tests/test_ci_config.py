@@ -49,14 +49,35 @@ def test_dependabot_ecosystems_are_uv_and_actions_weekly():
         assert u["schedule"]["interval"] == "weekly"
 
 
-def test_dependabot_groups_security_updates_only():
-    for u in _load(GH / "dependabot.yml")["updates"]:
-        groups = u.get("groups", {})
+def test_dependabot_groups_security_and_minor_patch_updates():
+    """Security updates grouped as `security-fixes`; minor and patch version updates
+    grouped per ecosystem; a major bump stays a pull request of its own."""
+    ups = {u["package-ecosystem"]: u for u in _load(GH / "dependabot.yml")["updates"]}
+    for eco, minor_group in (
+        ("uv", "uv-minor-patch"),
+        ("github-actions", "gh-actions-minor-patch"),
+    ):
+        groups = ups[eco]["groups"]
+        assert set(groups) == {"security-fixes", minor_group}
         assert groups["security-fixes"]["applies-to"] == "security-updates"
         assert groups["security-fixes"]["patterns"] == ["*"]
-        # routine updates must stay ungrouped, one pull request per package
-        assert all(g.get("applies-to") != "version-updates" for g in groups.values())
-        assert all(g.get("applies-to") == "security-updates" for g in groups.values())
+        mp = groups[minor_group]
+        assert mp["applies-to"] == "version-updates"
+        assert mp["patterns"] == ["*"]
+        assert sorted(mp["update-types"]) == ["minor", "patch"]
+
+
+def test_dependabot_schedule_and_commit_prefixes_match_mcpg():
+    ups = {u["package-ecosystem"]: u for u in _load(GH / "dependabot.yml")["updates"]}
+    for eco, prefix in (("uv", "chore"), ("github-actions", "ci")):
+        u = ups[eco]
+        assert u["schedule"]["day"] == "monday"
+        assert u["schedule"]["time"] == "06:00"
+        assert u["schedule"]["timezone"] == "Etc/UTC"
+        # `include: scope` adds "(deps)", so the prefix must not carry it too
+        assert u["commit-message"] == {"prefix": prefix, "include": "scope"}
+        assert u["labels"] == ["dependencies"]
+        assert u["open-pull-requests-limit"] >= 1
 
 
 # --- ci.yml -----------------------------------------------------------------
@@ -119,10 +140,6 @@ def test_actions_run_on_current_majors():
     )
     assert setup_uv_step["with"]["prune-cache"] is True
 
-    _, am_job = _am()
-    am_uses = _uses(am_job)
-    assert any(u == "dependabot/fetch-metadata@v3" for u in am_uses)
-
 
 # --- dependabot-auto-merge.yml -----------------------------------------------
 
@@ -144,12 +161,14 @@ def test_auto_merge_is_dependabot_only_and_never_checks_out():
     assert wf.get("permissions") == {"contents": "read"}
 
 
-def test_auto_merge_only_for_security_group():
+def test_auto_merge_for_every_dependabot_pull_request():
+    """Every Dependabot pull request gets auto-merge; the required `tests` check is
+    the gate, so the step has no group or update-type condition."""
     _, job = _am()
-    meta = [s for s in job["steps"] if s.get("uses", "").startswith("dependabot/fetch-metadata@")]
-    assert len(meta) == 1 and meta[0]["id"] == "meta"
     merges = [s for s in job["steps"] if "gh pr merge" in s.get("run", "")]
     assert len(merges) == 1
     step = merges[0]
-    assert "steps.meta.outputs.dependency-group == 'security-fixes'" in step["if"]
+    assert "if" not in step
     assert "--auto" in step["run"] and "--merge" in step["run"]
+    failure = [s for s in job["steps"] if s.get("if") == "failure()"]
+    assert len(failure) == 1 and "gh pr comment" in failure[0]["run"]
