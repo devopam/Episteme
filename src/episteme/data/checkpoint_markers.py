@@ -145,13 +145,20 @@ def input_key(path: Path, raw_root: Path) -> str:
 
 
 def discover_input_files(raw_root: Path, patterns: list[str]) -> list[Path]:
-    """glob + rglob per pattern; dedup by resolved FULL path (never basename)."""
+    """glob + rglob per pattern; dedup by resolved FULL path (never basename).
+
+    Files under a hidden directory of ``raw_root`` (a path part starting with ``.``)
+    are skipped: they are tool state, not source data -- e.g. the
+    ``.cache/huggingface/`` folder that ``hf download --local-dir`` keeps, whose
+    ``trees/<sha>.json`` would otherwise be read as an apollo or guidelines file."""
     root = Path(raw_root)
     seen: set[Path] = set()
     out: list[Path] = []
     for pat in patterns:
         for f in [*root.glob(pat), *root.rglob(pat)]:
             if not f.is_file():
+                continue
+            if any(part.startswith(".") for part in f.relative_to(root).parts[:-1]):
                 continue
             rp = f.resolve()
             if rp in seen:

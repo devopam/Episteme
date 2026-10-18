@@ -125,6 +125,16 @@ _SKIP_NAME_SUBSTRINGS = (
     "last_sync",
 )
 
+# Benchmark and decontamination files of FreedomIntelligence/ApolloCorpus (its README
+# config uses only train/sft/medicalExam_<lang>_clean.json for the exam split):
+#   check_exam/                    the Apollo benchmark questions and scorers
+#   medicalExam_<lang>.json        the exam set before decontamination (a superset
+#                                  of the _clean file)
+#   medicalExam_<lang>_dup*.json   the items removed for overlapping the benchmark
+# None of them may reach the corpus: they would put test questions into training.
+_BENCHMARK_DIRS = ("check_exam",)
+_BENCHMARK_NAME = re.compile(r"^medicalExam_[a-z]{2}(_dup|_dup_question)?\.json$")
+
 _TEXT_KEYS = ("text", "content", "body", "article", "output", "response", "message")
 _LANG_KEYS = ("lang", "language", "locale", "lang_code")
 _ID_KEYS = ("id", "uid", "doc_id", "uuid", "sample_id")
@@ -331,6 +341,15 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
         yield record_to_row(rec, source_file, idx)
 
 
+def _is_benchmark_file(path: Path, raw_dir: Path) -> bool:
+    """True for a benchmark or decontamination file (see _BENCHMARK_NAME)."""
+    try:
+        parts = path.relative_to(raw_dir).parts
+    except ValueError:
+        parts = path.parts
+    return any(d in parts for d in _BENCHMARK_DIRS) or bool(_BENCHMARK_NAME.match(path.name))
+
+
 def discover_apollo_files(raw_dir: Path) -> list[Path]:
     """``*.jsonl``/``*.json`` ApolloCorpus files under ``raw_dir``, deduped by
     resolved full path (never by basename) via
@@ -350,7 +369,12 @@ def discover_apollo_files(raw_dir: Path) -> list[Path]:
     discover_pubmed_files`` (Tasks 9/10/11).
     """
     files = discover_input_files(raw_dir, ["*.jsonl", "*.json"])
-    out = [f for f in files if not any(s in f.name.lower() for s in _SKIP_NAME_SUBSTRINGS)]
+    out = [
+        f
+        for f in files
+        if not any(s in f.name.lower() for s in _SKIP_NAME_SUBSTRINGS)
+        and not _is_benchmark_file(f, raw_dir)
+    ]
     out.sort(key=lambda p: (0 if p.name.endswith(".jsonl") else 1, input_key(p, raw_dir)))
     return out
 

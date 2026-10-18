@@ -212,3 +212,27 @@ def test_same_basename_different_subdirs_both_processed_with_distinct_content(tm
     # discard one on load -- the bookshelf-shaped risk, pre-existing and out
     # of scope for this task (see the report's id-derivation section).
     assert row_a["id"] != row_b["id"]
+
+
+def test_discover_apollo_files_skips_benchmark_and_decontamination_files(tmp_path):
+    """The Apollo benchmark (check_exam/), the pre-decontamination exam set
+    (medicalExam_<lang>.json) and the removed overlap (medicalExam_<lang>_dup*.json)
+    must not reach the corpus; the _clean exam set and other SFT files do."""
+    raw = tmp_path / "01_raw" / "apollo"
+    keep = [
+        raw / "train" / "sft" / "medicalExam_en_clean.json",
+        raw / "train" / "sft" / "medicalPatient_en.json",
+        raw / "train" / "pretrain" / "medicalBook_en_text.json",
+    ]
+    skip = [
+        raw / "check_exam" / "questions" / "en_question.json",
+        raw / "train" / "sft" / "medicalExam_en.json",
+        raw / "train" / "sft" / "medicalExam_en_dup.json",
+        raw / "train" / "sft" / "medicalExam_en_dup_question.json",
+    ]
+    for p in keep + skip:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('["x"]', encoding="utf-8")
+
+    found = {f.resolve() for f in discover_apollo_files(raw)}
+    assert found == {p.resolve() for p in keep}
