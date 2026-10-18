@@ -144,41 +144,145 @@ _LIST_KEYS = ("data", "records", "items", "texts", "conversations", "samples")
 # --------------------------------------------------------------------------- #
 # document-shape detection (lifted from the retired apollo/extract.py)
 # --------------------------------------------------------------------------- #
-def _load_records(path: Path) -> list[Any]:
-    """One apollo file -> a list of raw records (str, dict or nested list).
+_STREAM_CHUNK = 1 << 22  # 4 MiB of text per read
 
-    Handles: a JSON array (of strings, objects, or nested QA lists — the real
-    ApolloCorpus pretrain/sft shape); a JSON ``dict`` carrying a
-    ``data``/``records``/``items``/... list (else the dict itself is one
-    record); otherwise line-delimited JSON (JSONL), with any non-JSON line kept
-    as a raw string.
+
+_WS = " \t\r\n"
+
+
+def _iter_json_array(fh: Any, chunk: int = _STREAM_CHUNK) -> Iterator[Any]:
+    """Yield the elements of the JSON array that ``fh`` (a text file positioned
+    just after its opening ``[``) holds, one at a time. Memory stays at about one
+    element plus one chunk, whatever the file size: the 2 GiB ApolloCorpus files
+    took 5 GiB and more per worker when read whole (2026-10-18).
+
+    Strict, like ``json.loads``: elements are separated by one ``,``, the array
+    ends with ``]``, and only whitespace may follow it. A missing separator, a
+    trailing comma, a missing ``]`` or trailing content raises
+    ``json.JSONDecodeError``, so a damaged file fails instead of yielding part of
+    its records."""
+    dec = json.JSONDecoder()
+    buf = ""
+    pos = 0
+    eof = False
+
+    def more() -> bool:
+        nonlocal buf, pos, eof
+        if eof:
+            return False
+        data = fh.read(chunk)
+        if not data:
+            eof = True
+            return False
+        buf = buf[pos:] + data
+        pos = 0
+        return True
+
+    def next_char() -> str:
+        """Skip whitespace; the next character ('' at the end of the file)."""
+        nonlocal pos
+        while True:
+            while pos < len(buf) and buf[pos] in _WS:
+                pos += 1
+            if pos < len(buf):
+                return buf[pos]
+            if not more():
+                return ""
+
+    def fail(msg: str) -> json.JSONDecodeError:
+        return json.JSONDecodeError(msg, buf, pos)
+
+    first = True
+    while True:
+        c = next_char()
+        if c == "]" and first:
+            pos += 1
+            break
+        if c == "":
+            raise fail("unterminated array")
+        while True:
+            try:
+                obj, end = dec.raw_decode(buf, pos)
+            except json.JSONDecodeError:
+                if more():
+                    continue
+                raise
+            # A number cut by the chunk ("-0.5e" of "-0.5e-3") decodes without
+            # error; an element must be followed by whitespace, "," or "]".
+            if (end >= len(buf) or buf[end] not in _WS + ",]") and more():
+                continue
+            break
+        yield obj
+        pos = end
+        first = False
+        c = next_char()
+        if c == ",":
+            pos += 1
+            if next_char() == "]":
+                raise fail("trailing comma in array")
+            continue
+        if c == "]":
+            pos += 1
+            break
+        raise fail("expected ',' or ']' after an array element")
+    if next_char() != "":
+        raise fail("content after the end of the array")
+
+
+def _iter_jsonl(path: Path) -> Iterator[Any]:
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                yield line
+
+
+def _iter_records(path: Path) -> Iterator[Any]:
+    """One apollo file -> its raw records (str, dict or nested list), one at a time.
+
+    Handles: a ``.jsonl`` file, read line by line (a line may itself be an
+    array), with any non-JSON line kept as a raw string; a ``.json`` file whose
+    top level is an array (the real ApolloCorpus pretrain/sft shape), streamed
+    element by element; any other ``.json`` file, read whole (a ``dict`` carrying
+    a ``data``/``records``/``items``/... list, else the dict itself is one
+    record), falling back to line-by-line when it is not one JSON value.
     """
+    if path.suffix.lower() == ".jsonl":
+        yield from _iter_jsonl(path)
+        return
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        head = fh.read(1)
+        while head and head.isspace():
+            head = fh.read(1)
+        if not head:
+            return
+        if head == "[":
+            yield from _iter_json_array(fh)
+            return
     raw = path.read_text(encoding="utf-8", errors="replace").strip()
-    if not raw:
-        return []
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
         obj = None
-    if obj is not None:
-        if isinstance(obj, list):
-            return obj
-        if isinstance(obj, dict):
-            for k in _LIST_KEYS:
-                if isinstance(obj.get(k), list):
-                    return obj[k]
-            return [obj]
-        return [obj]
-    out: list[Any] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            out.append(line)
-    return out
+    del raw
+    if obj is None:
+        yield from _iter_jsonl(path)
+        return
+    if isinstance(obj, dict):
+        for k in _LIST_KEYS:
+            if isinstance(obj.get(k), list):
+                yield from obj[k]
+                return
+    yield obj
+
+
+def _load_records(path: Path) -> list[Any]:
+    """All records of one apollo file as a list (see _iter_records)."""
+    return list(_iter_records(path))
 
 
 def _extract_text(rec: Any) -> str:
@@ -337,7 +441,7 @@ def iter_rows_from_file(path: Path, *, source_file: str | None = None) -> Iterat
     collapse to the same ``source_file`` value on the rows themselves.
     """
     source_file = source_file or path.name
-    for idx, rec in enumerate(_load_records(path)):
+    for idx, rec in enumerate(_iter_records(path)):
         yield record_to_row(rec, source_file, idx)
 
 
