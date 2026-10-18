@@ -9,7 +9,7 @@ MIGRATION_0008 = MIG / "0008_pmc_bookshelf_default_partition.sql"
 
 
 def _base_schema(conn) -> None:
-    """schema.sql + 0002-0007, without 0008 (to show the gap 0008 closes)."""
+    """schema.sql + 0002-0007, without 0008 or later (to show the gap 0008 closes)."""
     with conn.cursor() as cur:
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute((REPO / "src/episteme/data/db/extensions.sql").read_text(encoding="utf-8"))
