@@ -118,7 +118,8 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
 | `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
-| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `<processed root>/_ops/_duckdb_tmp`). |
+| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `EPISTEME_DUCKDB_TEMP_DIR`). |
+| `EPISTEME_DUCKDB_TEMP_DIR` | Spill root for those connections (default `<processed root>/_ops/_duckdb_tmp`). Set it to a fast local disk when the processed root is on a slow disk: the `pubchem` join spilled 31 GB at random-I/O speed to the USB HDD and slowed every other job on it (2026-10-18). |
 | `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (default 3: the physical cores minus one, about 400 MB each). `--workers N` on a module overrides it. |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |

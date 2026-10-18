@@ -159,6 +159,7 @@ class Settings:
     production_database: str = "episteme"
     pg_database_secondary: str | None = None
     duckdb_memory_limit: str = "4GB"
+    duckdb_temp_dir: Path | None = None
     extract_workers: int = DEFAULT_EXTRACT_WORKERS
     sys_admin_password: str = ""
 
@@ -241,6 +242,11 @@ def get_settings() -> Settings:
         production_database=_get("EPISTEME_PRODUCTION_DATABASE", "episteme"),
         pg_database_secondary=secondary,
         duckdb_memory_limit=(_get("EPISTEME_DUCKDB_MEMORY_LIMIT") or "4GB").strip(),
+        # Spill root for the serializers' DuckDB connections; unset = under the
+        # processed root. Point it at a fast local disk when the data disk is slow.
+        duckdb_temp_dir=Path(_get("EPISTEME_DUCKDB_TEMP_DIR")).expanduser()
+        if (_get("EPISTEME_DUCKDB_TEMP_DIR") or "").strip()
+        else None,
         # Worker processes per extract/serialize stage (physical cores minus one).
         extract_workers=_get_positive_int_or_default(
             "EPISTEME_EXTRACT_WORKERS", DEFAULT_EXTRACT_WORKERS
