@@ -318,7 +318,7 @@ def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
     from episteme.ops import stop
 
     # real stage_guard, with its watchdog thread neutralised
-    monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel, **kw: None)
     monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
     monkeypatch.setattr(ff.la, "stage_guard", stop.stage_guard)
     ff.state["behaviour"]["a.jsonl"] = KeyboardInterrupt()

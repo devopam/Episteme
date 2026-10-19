@@ -53,16 +53,22 @@ def start_parent_watchdog(
     interval: float = 10.0,
     parent_pid: int | None = None,
     cancel_timeout: float = 10.0,
+    stop: threading.Event | None = None,
 ) -> threading.Thread:
     """Start a daemon thread that cancels the running statement and exits the
-    process (code 143) when the parent process is gone."""
+    process (code 143) when the parent process is gone. Setting ``stop`` ends
+    the thread without that exit (the guarded stage finished)."""
     # Limits: if the parent is already dead at start, POSIX getppid() returns 1,
     # which exists; a zombie parent also counts as existing.
     ppid = parent_pid or os.getppid()
 
     def _watch() -> None:
         while psutil.pid_exists(ppid):
-            time.sleep(interval)
+            if stop is not None:
+                if stop.wait(interval):
+                    return
+            else:
+                time.sleep(interval)
 
         def _run_cancel() -> None:
             try:
@@ -97,7 +103,8 @@ def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
     global _TERM_SEEN
     _TERM_SEEN = False
     install_stop_handlers()
-    start_parent_watchdog(_cancel)
+    done = threading.Event()
+    start_parent_watchdog(_cancel, stop=done)
     try:
         yield
     except KeyboardInterrupt:
@@ -106,3 +113,5 @@ def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
         except Exception:  # noqa: BLE001 - best effort; the exit follows
             _LOG.exception("cancel failed on stop")
         raise SystemExit(EXIT_TERM if _TERM_SEEN else EXIT_INT) from None
+    finally:
+        done.set()  # a finished stage must not leave a watchdog behind

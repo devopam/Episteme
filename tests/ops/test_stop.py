@@ -217,3 +217,21 @@ def test_pool_connection_is_tagged(pg_conn):
         got = c.execute("show application_name").fetchone()[0]
     assert got.startswith("episteme:")
     assert got.endswith(f":{os.getpid()}")
+
+
+def test_watchdog_thread_ends_when_the_guarded_stage_finishes(monkeypatch):
+    monkeypatch.setattr(stop.psutil, "pid_exists", lambda pid: True)
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    seen = []
+    real = stop.start_parent_watchdog
+
+    def _spy(cancel, **kw):
+        t = real(cancel, interval=30.0, **kw)
+        seen.append(t)
+        return t
+
+    monkeypatch.setattr(stop, "start_parent_watchdog", _spy)
+    with stop.stage_guard(lambda: None):
+        pass
+    seen[0].join(5)
+    assert not seen[0].is_alive()
