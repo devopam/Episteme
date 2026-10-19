@@ -106,6 +106,12 @@ def test_duckdb_memory_limit_string():
     assert p.duckdb_memory_limit == "4096MiB"
 
 
+@pytest.mark.parametrize("override,expected", [(512 * 1024, "524288B"), (1536 * 1024, "1572864B")])
+def test_duckdb_memory_limit_keeps_non_mib_overrides_exact(override, expected):
+    p = compute_profile(LAPTOP, Overrides(duckdb_memory_bytes=override))
+    assert p.duckdb_memory_limit == expected
+
+
 class _S:  # a stand-in for Settings with only the override fields
     extract_workers = None
     io_concurrency = None

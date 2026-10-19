@@ -85,7 +85,11 @@ class Profile:
 
     @property
     def duckdb_memory_limit(self) -> str:
-        return f"{self.duckdb_memory_bytes // MB}MiB"  # DuckDB reads MB as 10^6
+        # DuckDB reads MB as 10^6, so use binary MiB; a value that is not a
+        # whole number of MiB (an operator override) goes as exact bytes.
+        if self.duckdb_memory_bytes % MB:
+            return f"{self.duckdb_memory_bytes}B"
+        return f"{self.duckdb_memory_bytes // MB}MiB"
 
 
 def _batch_rows_rule(ram_bytes: int) -> int:
