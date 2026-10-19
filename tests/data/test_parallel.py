@@ -300,3 +300,19 @@ def test_dead_worker_stops_the_run(tmp_path, spawn_child_env):
     results = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw)
     assert first_failure(results) is not None
     assert len(results) <= len(files)
+
+
+@pytest.mark.parametrize("executor", ["process", "thread"])
+def test_a_stop_in_the_parent_cancels_the_pending_files(tmp_path, spawn_child_env, executor):
+    names = ("a.txt",) + tuple(f"f{i:02d}.txt" for i in range(16))
+    raw, files = _files(tmp_path, names)
+    log = tmp_path / "calls"
+
+    def _stop(_result):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_per_file(
+            _fail_on_b, files, workers=2, raw_dir=raw, log=log, executor=executor, on_result=_stop
+        )
+    assert len(list(log.iterdir())) < len(files)  # queued files never started

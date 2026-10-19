@@ -188,48 +188,55 @@ def _run_pool(
     }
     stopping = False
     broken_logged = False
-    while pending:
-        done, _ = wait(pending, return_when=FIRST_COMPLETED)
-        for fut in done:
-            path, tries = pending.pop(fut)
-            if fut.cancelled():
-                continue
-            try:
-                result = fut.result()
-            except TransientUnitError as exc:
-                if not stopping and tries < len(waits):
-                    wait_s = waits[tries]
-                    _log_retry(path, tries + 1, len(waits), wait_s, exc)
-                    sleep(wait_s)
-                    try:
-                        pending[pool.submit(fn, path, **kwargs)] = (path, tries + 1)
-                        continue
-                    except RuntimeError as sub_exc:  # broken or shut-down pool
-                        result = _failed_result(path, raw_dir, sub_exc)
-                else:
-                    _LOG.error("transient error on %s, not retried: %s", path, exc)
+    try:
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                path, tries = pending.pop(fut)
+                if fut.cancelled():
+                    continue
+                try:
+                    result = fut.result()
+                except TransientUnitError as exc:
+                    if not stopping and tries < len(waits):
+                        wait_s = waits[tries]
+                        _log_retry(path, tries + 1, len(waits), wait_s, exc)
+                        sleep(wait_s)
+                        try:
+                            pending[pool.submit(fn, path, **kwargs)] = (path, tries + 1)
+                            continue
+                        except RuntimeError as sub_exc:  # broken or shut-down pool
+                            result = _failed_result(path, raw_dir, sub_exc)
+                    else:
+                        _LOG.error("transient error on %s, not retried: %s", path, exc)
+                        result = _failed_result(path, raw_dir, exc)
+                except BrokenExecutor as exc:
+                    if not broken_logged:
+                        _LOG.error("a worker died (%r); failing every file still in flight", exc)
+                        broken_logged = True
                     result = _failed_result(path, raw_dir, exc)
-            except BrokenExecutor as exc:
-                if not broken_logged:
-                    _LOG.error("a worker died (%r); failing every file still in flight", exc)
-                    broken_logged = True
-                result = _failed_result(path, raw_dir, exc)
-            except Exception as exc:  # noqa: BLE001 - one file's crash becomes its failed result
-                _LOG.error("worker failed on %s: %r", path, exc)
-                result = _failed_result(path, raw_dir, exc)
-            emit(result)
-            if stop_on_failure and not stopping and is_failure(result):
-                stopping = True
-                _LOG.error("stopping at the first failed unit: %s", result.get("source_file"))
-                # Cancel each pending future; the ones already running (or, in a
-                # process pool, already handed to the call queue) cannot be
-                # cancelled and finish. Not shutdown(wait=False,
-                # cancel_futures=True) mid-loop: on CPython 3.14 / Windows the
-                # process pool then never completes the in-flight futures, and
-                # wait() below hangs.
-                for f in pending:
-                    f.cancel()
-                pending = {f: v for f, v in pending.items() if not f.cancelled()}
+                except Exception as exc:  # noqa: BLE001 - one file's crash becomes its failed result
+                    _LOG.error("worker failed on %s: %r", path, exc)
+                    result = _failed_result(path, raw_dir, exc)
+                emit(result)
+                if stop_on_failure and not stopping and is_failure(result):
+                    stopping = True
+                    _LOG.error("stopping at the first failed unit: %s", result.get("source_file"))
+                    # Cancel each pending future; the ones already running (or, in a
+                    # process pool, already handed to the call queue) cannot be
+                    # cancelled and finish. Not shutdown(wait=False,
+                    # cancel_futures=True) mid-loop: on CPython 3.14 / Windows the
+                    # process pool then never completes the in-flight futures, and
+                    # wait() below hangs.
+                    for f in pending:
+                        f.cancel()
+                    pending = {f: v for f, v in pending.items() if not f.cancelled()}
+    except BaseException:
+        # A stop (KeyboardInterrupt, SystemExit) or a bug: drop the queued
+        # units so the pool's shutdown waits only for the ones in flight.
+        for f in pending:
+            f.cancel()
+        raise
 
 
 def skip_files(
