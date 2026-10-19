@@ -894,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
 
         def _build_once() -> dict[str, Any]:
-            """One attempt: a fresh connection, the whole build as one transaction."""
+            """One attempt: a connection from the pool, the whole build as one transaction."""
             with connection() as conn:
                 holder[0] = conn
                 try:

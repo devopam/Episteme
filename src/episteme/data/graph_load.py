@@ -12,9 +12,9 @@ One raw input file (``source_file`` = its ``input_key``) is one transaction:
 6. audit (``force_override`` when forced, always ``graph_commit``), upsert lineage, commit.
 
 A failure rolls the file back alone. ``build_pubmed_graph`` retries a transient error
-on a fresh connection (audit mirror deferred until the commit) and stops at the first
-permanent failure: later files are not touched and the failed file is reported in
-``failed`` / ``stopped_at``. The skip state lives in ``_graph_lineage``, in the same
+on a connection from the pool (audit mirror deferred until the commit) and stops at
+the first permanent failure: later files are not touched and the failed file is
+reported in ``failed`` / ``stopped_at``. The skip state lives in ``_graph_lineage``, in the same
 database the deletes act on.
 """
 
@@ -236,8 +236,9 @@ def build_pubmed_graph(
     permanent failure.
 
     ``conn`` serves only the start-up check; ``None`` runs it on its own short
-    connection that is released before the first file loads. Each file loads on a fresh connection
-    inside ``audit_trail.deferred_mirror`` and is retried on a transient error
+    connection that is released before the first file loads. Each attempt takes a
+    connection from the pool (possibly a reused idle one), loads the file inside
+    ``audit_trail.deferred_mirror`` and is retried on a transient error
     (``with_retries``). ``holder`` (optional one-item list) receives the connection of
     the attempt in progress so a caller's ``stage_guard`` can cancel it.
 
@@ -293,7 +294,7 @@ def build_pubmed_graph(
         return _stop(sf, GraphLoadError(f"{sf}: unreadable success marker; re-extract the file"))
 
     def _attempt(sf: str) -> dict[str, Any]:
-        """One attempt: a fresh connection, one transaction, one commit."""
+        """One attempt: a connection from the pool, one transaction, one commit."""
         with connection() as uconn:
             if holder is not None:
                 holder[0] = uconn

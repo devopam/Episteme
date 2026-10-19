@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             bconn.commit()
 
     def _load_one(shard: Path, name: str) -> dict:
-        """One attempt: a fresh connection, one transaction, one commit."""
+        """One attempt: a connection from the pool, one transaction, one commit."""
         with connection() as conn:
             holder[0] = conn
             try:
