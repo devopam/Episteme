@@ -34,13 +34,20 @@ exit 0
 
 FAKE_PYTHON = r"""#!/usr/bin/env bash
 echo "$*" >> "$FAKE_PYTHON_LOG"
-{ cat <<'PROFILE'
+{ case "${FAKE_PYTHON_MODE:-}" in
+empty) ;;
+*) cat <<'PROFILE'
 shared_buffers|2457MB
 maintenance_work_mem|983MB
 work_mem|32MB
 effective_io_concurrency|2
 max_parallel_workers_per_gather|2
 PROFILE
+;;
+esac
+if [ "${FAKE_PYTHON_MODE:-}" = stray ]; then
+    printf '%s\n' 'note: a|b' 'warning|' 'x|y|z' ''
+fi
 } | if [ -n "${FAKE_PYTHON_CRLF:-}" ]; then sed 's/$/\r/'; else cat; fi
 exit "${FAKE_PYTHON_EXIT:-0}"
 """
@@ -181,6 +188,21 @@ def test_crlf_profile_rows_are_handled(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "DIFFERS" not in proc.stdout
     assert calls and not any("\r" in c for c in calls)
+
+
+def test_stray_profile_lines_are_ignored(tmp_path):
+    proc, calls = _run(tmp_path, "check", rows=_rows({}), extra={"FAKE_PYTHON_MODE": "stray"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    joined = "\n".join(calls)
+    for stray in ("note", "warning", "'x'", "y|z"):
+        assert stray not in joined
+
+
+def test_an_empty_profile_stops_the_script(tmp_path):
+    proc, calls = _run(tmp_path, "check", rows=_rows({}), extra={"FAKE_PYTHON_MODE": "empty"})
+    assert proc.returncode != 0
+    assert "could not compute the runtime profile" in proc.stderr
+    assert calls == []
 
 
 def test_a_failing_profile_stops_the_script(tmp_path):

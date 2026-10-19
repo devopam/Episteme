@@ -60,10 +60,15 @@ SETTINGS=(
     "wal_compression|lz4"
     "effective_cache_size|8GB"
 )
+profile_count=0
 while IFS= read -r row; do
     row="${row%$'\r'}"
-    case "$row" in [a-z_]*"|"*) SETTINGS+=("$row") ;; esac
+    if [[ $row =~ ^[a-z_][a-z0-9_]*[|][^|]+$ ]]; then
+        SETTINGS+=("$row")
+        profile_count=$((profile_count + 1))
+    fi
 done <<< "$profile_rows"
+[ "$profile_count" -gt 0 ] || die "tune_postgres.sh: could not compute the runtime profile (no name|value rows from python -m episteme.ops.profile show --format=pg)"
 
 # Bound every connection attempt: a silent, unreachable server would otherwise
 # hang until the OS gives up. Override with PGCONNECT_TIMEOUT (seconds).
