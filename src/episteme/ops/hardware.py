@@ -57,6 +57,11 @@ def _windows_media_type(drive: str) -> str:
     return (out.stdout or "").strip().splitlines()[0].strip() if out.stdout.strip() else ""
 
 
+def _media_type_kind(raw: str) -> str:
+    """Map a Windows MediaType string to hdd / ssd / unknown."""
+    return {"HDD": "hdd", "SSD": "ssd"}.get((raw or "").strip().upper(), "unknown")
+
+
 def _linux_rotational(path: Path) -> str | None:
     """'1' (rotational) / '0' / None for the block device holding ``path``."""
     dev = os.stat(path).st_dev
@@ -80,8 +85,7 @@ def disk_kind(path: Path) -> str:
             drive = p.drive.rstrip(":")
             if len(drive) != 1:
                 return "unknown"
-            raw = _windows_media_type(drive).upper()
-            return {"HDD": "hdd", "SSD": "ssd"}.get(raw, "unknown")
+            return _media_type_kind(_windows_media_type(drive))
         rot = _linux_rotational(p)
         return {"1": "hdd", "0": "ssd"}.get(rot or "", "unknown")
     except Exception:  # noqa: BLE001 - detection is best effort by design

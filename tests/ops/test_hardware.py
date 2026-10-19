@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -27,12 +27,24 @@ def test_ram_bytes(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "raw,expected", [("HDD", "hdd"), ("SSD", "ssd"), ("Unspecified", "unknown"), ("", "unknown")]
+    "raw,expected",
+    [("HDD", "hdd"), ("SSD", "ssd"), ("hdd", "hdd"), ("Unspecified", "unknown"), ("", "unknown")],
 )
-def test_windows_media_type_mapping(monkeypatch, tmp_path, raw, expected):
+def test_media_type_kind(raw, expected):
+    assert hardware._media_type_kind(raw) == expected
+
+
+def _windows_path(monkeypatch, path: str) -> None:
     monkeypatch.setattr(hardware.sys, "platform", "win32")
-    monkeypatch.setattr(hardware, "_windows_media_type", lambda drive: raw)
-    assert hardware.disk_kind(tmp_path) == expected
+    monkeypatch.setattr(hardware, "_existing_ancestor", lambda p: PureWindowsPath(path))
+
+
+def test_windows_drive_path_uses_media_type(monkeypatch):
+    calls = []
+    _windows_path(monkeypatch, "C:/x")
+    monkeypatch.setattr(hardware, "_windows_media_type", lambda drive: calls.append(drive) or "SSD")
+    assert hardware.disk_kind(Path("ignored")) == "ssd"
+    assert calls == ["C"]
 
 
 def test_linux_rotational(monkeypatch, tmp_path):
@@ -45,21 +57,21 @@ def test_linux_rotational(monkeypatch, tmp_path):
     assert hardware.disk_kind(tmp_path) == "unknown"
 
 
-def test_disk_kind_never_raises(monkeypatch, tmp_path):
+def test_disk_kind_never_raises(monkeypatch):
     def boom(_):
         raise OSError("powershell missing")
 
-    monkeypatch.setattr(hardware.sys, "platform", "win32")
+    _windows_path(monkeypatch, "C:/x")
     monkeypatch.setattr(hardware, "_windows_media_type", boom)
-    assert hardware.disk_kind(tmp_path / "does-not-exist-yet") == "unknown"
-    assert hardware.disk_kind(Path(r"\\server\share\x")) == "unknown"
+    assert hardware.disk_kind(Path("ignored")) == "unknown"
 
 
 def test_unc_path_skips_detection(monkeypatch):
     calls = []
-    monkeypatch.setattr(hardware.sys, "platform", "win32")
+    _windows_path(monkeypatch, r"\server\share\x")
     monkeypatch.setattr(hardware, "_windows_media_type", lambda drive: calls.append(drive) or "SSD")
-    assert hardware.disk_kind(Path(r"\\server\share\x")) == "unknown"
+    # The drive of a UNC path is not one letter, so no detection call is made.
+    assert hardware.disk_kind(Path("ignored")) == "unknown"
     assert calls == []
 
 
