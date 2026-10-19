@@ -145,3 +145,10 @@ def test_render_json_and_text_name_sources():
     assert data["values"]["cpu_workers"] == 7 and data["sources"]["cpu_workers"] == "env"
     text = prof.render(p, "text")
     assert "cpu_workers" in text and "env" in text and "rule" in text
+
+
+def test_render_text_labels_hardware_detected():
+    p = compute_profile(LAPTOP, Overrides(cpu_workers=7))
+    lines = prof.render(p, "text").splitlines()
+    assert lines[0].startswith("hardware:") and lines[0].endswith("  detected")
+    assert all(line.rstrip().endswith(("rule", "env")) for line in lines[1:])

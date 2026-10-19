@@ -593,8 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threads",
         type=int,
-        default=ops_profile.get_profile().pmc_threads,
-        help="Parallel download workers (each keeps its own connection open)",
+        default=None,
+        help=(
+            "Parallel download workers, each with its own open connection "
+            "(default: the runtime profile (48))"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -618,9 +621,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_threads(args: argparse.Namespace) -> int:
+    """The --threads value, or the runtime profile's when --threads is not given."""
+    if args.threads is None:
+        args.threads = ops_profile.get_profile().pmc_threads
+    return args.threads
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    resolve_threads(args)
 
     formats = []
     for f in args.formats:

@@ -39,4 +39,18 @@ def test_pmc_threads_default_from_profile(monkeypatch):
     _fake_profile(monkeypatch, pmc_threads=33)
     from episteme.data.pmc import download_pmc
 
-    assert download_pmc.build_parser().parse_args([]).threads == 33
+    args = download_pmc.build_parser().parse_args([])
+    assert args.threads is None
+    assert download_pmc.resolve_threads(args) == 33 and args.threads == 33
+    explicit = download_pmc.build_parser().parse_args(["--threads", "5"])
+    assert download_pmc.resolve_threads(explicit) == 5
+
+
+def test_pmc_build_parser_does_not_detect_hardware(monkeypatch):
+    def boom():
+        raise AssertionError("get_profile called while building the parser")
+
+    monkeypatch.setattr(prof, "get_profile", boom)
+    from episteme.data.pmc import download_pmc
+
+    download_pmc.build_parser()

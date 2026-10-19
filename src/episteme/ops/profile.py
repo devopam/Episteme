@@ -1,4 +1,3 @@
-# src/episteme/ops/profile.py
 """Runtime profile: every value that depends on the machine, computed from the
 hardware by the rules of the operating standard (spec section 5), with an env
 override for each (read by episteme.config). See
@@ -89,6 +88,10 @@ class Profile:
         return f"{self.duckdb_memory_bytes // MB}MB"
 
 
+def _batch_rows_rule(ram_bytes: int) -> int:
+    return 100_000 if ram_bytes >= 48 * GB else 50_000
+
+
 def compute_profile(hw: Hardware, ov: Overrides, *, data_role: str = "processed") -> Profile:
     sources: dict[str, str] = {"hardware": "detected"}
 
@@ -126,7 +129,7 @@ def compute_profile(hw: Hardware, ov: Overrides, *, data_role: str = "processed"
         download_threads=pick("download_threads", 16),
         pmc_threads=pick("pmc_threads", 48),
         duckdb_memory_bytes=duckdb,
-        batch_rows=pick("batch_rows", 100_000 if ram >= 48 * GB else 50_000),
+        batch_rows=pick("batch_rows", _batch_rows_rule(ram)),
         part_rows=pick("part_rows", 2_000_000 if big else 1_000_000),
         part_bytes=pick("part_bytes", GB if big else 512 * MB),
         pg_shared_buffers_bytes=shared,
@@ -191,6 +194,10 @@ def default_batch_rows() -> int:
 
     Uses RAM and the override only. It must not call ``get_profile()``: the
     constants call this at import, and ``get_profile()`` runs disk detection.
+
+    It runs at import of four modules and reads the settings once: later env
+    changes do not reach the constants. A bad env value raises ConfigError at
+    import.
     """
     from episteme.config import get_settings
     from episteme.ops import hardware
@@ -198,7 +205,7 @@ def default_batch_rows() -> int:
     override = get_settings().batch_rows
     if override is not None:
         return override
-    return 100_000 if hardware.ram_bytes() >= 48 * GB else 50_000
+    return _batch_rows_rule(hardware.ram_bytes())
 
 
 @lru_cache(maxsize=1)
@@ -236,7 +243,7 @@ def render(p: Profile, fmt: str) -> str:
         )
     lines = [
         f"hardware: {hw['physical_cores']} cores, {hw['ram_bytes'] // GB} GB RAM, "
-        f"disks {hw['disk_kinds']}"
+        f"disks {hw['disk_kinds']}  detected"
     ]
     for name in PROFILE_FIELDS:
         lines.append(f"{name:36} {values[name]!s:>16}  {p.sources.get(name, 'rule')}")

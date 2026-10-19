@@ -736,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         "--workers",
         type=int,
         default=None,
-        help="worker processes (default: EPISTEME_EXTRACT_WORKERS, 3)",
+        help="worker processes (default: the runtime profile; EPISTEME_EXTRACT_WORKERS overrides)",
     )
     p.add_argument("--force", action="store_true")
     p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per file to stderr")
