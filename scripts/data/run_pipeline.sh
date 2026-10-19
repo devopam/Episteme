@@ -229,14 +229,28 @@ run_stage() {
     local name="$1"
     shift
     log INFO "stage: $name"
-    if ! "$@"; then
+    # Drop any stale failure record so a later read only sees this stage's.
+    "$PY" -m episteme.ops.failure clear --source "$SOURCE" >/dev/null 2>&1 || true
+    # `if ! cmd` would lose the exit code; capture it so it can be reused.
+    local rc=0
+    "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        local reason
+        case "$rc" in
+            130|143) reason="stopped at stage $name" ;;
+            *)
+                reason="failed at stage $name"
+                local unit
+                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || unit=""
+                [ -n "$unit" ] && reason="$reason: $unit"
+                ;;
+        esac
         log ERROR "stage failed: $name"
         log ERROR "resume with: $0 $SOURCE $name"
         # DR-1: a dry run touches no DB, so it also emits no failure-path run_end
         # (that would be a lone run_end with no matching run_start).
-        [ "${EPISTEME_DRY_RUN:-0}" = "1" ] \
-            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $name" >/dev/null 2>&1 || true
-        exit 1
+        [ "${EPISTEME_DRY_RUN:-0}" = "1" ]             || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "$reason" >/dev/null 2>&1 || true
+        exit "$rc"
     fi
 }
 
