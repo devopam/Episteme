@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import (
@@ -229,3 +230,64 @@ def _run_pool(
                 for f in pending:
                     f.cancel()
                 pending = {f: v for f, v in pending.items() if not f.cancelled()}
+
+
+def skip_files(
+    source: str,
+    stage: str,
+    files: Sequence[Path],
+    skip_names: Sequence[str] | None,
+    reason: str | None,
+) -> list[Path]:
+    """Drop the files named by ``--skip-unit`` (the unit name is the basename).
+
+    Without skip names this returns ``files`` and touches no database. With
+    them, ``ops.skip.apply_skips`` exits 2 on a name that matches no file and
+    writes one ``unit_skip`` audit row per skipped name.
+    """
+    files = list(files)
+    if not skip_names:
+        return files
+    from episteme.config import get_settings
+    from episteme.ops.skip import apply_skips
+
+    keep = set(
+        apply_skips(
+            source,
+            stage,
+            [p.name for p in files],
+            skip_names,
+            reason,
+            run_id=get_settings().run_id,
+        )
+    )
+    for p in files:
+        if p.name not in keep:
+            print(f"skip-unit {p.name}", file=sys.stderr)
+    return [p for p in files if p.name in keep]
+
+
+def record_first_failure(
+    source: str,
+    stage: str,
+    files: Sequence[Path],
+    results: Iterable[dict[str, Any]],
+    raw_dir: Path,
+) -> str | None:
+    """Write ``last_failure.json`` for the first failed result; return its unit.
+
+    The unit is the file basename -- the name ``--skip-unit`` takes. A result's
+    ``source_file`` is ``input_key(path, raw_dir)``; it maps back to the path.
+    """
+    fail = first_failure(results)
+    if fail is None:
+        return None
+    from episteme.ops.failure import record_failure
+
+    key = str(fail.get("source_file") or "")
+    by_key = {input_key(p, raw_dir): p for p in files}
+    unit = by_key[key].name if key in by_key else Path(key).name
+    error = str(fail.get("error") or "")
+    record_failure(source, stage, unit, error)
+    print(f"stopped at {unit}: {error}", file=sys.stderr)
+    return unit

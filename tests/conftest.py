@@ -186,6 +186,31 @@ def _redirect_audit_mirror(request, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(_audit_trail, "_mirror_dir", _mirror_dir, raising=True)
 
 
+@pytest.fixture(autouse=True)
+def _redirect_failure_record(request, monkeypatch, tmp_path_factory):
+    """Keep ``ops.failure.record_failure`` (``last_failure.json``) off the real
+    ``02_processed/_ops/``, by the same rule as ``_redirect_audit_mirror``: an
+    extractor test passes its own ``processed_dir`` argument, but the failure
+    record resolves against ``get_settings().processed_root``. A test that
+    points ``processed_root`` into the pytest tmp tree keeps the real path."""
+    if "pg" in request.keywords:
+        return
+
+    from episteme.ops import failure as _failure
+
+    redirect_dir = tmp_path_factory.mktemp("failure_record")
+    base = tmp_path_factory.getbasetemp().resolve()
+    _real_path = _failure._path
+
+    def _path(source: str) -> Path:
+        root = Path(_failure.get_settings().processed_root).resolve()
+        if root == base or base in root.parents:
+            return _real_path(source)
+        return redirect_dir / "_ops" / source / "last_failure.json"
+
+    monkeypatch.setattr(_failure, "_path", _path, raising=True)
+
+
 @pytest.fixture
 def spawn_child_env(monkeypatch, tmp_path):
     """Environment for a test that starts worker processes or subprocesses.
