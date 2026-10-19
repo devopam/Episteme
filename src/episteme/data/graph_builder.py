@@ -64,6 +64,7 @@ via ``audit_trail``.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,12 @@ from episteme.data import graph_load
 from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
 from episteme.data.pubmed.relations import normalize_orcid
+from episteme.ops import orphans
+from episteme.ops.failure import record_failure
+from episteme.ops.retry import RETRY_WAITS, with_retries
+from episteme.ops.stop import stage_guard
+
+_SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 # Sources ``build`` knows how to graph. Only ``pmc`` has raw JATS to parse for
 # cites/mesh; ``pubmed`` loads graph files (``graph_load``); the rest contribute
@@ -222,6 +229,7 @@ def build(
     processed_dir: Path | str | None = None,
     force: bool = False,
     reason: str | None = None,
+    holder: list | None = None,
 ) -> dict[str, Any]:
     """Rebuild the edge tables for ``source`` from loaded rows (+ raw JATS for pmc,
     raw MeSH descriptor XML for mesh).
@@ -258,7 +266,12 @@ def build(
     ``source="pubmed"`` is different: it loads the extractor's per-relation graph
     files from ``processed_dir`` via :func:`graph_load.build_pubmed_graph` (one
     committed transaction per source file; ``raw_dir`` is unused) and returns that
-    function's ``{files, loaded, skipped, failed, rows, facets}``.
+    function's ``{files, loaded, skipped, failed, rows, facets}`` (it stops at the
+    first failed file; ``holder`` is forwarded to it).
+
+    Data tolerance is not a unit failure: a malformed JATS or MeSH file inside this
+    build is skipped or counted in the result (``# a malformed shard must not abort
+    the build``), never raised. Only a database or I/O error fails the build.
     """
     if source not in _GRAPH_SOURCES:
         raise NotImplementedError(f"{source} graph build is SP2+")
@@ -267,7 +280,12 @@ def build(
         if processed_dir is None:
             raise ValueError("processed_dir is required for source 'pubmed'")
         return graph_load.build_pubmed_graph(
-            conn, processed_dir=Path(processed_dir), run_id=run_id, force=force, reason=reason
+            conn,
+            processed_dir=Path(processed_dir),
+            run_id=run_id,
+            force=force,
+            reason=reason,
+            holder=holder,
         )
 
     raw_dir = Path(raw_dir)
@@ -821,50 +839,96 @@ def main(argv: list[str] | None = None) -> int:
         settings.run_id or f"{args.source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     )
 
-    if args.source == "pubmed":
-        try:
-            with connection() as conn:
-                res = build(
-                    conn,
-                    source="pubmed",
-                    raw_dir=args.raw_dir,
-                    run_id=run_id,
-                    processed_dir=args.processed_dir,
-                    force=args.force,
-                    reason=args.reason,
+    holder: list = [None]  # the connection of the attempt in progress, for stage_guard
+
+    with stage_guard(lambda: holder[0]):
+        with connection() as sconn:
+            orphans.sweep(sconn)
+
+        if args.source == "pubmed":
+            try:
+                with connection() as conn:
+                    res = build(
+                        conn,
+                        source="pubmed",
+                        raw_dir=args.raw_dir,
+                        run_id=run_id,
+                        processed_dir=args.processed_dir,
+                        force=args.force,
+                        reason=args.reason,
+                        holder=holder,
+                    )
+            except graph_load.GraphLoadError as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 2
+            if res["files"] == 0:
+                print(
+                    f"WARNING: no pubmed graph files found under {args.processed_dir}",
+                    file=sys.stderr,
                 )
-        except graph_load.GraphLoadError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 2
-        if res["files"] == 0:
+                return 1
+            rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
             print(
-                f"WARNING: no pubmed graph files found under {args.processed_dir}",
-                file=sys.stderr,
+                f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
+                f"failed={len(res['failed'])} facets={res['facets']} {rows}"
             )
-            return 1
-        rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
-        print(
-            f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
-            f"failed={len(res['failed'])} facets={res['facets']} {rows}"
-        )
-        if res["failed"]:
-            print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
-            return 1
-        return 0
+            if res["failed"]:
+                unit = res.get("stopped_at") or res["failed"][0]
+                record_failure(
+                    "pubmed",
+                    "graph",
+                    unit,
+                    res.get("error") or f"graph load failed: {unit}",
+                    run_id=run_id,
+                )
+                print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
+                print(f"stopped_at={unit}", file=sys.stderr)
+                return 1
+            return 0
 
-    if args.force:
-        print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
-    raw_dir = args.raw_dir
-    if raw_dir is None:
-        if args.source == "pmc":
-            raw_dir = settings.raw_root / "pmc" / "oa_comm" / "xml"
-        else:
-            print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
-            return 2
+        if args.force:
+            print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
+        raw_dir = args.raw_dir
+        if raw_dir is None:
+            if args.source == "pmc":
+                raw_dir = settings.raw_root / "pmc" / "oa_comm" / "xml"
+            else:
+                print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
+                return 2
 
-    with connection() as conn:
-        res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
-        conn.commit()
+        def _build_once() -> dict[str, Any]:
+            """One attempt: a fresh connection, the whole build as one transaction."""
+            with connection() as conn:
+                holder[0] = conn
+                try:
+                    with audit_trail.deferred_mirror(conn):
+                        try:
+                            res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
+                            audit_trail.commit(conn)
+                            return res
+                        except BaseException as exc:
+                            if not isinstance(exc, Exception):
+                                try:
+                                    conn.cancel_safe()
+                                except Exception:  # noqa: BLE001 - best effort
+                                    pass
+                            try:
+                                audit_trail.rollback(conn)
+                            except Exception:  # noqa: BLE001 - keep the original error
+                                pass
+                            raise
+                finally:
+                    holder[0] = None
+
+        def _on_retry(attempt: int, exc: BaseException, wait: float) -> None:
+            print(f"retry {args.source} ({attempt}/{len(RETRY_WAITS)}) in {wait}s: {exc!r}")
+
+        try:
+            res = with_retries(_build_once, sleep=lambda secs: _SLEEP(secs), on_retry=_on_retry)
+        except Exception as exc:  # noqa: BLE001 - permanent: record, exit 1
+            print(f"FAIL {args.source}: {exc}", file=sys.stderr)
+            record_failure(args.source, "graph", args.source, repr(exc), run_id=run_id)
+            return 1
     print(
         f"done source_files={len(res['source_files'])} cites={res['cites']} "
         f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
