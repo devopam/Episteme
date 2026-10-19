@@ -31,7 +31,6 @@ class ConfigError(RuntimeError):
 _SOURCES: dict[str, str] = {}
 
 DB_MODES = ("read-only", "restricted", "unrestricted")
-DEFAULT_EXTRACT_WORKERS = 3
 
 
 def _get(name: str, default: str | None = None) -> str | None:
@@ -98,6 +97,26 @@ def _get_positive_int_or_default(name: str, default: int) -> int:
     return value
 
 
+def _get_positive_int_or_none(name: str) -> int | None:
+    """Like ``_get_positive_int_or_default`` but unset (or invalid) gives ``None``:
+    the runtime profile (``episteme.ops.profile``) then supplies the rule's value."""
+    raw = _get(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        _LOG.warning("%s must be an integer >= 1, got %r; using the rule's value", name, raw)
+        return None
+    return value
+
+
+def _get_size_or_none(name: str) -> str | None:
+    return (_get(name) or "").strip() or None
+
+
 def _find_project_dotenv() -> str | None:
     """Path to the project-root .env, or None.
 
@@ -130,7 +149,6 @@ class Settings:
     om_host: str | None
     om_jwt: str | None
     ncbi_api_key: str | None
-    download_threads: int
     sample_limit: int
     actor: str | None
     run_id: str | None
@@ -158,9 +176,18 @@ class Settings:
     db_target: str = "primary"
     production_database: str = "episteme"
     pg_database_secondary: str | None = None
-    duckdb_memory_limit: str = "4GB"
+    download_threads: int | None = None
+    duckdb_memory_limit: str | None = None
     duckdb_temp_dir: Path | None = None
-    extract_workers: int = DEFAULT_EXTRACT_WORKERS
+    extract_workers: int | None = None
+    io_concurrency: int | None = None
+    pmc_threads: int | None = None
+    batch_rows: int | None = None
+    part_rows: int | None = None
+    part_bytes: str | None = None
+    pg_shared_buffers: str | None = None
+    pg_maintenance_work_mem: str | None = None
+    pg_work_mem: str | None = None
     sys_admin_password: str = ""
 
     def pg_dsn(self) -> str:
@@ -204,7 +231,7 @@ def get_settings() -> Settings:
         om_host=_get("OM_HOST"),
         om_jwt=_get("OM_JWT"),
         ncbi_api_key=_get("NCBI_API_KEY"),
-        download_threads=_get_int("EPISTEME_DOWNLOAD_THREADS", 4),
+        download_threads=_get_positive_int_or_none("EPISTEME_DOWNLOAD_THREADS"),
         sample_limit=_get_int("EPISTEME_SAMPLE_LIMIT", 0),
         actor=_get("EPISTEME_ACTOR"),
         # Set by scripts/data/run_pipeline.sh (export EPISTEME_RUN_ID) so every
@@ -241,16 +268,22 @@ def get_settings() -> Settings:
         db_target=db_target,
         production_database=_get("EPISTEME_PRODUCTION_DATABASE", "episteme"),
         pg_database_secondary=secondary,
-        duckdb_memory_limit=(_get("EPISTEME_DUCKDB_MEMORY_LIMIT") or "4GB").strip(),
+        duckdb_memory_limit=_get_size_or_none("EPISTEME_DUCKDB_MEMORY_LIMIT"),
         # Spill root for the serializers' DuckDB connections; unset = under the
         # processed root. Point it at a fast local disk when the data disk is slow.
         duckdb_temp_dir=Path(_get("EPISTEME_DUCKDB_TEMP_DIR")).expanduser()
         if (_get("EPISTEME_DUCKDB_TEMP_DIR") or "").strip()
         else None,
-        # Worker processes per extract/serialize stage (physical cores minus one).
-        extract_workers=_get_positive_int_or_default(
-            "EPISTEME_EXTRACT_WORKERS", DEFAULT_EXTRACT_WORKERS
-        ),
+        # Overrides of the runtime profile (episteme.ops.profile); None = the rule's value.
+        extract_workers=_get_positive_int_or_none("EPISTEME_EXTRACT_WORKERS"),
+        io_concurrency=_get_positive_int_or_none("EPISTEME_IO_CONCURRENCY"),
+        pmc_threads=_get_positive_int_or_none("EPISTEME_PMC_THREADS"),
+        batch_rows=_get_positive_int_or_none("EPISTEME_BATCH_ROWS"),
+        part_rows=_get_positive_int_or_none("EPISTEME_PART_ROWS"),
+        part_bytes=_get_size_or_none("EPISTEME_PART_BYTES"),
+        pg_shared_buffers=_get_size_or_none("EPISTEME_PG_SHARED_BUFFERS"),
+        pg_maintenance_work_mem=_get_size_or_none("EPISTEME_PG_MAINTENANCE_WORK_MEM"),
+        pg_work_mem=_get_size_or_none("EPISTEME_PG_WORK_MEM"),
         # episteme_sys_admin's password: bulk-load index work runs as the table owner.
         sys_admin_password=_get("EPISTEME_SYS_ADMIN_PASSWORD", "") or "",
     )

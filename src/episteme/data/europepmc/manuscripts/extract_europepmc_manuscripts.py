@@ -110,7 +110,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     write_run_manifest,
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
-from episteme.data.parallel import run_per_file  # noqa: E402
+from episteme.data.parallel import default_workers, run_per_file  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
@@ -569,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
         "--workers",
         type=int,
         default=None,
-        help="worker processes (default: EPISTEME_EXTRACT_WORKERS, 3)",
+        help="worker processes (default: the runtime profile; EPISTEME_EXTRACT_WORKERS overrides)",
     )
     p.add_argument("--force", action="store_true")
     p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per file to stderr")
@@ -579,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         help="parse only; print a field-shape table; write NO shard/marker/manifest/audit",
     )
     args = p.parse_args(argv)
-    workers = settings.extract_workers if args.workers is None else max(1, args.workers)
+    workers = default_workers() if args.workers is None else max(1, args.workers)
 
     raw_dir: Path = args.raw_dir
     processed_dir: Path = args.processed_dir

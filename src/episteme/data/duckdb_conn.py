@@ -10,8 +10,9 @@ from pathlib import Path
 import duckdb
 
 from episteme.config import get_settings
+from episteme.ops.profile import default_batch_rows
 
-FETCH_BATCH_ROWS = 50_000
+FETCH_BATCH_ROWS = default_batch_rows()
 
 _MEMORY_LIMIT_RE = re.compile(r"^\d+(\.\d+)?\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$", re.IGNORECASE)
 
@@ -36,7 +37,11 @@ def connect(
     Insertion order is deliberately left at DuckDB's default: callers rely on it.
     """
     settings = get_settings()
-    limit = (memory_limit if memory_limit is not None else settings.duckdb_memory_limit).strip()
+    if memory_limit is None:
+        from episteme.ops.profile import get_profile
+
+        memory_limit = get_profile().duckdb_memory_limit
+    limit = memory_limit.strip()
     if not _MEMORY_LIMIT_RE.match(limit):
         raise ValueError(f"invalid DuckDB memory limit: {limit!r}")
     if temp_dir is not None:

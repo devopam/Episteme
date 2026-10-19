@@ -43,6 +43,7 @@ from typing import Any
 
 from episteme import audit_trail
 from episteme.data import article_schema
+from episteme.ops.profile import default_batch_rows
 
 # The "hot" narrow-table columns = ARTICLE_COLUMNS minus the four text columns
 # that live in episteme.article_body. Derived (not hand-typed) so it cannot
@@ -64,7 +65,7 @@ BODY_COLUMNS: tuple[str, ...] = (
 
 # Rows per streamed batch (the loader's memory bound) and the content-hash
 # read size.
-LOAD_BATCH_ROWS = 50_000
+LOAD_BATCH_ROWS = default_batch_rows()
 _HASH_CHUNK_BYTES = 1 << 20
 
 # SP1-β loads pmc only. These sources are identifier enrichment, not a text

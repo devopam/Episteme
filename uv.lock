@@ -657,6 +657,7 @@ name = "episteme"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "psutil" },
     { name = "python-dotenv" },
     { name = "tqdm" },
 ]
@@ -752,6 +753,7 @@ requires-dist = [
     { name = "polars", marker = "extra == 'data'", specifier = ">=2.0.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "pronto", marker = "extra == 'data'", specifier = ">=2.7" },
+    { name = "psutil", specifier = ">=7.0.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'data'", specifier = ">=3.3.6" },
     { name = "psycopg-pool", marker = "extra == 'data'", specifier = ">=3.3.3" },
     { name = "pyarrow", marker = "extra == 'data'", specifier = ">=12.0.0" },

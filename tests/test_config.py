@@ -24,6 +24,9 @@ def fresh_config(tmp_path, monkeypatch):
 
         importlib.reload(cfg)
         cfg.get_settings.cache_clear()
+        from episteme.ops.profile import get_profile
+
+        get_profile.cache_clear()
         return cfg
 
     yield _load
@@ -44,7 +47,7 @@ def test_defaults_when_env_absent(fresh_config):
     assert s.raw_root == Path("./01_raw")
     assert s.pg_host == "localhost"
     assert s.pg_port == 5432
-    assert s.download_threads == 4
+    assert s.download_threads is None
     assert s.actor is None
     assert s.pmc_s3_bucket == "pmc-oa-opendata"
 
@@ -193,7 +196,7 @@ class TestFreshConfigNoLeak:
 
 
 def test_duckdb_memory_limit_default(fresh_config):
-    assert fresh_config("").get_settings().duckdb_memory_limit == "4GB"
+    assert fresh_config("").get_settings().duckdb_memory_limit is None
 
 
 def test_duckdb_memory_limit_override(fresh_config):
@@ -202,7 +205,7 @@ def test_duckdb_memory_limit_override(fresh_config):
 
 
 def test_extract_workers_default(fresh_config):
-    assert fresh_config("").get_settings().extract_workers == 3
+    assert fresh_config("").get_settings().extract_workers is None
 
 
 def test_extract_workers_override(fresh_config):
@@ -213,8 +216,30 @@ def test_extract_workers_override(fresh_config):
 def test_extract_workers_invalid_falls_back_with_warning(fresh_config, caplog, bad):
     cfg = fresh_config(f"EPISTEME_EXTRACT_WORKERS={bad}\n")
     with caplog.at_level(logging.WARNING, logger="episteme.config"):
-        assert cfg.get_settings().extract_workers == 3
+        assert cfg.get_settings().extract_workers is None
     assert "EPISTEME_EXTRACT_WORKERS" in caplog.text
+
+
+def test_new_override_keys_are_read(fresh_config):
+    s = fresh_config(
+        "EPISTEME_IO_CONCURRENCY=8\nEPISTEME_PMC_THREADS=24\nEPISTEME_BATCH_ROWS=20000\n"
+        "EPISTEME_PART_ROWS=500000\nEPISTEME_PART_BYTES=256MB\nEPISTEME_PG_SHARED_BUFFERS=1GB\n"
+        "EPISTEME_PG_MAINTENANCE_WORK_MEM=512MB\nEPISTEME_PG_WORK_MEM=16MB\n"
+        "EPISTEME_DOWNLOAD_THREADS=8\n"
+    ).get_settings()
+    assert (s.io_concurrency, s.pmc_threads, s.batch_rows, s.part_rows, s.download_threads) == (
+        8,
+        24,
+        20000,
+        500000,
+        8,
+    )
+    assert (s.part_bytes, s.pg_shared_buffers, s.pg_maintenance_work_mem, s.pg_work_mem) == (
+        "256MB",
+        "1GB",
+        "512MB",
+        "16MB",
+    )
 
 
 def test_sys_admin_password_read(fresh_config):
