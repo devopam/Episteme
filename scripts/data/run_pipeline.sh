@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--skip-unit NAME --reason REASON]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -33,6 +33,7 @@ FORCE=0
 BULK=0
 REASON=""
 MAX_FILES=""
+SKIP_UNITS=()
 # I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
 # hf_corpus `<repo_id>`, chembl `all`, …). Collect and forward them to the
 # table-driven wrapper rather than WARN-and-drop — the wrapper is the layer that
@@ -46,6 +47,11 @@ while [ $# -gt 0 ]; do
         # --reason/--max-files would make `shift 2` fail (count out of range),
         # leave $1 unchanged, and spin the while-loop forever.
         --reason) REASON="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        # extract, serialize or load stage only: skip the named unit in this run
+        # (repeatable; needs --reason). Per run: no marker survives it.
+        --skip-unit)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "--skip-unit requires a unit name" 2
+            SKIP_UNITS+=("$2"); shift 2 ;;
         # download_pmc.py's flag is --limit, extract_pmc.py's is --max-files --
         # one orchestrator flag, translated per downstream script below.
         --max-files) MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
@@ -62,6 +68,14 @@ done
 
 if [ "$FORCE" = "1" ] && [ -z "$REASON" ]; then
     die "--force requires --reason" 2
+fi
+if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
+    [ -n "$REASON" ] || die "--skip-unit requires --reason" 2
+    case "$STAGE" in
+        extract|serialize|load) ;;
+        all) die "--skip-unit needs one named stage, not 'all'" 2 ;;
+        *) die "--skip-unit is valid with the extract, serialize or load stage only (not $STAGE)" 2 ;;
+    esac
 fi
 if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
@@ -268,6 +282,14 @@ fi
 [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && download_args+=(--dry-run)
 [ "$FORCE" = "1" ] && extract_args+=(--force)
 
+# --skip-unit NAME ... --reason R: forwarded to the one named stage only
+# (extract, serialize or load; the validation above rejects every other use).
+skip_args=()
+for _u in "${SKIP_UNITS[@]+"${SKIP_UNITS[@]}"}"; do skip_args+=(--skip-unit "$_u"); done
+[ "${#skip_args[@]}" -eq 0 ] || skip_args+=(--reason "$REASON")
+extract_args+=("${skip_args[@]+"${skip_args[@]}"}")
+load_args+=("${skip_args[@]+"${skip_args[@]}"}")
+
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
 # `load` reuses load_args above; `graph` gets --force --reason R only when forced
@@ -277,6 +299,7 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
+lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}")
 
 # SP4 structured `serialize` wrappers accept only --max-files N and --force --
 # NOT --reason, mirroring lit_extract_args' shape. `load` reuses load_args;
@@ -284,6 +307,7 @@ lit_extract_args=()
 struct_serialize_args=()
 [ -n "$MAX_FILES" ] && struct_serialize_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && struct_serialize_args+=(--force)
+struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}")
 
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N

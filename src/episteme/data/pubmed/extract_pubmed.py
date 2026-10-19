@@ -81,6 +81,7 @@ from episteme.data.pubmed.relations import (  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
 from episteme.ops.skip import add_skip_args, check_skip_args  # noqa: E402
+from episteme.ops.stop import stage_guard  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
 
@@ -585,7 +586,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
     p = argparse.ArgumentParser(
@@ -650,6 +651,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
     return 1 if res["failed"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Extract/serialize hold no long DB statement: only the stop handlers and
+    # the parent watchdog apply (conn_ref returns None).
+    with stage_guard(lambda: None):
+        return _main(argv)
 
 
 if __name__ == "__main__":
