@@ -1,4 +1,5 @@
-"""run_per_file: in-process for one worker, spawned processes above one.
+"""run_per_file: in-process for one worker, spawned processes (or threads) above
+one; it stops at the first failed unit and resubmits transient failures.
 
 Every helper here is module-level: a spawned child imports this module by name.
 Every multi-worker test takes ``spawn_child_env`` (see tests/conftest.py)."""
@@ -6,12 +7,14 @@ Every multi-worker test takes ``spawn_child_env`` (see tests/conftest.py)."""
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
 from episteme.data.checkpoint_markers import input_key
-from episteme.data.parallel import run_per_file
+from episteme.data.parallel import first_failure, run_per_file
+from episteme.ops.retry import TransientUnitError
 
 
 def _echo(path: Path, *, raw_dir: Path, tag: str) -> dict:
@@ -28,6 +31,30 @@ def _exit_on_b(path: Path, *, raw_dir: Path) -> dict:
     if path.name == "b.txt":
         os._exit(3)
     return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def _fail_on_b(path: Path, *, raw_dir: Path, log: Path | None = None) -> dict:
+    """b.txt returns a failed result (the common case: process_one caught it)."""
+    if log is not None:  # one file per call: concurrent appends are not atomic on Windows
+        log.mkdir(exist_ok=True)
+        (log / path.name).touch()
+    if path.name == "b.txt":
+        return {"source_file": path.name, "skipped": False, "ok": False, "error": "bad"}
+    if path.name != "a.txt":
+        time.sleep(0.3)
+    return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def _transient_twice(path: Path, *, raw_dir: Path, counter: Path) -> dict:
+    n = int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+    counter.write_text(str(n + 1), encoding="utf-8")
+    if n < 2:
+        raise TransientUnitError(path.name, "OSError(5, 'I/O error')")
+    return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def _always_transient(path: Path, *, raw_dir: Path) -> dict:
+    raise TransientUnitError(path.name, "TimeoutError()")
 
 
 def _probe_child(path: Path, *, raw_dir: Path) -> dict:
@@ -87,7 +114,7 @@ def test_three_workers_same_results_in_child_processes(tmp_path, spawn_child_env
 
 def test_escaped_exception_becomes_a_failed_result(tmp_path, spawn_child_env):
     raw, files = _files(tmp_path)
-    results = run_per_file(_boom_on_b, files, workers=3, raw_dir=raw)
+    results = run_per_file(_boom_on_b, files, workers=3, raw_dir=raw, stop_on_failure=False)
     by = {r["source_file"]: r for r in results}
     assert set(by) == {"a.txt", "b.txt", "c.txt", "d.txt"}
     assert by["b.txt"]["ok"] is False
@@ -99,7 +126,7 @@ def test_escaped_exception_becomes_a_failed_result(tmp_path, spawn_child_env):
 
 def test_dead_worker_fails_the_remaining_files_without_raising(tmp_path, spawn_child_env):
     raw, files = _files(tmp_path)
-    results = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw)
+    results = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw, stop_on_failure=False)
     assert sorted(r["source_file"] for r in results) == ["a.txt", "b.txt", "c.txt", "d.txt"]
     b = next(r for r in results if r["source_file"] == "b.txt")
     assert b["ok"] is False
@@ -146,3 +173,130 @@ def test_spawned_child_is_kept_off_any_database(tmp_path, spawn_child_env):
         assert r["pid"] != os.getpid()
         assert r["refused"] is True
         assert Path(r["processed_root"]) == spawn_child_env
+
+
+# --- stop at the first failure (operating standard section 6.2) ---------------
+
+
+def test_one_worker_stops_after_the_failing_second_file(tmp_path):
+    raw, files = _files(tmp_path, ("a.txt", "b.txt", "c.txt"))
+    log = tmp_path / "calls"
+    results = run_per_file(_fail_on_b, files, workers=1, raw_dir=raw, log=log)
+    assert sorted(x.name for x in log.iterdir()) == ["a.txt", "b.txt"]  # c never called
+    assert [r["source_file"] for r in results] == ["a.txt", "b.txt"]
+    assert first_failure(results)["source_file"] == "b.txt"
+
+
+def test_one_worker_continues_when_stop_on_failure_is_false(tmp_path):
+    raw, files = _files(tmp_path, ("a.txt", "b.txt", "c.txt"))
+    results = run_per_file(_fail_on_b, files, workers=1, raw_dir=raw, stop_on_failure=False)
+    assert [r["source_file"] for r in results] == ["a.txt", "b.txt", "c.txt"]
+
+
+def test_one_worker_escaped_exception_becomes_a_failed_result_and_stops(tmp_path):
+    raw, files = _files(tmp_path, ("a.txt", "b.txt", "c.txt"))
+    results = run_per_file(_boom_on_b, files, workers=1, raw_dir=raw)
+    assert [r["source_file"] for r in results] == ["a.txt", "b.txt"]
+    assert "kaboom" in results[1]["error"]
+
+
+@pytest.mark.parametrize("executor", ["process", "thread"])
+def test_two_workers_cancel_the_pending_files(tmp_path, spawn_child_env, executor):
+    names = ("a.txt", "b.txt") + tuple(f"f{i:02d}.txt" for i in range(16))
+    raw, files = _files(tmp_path, names)
+    log = tmp_path / "calls"
+    results = run_per_file(_fail_on_b, files, workers=2, raw_dir=raw, log=log, executor=executor)
+    called = [x.name for x in log.iterdir()]
+    assert len(called) < len(files)  # pending files were cancelled
+    assert sorted(r["source_file"] for r in results) == sorted(called)  # in-flight kept
+    assert first_failure(results)["source_file"] == "b.txt"
+    assert all(r["ok"] for r in results if r["source_file"] != "b.txt")
+
+
+def test_first_failure_ignores_skipped_results():
+    rs = [
+        {"source_file": "a", "skipped": True, "reason": "success_marker"},
+        {"source_file": "b", "skipped": False, "ok": True},
+    ]
+    assert first_failure(rs) is None
+    rs.append({"source_file": "c", "skipped": False, "ok": False, "error": "x"})
+    assert first_failure(rs)["source_file"] == "c"
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_transient_error_twice_then_success_is_one_ok_result(tmp_path, spawn_child_env, workers):
+    raw, files = _files(tmp_path, ("a.txt",))
+    slept: list[float] = []
+    results = run_per_file(
+        _transient_twice,
+        files,
+        workers=workers,
+        raw_dir=raw,
+        counter=tmp_path / "count.txt",
+        sleep=slept.append,
+    )
+    assert [r["ok"] for r in results] == [True]
+    assert slept == [30, 60]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_transient_error_after_the_last_retry_is_a_failed_result(
+    tmp_path, spawn_child_env, workers
+):
+    raw, files = _files(tmp_path, ("a.txt",))
+    slept: list[float] = []
+    [r] = run_per_file(_always_transient, files, workers=workers, raw_dir=raw, sleep=slept.append)
+    assert slept == [30, 60, 120]
+    assert r["ok"] is False and r["skipped"] is False
+    assert "TimeoutError" in r["error"]
+
+
+def test_thread_mode_retries_in_threads(tmp_path):
+    raw, files = _files(tmp_path, ("a.txt",))
+    slept: list[float] = []
+    results = run_per_file(
+        _transient_twice,
+        files,
+        workers=2,
+        executor="thread",
+        raw_dir=raw,
+        counter=tmp_path / "count.txt",
+        sleep=slept.append,
+    )
+    assert [r["ok"] for r in results] == [True]
+    assert slept == [30, 60]
+
+
+def test_thread_mode_runs_in_this_process(tmp_path, monkeypatch):
+    import episteme.data.parallel as par
+
+    def _no_pool(*_a, **_k):
+        raise AssertionError("process pool started in thread mode")
+
+    monkeypatch.setattr(par, "ProcessPoolExecutor", _no_pool)
+    raw, files = _files(tmp_path)
+    results = run_per_file(_echo, files, workers=3, executor="thread", raw_dir=raw, tag="t")
+    assert sorted(r["source_file"] for r in results) == ["a.txt", "b.txt", "c.txt", "d.txt"]
+    assert {r["pid"] for r in results} == {os.getpid()}
+
+
+def test_unknown_executor_is_rejected(tmp_path):
+    raw, files = _files(tmp_path, ("a.txt",))
+    with pytest.raises(ValueError):
+        run_per_file(_echo, files, workers=2, executor="fork", raw_dir=raw, tag="t")
+
+
+def test_broken_pool_is_permanent_and_not_retried(tmp_path, spawn_child_env):
+    raw, files = _files(tmp_path, ("b.txt",))
+    slept: list[float] = []
+    [r] = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw, sleep=slept.append)
+    assert r["ok"] is False
+    assert "BrokenProcessPool" in r["error"]
+    assert slept == []
+
+
+def test_dead_worker_stops_the_run(tmp_path, spawn_child_env):
+    raw, files = _files(tmp_path)
+    results = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw)
+    assert first_failure(results) is not None
+    assert len(results) <= len(files)
