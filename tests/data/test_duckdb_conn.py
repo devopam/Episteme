@@ -111,3 +111,21 @@ def test_connect_spills_under_the_configured_temp_dir(settings_root, tmp_path, m
         assert _temp_directory(con).parent == fast
     finally:
         con.close()
+
+
+def test_connect_default_limit_comes_from_the_profile(settings_root, monkeypatch):
+    """No env limit and no argument: the profile's rule value applies."""
+    from episteme.ops import profile as prof
+    from episteme.ops.hardware import Hardware
+
+    monkeypatch.setenv("EPISTEME_DUCKDB_MEMORY_LIMIT", "")
+    duckdb_conn.get_settings.cache_clear()
+    hw = Hardware(4, 8 * 2**30, {"processed": "ssd", "raw": "ssd"})
+    ov = prof.Overrides(duckdb_memory_bytes=256 * 2**20)
+    monkeypatch.setattr(prof, "get_profile", lambda: prof.compute_profile(hw, ov))
+    con = duckdb_conn.connect()
+    try:
+        limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
+        assert limit.startswith(("244", "256"))
+    finally:
+        con.close()

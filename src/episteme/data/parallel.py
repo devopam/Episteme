@@ -33,6 +33,13 @@ from episteme.data.checkpoint_markers import input_key
 _LOG = logging.getLogger(__name__)
 
 
+def default_workers() -> int:
+    """Worker count when ``--workers`` is not given: the runtime profile's ``cpu_workers``."""
+    from episteme.ops.profile import get_profile
+
+    return get_profile().cpu_workers
+
+
 def _failed_result(path: Path, raw_dir: Path | None, exc: BaseException) -> dict[str, Any]:
     key = input_key(path, raw_dir) if raw_dir is not None else Path(path).name
     return {"source_file": key, "skipped": False, "ok": False, "error": f"worker: {exc!r}"}

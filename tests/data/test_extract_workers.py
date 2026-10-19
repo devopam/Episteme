@@ -117,3 +117,13 @@ def test_cli_workers_default_comes_from_the_setting(tmp_path, spawn_child_env, m
     proc = _cli(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "workers=2" in proc.stdout
+
+
+def test_default_workers_is_the_profile_cpu_workers(monkeypatch):
+    from episteme.data.parallel import default_workers
+    from episteme.ops import profile as prof
+    from episteme.ops.hardware import Hardware
+
+    hw = Hardware(8, 32 * 2**30, {"processed": "ssd", "raw": "ssd"})
+    monkeypatch.setattr(prof, "get_profile", lambda: prof.compute_profile(hw, prof.Overrides()))
+    assert default_workers() == 7

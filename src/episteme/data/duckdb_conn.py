@@ -36,7 +36,11 @@ def connect(
     Insertion order is deliberately left at DuckDB's default: callers rely on it.
     """
     settings = get_settings()
-    limit = (memory_limit if memory_limit is not None else settings.duckdb_memory_limit).strip()
+    if memory_limit is None:
+        from episteme.ops.profile import get_profile
+
+        memory_limit = settings.duckdb_memory_limit or get_profile().duckdb_memory_limit
+    limit = memory_limit.strip()
     if not _MEMORY_LIMIT_RE.match(limit):
         raise ValueError(f"invalid DuckDB memory limit: {limit!r}")
     if temp_dir is not None:
