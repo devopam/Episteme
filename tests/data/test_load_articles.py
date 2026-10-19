@@ -341,6 +341,56 @@ def test_sweep_error_writes_one_run_end(ff, monkeypatch):
     assert len(ends) == 1 and ends[0][2].startswith("failed: RuntimeError")
 
 
+def test_mirror_failure_after_commit_is_permanent_not_retried(ff, monkeypatch, capsys):
+    """The commit succeeds, then the mirror append raises OSError(EIO). EIO alone
+    is transient, but a retry would commit the shard twice: AuditMirrorError is
+    permanent, so there is no retry and no sleep, and one load_commit only."""
+    import errno
+    import json
+
+    from episteme import audit_trail
+
+    def _record(event, **kw):
+        ff.rows.append((event, kw.get("object"), kw.get("reason")))
+        queue = audit_trail._DEFERRED.get(kw.get("conn"))
+        if queue is not None:  # what the real record() does inside deferred_mirror
+            queue.append({"event_type": event, "record_hash": "h"})
+        return "h"
+
+    monkeypatch.setattr(audit_trail, "record", _record)
+
+    def _load(conn, *, source, staging_path, run_id):
+        ff.state["calls"].append(Path(staging_path).name)
+        audit_trail.record("load_commit", conn=conn, object=source, run_id=run_id)
+        return {
+            "rows": 1,
+            "deleted": 0,
+            "body_deleted": 0,
+            "event": "load_commit",
+            "read_sec": 0,
+            "copy_sec": 0,
+            "rows_per_sec": 0,
+        }
+
+    monkeypatch.setattr(ff.la.postgres_loader, "load_source_file", _load)
+
+    def _broken_mirror(lines):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(audit_trail, "_append_mirror_lines", _broken_mirror)
+
+    assert ff.run() == 1
+    assert ff.sleeps == []  # no retry, no sleep
+    assert ff.state["calls"] == ["a.jsonl"]
+    assert [r for r in ff.rows if r[0] == "load_commit"] == [("load_commit", "src", None)]
+    out = capsys.readouterr().out
+    assert "FAIL a.jsonl" in out and "stopped_at=a.jsonl" in out
+    data = json.loads((ff.root / "_ops" / "src" / "last_failure.json").read_text())
+    assert data["unit"] == "a.jsonl" and "AuditMirrorError" in data["error"]
+    ends = [r for r in ff.rows if r[0] == "run_end"]
+    assert len(ends) == 1 and "AuditMirrorError" in ends[0][2]
+
+
 def test_skip_unit_is_matched_after_only_filtering(ff):
     assert ff.run("--only", "a.jsonl", "--skip-unit", "b.jsonl", "--reason", "r") == 2
 

@@ -188,6 +188,16 @@ def _mirror_append_lock(mirror_dir: Path) -> Iterator[None]:
 _DEFERRED: weakref.WeakKeyDictionary[Any, list[dict[str, Any]]] = weakref.WeakKeyDictionary()
 
 
+class AuditMirrorError(RuntimeError):
+    """The commit succeeded but the queued mirror lines could not be written.
+
+    Permanent on purpose: a retry would commit the rows a second time. The
+    lines are lost (loudly); ``verify()`` reports the gap. ``is_transient``
+    does not follow ``__cause__``, so the OSError underneath does not make
+    this error transient.
+    """
+
+
 def _append_mirror_lines(records: list[dict[str, Any]]) -> None:
     """Append ``records`` to the day's mirror, in order, under the append lock."""
     try:
@@ -239,7 +249,9 @@ def commit(conn: Any) -> None:
     """Commit ``conn``, then append any queued mirror lines in order.
 
     If ``conn.commit()`` raises, the queued lines are dropped and the error
-    propagates. Outside ``deferred_mirror`` this is a plain ``conn.commit()``.
+    propagates. If the commit succeeds but the mirror append fails with an
+    ``OSError``, ``AuditMirrorError`` is raised from it (the rows stay committed).
+    Outside ``deferred_mirror`` this is a plain ``conn.commit()``.
     """
     queue = _DEFERRED.get(conn)
     try:
@@ -251,7 +263,12 @@ def commit(conn: Any) -> None:
     if queue:
         lines = list(queue)
         queue.clear()
-        _append_mirror_lines(lines)
+        try:
+            _append_mirror_lines(lines)
+        except OSError as exc:
+            raise AuditMirrorError(
+                f"committed, but {len(lines)} audit mirror line(s) were not written: {exc}"
+            ) from exc
 
 
 def rollback(conn: Any) -> None:

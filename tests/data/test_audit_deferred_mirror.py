@@ -131,6 +131,28 @@ def test_commit_failure_drops_queue_and_reraises(mirror):
     assert mirror() == []
 
 
+def test_mirror_failure_after_commit_raises_audit_mirror_error(mirror, monkeypatch):
+    import errno
+
+    from episteme.ops.retry import is_transient
+
+    conn = _Conn()
+    with audit_trail.deferred_mirror(conn):
+        audit_trail.record("run_start", conn=conn, object="a")
+
+        def _broken(lines):
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(audit_trail, "_append_mirror_lines", _broken)
+        with pytest.raises(audit_trail.AuditMirrorError) as ei:
+            audit_trail.commit(conn)
+    assert conn.commits == 1  # the rows stay committed
+    assert isinstance(ei.value.__cause__, OSError)
+    assert is_transient(ei.value.__cause__)  # the cause alone would be retried
+    assert not is_transient(ei.value)  # the wrapper is permanent
+    assert mirror() == []
+
+
 def test_outside_deferred_mirror_unchanged(mirror):
     conn = _Conn()
     audit_trail.record("run_start", conn=conn, object="a")
