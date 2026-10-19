@@ -161,6 +161,10 @@ Hash chain and verification:
   problem, or an unhandled error such as an unreachable database; `2` a missing
   required environment variable (from `require_env`).
 
+Deferred mirror append:
+
+A stage that retries a transaction defers the mirror append until commit, so the mirror never holds a line for a rolled-back row. Inside `audit_trail.deferred_mirror(conn)`, `record()` inserts the row as usual but queues the mirror line on the connection. `audit_trail.commit(conn)` commits and then appends the queued lines in order. `audit_trail.rollback(conn)` rolls back and drops them. Leaving the block by an exception drops the queued lines. Leaving it with queued lines and no commit or rollback raises `RuntimeError`. Outside `deferred_mirror`, `record()` still appends the line right after the INSERT.
+
 Append-only enforcement:
 
 - `schema.sql` grants `episteme_app` full DML on all tables, then runs

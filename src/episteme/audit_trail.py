@@ -29,6 +29,7 @@ import socket
 # subprocess is used only for a fixed `git rev-parse` arg list, no shell.
 import subprocess  # nosec B404
 import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -178,6 +179,85 @@ def _mirror_append_lock(mirror_dir: Path) -> Iterator[None]:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
+# Mirror lines queued per connection while inside deferred_mirror(). Keyed
+# weakly because a connection object is not always attribute-assignable.
+_DEFERRED: weakref.WeakKeyDictionary[Any, list[dict[str, Any]]] = weakref.WeakKeyDictionary()
+
+
+def _append_mirror_lines(records: list[dict[str, Any]]) -> None:
+    """Append ``records`` to the day's mirror, in order, under the append lock."""
+    try:
+        mirror_dir = _mirror_dir()
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            _mirror_append_lock(mirror_dir),
+            open(_mirror_path(), "a", encoding="utf-8") as fh,
+        ):
+            for rec in records:
+                fh.write(_canonical_json(rec) + "\n")
+    except OSError:
+        # Resolution 6: a broken mirror must be loud, not silent. The DB row is
+        # already inserted in the caller's txn and stays; we log and re-raise so
+        # the caller sees the mirror is out of sync.
+        _LOG.exception(
+            "audit mirror write failed for record_hash=%s",
+            ",".join(str(r.get("record_hash")) for r in records),
+        )
+        raise
+
+
+@contextmanager
+def deferred_mirror(conn: Any) -> Iterator[None]:
+    """Hold ``record()``'s mirror lines on ``conn`` until ``commit(conn)``.
+
+    A stage that retries a transaction uses this so the mirror never holds a
+    line for a rolled-back row. ``rollback(conn)`` drops the queued lines.
+    Leaving the block by an exception drops them and lets the exception
+    propagate. Leaving it cleanly with lines still queued raises
+    ``RuntimeError``. Nesting on one connection raises ``RuntimeError``.
+    """
+    if conn in _DEFERRED:
+        raise RuntimeError("deferred_mirror is already active on this connection (nested)")
+    queue: list[dict[str, Any]] = []
+    _DEFERRED[conn] = queue
+    try:
+        yield
+    except BaseException:
+        _DEFERRED.pop(conn, None)
+        raise
+    leftover = bool(queue)
+    _DEFERRED.pop(conn, None)
+    if leftover:
+        raise RuntimeError("deferred audit mirror lines were neither committed nor rolled back")
+
+
+def commit(conn: Any) -> None:
+    """Commit ``conn``, then append any queued mirror lines in order.
+
+    If ``conn.commit()`` raises, the queued lines are dropped and the error
+    propagates. Outside ``deferred_mirror`` this is a plain ``conn.commit()``.
+    """
+    queue = _DEFERRED.get(conn)
+    try:
+        conn.commit()
+    except BaseException:
+        if queue is not None:
+            queue.clear()
+        raise
+    if queue:
+        lines = list(queue)
+        queue.clear()
+        _append_mirror_lines(lines)
+
+
+def rollback(conn: Any) -> None:
+    """Roll back ``conn`` and drop any queued mirror lines."""
+    queue = _DEFERRED.get(conn)
+    if queue is not None:
+        queue.clear()
+    conn.rollback()
+
+
 def record(
     event_type: str,
     *,
@@ -193,7 +273,8 @@ def record(
     """Insert one hash-chained ``episteme._audit`` row in ``conn``'s transaction.
 
     Also appends the full record (including ``record_hash``) as one line to the
-    day's JSONL mirror. Returns the ``record_hash``. Does NOT commit -- the
+    day's JSONL mirror (inside ``deferred_mirror`` the line waits for
+    ``commit(conn)``). Returns the ``record_hash``. Does NOT commit -- the
     caller owns the transaction.
     """
     # Closed-set check first: before require_actor(), before get_settings(),
@@ -273,20 +354,12 @@ def record(
     mirror_record = dict(fields)
     mirror_record["record_hash"] = rec_hash
     mirror_record["ts"] = datetime.now(timezone.utc).isoformat()
-    try:
-        mirror_dir = _mirror_dir()
-        mirror_dir.mkdir(parents=True, exist_ok=True)
-        with (
-            _mirror_append_lock(mirror_dir),
-            open(_mirror_path(), "a", encoding="utf-8") as fh,
-        ):
-            fh.write(_canonical_json(mirror_record) + "\n")
-    except OSError:
-        # Resolution 6: a broken mirror must be loud, not silent. The DB row is
-        # already inserted in the caller's txn and stays; we log and re-raise so
-        # the caller sees the mirror is out of sync.
-        _LOG.exception("audit mirror write failed for record_hash=%s", rec_hash)
-        raise
+    queue = _DEFERRED.get(conn)
+    if queue is not None:
+        # Inside deferred_mirror(): hold the line until commit(conn).
+        queue.append(mirror_record)
+    else:
+        _append_mirror_lines([mirror_record])
 
     return rec_hash
 
