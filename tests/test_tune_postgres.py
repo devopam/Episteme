@@ -34,13 +34,14 @@ exit 0
 
 FAKE_PYTHON = r"""#!/usr/bin/env bash
 echo "$*" >> "$FAKE_PYTHON_LOG"
-cat <<'PROFILE'
+{ cat <<'PROFILE'
 shared_buffers|2457MB
 maintenance_work_mem|983MB
 work_mem|32MB
 effective_io_concurrency|2
 max_parallel_workers_per_gather|2
 PROFILE
+} | if [ -n "${FAKE_PYTHON_CRLF:-}" ]; then sed 's/$/\r/'; else cat; fi
 exit "${FAKE_PYTHON_EXIT:-0}"
 """
 
@@ -172,6 +173,14 @@ def test_settings_come_from_the_profile(tmp_path):
         assert f"'{name}'" in joined
     log = (tmp_path / "python.log").read_text(encoding="utf-8")
     assert "-m episteme.ops.profile show --format=pg" in log
+
+
+def test_crlf_profile_rows_are_handled(tmp_path):
+    # the Windows interpreter prints CRLF; a stray CR must not reach the SQL or the compare
+    proc, calls = _run(tmp_path, "check", rows=_rows({}), extra={"FAKE_PYTHON_CRLF": "1"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "DIFFERS" not in proc.stdout
+    assert calls and not any("\r" in c for c in calls)
 
 
 def test_a_failing_profile_stops_the_script(tmp_path):

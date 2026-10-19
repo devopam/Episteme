@@ -61,7 +61,8 @@ SETTINGS=(
     "effective_cache_size|8GB"
 )
 while IFS= read -r row; do
-    case "$row" in *"|"*) SETTINGS+=("$row") ;; esac
+    row="${row%$'\r'}"
+    case "$row" in [a-z_]*"|"*) SETTINGS+=("$row") ;; esac
 done <<< "$profile_rows"
 
 # Bound every connection attempt: a silent, unreachable server would otherwise
