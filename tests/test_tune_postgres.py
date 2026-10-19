@@ -32,14 +32,29 @@ esac
 exit 0
 """
 
+FAKE_PYTHON = r"""#!/usr/bin/env bash
+echo "$*" >> "$FAKE_PYTHON_LOG"
+cat <<'PROFILE'
+shared_buffers|2457MB
+maintenance_work_mem|983MB
+work_mem|32MB
+effective_io_concurrency|2
+max_parallel_workers_per_gather|2
+PROFILE
+exit "${FAKE_PYTHON_EXIT:-0}"
+"""
+
 RECOMMENDED = {
     "checkpoint_timeout": "30min",
     "effective_cache_size": "8GB",
-    "maintenance_work_mem": "1GB",
+    "effective_io_concurrency": "2",
+    "maintenance_work_mem": "983MB",
+    "max_parallel_workers_per_gather": "2",
     "max_wal_size": "16GB",
     "min_wal_size": "2GB",
-    "shared_buffers": "2GB",
+    "shared_buffers": "2457MB",
     "wal_compression": "lz4",
+    "work_mem": "32MB",
 }
 SECRET = "s3cret-pw"
 SU = {"POSTGRES_SUPERUSER": "pgsu", "POSTGRES_SUPERUSER_PASSWORD": SECRET}
@@ -68,6 +83,7 @@ def _run(
     unapplied: str = "",
     overrides: str = "",
     validation: str | None = None,
+    python_exit: int = 0,
     extra: dict[str, str] | None = None,
 ):
     root = tmp_path / "repo"
@@ -79,12 +95,18 @@ def _run(
     fake.write_bytes(FAKE_PSQL.encode("utf-8"))
     fake.chmod(0o755)
     log = tmp_path / "psql.log"
+    fake_py = tmp_path / "fakepython"
+    fake_py.write_bytes(FAKE_PYTHON.encode("utf-8"))
+    fake_py.chmod(0o755)
     env = {
         k: v for k, v in os.environ.items() if not k.startswith(("EPISTEME_", "POSTGRES_", "PG"))
     }
     env.update(
         {
             "PSQL": fake.as_posix(),
+            "PYTHON": fake_py.as_posix(),
+            "FAKE_PYTHON_LOG": (tmp_path / "python.log").as_posix(),
+            "FAKE_PYTHON_EXIT": str(python_exit),
             "PGHOST": "localhost",
             "PGPORT": "5433",
             "EPISTEME_SYS_ADMIN_PASSWORD": SECRET,
@@ -115,7 +137,7 @@ def test_check_fails_and_names_the_differing_setting(tmp_path):
     proc, _ = _run(tmp_path, "check", rows=_rows({"shared_buffers": "128MB"}))
     assert proc.returncode == 1
     line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("shared_buffers"))
-    assert "128MB" in line and "2GB" in line and "DIFFERS" in line
+    assert "128MB" in line and "2457MB" in line and "DIFFERS" in line
 
 
 def test_check_fails_when_a_restart_is_pending(tmp_path):
@@ -134,6 +156,28 @@ def test_check_fails_on_a_role_or_database_override(tmp_path):
     )
     assert proc.returncode == 1
     assert "OVERRIDE database=episteme role=episteme_app maintenance_work_mem=64MB" in proc.stdout
+
+
+def test_settings_come_from_the_profile(tmp_path):
+    proc, calls = _run(tmp_path, "check", rows=_rows({}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    joined = "\n".join(calls)
+    for name in (
+        "shared_buffers",
+        "maintenance_work_mem",
+        "work_mem",
+        "effective_io_concurrency",
+        "max_parallel_workers_per_gather",
+    ):
+        assert f"'{name}'" in joined
+    log = (tmp_path / "python.log").read_text(encoding="utf-8")
+    assert "-m episteme.ops.profile show --format=pg" in log
+
+
+def test_a_failing_profile_stops_the_script(tmp_path):
+    proc, _ = _run(tmp_path, "check", rows=_rows({}), python_exit=1)
+    assert proc.returncode != 0
+    assert "profile" in proc.stderr
 
 
 def test_connections_have_a_bounded_timeout(tmp_path):

@@ -12,23 +12,17 @@
 # init_database.sh does, and never echoes a password. Settings marked restart
 # take effect only after the service restarts; apply lists them.
 #
+# shared_buffers, maintenance_work_mem, work_mem, effective_io_concurrency and
+# max_parallel_workers_per_gather come from the runtime profile
+# (python -m episteme.ops.profile show --format=pg). The WAL, checkpoint and
+# effective_cache_size values are fixed below.
+#
 # fsync, full_page_writes and data checksums are deliberately left on (GxP data
 # integrity, docs/11). Sizing and reasons: docs/10 section 2.4.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
 . "$HERE/../_lib/common.sh"
-
-# name|value — keep in step with the table in docs/10 section 2.4
-SETTINGS=(
-    "shared_buffers|2GB"
-    "max_wal_size|16GB"
-    "min_wal_size|2GB"
-    "checkpoint_timeout|30min"
-    "wal_compression|lz4"
-    "maintenance_work_mem|1GB"
-    "effective_cache_size|8GB"
-)
 
 MODE="${1:-check}"
 case "$MODE" in
@@ -47,6 +41,28 @@ if [ -z "$PSQL" ]; then
     done
 fi
 [ -n "$PSQL" ] || die "psql not found (set PSQL=/path/to/psql)"
+
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+    for c in "$HERE/../../../.venv/Scripts/python.exe" "$HERE/../../../.venv/bin/python" python; do
+        command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+    done
+fi
+[ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
+
+# name|value — keep in step with the table in docs/10 section 2.4. The fixed
+# values come first; the profile adds the memory and parallelism values.
+profile_rows="$("$PY" -m episteme.ops.profile show --format=pg)"     || die "tune_postgres.sh: could not compute the runtime profile (python -m episteme.ops.profile show --format=pg)"
+SETTINGS=(
+    "max_wal_size|16GB"
+    "min_wal_size|2GB"
+    "checkpoint_timeout|30min"
+    "wal_compression|lz4"
+    "effective_cache_size|8GB"
+)
+while IFS= read -r row; do
+    case "$row" in *"|"*) SETTINGS+=("$row") ;; esac
+done <<< "$profile_rows"
 
 # Bound every connection attempt: a silent, unreachable server would otherwise
 # hang until the OS gives up. Override with PGCONNECT_TIMEOUT (seconds).
