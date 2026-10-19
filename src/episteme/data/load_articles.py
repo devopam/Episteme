@@ -43,7 +43,7 @@ from episteme.ops import orphans
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
-from episteme.ops.stop import stage_guard  # noqa: E402
+from episteme.ops.stop import stage_guard
 
 _LOG = logging.getLogger(__name__)
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing

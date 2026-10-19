@@ -352,7 +352,7 @@ bash scripts/data/run_pipeline.sh corpus materialize
 
 Stages: `all`, `download`, `extract`, `load`, `graph`, `materialize`, `enrich`, `serialize`. Sources are the keys of the `WRAPPER` table in `scripts/data/run_pipeline.sh` (all listed in `docs/12-source-inventory.md`), plus the alias `corpus` (materialize only).
 
-Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from; a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
+Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2; `--skip-unit` without `--reason`, with `all`, or with a stage that does not take it: exit 2; `--skip-unit` with the `load` stage of `europepmc_id_mappings` or `cdisc_ct`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from; a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
 
 Tokens the dispatcher does not recognise are not dropped: they are forwarded to the download wrapper as the MODE or repo argument (for example `parquet` for `openalex`, `all` for `chembl`, a repo id for `hf_corpus`) and to flags such as `--include-current` or `--since`. Only the download wrapper sees them.
 
@@ -473,7 +473,7 @@ Units that are done are skipped. Extract and serialize use the success markers. 
 bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TEXT"
 ```
 
-- `--skip-unit` can be repeated. `--reason` is required. Only one named stage is allowed: `extract`, `serialize` or `load`. `all` and `graph` exit 2.
+- `--skip-unit` can be repeated. `--reason` is required. Only one named stage is allowed: `extract`, `serialize` or `load`. `all` and `graph` exit 2. Exception: the `load` stage of `europepmc_id_mappings` and `cdisc_ct` does not take `--skip-unit` and exits 2 (their loaders are not yet under these rules).
 - The skip is for this run only. No marker stays. The next run tries the unit again.
 - Each skipped unit writes one audited `unit_skip` row with your reason.
 - NAME is the unit name from `last_failure.json`. For extract and serialize it is the `input_key` (the path under the raw directory). For load it is the shard file name.

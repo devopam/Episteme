@@ -79,7 +79,7 @@ from episteme.data.pubmed.relations import normalize_orcid
 from episteme.ops import orphans
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
-from episteme.ops.stop import stage_guard  # noqa: E402
+from episteme.ops.stop import stage_guard
 
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 

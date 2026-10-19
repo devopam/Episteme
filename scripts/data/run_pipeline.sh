@@ -76,6 +76,13 @@ if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
         all) die "--skip-unit needs one named stage, not 'all'" 2 ;;
         *) die "--skip-unit is valid with the extract, serialize or load stage only (not $STAGE)" 2 ;;
     esac
+    # These load wrappers reach a Python module that has no --skip-unit.
+    if [ "$STAGE" = "load" ]; then
+        case "$SOURCE" in
+            europepmc_id_mappings|cdisc_ct)
+                die "$SOURCE load does not support --skip-unit" 2 ;;
+        esac
+    fi
 fi
 if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
@@ -286,9 +293,12 @@ fi
 # (extract, serialize or load; the validation above rejects every other use).
 skip_args=()
 for _u in "${SKIP_UNITS[@]+"${SKIP_UNITS[@]}"}"; do skip_args+=(--skip-unit "$_u"); done
-[ "${#skip_args[@]}" -eq 0 ] || skip_args+=(--reason "$REASON")
-extract_args+=("${skip_args[@]+"${skip_args[@]}"}")
+# --reason rides along once: load_args already holds it when --force is set.
+skip_reason=()
+[ "${#skip_args[@]}" -eq 0 ] || skip_reason=(--reason "$REASON")
+extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
+[ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
@@ -299,7 +309,7 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
-lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}")
+lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
 # SP4 structured `serialize` wrappers accept only --max-files N and --force --
 # NOT --reason, mirroring lit_extract_args' shape. `load` reuses load_args;
@@ -307,7 +317,7 @@ lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}")
 struct_serialize_args=()
 [ -n "$MAX_FILES" ] && struct_serialize_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && struct_serialize_args+=(--force)
-struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}")
+struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N

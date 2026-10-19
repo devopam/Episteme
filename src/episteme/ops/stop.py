@@ -70,6 +70,10 @@ def start_parent_watchdog(
             else:
                 time.sleep(interval)
 
+        # A clean finish at the same instant as the parent's death must not exit 143.
+        if stop is not None and stop.is_set():
+            return
+
         def _run_cancel() -> None:
             try:
                 cancel()

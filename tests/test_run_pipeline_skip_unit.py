@@ -95,3 +95,19 @@ def test_skip_unit_misuse_exits_2_and_runs_no_stage(tree, stage, args):
     proc, calls = _run(tree, "pubmed", stage, *args)
     assert proc.returncode == 2, proc.stderr
     assert calls == []
+
+
+@pytest.mark.parametrize("source", ["europepmc_id_mappings", "cdisc_ct"])
+def test_skip_unit_is_rejected_for_loaders_that_do_not_take_it(tree, source):
+    proc, calls = _run(tree, source, "load", "--skip-unit", "a", "--reason", "r")
+    assert proc.returncode == 2, proc.stderr
+    assert "does not support --skip-unit" in proc.stderr
+    assert calls == []
+
+
+def test_force_and_skip_unit_pass_reason_once(tree):
+    proc, calls = _run(
+        tree, "pubmed", "load", "--force", "--skip-unit", "s.jsonl", "--reason", "why"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_pubmed.sh --force --reason why --skip-unit s.jsonl"]
