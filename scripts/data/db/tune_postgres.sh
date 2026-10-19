@@ -60,15 +60,20 @@ SETTINGS=(
     "wal_compression|lz4"
     "effective_cache_size|8GB"
 )
-profile_count=0
+EXPECTED_PROFILE=(shared_buffers maintenance_work_mem work_mem effective_io_concurrency max_parallel_workers_per_gather)
+declare -A profile_seen=()
 while IFS= read -r row; do
     row="${row%$'\r'}"
     if [[ $row =~ ^[a-z_][a-z0-9_]*[|][0-9]+(MB)?$ ]]; then
         SETTINGS+=("$row")
-        profile_count=$((profile_count + 1))
+        profile_seen["${row%%|*}"]=$((${profile_seen["${row%%|*}"]:-0} + 1))
     fi
 done <<< "$profile_rows"
-[ "$profile_count" -gt 0 ] || die "tune_postgres.sh: could not compute the runtime profile (no name|value rows from python -m episteme.ops.profile show --format=pg)"
+profile_missing=""
+for name in "${EXPECTED_PROFILE[@]}"; do
+    [ "${profile_seen[$name]:-0}" -eq 1 ] || profile_missing+="${profile_missing:+, }$name"
+done
+[ -z "$profile_missing" ] || die "tune_postgres.sh: could not compute the runtime profile (missing: $profile_missing)"
 
 # Bound every connection attempt: a silent, unreachable server would otherwise
 # hang until the OS gives up. Override with PGCONNECT_TIMEOUT (seconds).

@@ -36,6 +36,7 @@ FAKE_PYTHON = r"""#!/usr/bin/env bash
 echo "$*" >> "$FAKE_PYTHON_LOG"
 { case "${FAKE_PYTHON_MODE:-}" in
 empty) ;;
+partial) echo 'work_mem|32MB' ;;
 *) cat <<'PROFILE'
 shared_buffers|2457MB
 maintenance_work_mem|983MB
@@ -202,6 +203,21 @@ def test_an_empty_profile_stops_the_script(tmp_path):
     proc, calls = _run(tmp_path, "check", rows=_rows({}), extra={"FAKE_PYTHON_MODE": "empty"})
     assert proc.returncode != 0
     assert "could not compute the runtime profile" in proc.stderr
+    assert calls == []
+
+
+def test_a_partial_profile_stops_the_script(tmp_path):
+    proc, calls = _run(tmp_path, "check", rows=_rows({}), extra={"FAKE_PYTHON_MODE": "partial"})
+    assert proc.returncode != 0
+    assert "could not compute the runtime profile (missing: " in proc.stderr
+    for name in (
+        "shared_buffers",
+        "maintenance_work_mem",
+        "effective_io_concurrency",
+        "max_parallel_workers_per_gather",
+    ):
+        assert name in proc.stderr
+    assert "missing: work_mem" not in proc.stderr
     assert calls == []
 
 

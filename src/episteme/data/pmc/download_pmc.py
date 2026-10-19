@@ -631,7 +631,6 @@ def resolve_threads(args: argparse.Namespace) -> int:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    resolve_threads(args)
 
     formats = []
     for f in args.formats:
@@ -645,6 +644,8 @@ def main() -> None:
             "resolving nothing, writing nothing"
         )
         return
+
+    resolve_threads(args)  # after the dry run: the profile runs disk detection
 
     out: Path = args.output_dir
     out.mkdir(parents=True, exist_ok=True)

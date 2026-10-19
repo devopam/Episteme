@@ -85,7 +85,7 @@ class Profile:
 
     @property
     def duckdb_memory_limit(self) -> str:
-        return f"{self.duckdb_memory_bytes // MB}MB"
+        return f"{self.duckdb_memory_bytes // MB}MiB"  # DuckDB reads MB as 10^6
 
 
 def _batch_rows_rule(ram_bytes: int) -> int:
@@ -178,6 +178,9 @@ def overrides_from_settings(s) -> Overrides:
             _LOG.warning(
                 "%s=%r is not a size like 2GB or 512MB; using the rule's value", env_key, raw
             )
+        elif name.startswith("pg_") and value < MB:
+            _LOG.warning("%s=%r must be at least 1MB; using the rule's value", env_key, raw)
+            value = None
         kw[name] = value if value and value > 0 else None
     return Overrides(**kw)
 

@@ -103,7 +103,7 @@ def test_parse_bytes_rejects(text):
 
 def test_duckdb_memory_limit_string():
     p = compute_profile(LAPTOP, Overrides(duckdb_memory_bytes=4 * GB))
-    assert p.duckdb_memory_limit == "4096MB"
+    assert p.duckdb_memory_limit == "4096MiB"
 
 
 class _S:  # a stand-in for Settings with only the override fields
@@ -127,6 +127,17 @@ def test_overrides_from_settings_parses_byte_values(caplog):
         ov = prof.overrides_from_settings(s)
     assert (ov.duckdb_memory_bytes, ov.pg_work_mem_bytes, ov.cpu_workers) == (2 * GB, 16 * 2**20, 5)
     assert ov.part_bytes is None and "EPISTEME_PART_BYTES" in caplog.text
+
+
+def test_overrides_from_settings_rejects_pg_sizes_below_1mb(caplog):
+    s = _S()
+    s.pg_work_mem, s.pg_shared_buffers, s.duckdb_memory_limit = "512KB", "1MB", "512KB"
+    with caplog.at_level(logging.WARNING, logger="episteme.ops.profile"):
+        ov = prof.overrides_from_settings(s)
+    assert ov.pg_work_mem_bytes is None
+    assert "EPISTEME_PG_WORK_MEM" in caplog.text and "at least 1MB" in caplog.text
+    assert ov.pg_shared_buffers_bytes == 2**20
+    assert ov.duckdb_memory_bytes == 512 * 2**10  # only the pg_* keys have the 1MB floor
 
 
 def test_render_pg_whole_megabytes():

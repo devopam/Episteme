@@ -66,7 +66,7 @@ def test_connect_defaults_come_from_settings(settings_root):
     con = duckdb_conn.connect()
     try:
         limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
-        assert limit == _limit_of("256MB")  # the env override, folded into the profile
+        assert limit == _limit_of("256MiB")  # the env override, folded into the profile
         spill = _temp_directory(con)
         assert spill.parent == settings_root / "_ops" / "_duckdb_tmp"
     finally:
@@ -167,6 +167,6 @@ def test_connect_default_limit_comes_from_the_profile(settings_root, monkeypatch
     con = duckdb_conn.connect()
     try:
         limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
-        assert limit == _limit_of("256MB")
+        assert limit == _limit_of("256MiB")
     finally:
         con.close()

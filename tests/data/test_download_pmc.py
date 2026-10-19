@@ -464,3 +464,13 @@ def test_http_get_checked_uses_the_thread_session(monkeypatch):
     monkeypatch.setattr(dp, "_session", lambda: FakeSession())
     assert dp.http_get_checked("https://example.invalid/x") is None
     assert calls == ["https://example.invalid/x"]
+
+
+def test_dry_run_does_not_resolve_the_profile(monkeypatch, tmp_path, capsys):
+    def boom():
+        raise AssertionError("get_profile must not run on a dry run")
+
+    monkeypatch.setattr(dp.ops_profile, "get_profile", boom)
+    monkeypatch.setattr(sys, "argv", ["download_pmc", "--output_dir", str(tmp_path), "--dry-run"])
+    dp.main()
+    assert "dry-run" in capsys.readouterr().out
