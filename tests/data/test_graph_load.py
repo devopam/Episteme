@@ -33,13 +33,14 @@ def _configure(tmp_path, monkeypatch):
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
     # audit_trail, ops.failure and the connection module bind get_settings at import;
-    # after the config reload they would keep the old function and its cache.
+    # after the config reload they keep the old function, so clear its cache in place
+    # (a reload of those modules would rebind them and break tests that hold the old one).
     import episteme.audit_trail as audit_trail
     import episteme.data.db.connection as conn_mod
     import episteme.ops.failure as failure
 
-    importlib.reload(audit_trail)
-    importlib.reload(failure)
+    audit_trail.get_settings.cache_clear()
+    failure.get_settings.cache_clear()
     conn_mod.get_settings.cache_clear()
     monkeypatch.setattr(conn_mod, "_POOL", None)
 
