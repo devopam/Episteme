@@ -37,7 +37,7 @@ We optimise for **low rework later**, not for the fastest first metric.
   1. The file was fully read/parsed, and
   2. Resulting rows were **committed** (extract: written to a staging Parquet/JSONL shard; load: loaded into Postgres, see §4), and
   3. A **success marker** was written.
-- A unit is **failed** if any of the above does not complete. No success marker is written. Other units continue.
+- A unit is **failed** if any of the above does not complete. No success marker is written. The stage stops at the first failed unit (fail fast): it does not start the next unit, and it records the unit in `last_failure.json`. A transient error is retried first (docs/10 section 4.7). To go past a unit that fails for a permanent reason, an operator runs the stage again with `--skip-unit NAME --reason TEXT`.
 
 There is no “partial success” for a unit: either full commit + marker, or retry from scratch for that file (idempotent).
 

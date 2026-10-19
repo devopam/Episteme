@@ -346,7 +346,7 @@ Rules of use:
 ### 4.1 The dispatcher
 
 ```text
-bash scripts/data/run_pipeline.sh <source> <stage> [--dry-run] [--force] [--reason REASON] [--max-files N]
+bash scripts/data/run_pipeline.sh <source> <stage> [--dry-run] [--force] [--reason REASON] [--max-files N] [--skip-unit NAME]
 bash scripts/data/run_pipeline.sh corpus materialize
 ```
 
@@ -438,6 +438,76 @@ bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 - **A `--bulk` load or graph.** Stop the python load process, not the bash driver, so the driver's trap still rebuilds. If the driver was killed too, run `bulk_load_indexes.sh status`, then `rebuild`.
 
 **Loader timing:** every `ok` line of a load ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
+
+### 4.7 Failure rules
+
+These rules apply to the `extract`, `serialize`, `load` and `graph` stages. Downloads keep their own rule: record the failure and continue.
+
+**Fail fast.** A stage stops at the first unit that fails. A unit is one input file (extract, serialize) or one shard (load). The stage does not start the next unit. With more than one worker, the units already running finish or fail. The exit code is 1.
+
+**Retries.** A transient error is retried 3 times. The waits are 30, 60 and 120 seconds. A load or graph unit retries on a new connection. If the third retry fails, the error is permanent and the stage stops.
+
+- Transient: a PostgreSQL connection error (SQLSTATE class `08`), serialization failure (`40001`), deadlock (`40P01`), lock not available (`55P03`), operator intervention (`57P01` to `57P05`) and too many connections (`53300`). Also transient: a connect error with no SQLSTATE, and OS errors such as I/O error, time-out, connection reset or refused, a broken pipe, and the Windows codes 21, 64, 121, 1117 and 1231.
+- Permanent: all other errors. A cancelled query (`57014`) is permanent. So are a missing file, a permission error and a bad row.
+- A wrong password is a connect error with no SQLSTATE. It is treated as transient. The stage waits about 3.5 minutes (30 + 60 + 120 s) before it fails. Fix the password first, or stop the stage and start it again.
+
+**`last_failure.json`.** A stage that stops on a unit writes `<processed root>/_ops/<source>/last_failure.json`. The file holds `run_id`, `stage`, `unit`, `error` and `at`. `run_pipeline.sh` puts the unit and the error in the `run_end` audit reason. To read the record:
+
+```bash
+python -m episteme.ops.failure show --source <source> --run-id <run_id>
+```
+
+The command prints `<unit>: <error>`. It prints nothing when the record belongs to another run. The unit name is what `--skip-unit` takes.
+
+**Resume.** Run the same stage again:
+
+```bash
+bash scripts/data/run_pipeline.sh <source> <stage>
+```
+
+Units that are done are skipped. Extract and serialize use the success markers. Load and graph use the load and graph markers. The failed unit runs again.
+
+**Skip a unit.** Use this only when a unit fails for a permanent reason and you accept to leave it out.
+
+```bash
+bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TEXT"
+```
+
+- `--skip-unit` can be repeated. `--reason` is required. Only one named stage is allowed: `extract`, `serialize` or `load`. `all` and `graph` exit 2.
+- The skip is for this run only. No marker stays. The next run tries the unit again.
+- Each skipped unit writes one audited `unit_skip` row with your reason.
+- NAME is the unit name from `last_failure.json`. For extract and serialize it is the `input_key` (the path under the raw directory). For load it is the shard file name.
+- A bare file name works when exactly one input has that name. If two inputs share the name, use the `input_key`.
+- A shard that already has a success marker is skipped as a `unit_skip` too, when you name it.
+- A name that matches no unit exits 2, and nothing is audited.
+
+**Exit codes.**
+
+| Code | Meaning |
+|---|---|
+| 0 | The stage finished. |
+| 1 | A unit failed (permanent, or transient after 3 retries). |
+| 2 | Usage error, for example `--skip-unit` without `--reason`. |
+| 130 | Stopped with Ctrl-C. The runner prints `stopped at stage <name>`. |
+| 143 | Stopped with SIGTERM, or the parent runner died. |
+
+**Stop handling.** Ctrl-C and SIGTERM stop the stage at once. A load or graph stage first cancels the running SQL statement. A unit in progress gets no success marker, so a re-run does it again. If the runner process dies, a watchdog in the stage notices within about 10 seconds. It cancels the statement and exits with 143.
+
+**Orphan sweep.** Each connection sets `application_name` to `episteme:<run_id>:<pid>`. At the start of a load or graph stage, the sweep looks for backends that fit these rules:
+
+- the `application_name` starts with `episteme:`;
+- the backend belongs to the same database role;
+- the backend is `active`;
+- the client PID in the name no longer exists on this host.
+
+The sweep cancels the running statement of each such backend. Each cancel writes an audited `orphan_cancel` row.
+
+**Known limits.**
+
+- A PID that another process has reused makes an orphan look alive. The sweep leaves it alone.
+- The sweep checks PIDs on this host only. It assumes the clients run here.
+- The sweep does not touch an orphan that is `idle in transaction`. That backend ends only when the server notices the closed socket.
+- Downloads do not use these rules. Pause, lock and queue are planned (operating standard PR 3).
 
 ---
 
