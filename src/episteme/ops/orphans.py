@@ -42,9 +42,10 @@ def sweep(conn: Any, *, name_like: str = "episteme:%") -> list[int]:
     assumes the clients run on this host. Backends of other roles (for example
     the ``admin_dsn`` role) are not swept, because of ``usename = current_user``.
 
-    Each cancel is audited and committed at once. If an audit write fails, the
-    sweep rolls back, logs the PID, continues, and raises ``RuntimeError``
-    after the last orphan.
+    Each cancel is audited and committed at once, inside
+    ``audit_trail.deferred_mirror``: a failed commit leaves no mirror line. If
+    an audit write or the commit fails, the sweep rolls back, logs the PID,
+    continues, and raises ``RuntimeError`` after the last orphan.
     """
     with conn.cursor() as cur:
         cur.execute(_SELECT, (name_like,))
@@ -67,16 +68,21 @@ def sweep(conn: Any, *, name_like: str = "episteme:%") -> list[int]:
             _LOG.info("orphan backend %s (%s) already ended; skipped", pid, app)
             continue
         try:
-            audit_trail.record(
-                "orphan_cancel",
-                conn=conn,
-                object=app,
-                reason=f"client pid {client} gone; statement started {started}",
-                run_id=get_settings().run_id,
-            )
-            audit_trail.commit(conn)
+            # The mirror line waits for the commit: a failed commit leaves none.
+            with audit_trail.deferred_mirror(conn):
+                try:
+                    audit_trail.record(
+                        "orphan_cancel",
+                        conn=conn,
+                        object=app,
+                        reason=f"client pid {client} gone; statement started {started}",
+                        run_id=get_settings().run_id,
+                    )
+                    audit_trail.commit(conn)
+                except BaseException:
+                    audit_trail.rollback(conn)
+                    raise
         except Exception:  # noqa: BLE001 - keep sweeping; raise after the loop
-            conn.rollback()
             _LOG.error("orphan_cancel audit failed for backend pid %s", pid, exc_info=True)
             failed.append(pid)
             continue

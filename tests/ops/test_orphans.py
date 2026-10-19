@@ -149,3 +149,49 @@ def test_sweep_audit_failure_continues_then_raises(monkeypatch):
     assert recorded == ["episteme:r:6002"]
     assert commits == [1]
     assert ("ROLLBACK", None) in conn.log
+
+
+def test_sweep_failed_commit_leaves_no_mirror_line(monkeypatch):
+    """record() queues its mirror line inside deferred_mirror; the commit fails,
+    so the line is dropped, the sweep goes on and raises after the last orphan."""
+    rows = [(21, "episteme:r:7001", "t1"), (22, "episteme:r:7002", "t2")]
+
+    class CommitConn(FakeConn):
+        failed_once = False
+
+        def commit(self):  # the first commit (backend 21) fails
+            if not self.failed_once:
+                self.failed_once = True
+                raise OSError("commit failed")
+            self.log.append(("COMMIT", None))
+
+    conn = CommitConn(rows)
+    monkeypatch.setattr(orphans.psutil, "pid_exists", lambda p: False)
+
+    def rec(ev, **kw):
+        audit_trail._DEFERRED[kw["conn"]].append({"object": kw["object"]})
+        return "h"
+
+    monkeypatch.setattr(orphans.audit_trail, "record", rec)
+    written = []
+    monkeypatch.setattr(audit_trail, "_append_mirror_lines", lambda lines: written.extend(lines))
+    with pytest.raises(RuntimeError, match=r"\[21\]"):
+        orphans.sweep(conn)
+    assert written == [{"object": "episteme:r:7002"}]  # none for the failed commit
+    assert conn.log.count(("COMMIT", None)) == 1
+    assert ("ROLLBACK", None) in conn.log
+    assert conn not in audit_trail._DEFERRED
+
+
+def test_sweep_records_inside_deferred_mirror(monkeypatch):
+    conn = FakeConn([(31, "episteme:r:8001", "t")])
+    monkeypatch.setattr(orphans.psutil, "pid_exists", lambda p: False)
+    seen = []
+    monkeypatch.setattr(
+        orphans.audit_trail,
+        "record",
+        lambda ev, **kw: seen.append(kw["conn"] in audit_trail._DEFERRED),
+    )
+    monkeypatch.setattr(orphans.audit_trail, "commit", lambda c: None)
+    assert orphans.sweep(conn) == [31]
+    assert seen == [True]
