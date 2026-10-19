@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
 from episteme.ops.stop import stage_guard
 
+_LOG = logging.getLogger(__name__)
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 
@@ -137,6 +139,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no shards under {staging_dir}")
         return 0
 
+    if args.skip_unit:
+        unknown = sorted(set(args.skip_unit) - {sh.name for sh in shards})
+        if unknown:
+            print(
+                f"error: --skip-unit name(s) {unknown!r} match no load unit of {source}",
+                file=sys.stderr,
+            )
+            return 2
+
     external_run_id = get_settings().run_id
     run_id = external_run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     # Skip our own run_start/run_end bracket when an orchestrator (e.g.
@@ -176,7 +187,15 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         audit_trail.commit(conn)
                         return result
-                    except BaseException:
+                    except BaseException as exc:
+                        if not isinstance(exc, Exception):
+                            # Stop (KeyboardInterrupt/SystemExit): cancel the running
+                            # statement explicitly. psycopg also interrupts it on
+                            # KeyboardInterrupt, but do not rely on that alone.
+                            try:
+                                conn.cancel_safe()
+                            except Exception:  # noqa: BLE001 - best effort
+                                pass
                         try:
                             audit_trail.rollback(conn)
                         except Exception:  # noqa: BLE001 - keep the original error
@@ -191,13 +210,24 @@ def main(argv: list[str] | None = None) -> int:
 
         return _cb
 
+    run_ended = False
+
+    def _end_bracket(reason: str | None = None) -> None:
+        nonlocal run_ended
+        if not own_bracket or run_ended:
+            return
+        run_ended = True  # never two run_end rows, even if the write fails
+        _bracket("run_end", reason=reason)
+
+    failed_at: str | None = None
+    skipped_by_operator = 0
     with stage_guard(lambda: holder[0]):
         if own_bracket:
             _bracket("run_start")
-        with connection() as sconn:
-            orphans.sweep(sconn)
-
         try:
+            with connection() as sconn:
+                orphans.sweep(sconn)
+
             keep = set(
                 apply_skips(
                     source,
@@ -208,47 +238,52 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=run_id,
                 )
             )
-        except SystemExit as exc:
-            if own_bracket:
-                _bracket("run_end", reason=f"failed: --skip-unit rejected (exit {exc.code})")
-            raise
-        skipped_by_operator = len(shards) - len(keep)
+            skipped_by_operator = len(shards) - len(keep)
 
-        failed_at: str | None = None
-        for shard in shards:
-            name = shard.name
-            if name not in keep:
-                print(f"skip-unit {name}")
-                continue
-            marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
-            if marker.is_file() and not args.force:
-                print(f"skip {name}")
-                continue
+            for shard in shards:
+                name = shard.name
+                if name not in keep:
+                    print(f"skip-unit {name}")
+                    continue
+                marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
+                if marker.is_file() and not args.force:
+                    print(f"skip {name}")
+                    continue
 
-            try:
-                result = with_retries(
-                    lambda shard=shard, name=name: _load_one(shard, name),
-                    sleep=lambda secs: _SLEEP(secs),
-                    on_retry=_on_retry(name),
+                try:
+                    result = with_retries(
+                        lambda shard=shard, name=name: _load_one(shard, name),
+                        sleep=lambda secs: _SLEEP(secs),
+                        on_retry=_on_retry(name),
+                    )
+                except Exception as exc:  # noqa: BLE001 - permanent: record, stop the run
+                    failed_at = name
+                    print(f"FAIL {name}: {exc}")
+                    record_failure(source, "load", name, repr(exc), run_id=run_id)
+                    _end_bracket(f"failed at shard {name}: {exc!r}"[:500])
+                    break
+
+                _write_load_success(processed_dir, source, name, result)
+                print(
+                    f"ok {name} rows={result['rows']} deleted={result['deleted']} "
+                    f"body_deleted={result['body_deleted']} event={result['event']} "
+                    f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
+                    f"rows_per_sec={result['rows_per_sec']}"
                 )
-            except Exception as exc:  # noqa: BLE001 - permanent: record, stop the run
-                failed_at = name
-                print(f"FAIL {name}: {exc}")
-                record_failure(source, "load", name, repr(exc), run_id=run_id)
-                if own_bracket:
-                    _bracket("run_end", reason=f"failed at shard {name}: {exc!r}"[:500])
-                break
-
-            _write_load_success(processed_dir, source, name, result)
-            print(
-                f"ok {name} rows={result['rows']} deleted={result['deleted']} "
-                f"body_deleted={result['body_deleted']} event={result['event']} "
-                f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
-                f"rows_per_sec={result['rows_per_sec']}"
+            _end_bracket()
+        except BaseException as exc:
+            # Every other non-success exit (stop, sweep error, unexpected error)
+            # closes the bracket once; a failure here must not hide `exc`.
+            reason = (
+                f"stopped ({type(exc).__name__})"
+                if not isinstance(exc, Exception)
+                else f"failed: {exc!r}"[:500]
             )
-
-        if failed_at is None and own_bracket:
-            _bracket("run_end")
+            try:
+                _end_bracket(reason)
+            except Exception:  # noqa: BLE001 - keep the original exception
+                _LOG.exception("could not write run_end after %r", exc)
+            raise
 
     if failed_at is not None:
         print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")

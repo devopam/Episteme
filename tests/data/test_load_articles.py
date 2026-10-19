@@ -267,6 +267,10 @@ def test_permanent_failure_stops_the_run_and_names_the_shard(ff, capsys):
     ends = [r for r in ff.rows if r[0] == "run_end"]
     assert len(ends) == 1 and ends[0][2].startswith("failed at shard b.jsonl")
     assert ff.sleeps == []  # permanent: no retry
+    from episteme.data import checkpoint_markers as cm
+
+    assert cm.load_success_marker_path(ff.root, "src", "a.jsonl").is_file()
+    assert not cm.load_success_marker_path(ff.root, "src", "b.jsonl").is_file()
 
 
 def test_transient_error_is_retried_and_the_shard_loads_once(ff, capsys):
@@ -305,17 +309,40 @@ def test_skip_unit_skips_the_shard_and_records_one_row(ff, capsys):
 
 
 def test_skip_unit_unknown_name_exits_2_before_loading(ff):
-    with pytest.raises(SystemExit) as e:
-        ff.run("--skip-unit", "nope.jsonl", "--reason", "r")
-    assert e.value.code == 2
+    assert ff.run("--skip-unit", "nope.jsonl", "--reason", "r") == 2
     assert ff.state["calls"] == []
-    assert [r for r in ff.rows if r[0] == "unit_skip"] == []
+    assert ff.rows == []  # validated before any DB work: no run_start either
+
+
+def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
+    from episteme.ops import stop
+
+    # real stage_guard, with its watchdog thread neutralised
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel: None)
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(ff.la, "stage_guard", stop.stage_guard)
+    ff.state["behaviour"]["a.jsonl"] = KeyboardInterrupt()
+    with pytest.raises(SystemExit) as e:
+        ff.run()
+    assert e.value.code == 130
+    ends = [r for r in ff.rows if r[0] == "run_end"]
+    assert len(ends) == 1 and "KeyboardInterrupt" in ends[0][2]
+    assert ff.state["calls"] == ["a.jsonl"]
+
+
+def test_sweep_error_writes_one_run_end(ff, monkeypatch):
+    def boom(conn):
+        raise RuntimeError("audit failed")
+
+    monkeypatch.setattr(ff.la.orphans, "sweep", boom)
+    with pytest.raises(RuntimeError):
+        ff.run()
+    ends = [r for r in ff.rows if r[0] == "run_end"]
+    assert len(ends) == 1 and ends[0][2].startswith("failed: RuntimeError")
 
 
 def test_skip_unit_is_matched_after_only_filtering(ff):
-    with pytest.raises(SystemExit) as e:
-        ff.run("--only", "a.jsonl", "--skip-unit", "b.jsonl", "--reason", "r")
-    assert e.value.code == 2
+    assert ff.run("--only", "a.jsonl", "--skip-unit", "b.jsonl", "--reason", "r") == 2
 
 
 @pytest.mark.pg
@@ -356,7 +383,20 @@ def test_transient_error_then_success_writes_one_load_commit(pg_conn, monkeypatc
         conn_mod.get_settings.cache_clear()
 
     assert rc == 0 and len(calls) == 2
+    # the failed attempt left no audit mirror line: lines == committed DB rows
+    from episteme import audit_trail
+
     pg_conn.rollback()
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme._audit")
+        db_rows = cur.fetchone()[0]
+    mirror_lines = sum(
+        1
+        for f in audit_trail._mirror_dir().glob("audit-*.jsonl")
+        for ln in f.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    )
+    assert mirror_lines == db_rows
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM episteme._audit "
