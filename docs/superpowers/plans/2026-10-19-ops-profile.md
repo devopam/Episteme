@@ -87,7 +87,9 @@ def test_ram_bytes(monkeypatch):
     assert hardware.ram_bytes() == 16 * 2**30
 
 
-@pytest.mark.parametrize("raw,expected", [("HDD", "hdd"), ("SSD", "ssd"), ("Unspecified", "unknown"), ("", "unknown")])
+@pytest.mark.parametrize(
+    "raw,expected", [("HDD", "hdd"), ("SSD", "ssd"), ("Unspecified", "unknown"), ("", "unknown")]
+)
 def test_windows_media_type_mapping(monkeypatch, tmp_path, raw, expected):
     monkeypatch.setattr(hardware.sys, "platform", "win32")
     monkeypatch.setattr(hardware, "_windows_media_type", lambda drive: raw)
@@ -202,7 +204,10 @@ def _linux_rotational(path: Path) -> str | None:
     dev = os.stat(path).st_dev
     major, minor = os.major(dev), os.minor(dev)
     sys_dev = Path(f"/sys/dev/block/{major}:{minor}")
-    for cand in (sys_dev / "queue" / "rotational", sys_dev.resolve().parent / "queue" / "rotational"):
+    for cand in (
+        sys_dev / "queue" / "rotational",
+        sys_dev.resolve().parent / "queue" / "rotational",
+    ):
         if cand.is_file():
             return cand.read_text().strip()
     return None
@@ -286,7 +291,14 @@ def test_laptop_rules():
     assert p.pg_shared_buffers_bytes == int(16 * GB * 0.15)
     assert p.pg_maintenance_work_mem_bytes == int(16 * GB * 0.06)
     assert p.pg_work_mem_bytes == 32 * 2**20
-    assert p.pipeline_bytes == 16 * GB - p.os_reserve_bytes - p.pg_shared_buffers_bytes - p.pg_maintenance_work_mem_bytes - p.pg_work_mem_bytes
+    assert (
+        p.pipeline_bytes
+        == 16 * GB
+        - p.os_reserve_bytes
+        - p.pg_shared_buffers_bytes
+        - p.pg_maintenance_work_mem_bytes
+        - p.pg_work_mem_bytes
+    )
     assert p.duckdb_memory_bytes == p.pipeline_bytes // 2
     assert p.cpu_workers == 3
     assert p.io_concurrency == 2
@@ -333,7 +345,9 @@ def test_tiny_machine_floors_and_warns(caplog):
 
 
 def test_overrides_win_and_are_marked_env():
-    ov = Overrides(cpu_workers=7, duckdb_memory_bytes=2 * GB, batch_rows=10_000, pg_work_mem_bytes=64 * 2**20)
+    ov = Overrides(
+        cpu_workers=7, duckdb_memory_bytes=2 * GB, batch_rows=10_000, pg_work_mem_bytes=64 * 2**20
+    )
     p = compute_profile(LAPTOP, ov)
     assert (p.cpu_workers, p.duckdb_memory_bytes, p.batch_rows) == (7, 2 * GB, 10_000)
     assert p.pg_work_mem_bytes == 64 * 2**20
@@ -342,7 +356,14 @@ def test_overrides_win_and_are_marked_env():
 
 @pytest.mark.parametrize(
     "text,expected",
-    [("2GB", 2 * GB), ("512MB", 512 * 2**20), ("1.5GB", int(1.5 * GB)), ("1048576", 2**20), ("64kb", 64 * 1024), (" 3 GiB ", 3 * GB)],
+    [
+        ("2GB", 2 * GB),
+        ("512MB", 512 * 2**20),
+        ("1.5GB", int(1.5 * GB)),
+        ("1048576", 2**20),
+        ("64kb", 64 * 1024),
+        (" 3 GiB ", 3 * GB),
+    ],
 )
 def test_parse_bytes(text, expected):
     assert parse_bytes(text) == expected
@@ -383,7 +404,18 @@ from episteme.ops.hardware import Hardware
 _LOG = logging.getLogger(__name__)
 
 KB, MB, GB = 2**10, 2**20, 2**30
-_UNITS = {"": 1, "b": 1, "kb": KB, "kib": KB, "mb": MB, "mib": MB, "gb": GB, "gib": GB, "tb": 2**40, "tib": 2**40}
+_UNITS = {
+    "": 1,
+    "b": 1,
+    "kb": KB,
+    "kib": KB,
+    "mb": MB,
+    "mib": MB,
+    "gb": GB,
+    "gib": GB,
+    "tb": 2**40,
+    "tib": 2**40,
+}
 _BYTES_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*$")
 
 PIPELINE_FLOOR = GB
@@ -547,8 +579,19 @@ def test_new_override_keys_are_read(fresh_config):
         "EPISTEME_PART_ROWS=500000\nEPISTEME_PART_BYTES=256MB\nEPISTEME_PG_SHARED_BUFFERS=1GB\n"
         "EPISTEME_PG_MAINTENANCE_WORK_MEM=512MB\nEPISTEME_PG_WORK_MEM=16MB\nEPISTEME_DOWNLOAD_THREADS=8\n"
     ).get_settings()
-    assert (s.io_concurrency, s.pmc_threads, s.batch_rows, s.part_rows, s.download_threads) == (8, 24, 20000, 500000, 8)
-    assert (s.part_bytes, s.pg_shared_buffers, s.pg_maintenance_work_mem, s.pg_work_mem) == ("256MB", "1GB", "512MB", "16MB")
+    assert (s.io_concurrency, s.pmc_threads, s.batch_rows, s.part_rows, s.download_threads) == (
+        8,
+        24,
+        20000,
+        500000,
+        8,
+    )
+    assert (s.part_bytes, s.pg_shared_buffers, s.pg_maintenance_work_mem, s.pg_work_mem) == (
+        "256MB",
+        "1GB",
+        "512MB",
+        "16MB",
+    )
 ```
 
 Keep `test_duckdb_memory_limit_override` and `test_extract_workers_override` as they are. Add to `tests/ops/test_profile.py`:
@@ -627,7 +670,10 @@ _BYTE_KEYS = {
     "duckdb_memory_limit": ("duckdb_memory_bytes", "EPISTEME_DUCKDB_MEMORY_LIMIT"),
     "part_bytes": ("part_bytes", "EPISTEME_PART_BYTES"),
     "pg_shared_buffers": ("pg_shared_buffers_bytes", "EPISTEME_PG_SHARED_BUFFERS"),
-    "pg_maintenance_work_mem": ("pg_maintenance_work_mem_bytes", "EPISTEME_PG_MAINTENANCE_WORK_MEM"),
+    "pg_maintenance_work_mem": (
+        "pg_maintenance_work_mem_bytes",
+        "EPISTEME_PG_MAINTENANCE_WORK_MEM",
+    ),
     "pg_work_mem": ("pg_work_mem_bytes", "EPISTEME_PG_WORK_MEM"),
 }
 _INT_KEYS = {
@@ -651,7 +697,9 @@ def overrides_from_settings(s) -> Overrides:
             continue
         value = parse_bytes(raw)
         if value is None or value <= 0:
-            _LOG.warning("%s=%r is not a size like 2GB or 512MB; using the rule's value", env_key, raw)
+            _LOG.warning(
+                "%s=%r is not a size like 2GB or 512MB; using the rule's value", env_key, raw
+            )
         kw[name] = value if value and value > 0 else None
     return Overrides(**kw)
 
@@ -687,10 +735,18 @@ def render(p: Profile, fmt: str) -> str:
         }
         return "\n".join(f"{k}|{v}" for k, v in rows.items())
     values = {name: getattr(p, name) for name in PROFILE_FIELDS}
-    hw = {"physical_cores": p.hardware.physical_cores, "ram_bytes": p.hardware.ram_bytes, "disk_kinds": p.hardware.disk_kinds}
+    hw = {
+        "physical_cores": p.hardware.physical_cores,
+        "ram_bytes": p.hardware.ram_bytes,
+        "disk_kinds": p.hardware.disk_kinds,
+    }
     if fmt == "json":
-        return json.dumps({"hardware": hw, "values": values, "sources": p.sources}, indent=2, sort_keys=True)
-    lines = [f"hardware: {hw['physical_cores']} cores, {hw['ram_bytes'] // GB} GB RAM, disks {hw['disk_kinds']}"]
+        return json.dumps(
+            {"hardware": hw, "values": values, "sources": p.sources}, indent=2, sort_keys=True
+        )
+    lines = [
+        f"hardware: {hw['physical_cores']} cores, {hw['ram_bytes'] // GB} GB RAM, disks {hw['disk_kinds']}"
+    ]
     for name in PROFILE_FIELDS:
         lines.append(f"{name:36} {values[name]!s:>16}  {p.sources.get(name, 'rule')}")
     return "\n".join(lines)
@@ -846,7 +902,13 @@ def test_settings_come_from_the_profile(tmp_path):
     proc, calls = _run(tmp_path, "check", rows=_rows({}))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     joined = "\n".join(calls)
-    for name in ("shared_buffers", "maintenance_work_mem", "work_mem", "effective_io_concurrency", "max_parallel_workers_per_gather"):
+    for name in (
+        "shared_buffers",
+        "maintenance_work_mem",
+        "work_mem",
+        "effective_io_concurrency",
+        "max_parallel_workers_per_gather",
+    ):
         assert f"'{name}'" in joined
 
 
