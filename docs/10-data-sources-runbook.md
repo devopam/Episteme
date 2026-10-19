@@ -117,10 +117,15 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
-| `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs (default 4). |
-| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (default `4GB`; spills to `EPISTEME_DUCKDB_TEMP_DIR`). |
+| `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs. Unset: the profile's rule (16; section 2.5). |
+| `EPISTEME_PMC_THREADS` | Threads of the `pmc` downloader (`--threads`). Unset: the profile's rule (48). |
+| `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (unset: the profile's rule, 50% of the pipeline share, about 4 GB on a 16 GB machine; spills to `EPISTEME_DUCKDB_TEMP_DIR`). |
 | `EPISTEME_DUCKDB_TEMP_DIR` | Spill root for those connections (default `<processed root>/_ops/_duckdb_tmp`). Set it to a fast local disk when the processed root is on a slow disk: the `pubchem` join spilled 31 GB at random-I/O speed to the USB HDD and slowed every other job on it (2026-10-18). |
-| `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (default 3: the physical cores minus one, about 400 MB each). `--workers N` on a module overrides it. |
+| `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (unset: the profile's rule, the physical cores minus one, limited by memory; 3 on the 4-core laptop). `--workers N` on a module overrides it. |
+| `EPISTEME_IO_CONCURRENCY` | Parallel reads or writes on the data disk. Unset: the profile's rule (2 on an HDD or an unknown disk kind; 4 x cores on an SSD). |
+| `EPISTEME_BATCH_ROWS` | Rows per write, fetch, load and graph batch. Unset: the profile's rule (50,000; 100,000 when RAM is 48 GB or more). |
+| `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES` | Row and byte caps of one part. The profile reads them. No stage writes parts yet. |
+| `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM`, `EPISTEME_PG_WORK_MEM` | Values that `tune_postgres.sh` applies. Unset: the profile's rule (section 2.5). |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
 | `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
@@ -204,21 +209,24 @@ On a server where pgvector is installed, `bash scripts/data/db/migrate_database.
 
 ### 2.4 Server settings for bulk loads
 
-PostgreSQL's defaults suit a small shared server, not a single-user bulk load. On the local build (4 cores, 16 GB RAM, data directory on a 5,400 rpm USB HDD) these settings are recommended before a full load. They are cluster-wide, so they apply to `episteme` and `episteme_test` alike.
+PostgreSQL's defaults suit a small shared server, not a single-user bulk load. On the local build (4 cores, 16 GB RAM, data directory on a 5,400 rpm USB HDD) these settings are recommended before a full load. The five memory and parallelism values come from the runtime profile (section 2.5); the table shows the values for this laptop. They are cluster-wide, so they apply to `episteme` and `episteme_test` alike.
 
 | Setting | Default | Recommended | Restart | Why |
 |---|---|---|---|---|
-| `shared_buffers` | 128MB | 2GB | yes | keeps the hot index pages of `articles_default` in memory during loads |
+| `shared_buffers` | 128MB | profile: 15% of RAM, about 2.4GB | yes | keeps the hot index pages of `articles_default` in memory during loads |
 | `max_wal_size` | 1GB | 16GB | no | fewer forced checkpoints during a load |
 | `min_wal_size` | 80MB | 2GB | no | keeps recycled WAL segments instead of recreating them |
 | `checkpoint_timeout` | 5min | 30min | no | fewer checkpoints, so fewer full-page images in the WAL |
 | `wal_compression` | off | lz4 | no | compresses those full-page images (needs a build with lz4; the local PG19 has it) |
-| `maintenance_work_mem` | 64MB | 1GB | no | faster `CREATE INDEX` and index rebuilds |
+| `maintenance_work_mem` | 64MB | profile: 6% of RAM, about 1GB | no | faster `CREATE INDEX` and index rebuilds |
+| `work_mem` | 4MB | profile: 32MB | no | per-sort memory; the profile keeps it small |
+| `effective_io_concurrency` | 16 | profile: 2 on an HDD or an unknown disk kind; 200 on an SSD | no | prefetch depth that suits the disk |
+| `max_parallel_workers_per_gather` | 2 | profile: cores / 2 | no | parallel query workers |
 | `effective_cache_size` | 4GB | 8GB | no | planner hint only; allocates nothing |
 
-`fsync`, `full_page_writes` and data checksums stay on (GxP data integrity, docs/11). Memory budget on 16 GB: 2 GB of shared buffers, up to 4 GB of DuckDB during a serialize (`EPISTEME_DUCKDB_MEMORY_LIMIT`), and the Python workers, with headroom for the operating system cache.
+`fsync`, `full_page_writes` and data checksums stay on (GxP data integrity, docs/11). Memory budget on 16 GB: the profile gives about 2.4 GB to shared buffers, about 1 GB to `maintenance_work_mem`, up to about 4 GB to DuckDB during a serialize, and the rest of the pipeline share to the Python workers. At least 25% of RAM stays free for the operating system and its cache. `max_wal_size`, `min_wal_size`, `checkpoint_timeout`, `wal_compression` and `effective_cache_size` stay fixed.
 
-Check and apply with `scripts/data/db/tune_postgres.sh`. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs, if a restart is pending, or if an `ALTER ROLE`/`ALTER DATABASE ... SET` override of one of these settings exists (it would beat the server value for, say, `episteme_app` sessions). `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, validates every name and value first (nothing is written if one is invalid), sets each value, reloads, and confirms each one is active or waiting for a restart. Every connection uses `PGCONNECT_TIMEOUT` (default 10 seconds). The everyday MCPg server cannot do this: it connects as `episteme_sys_admin`, and its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
+Check and apply with `scripts/data/db/tune_postgres.sh`. The script reads the five profile values from `python -m episteme.ops.profile show --format pg`; an `EPISTEME_PG_*` key overrides a value. `check` reads `pg_settings` as `episteme_sys_admin` and exits 1 if any setting differs, if a restart is pending, or if an `ALTER ROLE`/`ALTER DATABASE ... SET` override of one of these settings exists (it would beat the server value for, say, `episteme_app` sessions). `apply` needs the superuser, because `episteme_sys_admin` has no `ALTER SYSTEM` privilege (by design): it uses `POSTGRES_SUPERUSER` (default `postgres`) and `POSTGRES_SUPERUSER_PASSWORD` from `.env`, like `init_database.sh`, validates every name and value first (nothing is written if one is invalid), sets each value, reloads, and confirms each one is active or waiting for a restart. Every connection uses `PGCONNECT_TIMEOUT` (default 10 seconds). The everyday MCPg server cannot do this: it connects as `episteme_sys_admin`, and its `run_ddl` tool accepts only structural DDL and rejects `ALTER SYSTEM`.
 
 **MCPg admin server (optional).** MCPg 0.8 adds `alter_system`, `alter_system_reset_all` and `reload_config` tools, plus a read-only `inspect_guc` that shows a setting's live value and whether it needs a reload or a restart. `scripts/mcpg-episteme.sh episteme --admin` starts MCPg as `POSTGRES_SUPERUSER` with those tools on, `MCPG_ACCESS_MODE=unrestricted`, no secondary database, and an allowlist (`MCPG_ALTER_SYSTEM_ALLOWLIST`). Without `--admin` the launcher always turns them off. Each change takes two calls: the first returns a warning and a confirmation token, and the second applies it with `confirm=true` and that token. `ALTER SYSTEM` is not transactional; a `postmaster` setting such as `shared_buffers` still needs a service restart. `alter_system_reset_all` clears every `ALTER SYSTEM` override, including the section 2.4 tuning; MCPg refuses it while any override is outside the allowlist. Do not change settings through MCPg while `tune_postgres.sh apply` runs: both write `postgresql.auto.conf`, and the last write wins.
 
@@ -244,6 +252,70 @@ bash scripts/data/db/tune_postgres.sh apply     # then restart the postgresql-x6
 5. Start the service, check that the server is not in recovery, run a `CHECKPOINT`, verify the audit chain, then delete `pg_wal.old`.
 
 Cost: the database then depends on both drives; back-ups must cover both. `max_wal_size` is a soft target, not a cap: a load that writes WAL faster than checkpoints can recycle it, or WAL held back by archiving or a replication slot (neither is used on the local build), can grow `pg_wal` past it. Give the WAL disk generous headroom, at least twice `max_wal_size` (32 GB at 16GB; the local SSD has hundreds of GB free), and watch its size during the first large load. A full WAL disk stops all writes.
+
+### 2.5 Runtime profile
+
+The profile sets the memory and parallelism values of the pipeline from the hardware. It reads the physical cores, the RAM and the disk kind of the raw root, the processed root and the DuckDB spill folder. When it cannot find the disk kind, it uses the HDD rules. Detection runs once per process.
+
+Show the profile:
+
+```bash
+.venv/Scripts/python -m episteme.ops.profile show                  # text (default)
+.venv/Scripts/python -m episteme.ops.profile show --format json
+.venv/Scripts/python -m episteme.ops.profile show --format pg      # the values for tune_postgres.sh
+```
+
+Each line of the text output shows a value and its source: `detected`, `rule` or `env`.
+
+**An env key wins.** A set key always replaces the rule's value. An invalid value logs a warning, and the rule's value is used. The keys are in section 1.2: `EPISTEME_EXTRACT_WORKERS`, `EPISTEME_IO_CONCURRENCY`, `EPISTEME_DOWNLOAD_THREADS`, `EPISTEME_PMC_THREADS`, `EPISTEME_DUCKDB_MEMORY_LIMIT`, `EPISTEME_DUCKDB_TEMP_DIR`, `EPISTEME_BATCH_ROWS`, `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES`, `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM` and `EPISTEME_PG_WORK_MEM`. A `--workers N` flag on a module wins over the key.
+
+**Memory budget**
+
+| Share | Rule | 16 GB laptop | 64 GB, 16 cores |
+|---|---|---|---|
+| OS and other applications | 25% of RAM, at least 3 GB | 4 GB | 16 GB |
+| PostgreSQL `shared_buffers` | 15% of RAM, at most 16 GB | 2.4 GB | 9.6 GB |
+| PostgreSQL `maintenance_work_mem` | 6% of RAM, at most 2 GB | 1 GB | 2 GB |
+| PostgreSQL `work_mem` | 32 MB | 32 MB | 32 MB |
+| Pipeline job (workers and DuckDB together) | the rest | about 8.5 GB | about 36 GB |
+| DuckDB memory cap | 50% of the pipeline share | about 4 GB | about 18 GB |
+
+**Parallelism and sizes**
+
+| Value | Rule | Laptop (4 cores, HDD) | 16 cores, SSD |
+|---|---|---|---|
+| CPU workers (extract, serialize) | physical cores - 1, at least 1, and at most pipeline share / 1.5 GB | 3 | 15 |
+| I/O concurrency on the data disk | HDD 2; SSD 4 x cores | 2 | 64 |
+| Download threads per host | 16; PMC 48 | 16 / 48 | 16 / 48 |
+| PostgreSQL `max_parallel_workers_per_gather` | cores / 2 | 2 | 8 |
+| PostgreSQL `effective_io_concurrency` | HDD 2; SSD 200 | 2 | 200 |
+| Batch rows (write, fetch, load, graph) | 50,000; 100,000 when RAM >= 48 GB | 50,000 | 100,000 |
+| Part caps | 1,000,000 rows or 512 MB of staging data; 2,000,000 rows or 1 GB on an SSD with >= 32 GB RAM | 1M / 512 MB | 2M / 1 GB |
+
+**Example (this laptop, from a worktree without `.env`).** In that worktree the data folders were on the internal SSD, so the profile applied the SSD rules (`io_concurrency` 16 and `pg_effective_io_concurrency` 200):
+
+```
+hardware: 4 cores, 15 GB RAM, disks {'raw': 'ssd', 'processed': 'ssd'}
+os_reserve_bytes                           4262667264  rule
+pipeline_bytes                             9173806859  rule
+cpu_workers                                         3  rule
+io_concurrency                                     16  rule
+download_threads                                   16  rule
+pmc_threads                                        48  rule
+duckdb_memory_bytes                        4586903429  rule
+batch_rows                                      50000  rule
+part_rows                                     1000000  rule
+part_bytes                                  536870912  rule
+pg_shared_buffers_bytes                    2557600358  rule
+pg_maintenance_work_mem_bytes              1023040143  rule
+pg_work_mem_bytes                            33554432  rule
+pg_max_parallel_workers_per_gather                  2  rule
+pg_effective_io_concurrency                       200  rule
+```
+
+On the production layout, the data is on a USB HDD that Windows reports as `Unspecified`. There the disk kind is `unknown`, and the HDD rules apply. `io_concurrency` is then 2, and `effective_io_concurrency` is 2. Run `profile show` on the machine to see the real values.
+
+The `--format pg` output gives `tune_postgres.sh` its five values: `shared_buffers`, `maintenance_work_mem`, `work_mem`, `effective_io_concurrency` and `max_parallel_workers_per_gather`. The profile never changes a running server. Only `tune_postgres.sh apply` does (section 2.4).
 
 ---
 
@@ -414,7 +486,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.data.graph_builder
 .venv/Scripts/python.exe -m episteme.data.audit.pubmed_audit [--processed-dir DIR] [--raw-dir DIR] [--out-dir DIR] [--sample-files N] [--memory-limit 2GB] [--duckdb-temp DIR]
 ```
 
-It writes `pubmed_audit.json` and `pubmed_audit.md` under `<processed>/_ops/pubmed/audit/` (override with `--out-dir`) and prints the report path. `--sample-files N` (default 5) is the number of raw files re-read for the DOI probe, which compares each record's stored DOI with the record's own `ArticleIdList`. The default `--memory-limit` is 2GB, deliberately below the 4GB `EPISTEME_DUCKDB_MEMORY_LIMIT` so the audit can share the machine with PostgreSQL; `--duckdb-temp` is the spill directory. The report also carries `graph_btree_max_bytes` (the longest value in bytes per btree-indexed graph column: `mesh.descriptor_ui`, `cites.src_pmid`, `cites.dst_pmid`, `comments.ref_pmid`, `chemicals.substance_ui`, `keywords.keyword`, `authors.orcid`; keys `columns`, `max`, `limit` = 2000 and `over_limit`) and `shards_without_graph` (pubmed shards whose success marker lacks `graph_relations` or whose six graph files are not all present). Exit codes: 0 pass; 1 when any btree column exceeds 2000 bytes, when `shards_without_graph` is above 0, when the DOI probe did not run (its status is not `ok`, for example no raw directory) or found a mismatch; `--sample-files 0` skips the probe, so only the first two conditions can fail it. Each failing condition prints a `WARNING:` line. Treat exit 1 as a failed gate.
+It writes `pubmed_audit.json` and `pubmed_audit.md` under `<processed>/_ops/pubmed/audit/` (override with `--out-dir`) and prints the report path. `--sample-files N` (default 5) is the number of raw files re-read for the DOI probe, which compares each record's stored DOI with the record's own `ArticleIdList`. The default `--memory-limit` is 2GB, deliberately below the profile's DuckDB cap (about 4 GB on a 16 GB machine) so the audit can share the machine with PostgreSQL; `--duckdb-temp` is the spill directory. The report also carries `graph_btree_max_bytes` (the longest value in bytes per btree-indexed graph column: `mesh.descriptor_ui`, `cites.src_pmid`, `cites.dst_pmid`, `comments.ref_pmid`, `chemicals.substance_ui`, `keywords.keyword`, `authors.orcid`; keys `columns`, `max`, `limit` = 2000 and `over_limit`) and `shards_without_graph` (pubmed shards whose success marker lacks `graph_relations` or whose six graph files are not all present). Exit codes: 0 pass; 1 when any btree column exceeds 2000 bytes, when `shards_without_graph` is above 0, when the DOI probe did not run (its status is not `ok`, for example no raw directory) or found a mismatch; `--sample-files 0` skips the probe, so only the first two conditions can fail it. Each failing condition prints a `WARNING:` line. Treat exit 1 as a failed gate.
 
 **Rollout order for the full baseline** (spec `docs/superpowers/specs/2026-10-14-pubmed-graph-design.md`):
 
