@@ -180,3 +180,43 @@ def test_main_sweeps_orphans_once_at_start(stub, tmp_path, monkeypatch):
     monkeypatch.setattr(graph_builder.orphans, "sweep", lambda conn: sweeps.append(conn) or [])
     graph_builder.main(["--source", "pmc", "--raw-dir", str(tmp_path)])
     assert len(sweeps) == 1
+
+
+def test_holder_reaches_stage_guard_conn_ref(stub, tmp_path, monkeypatch):
+    calls, files = stub
+    files[0] = 1
+    refs = []
+
+    @contextlib.contextmanager
+    def capture(ref):
+        refs.append(ref)
+        yield
+
+    monkeypatch.setattr(graph_builder, "stage_guard", capture)
+    assert graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)]) == 0
+    holder = calls[0]["holder"]
+    sentinel = object()
+    holder[0] = sentinel
+    assert refs[0]() is sentinel  # the list build() fills is the one stage_guard reads
+
+
+def test_pubmed_unexpected_error_is_recorded_and_exits_1(
+    stub, recorded, tmp_path, monkeypatch, capsys
+):
+    import psycopg
+
+    def boom(conn, **kw):
+        raise psycopg.OperationalError("db gone")
+
+    monkeypatch.setattr(graph_builder, "build", boom)
+    assert graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)]) == 1
+    assert recorded[0][0][:3] == ("pubmed", "graph", "pubmed")
+
+
+def test_pubmed_stop_propagates_to_stage_guard(stub, tmp_path, monkeypatch):
+    def stop(conn, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(graph_builder, "build", stop)
+    with pytest.raises(KeyboardInterrupt):
+        graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)])

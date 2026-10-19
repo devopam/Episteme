@@ -29,7 +29,6 @@ from psycopg.types.json import Jsonb
 
 from episteme import audit_trail
 from episteme.data.checkpoint_markers import ops_root
-from episteme.data.db.connection import connection
 from episteme.data.graph_files import (
     RELATION_COLUMNS,
     RELATIONS,
@@ -216,7 +215,10 @@ def load_one(
                 conn.cancel_safe()
             except Exception:  # noqa: BLE001 - best effort
                 pass
-        audit_trail.rollback(conn)
+        try:
+            audit_trail.rollback(conn)
+        except Exception:  # noqa: BLE001 - keep the original error (a stop must stay a stop)
+            pass
         raise
     return {"source_file": source_file, "skipped": False, "rows": rows, "facets": facets}
 
@@ -233,7 +235,8 @@ def build_pubmed_graph(
     """Graph-load every extracted pubmed file, one transaction each; stop at the first
     permanent failure.
 
-    ``conn`` serves only the start-up checks. Each file loads on a fresh connection
+    ``conn`` serves only the start-up check; ``None`` runs it on its own short
+    connection that is released before the first file loads. Each file loads on a fresh connection
     inside ``audit_trail.deferred_mirror`` and is retried on a transient error
     (``with_retries``). ``holder`` (optional one-item list) receives the connection of
     the attempt in progress so a caller's ``stage_guard`` can cancel it.
@@ -248,10 +251,22 @@ def build_pubmed_graph(
     processed_dir = Path(processed_dir)
     if force and not reason:
         raise GraphLoadError("--force requires --reason")
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM episteme.mesh_tree LIMIT 1")
-        has_tree = cur.fetchone() is not None
-    conn.rollback()
+    # Lazy import: a module-level binding would freeze whatever `connection` was
+    # importable first (tests stub it).
+    from episteme.data.db.connection import connection
+
+    def _has_tree(c) -> bool:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM episteme.mesh_tree LIMIT 1")
+            found = cur.fetchone() is not None
+        c.rollback()
+        return found
+
+    if conn is not None:
+        has_tree = _has_tree(conn)
+    else:
+        with connection() as short:
+            has_tree = _has_tree(short)
     if not has_tree:
         raise GraphLoadError("mesh_tree is empty; run `run_pipeline.sh mesh graph` first")
 

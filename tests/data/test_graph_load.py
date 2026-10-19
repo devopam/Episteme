@@ -32,6 +32,16 @@ def _configure(tmp_path, monkeypatch):
 
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
+    # audit_trail, ops.failure and the connection module bind get_settings at import;
+    # after the config reload they would keep the old function and its cache.
+    import episteme.audit_trail as audit_trail
+    import episteme.data.db.connection as conn_mod
+    import episteme.ops.failure as failure
+
+    importlib.reload(audit_trail)
+    importlib.reload(failure)
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
 
 
 def _mesh(pmid, ui, name, sf):
@@ -353,7 +363,8 @@ def test_stops_at_the_first_failed_file_and_keeps_earlier_loads(env):
     assert res["failed"] == [SF_B] and res["stopped_at"] == SF_B
     assert res["loaded"] == 1
     assert _counts(conn, SF_A) == info_a["graph_rows"]  # committed before the failure
-    assert _counts(conn, sf_c) == {rel: 0 for rel in gf.RELATIONS} and info_c  # not reached
+    assert info_c
+    assert _counts(conn, sf_c) == {rel: 0 for rel in gf.RELATIONS}  # not reached
 
 
 def test_transient_error_then_success_commits_once(env, monkeypatch):
@@ -369,7 +380,7 @@ def test_transient_error_then_success_commits_once(env, monkeypatch):
     monkeypatch.setattr(graph_load, "_SLEEP", lambda s: None)
     real = graph_load._copy_relation
 
-    def _mirror_count():  # the mirror dir outlives the test DB: compare deltas
+    def _mirror_count():  # other tests also write to this mirror: compare deltas
         return sum(
             1
             for f in audit_trail._mirror_dir().glob("audit-*.jsonl")
@@ -393,6 +404,7 @@ def test_transient_error_then_success_commits_once(env, monkeypatch):
     finally:
         if conn_mod._POOL is not None:
             conn_mod._POOL.close()
+        conn_mod.get_settings.cache_clear()
     assert res["failed"] == [] and res["loaded"] == 1
     assert _counts(conn, SF_A) == info["graph_rows"]  # no duplicates from the failed attempt
     conn.rollback()
@@ -452,6 +464,7 @@ def test_empty_mesh_tree_refuses_to_start(env):
 def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys, monkeypatch):
     import json
 
+    import episteme.ops.failure as failure
     from episteme.data import graph_builder
 
     conn, processed = env
@@ -468,9 +481,7 @@ def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys, mo
     out = capsys.readouterr()
     assert "failed=1" in out.out
     assert "re-extract" in out.err
-    rec = json.loads(
-        (processed.parent / "_ops" / "pubmed" / "last_failure.json").read_text("utf-8")
-    )
+    rec = json.loads(failure._path("pubmed").read_text("utf-8"))
     assert rec["stage"] == "graph" and rec["unit"] == SF_B
 
 
@@ -569,5 +580,6 @@ def test_truncated_marker_stops_the_run_at_that_file(env, capsys):
     assert res["stopped_at"] == SF_A
     assert res["files"] == 2
     assert res["loaded"] == 0
-    assert info_b and _counts(conn, SF_B) == {rel: 0 for rel in gf.RELATIONS}
+    assert info_b
+    assert _counts(conn, SF_B) == {rel: 0 for rel in gf.RELATIONS}
     assert "unreadable success marker" in capsys.readouterr().err

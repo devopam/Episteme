@@ -847,20 +847,23 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.source == "pubmed":
             try:
-                with connection() as conn:
-                    res = build(
-                        conn,
-                        source="pubmed",
-                        raw_dir=args.raw_dir,
-                        run_id=run_id,
-                        processed_dir=args.processed_dir,
-                        force=args.force,
-                        reason=args.reason,
-                        holder=holder,
-                    )
+                res = build(
+                    None,  # build_pubmed_graph opens short connections; none is held here
+                    source="pubmed",
+                    raw_dir=args.raw_dir,
+                    run_id=run_id,
+                    processed_dir=args.processed_dir,
+                    force=args.force,
+                    reason=args.reason,
+                    holder=holder,
+                )
             except graph_load.GraphLoadError as e:
                 print(f"ERROR: {e}", file=sys.stderr)
                 return 2
+            except Exception as exc:  # noqa: BLE001 - e.g. the start-up check lost the database
+                print(f"FAIL pubmed: {exc}", file=sys.stderr)
+                record_failure("pubmed", "graph", "pubmed", repr(exc), run_id=run_id)
+                return 1
             if res["files"] == 0:
                 print(
                     f"WARNING: no pubmed graph files found under {args.processed_dir}",
@@ -873,14 +876,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"failed={len(res['failed'])} facets={res['facets']} {rows}"
             )
             if res["failed"]:
-                unit = res.get("stopped_at") or res["failed"][0]
-                record_failure(
-                    "pubmed",
-                    "graph",
-                    unit,
-                    res.get("error") or f"graph load failed: {unit}",
-                    run_id=run_id,
-                )
+                unit = res["stopped_at"]  # build_pubmed_graph always sets it with `failed`
+                record_failure("pubmed", "graph", unit, res["error"], run_id=run_id)
                 print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
                 print(f"stopped_at={unit}", file=sys.stderr)
                 return 1

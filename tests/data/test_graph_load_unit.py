@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+
 from episteme.data import graph_load
 from episteme.data.checkpoint_markers import mark_success
 
@@ -47,3 +49,48 @@ def test_truncated_marker_is_reported_corrupt_not_raised(tmp_path):
     assert old == []
     assert corrupt == ["baseline__bad.xml.gz"]
     assert graph_load.graphed_files(tmp_path, "pubmed") == ["baseline__a.xml.gz"]
+
+
+def test_stop_survives_a_failing_rollback_and_is_not_retried(monkeypatch, tmp_path):
+    """A KeyboardInterrupt in a unit stays a KeyboardInterrupt even when the rollback
+    raises OperationalError (lost connection); with_retries must not retry it."""
+    import contextlib
+
+    import psycopg
+    import pytest
+
+    import episteme.data.db.connection as dbc
+
+    class Conn:
+        def __init__(self, bad_rollback=True):
+            self.bad_rollback = bad_rollback
+
+        def cursor(self):
+            return contextlib.nullcontext(
+                types.SimpleNamespace(execute=lambda *a, **k: None, fetchone=lambda: (1,))
+            )
+
+        def rollback(self):
+            if not self.bad_rollback:
+                return
+            raise psycopg.OperationalError("connection lost")
+
+        def cancel_safe(self):
+            pass
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield Conn()
+
+    sleeps = []
+    monkeypatch.setattr(dbc, "connection", fake_connection)
+    monkeypatch.setattr(graph_load, "_SLEEP", sleeps.append)
+    monkeypatch.setattr(graph_load, "_success_markers", lambda d, s: (["a.xml.gz"], [], []))
+
+    def stop(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(graph_load, "marker_graph_info", stop)
+    with pytest.raises(KeyboardInterrupt):
+        graph_load.build_pubmed_graph(Conn(False), processed_dir=tmp_path, run_id="r")
+    assert sleeps == []
