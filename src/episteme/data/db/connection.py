@@ -77,6 +77,8 @@ def admin_dsn_from_settings() -> str:
 def get_pool() -> ConnectionPool:
     global _POOL
     if _POOL is None:
+        # create the pool in the process that uses it; a pool inherited through
+        # fork carries the parent's PID in application_name
         _POOL = ConnectionPool(
             dsn_from_settings(),
             kwargs=connect_kwargs(get_settings()),

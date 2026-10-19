@@ -44,7 +44,7 @@ def install_stop_handlers() -> None:
         try:
             signal.signal(sig, _on_term)
         except ValueError:  # not the main thread
-            _LOG.debug("cannot install %s handler outside the main thread", name)
+            _LOG.warning("cannot install %s handler outside the main thread", name)
 
 
 def start_parent_watchdog(
@@ -52,18 +52,30 @@ def start_parent_watchdog(
     *,
     interval: float = 10.0,
     parent_pid: int | None = None,
+    cancel_timeout: float = 10.0,
 ) -> threading.Thread:
     """Start a daemon thread that cancels the running statement and exits the
     process (code 143) when the parent process is gone."""
+    # Limits: if the parent is already dead at start, POSIX getppid() returns 1,
+    # which exists; a zombie parent also counts as existing.
     ppid = parent_pid or os.getppid()
 
     def _watch() -> None:
         while psutil.pid_exists(ppid):
             time.sleep(interval)
-        try:
-            cancel()
-        except Exception:  # noqa: BLE001 - the process exits next
-            _LOG.exception("cancel failed after parent %s exited", ppid)
+
+        def _run_cancel() -> None:
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - the process exits next
+                _LOG.exception("cancel failed after parent %s exited", ppid)
+
+        # A cancel can hang when the DB is unreachable: bound the wait.
+        helper = threading.Thread(target=_run_cancel, name="watchdog-cancel", daemon=True)
+        helper.start()
+        helper.join(cancel_timeout)
+        if helper.is_alive():
+            _LOG.error("cancel did not finish within %ss; exiting anyway", cancel_timeout)
         _LOG.error("parent process %s is gone; exiting", ppid)
         os._exit(EXIT_TERM)
 
@@ -82,6 +94,8 @@ def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
         if c is not None:
             c.cancel_safe()
 
+    global _TERM_SEEN
+    _TERM_SEEN = False
     install_stop_handlers()
     start_parent_watchdog(_cancel)
     try:

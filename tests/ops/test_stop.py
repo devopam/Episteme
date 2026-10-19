@@ -43,10 +43,14 @@ def test_connect_kwargs_carry_application_name(monkeypatch):
 
 def test_install_stop_handlers_maps_sigterm(monkeypatch):
     seen = {}
-    monkeypatch.setattr(stop.signal, "signal", lambda s, h: seen.setdefault(s, h))
+    monkeypatch.setattr(stop.signal, "signal", lambda s, h: seen.setdefault(s, []).append(h))
     stop.install_stop_handlers()
     stop.install_stop_handlers()  # idempotent
-    handler = seen[signal.SIGTERM]
+    sigs = [signal.SIGTERM] + ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])
+    for sig in sigs:
+        assert len(seen[sig]) == 2
+        assert seen[sig][0] is seen[sig][1]
+    handler = seen[signal.SIGTERM][0]
     with pytest.raises(KeyboardInterrupt):
         handler(signal.SIGTERM, None)
 
@@ -105,13 +109,51 @@ def test_stage_guard_maps_keyboardinterrupt_to_130(monkeypatch):
     assert ei.value.code == 130
 
 
-def test_stage_guard_maps_term_to_143(monkeypatch):
+def test_install_off_main_thread_warns(monkeypatch, caplog):
+    def deny(s, h):
+        raise ValueError("signal only works in main thread")
+
+    monkeypatch.setattr(stop.signal, "signal", deny)
+    with caplog.at_level("WARNING", logger=stop._LOG.name):
+        th = threading.Thread(target=stop.install_stop_handlers)
+        th.start()
+        th.join()
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_watchdog_exits_even_if_cancel_hangs(monkeypatch):
+    monkeypatch.setattr(stop.psutil, "pid_exists", lambda pid: False)
+    codes = []
+
+    def fake_exit(code):
+        codes.append(code)
+        raise SystemExit
+
+    monkeypatch.setattr(stop.os, "_exit", fake_exit)
+    monkeypatch.setattr(threading, "excepthook", lambda a: None)
+    never = threading.Event()
+    t = stop.start_parent_watchdog(never.wait, interval=0.01, parent_pid=99, cancel_timeout=0.1)
+    t.join(5)
+    never.set()
+    assert codes == [143]
+
+
+def test_stage_guard_resets_term_flag_on_entry(monkeypatch):
     monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
     monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
     monkeypatch.setattr(stop, "_TERM_SEEN", True)
     with pytest.raises(SystemExit) as ei:
         with stop.stage_guard(lambda: None):
             raise KeyboardInterrupt
+    assert ei.value.code == 130
+
+
+def test_stage_guard_maps_term_to_143(monkeypatch):
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    with pytest.raises(SystemExit) as ei:
+        with stop.stage_guard(lambda: None):
+            stop._on_term(signal.SIGTERM, None)
     assert ei.value.code == 143
 
 

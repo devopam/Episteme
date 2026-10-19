@@ -9,6 +9,8 @@ from episteme.ops import orphans
 
 
 class FakeCursor:
+    cancel_result = True
+
     def __init__(self, rows, log):
         self.rows, self.log = rows, log
 
@@ -24,6 +26,9 @@ class FakeCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        return (self.cancel_result,)
+
 
 class FakeConn:
     def __init__(self, rows):
@@ -31,6 +36,9 @@ class FakeConn:
 
     def cursor(self):
         return FakeCursor(self.rows, self.log)
+
+    def rollback(self):
+        self.log.append(("ROLLBACK", None))
 
 
 def test_sweep_cancels_only_dead_clients(monkeypatch):
@@ -63,7 +71,6 @@ def test_sweep_no_orphans_records_nothing(monkeypatch):
     conn = FakeConn([(1, "episteme:r:5000", "t")])
     monkeypatch.setattr(orphans.psutil, "pid_exists", lambda p: True)
     monkeypatch.setattr(orphans.audit_trail, "record", lambda *a, **k: pytest.fail("no"))
-    conn.rollback = lambda: None
     assert orphans.sweep(conn) == []
 
 
@@ -107,3 +114,38 @@ def test_sweep_cancels_backend_of_dead_client(pg_conn):
         victim.close()
     assert victim_pid in cancelled
     assert isinstance(out.get("err"), psycopg.errors.QueryCanceled)
+
+
+def test_sweep_filters_active_only():
+    assert "state = 'active'" in orphans._SELECT
+
+
+def test_sweep_skips_backend_already_ended(monkeypatch):
+    conn = FakeConn([(7, "episteme:r:5001", "t")])
+    monkeypatch.setattr(orphans.psutil, "pid_exists", lambda p: False)
+    monkeypatch.setattr(FakeCursor, "cancel_result", False)
+    monkeypatch.setattr(orphans.audit_trail, "record", lambda *a, **k: pytest.fail("no"))
+    assert orphans.sweep(conn) == []
+
+
+def test_sweep_audit_failure_continues_then_raises(monkeypatch):
+    rows = [(11, "episteme:r:6001", "t1"), (12, "episteme:r:6002", "t2")]
+    conn = FakeConn(rows)
+    monkeypatch.setattr(orphans.psutil, "pid_exists", lambda p: False)
+    recorded = []
+
+    def rec(ev, **kw):
+        if kw["object"].endswith("6001"):
+            raise ValueError("audit down")
+        recorded.append(kw["object"])
+
+    monkeypatch.setattr(orphans.audit_trail, "record", rec)
+    commits = []
+    monkeypatch.setattr(orphans.audit_trail, "commit", lambda c: commits.append(1))
+    with pytest.raises(RuntimeError, match=r"\[11\]"):
+        orphans.sweep(conn)
+    cancels = [p for s, p in conn.log if s != "ROLLBACK" and "pg_cancel_backend" in s]
+    assert cancels == [(11,), (12,)]
+    assert recorded == ["episteme:r:6002"]
+    assert commits == [1]
+    assert ("ROLLBACK", None) in conn.log
