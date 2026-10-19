@@ -33,6 +33,13 @@ if [ -f "$_COMMON_LIB_DIR/sources.env" ]; then
     unset _common_real_env_snapshot
 fi
 
+# The parent watchdog (episteme.ops.stop) watches this process. The outermost
+# script wins: a wrapper run directly watches itself; under run_pipeline.sh the
+# runner's PID is kept. Under Git Bash $$ is the MSYS PID, which psutil cannot
+# see; /proc/$$/winpid is the Windows PID.
+: "${EPISTEME_RUNNER_PID:=$(cat /proc/$$/winpid 2>/dev/null || echo $$)}"
+export EPISTEME_RUNNER_PID
+
 log() { # log LEVEL MSG...
     local level="$1"; shift
     printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$*" >&2

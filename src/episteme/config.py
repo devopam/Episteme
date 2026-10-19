@@ -113,6 +113,22 @@ def _get_positive_int_or_none(name: str) -> int | None:
     return value
 
 
+def _get_pid_or_none(name: str) -> int | None:
+    """A process id, or ``None`` when unset. A non-integer logs a warning and
+    gives ``None`` (the watchdog then watches the parent process)."""
+    raw = (_get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        _LOG.warning("%s must be a process id, got %r; ignoring it", name, raw)
+        return None
+    return value
+
+
 def _get_size_or_none(name: str) -> str | None:
     return (_get(name) or "").strip() or None
 
@@ -189,6 +205,7 @@ class Settings:
     pg_maintenance_work_mem: str | None = None
     pg_work_mem: str | None = None
     sys_admin_password: str = ""
+    runner_pid: int | None = None
 
     def pg_dsn(self) -> str:
         return (
@@ -286,6 +303,9 @@ def get_settings() -> Settings:
         pg_work_mem=_get_size_or_none("EPISTEME_PG_WORK_MEM"),
         # episteme_sys_admin's password: bulk-load index work runs as the table owner.
         sys_admin_password=_get("EPISTEME_SYS_ADMIN_PASSWORD", "") or "",
+        # Windows PID of the outermost pipeline script (scripts/data/_lib/common.sh
+        # exports it); the parent watchdog (episteme.ops.stop) watches it.
+        runner_pid=_get_pid_or_none("EPISTEME_RUNNER_PID"),
     )
 
 

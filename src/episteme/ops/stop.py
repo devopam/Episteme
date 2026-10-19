@@ -4,6 +4,10 @@ running statement when the parent process dies.
 A hard kill of the runner on Windows once left a 3-hour orphan DELETE running
 in PostgreSQL. A stage wraps its main in ``stage_guard`` so a stop or a dead
 parent cancels the statement instead of leaving it behind.
+
+The watched process is the runner (``EPISTEME_RUNNER_PID``, the Windows PID of
+the outermost pipeline script), else the first ancestor that is not the venv
+launcher.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -47,6 +52,94 @@ def install_stop_handlers() -> None:
             _LOG.warning("cannot install %s handler outside the main thread", name)
 
 
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _launcher_paths() -> set[str]:
+    """Paths of the venv launcher. On Windows a uv venv's ``python.exe`` is a
+    launcher that starts the real interpreter as its child; inside the real
+    interpreter ``sys.executable`` is the launcher's path."""
+    paths = {
+        sys.executable,
+        os.path.join(sys.prefix, "Scripts", "python.exe"),
+        os.path.join(sys.prefix, "Scripts", "pythonw.exe"),
+    }
+    return {_norm(p) for p in paths if p}
+
+
+def _exe(proc: psutil.Process) -> str:
+    try:
+        return proc.exe() or ""
+    except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return ""
+
+
+def _ancestor_to_watch() -> psutil.Process | None:
+    """The first ancestor that is not the venv launcher. On Linux there is no
+    launcher, so this is the parent."""
+    launchers = _launcher_paths()
+    try:
+        proc = psutil.Process(os.getpid()).parent()
+        while proc is not None:
+            exe = _exe(proc)
+            if not exe or _norm(exe) not in launchers:
+                return proc
+            proc = proc.parent()
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        _LOG.warning("cannot walk the parent processes: %s", exc)
+    return None
+
+
+def _open(pid: int) -> psutil.Process | None:
+    """``psutil.Process(pid)``, or None when that process is not running."""
+    try:
+        proc = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError) as exc:
+        _LOG.warning("process %s cannot be watched: %s", pid, exc)
+        return None
+    return proc if _is_running(proc) else None
+
+
+def _is_running(proc: psutil.Process) -> bool:
+    """``is_running`` also checks the create time, so a reused PID counts as gone."""
+    try:
+        return proc.is_running()
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        _LOG.warning("process %s treated as gone: %s", proc.pid, exc)
+        return False
+
+
+def _runner_pid() -> int | None:
+    try:
+        from episteme.config import get_settings
+
+        return get_settings().runner_pid
+    except Exception as exc:  # noqa: BLE001 - no settings: use the ancestor walk
+        _LOG.warning("runner PID unavailable (%s); watching the parent process", exc)
+        return None
+
+
+def _watch_target(parent_pid: int | None) -> tuple[psutil.Process | None, int | None]:
+    """The process to watch, in this order: an explicit ``parent_pid``; the
+    runner (``EPISTEME_RUNNER_PID``, exported by scripts/data/_lib/common.sh) if
+    it is running now; the first ancestor that is not the venv launcher.
+    Returns ``(process, pid)``; a None process means it is already gone."""
+    if parent_pid is not None:
+        return _open(parent_pid), parent_pid
+    runner = _runner_pid()
+    if runner is not None:
+        proc = _open(runner)
+        if proc is not None:
+            return proc, runner
+        _LOG.warning(
+            "EPISTEME_RUNNER_PID=%s is not running; watching the parent process instead",
+            runner,
+        )
+    proc = _ancestor_to_watch()
+    return proc, (proc.pid if proc is not None else None)
+
+
 def start_parent_watchdog(
     cancel: Callable[[], None],
     *,
@@ -56,14 +149,14 @@ def start_parent_watchdog(
     stop: threading.Event | None = None,
 ) -> threading.Thread:
     """Start a daemon thread that cancels the running statement and exits the
-    process (code 143) when the parent process is gone. Setting ``stop`` ends
-    the thread without that exit (the guarded stage finished)."""
-    # Limits: if the parent is already dead at start, POSIX getppid() returns 1,
-    # which exists; a zombie parent also counts as existing.
-    ppid = parent_pid or os.getppid()
+    process (code 143) when the watched process is gone (see ``_watch_target``).
+    Setting ``stop`` ends the thread without that exit (the guarded stage
+    finished)."""
+    # Limits: a zombie parent on POSIX counts as running.
+    proc, ppid = _watch_target(parent_pid)
 
     def _watch() -> None:
-        while psutil.pid_exists(ppid):
+        while proc is not None and _is_running(proc):
             if stop is not None:
                 if stop.wait(interval):
                     return

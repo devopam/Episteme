@@ -258,3 +258,19 @@ def test_duckdb_temp_dir_default_is_none(fresh_config):
 def test_duckdb_temp_dir_override(fresh_config, tmp_path):
     cfg = fresh_config(f"EPISTEME_DUCKDB_TEMP_DIR={tmp_path.as_posix()}\n")
     assert cfg.get_settings().duckdb_temp_dir == tmp_path
+
+
+def test_runner_pid_default_is_none(fresh_config):
+    assert fresh_config("").get_settings().runner_pid is None
+
+
+def test_runner_pid_is_read(fresh_config):
+    assert fresh_config("EPISTEME_RUNNER_PID=4321\n").get_settings().runner_pid == 4321
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-5", "12.5"])
+def test_runner_pid_invalid_warns_and_gives_none(fresh_config, caplog, bad):
+    cfg = fresh_config(f"EPISTEME_RUNNER_PID={bad}\n")
+    with caplog.at_level(logging.WARNING, logger="episteme.config"):
+        assert cfg.get_settings().runner_pid is None  # no ConfigError
+    assert "EPISTEME_RUNNER_PID" in caplog.text
