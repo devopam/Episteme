@@ -6,9 +6,14 @@ docs/superpowers/specs/2026-10-19-pipeline-operating-standard-design.md."""
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import re
+import sys
 from dataclasses import dataclass, field, fields
+from functools import lru_cache
+from pathlib import Path
 
 from episteme.ops.hardware import Hardware
 
@@ -134,3 +139,104 @@ def compute_profile(hw: Hardware, ov: Overrides, *, data_role: str = "processed"
 
 
 PROFILE_FIELDS = tuple(f.name for f in fields(Profile) if f.name not in ("hardware", "sources"))
+
+
+_BYTE_KEYS = {
+    "duckdb_memory_limit": ("duckdb_memory_bytes", "EPISTEME_DUCKDB_MEMORY_LIMIT"),
+    "part_bytes": ("part_bytes", "EPISTEME_PART_BYTES"),
+    "pg_shared_buffers": ("pg_shared_buffers_bytes", "EPISTEME_PG_SHARED_BUFFERS"),
+    "pg_maintenance_work_mem": (
+        "pg_maintenance_work_mem_bytes",
+        "EPISTEME_PG_MAINTENANCE_WORK_MEM",
+    ),
+    "pg_work_mem": ("pg_work_mem_bytes", "EPISTEME_PG_WORK_MEM"),
+}
+_INT_KEYS = {
+    "extract_workers": "cpu_workers",
+    "io_concurrency": "io_concurrency",
+    "download_threads": "download_threads",
+    "pmc_threads": "pmc_threads",
+    "batch_rows": "batch_rows",
+    "part_rows": "part_rows",
+}
+
+
+def overrides_from_settings(s) -> Overrides:
+    kw: dict[str, int | None] = {}
+    for attr, name in _INT_KEYS.items():
+        kw[name] = getattr(s, attr)
+    for attr, (name, env_key) in _BYTE_KEYS.items():
+        raw = getattr(s, attr)
+        if raw is None:
+            kw[name] = None
+            continue
+        value = parse_bytes(raw)
+        if value is None or value <= 0:
+            _LOG.warning(
+                "%s=%r is not a size like 2GB or 512MB; using the rule's value", env_key, raw
+            )
+        kw[name] = value if value and value > 0 else None
+    return Overrides(**kw)
+
+
+def _paths(s) -> dict[str, Path]:
+    paths = {"raw": s.raw_root, "processed": s.processed_root}
+    if s.duckdb_temp_dir is not None:
+        paths["duckdb_temp"] = s.duckdb_temp_dir
+    return paths
+
+
+@lru_cache(maxsize=1)
+def get_profile() -> Profile:
+    from episteme.config import get_settings
+    from episteme.ops.hardware import detect
+
+    s = get_settings()
+    return compute_profile(detect(_paths(s)), overrides_from_settings(s))
+
+
+def _mb(b: int) -> str:
+    return f"{b // MB}MB"
+
+
+def render(p: Profile, fmt: str) -> str:
+    if fmt == "pg":
+        rows = {
+            "shared_buffers": _mb(p.pg_shared_buffers_bytes),
+            "maintenance_work_mem": _mb(p.pg_maintenance_work_mem_bytes),
+            "work_mem": _mb(p.pg_work_mem_bytes),
+            "effective_io_concurrency": str(p.pg_effective_io_concurrency),
+            "max_parallel_workers_per_gather": str(p.pg_max_parallel_workers_per_gather),
+        }
+        return "\n".join(f"{k}|{v}" for k, v in rows.items())
+    values = {name: getattr(p, name) for name in PROFILE_FIELDS}
+    hw = {
+        "physical_cores": p.hardware.physical_cores,
+        "ram_bytes": p.hardware.ram_bytes,
+        "disk_kinds": p.hardware.disk_kinds,
+    }
+    if fmt == "json":
+        return json.dumps(
+            {"hardware": hw, "values": values, "sources": p.sources}, indent=2, sort_keys=True
+        )
+    lines = [
+        f"hardware: {hw['physical_cores']} cores, {hw['ram_bytes'] // GB} GB RAM, "
+        f"disks {hw['disk_kinds']}"
+    ]
+    for name in PROFILE_FIELDS:
+        lines.append(f"{name:36} {values[name]!s:>16}  {p.sources.get(name, 'rule')}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="python -m episteme.ops.profile")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    show = sub.add_parser("show", help="print the runtime profile")
+    show.add_argument("--format", choices=("text", "json", "pg"), default="text")
+    args = ap.parse_args(argv)
+    print(render(get_profile(), args.format))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

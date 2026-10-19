@@ -1,7 +1,9 @@
+import json
 import logging
 
 import pytest
 
+from episteme.ops import profile as prof
 from episteme.ops.hardware import Hardware
 from episteme.ops.profile import Overrides, compute_profile, parse_bytes
 
@@ -102,3 +104,44 @@ def test_parse_bytes_rejects(text):
 def test_duckdb_memory_limit_string():
     p = compute_profile(LAPTOP, Overrides(duckdb_memory_bytes=4 * GB))
     assert p.duckdb_memory_limit == "4096MB"
+
+
+class _S:  # a stand-in for Settings with only the override fields
+    extract_workers = None
+    io_concurrency = None
+    download_threads = None
+    pmc_threads = None
+    duckdb_memory_limit = None
+    batch_rows = None
+    part_rows = None
+    part_bytes = None
+    pg_shared_buffers = None
+    pg_maintenance_work_mem = None
+    pg_work_mem = None
+
+
+def test_overrides_from_settings_parses_byte_values(caplog):
+    s = _S()
+    s.duckdb_memory_limit, s.part_bytes, s.pg_work_mem, s.extract_workers = "2GB", "lots", "16MB", 5
+    with caplog.at_level(logging.WARNING, logger="episteme.ops.profile"):
+        ov = prof.overrides_from_settings(s)
+    assert (ov.duckdb_memory_bytes, ov.pg_work_mem_bytes, ov.cpu_workers) == (2 * GB, 16 * 2**20, 5)
+    assert ov.part_bytes is None and "EPISTEME_PART_BYTES" in caplog.text
+
+
+def test_render_pg_whole_megabytes():
+    p = compute_profile(LAPTOP, Overrides())
+    lines = dict(line.split("|") for line in prof.render(p, "pg").splitlines())
+    assert lines["shared_buffers"] == f"{p.pg_shared_buffers_bytes // 2**20}MB"
+    assert lines["maintenance_work_mem"].endswith("MB") and "." not in lines["maintenance_work_mem"]
+    assert lines["work_mem"] == "32MB"
+    assert lines["effective_io_concurrency"] == "2"
+    assert lines["max_parallel_workers_per_gather"] == "2"
+
+
+def test_render_json_and_text_name_sources():
+    p = compute_profile(LAPTOP, Overrides(cpu_workers=7))
+    data = json.loads(prof.render(p, "json"))
+    assert data["values"]["cpu_workers"] == 7 and data["sources"]["cpu_workers"] == "env"
+    text = prof.render(p, "text")
+    assert "cpu_workers" in text and "env" in text and "rule" in text
