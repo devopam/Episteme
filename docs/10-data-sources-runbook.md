@@ -117,12 +117,12 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
-| `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs. Unset: the profile's rule (16; section 2.5). |
+| `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs. Unset: 4 in the aria2c wrappers. The profile computes `download_threads` (16), but no wrapper reads it yet. |
 | `EPISTEME_PMC_THREADS` | Threads of the `pmc` downloader (`--threads`). Unset: the profile's rule (48). |
 | `EPISTEME_DUCKDB_MEMORY_LIMIT` | Memory cap for the serializers' DuckDB connections (unset: the profile's rule, 50% of the pipeline share, about 4 GB on a 16 GB machine; spills to `EPISTEME_DUCKDB_TEMP_DIR`). |
 | `EPISTEME_DUCKDB_TEMP_DIR` | Spill root for those connections (default `<processed root>/_ops/_duckdb_tmp`). Set it to a fast local disk when the processed root is on a slow disk: the `pubchem` join spilled 31 GB at random-I/O speed to the USB HDD and slowed every other job on it (2026-10-18). |
 | `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (unset: the profile's rule, the physical cores minus one, limited by memory; 3 on the 4-core laptop). `--workers N` on a module overrides it. |
-| `EPISTEME_IO_CONCURRENCY` | Parallel reads or writes on the data disk. Unset: the profile's rule (2 on an HDD or an unknown disk kind; 4 x cores on an SSD). |
+| `EPISTEME_IO_CONCURRENCY` | Parallel reads or writes on the data disk. Unset: the profile's rule (2 on an HDD or an unknown disk kind; 4 x cores on an SSD). The profile reads it, but no stage uses it yet. |
 | `EPISTEME_BATCH_ROWS` | Rows per write, fetch, load and graph batch. Unset: the profile's rule (50,000; 100,000 when RAM is 48 GB or more). |
 | `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES` | Row and byte caps of one part. The profile reads them. No stage writes parts yet. |
 | `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM`, `EPISTEME_PG_WORK_MEM` | Values that `tune_postgres.sh` applies. Unset: the profile's rule (section 2.5). |
@@ -265,7 +265,9 @@ Show the profile:
 .venv/Scripts/python -m episteme.ops.profile show --format pg      # the values for tune_postgres.sh
 ```
 
-Each line of the text output shows a value and its source: `detected`, `rule` or `env`.
+The first line of the text output shows the hardware and ends with `detected`. Each value line ends with its source: `rule` or `env`.
+
+`effective_io_concurrency` follows the disk kind of the processed root, not of the PostgreSQL data directory. Run `tune_postgres.sh` from a checkout whose processed root is on the same kind of disk as the server's data (on production, both are on D:).
 
 **An env key wins.** A set key always replaces the rule's value. An invalid value logs a warning, and the rule's value is used. The keys are in section 1.2: `EPISTEME_EXTRACT_WORKERS`, `EPISTEME_IO_CONCURRENCY`, `EPISTEME_DOWNLOAD_THREADS`, `EPISTEME_PMC_THREADS`, `EPISTEME_DUCKDB_MEMORY_LIMIT`, `EPISTEME_DUCKDB_TEMP_DIR`, `EPISTEME_BATCH_ROWS`, `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES`, `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM` and `EPISTEME_PG_WORK_MEM`. A `--workers N` flag on a module wins over the key.
 

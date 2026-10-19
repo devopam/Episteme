@@ -294,3 +294,10 @@ def test_unknown_mode_is_rejected(tmp_path):
     proc, calls = _run(tmp_path, "tune-everything")
     assert proc.returncode != 0
     assert calls == []
+
+
+def test_help_prints_the_whole_header(tmp_path):
+    proc, calls = _run(tmp_path, "--help")
+    assert proc.returncode == 0
+    assert "Sizing and reasons: docs/10 section 2.4." in proc.stdout
+    assert calls == []

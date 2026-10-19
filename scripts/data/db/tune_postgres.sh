@@ -27,7 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-check}"
 case "$MODE" in
     check|apply) ;;
-    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "tune_postgres.sh: unknown mode '$MODE' (check|apply)" ;;
 esac
 
@@ -52,7 +52,7 @@ fi
 
 # name|value — keep in step with the table in docs/10 section 2.4. The fixed
 # values come first; the profile adds the memory and parallelism values.
-profile_rows="$("$PY" -m episteme.ops.profile show --format=pg)"     || die "tune_postgres.sh: could not compute the runtime profile (python -m episteme.ops.profile show --format=pg)"
+profile_rows="$("$PY" -m episteme.ops.profile show --format=pg)" || die "tune_postgres.sh: could not compute the runtime profile (python -m episteme.ops.profile show --format=pg)"
 SETTINGS=(
     "max_wal_size|16GB"
     "min_wal_size|2GB"
@@ -63,7 +63,7 @@ SETTINGS=(
 profile_count=0
 while IFS= read -r row; do
     row="${row%$'\r'}"
-    if [[ $row =~ ^[a-z_][a-z0-9_]*[|][^|]+$ ]]; then
+    if [[ $row =~ ^[a-z_][a-z0-9_]*[|][0-9]+(MB)?$ ]]; then
         SETTINGS+=("$row")
         profile_count=$((profile_count + 1))
     fi
