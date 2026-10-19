@@ -14,8 +14,8 @@ One raw input file (``source_file`` = its ``input_key``) is one transaction:
 A failure rolls the file back alone. ``build_pubmed_graph`` retries a transient error
 on a connection from the pool (audit mirror deferred until the commit) and stops at
 the first permanent failure: later files are not touched and the failed file is
-reported in ``failed`` / ``stopped_at``. The skip state lives in ``_graph_lineage``, in the same
-database the deletes act on.
+reported in ``failed`` / ``stopped_at``. The skip state lives in
+``_graph_lineage``, in the same database the deletes act on.
 """
 
 from __future__ import annotations

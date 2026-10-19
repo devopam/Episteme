@@ -155,6 +155,19 @@ def start_parent_watchdog(
     # Limits: a zombie parent on POSIX counts as running.
     proc, ppid = _watch_target(parent_pid)
 
+    if proc is None and parent_pid is None:
+        # Nothing to watch (no runner, no usable ancestor): a stage must never
+        # stop itself for that. Run without a watchdog; the thread only waits.
+        _LOG.warning("no process to watch; running without a parent watchdog")
+
+        def _idle() -> None:
+            if stop is not None:
+                stop.wait()
+
+        t = threading.Thread(target=_idle, name="parent-watchdog", daemon=True)
+        t.start()
+        return t
+
     def _watch() -> None:
         while proc is not None and _is_running(proc):
             if stop is not None:

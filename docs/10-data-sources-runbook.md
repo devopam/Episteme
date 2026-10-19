@@ -352,7 +352,7 @@ bash scripts/data/run_pipeline.sh corpus materialize
 
 Stages: `all`, `download`, `extract`, `load`, `graph`, `materialize`, `enrich`, `serialize`. Sources are the keys of the `WRAPPER` table in `scripts/data/run_pipeline.sh` (all listed in `docs/12-source-inventory.md`), plus the alias `corpus` (materialize only).
 
-Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2; `--skip-unit` without `--reason`, with `all`, or with a stage that does not take it: exit 2; `--skip-unit` with the `load` stage of `europepmc_id_mappings` or `cdisc_ct`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from; a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
+Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2; `--skip-unit` without `--reason`, with `all`, or with a stage that does not take it: exit 2; `--skip-unit` with the `load` stage of `europepmc_id_mappings` or `cdisc_ct`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from, except the `--bulk` index drop and rebuild (section 4.7); a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
 
 Tokens the dispatcher does not recognise are not dropped: they are forwarded to the download wrapper as the MODE or repo argument (for example `parquet` for `openalex`, `all` for `chembl`, a repo id for `hf_corpus`) and to flags such as `--include-current` or `--since`. Only the download wrapper sees them.
 
@@ -497,7 +497,7 @@ bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TE
 | 0 | The stage finished. |
 | 1 | A unit failed (permanent, or transient after 3 retries). |
 | 2 | Usage error, for example `--skip-unit` without `--reason`. |
-| 130 | Stopped with Ctrl-C. The runner prints `stopped at stage <name>`. |
+| 130 | Stopped with Ctrl-C. The audit `run_end` reason is `stopped at stage <name>`. |
 | 143 | Stopped with SIGTERM, or the parent runner died. |
 
 When a stage fails, `run_pipeline.sh` passes 130 and 143 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
@@ -505,14 +505,14 @@ When a stage fails, `run_pipeline.sh` passes 130 and 143 through and turns every
 **Stop handling.** Ctrl-C and SIGTERM stop the stage at once. A load or graph stage first cancels the running SQL statement.
 
 - With 1 worker, the unit in progress gets no success marker, so a re-run does it again.
-- With more than 1 worker, the units already in flight finish and write their success markers. The queued units do not start.
+- With more than 1 worker, a SIGTERM to the stage lets the units already in flight finish and write their success markers. The queued units do not start. A console Ctrl-C also reaches the pool workers, so units in flight can stop with no marker; a re-run redoes them.
 
 To stop a stage, stop the process (Ctrl-C or SIGTERM), or cancel its statement (`pg_cancel_backend`, SQLSTATE `57014`). Do not use `pg_terminate_backend`. It gives `57P01`, which is transient, so the stage waits 30 seconds and retries.
 
 **Parent watchdog.** Each stage runs a watchdog thread. It watches one process:
 
 1. The runner. `scripts/data/_lib/common.sh` exports `EPISTEME_RUNNER_PID`. The outermost script sets it: under `run_pipeline.sh` it is the PID of `run_pipeline.sh`; a wrapper run directly gives its own PID. Under Git Bash the value is the Windows PID (`/proc/$$/winpid`).
-2. If `EPISTEME_RUNNER_PID` is not set, is not an integer, or names a process that is not running when the stage starts, the stage logs a WARNING. It then watches its first ancestor that is not the venv launcher (`.venv/Scripts/python.exe` on Windows). On Linux that is the parent process.
+2. If `EPISTEME_RUNNER_PID` is not set, is not an integer, or names a process that is not running when the stage starts, the stage logs a WARNING. It then watches its first ancestor that is not the venv launcher (`.venv/Scripts/python.exe` on Windows). On Linux that is the parent process. If no such process can be found, the stage logs a WARNING (`no process to watch`) and runs without a watchdog.
 
 The watchdog checks the process every 10 seconds. It compares the process start time too, so a reused PID counts as gone. When the process is gone, the watchdog cancels the running statement (it waits at most 10 seconds for the cancel) and exits with 143. So the stage notices a dead runner within about 10 seconds, and exits within about 20.
 

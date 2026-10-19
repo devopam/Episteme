@@ -326,6 +326,24 @@ def test_stale_runner_pid_does_not_exit_at_once(monkeypatch):
     assert codes == []
 
 
+@pytest.mark.parametrize("runner", [None, 222], ids=["no-runner", "stale-runner"])
+def test_nothing_to_watch_runs_without_a_watchdog(monkeypatch, caplog, runner):
+    _fake_psutil(monkeypatch, {})
+    monkeypatch.setattr(stop, "_runner_pid", lambda: runner)
+    monkeypatch.setattr(stop, "_ancestor_to_watch", lambda: None)
+    codes = _no_exit(monkeypatch)
+    cancels: list[int] = []
+    done = threading.Event()
+    with caplog.at_level("WARNING", logger=stop._LOG.name):
+        t = stop.start_parent_watchdog(lambda: cancels.append(1), interval=0.01, stop=done)
+        time.sleep(0.2)
+    assert codes == [] and cancels == []
+    assert "running without a parent watchdog" in caplog.text
+    done.set()
+    t.join(5)
+    assert not t.is_alive()
+
+
 def test_runner_pid_comes_from_settings(monkeypatch):
     import episteme.config as cfg
 

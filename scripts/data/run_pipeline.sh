@@ -270,7 +270,8 @@ run_stage() {
         log ERROR "resume with: $0 $SOURCE $name"
         # DR-1: a dry run touches no DB, so it also emits no failure-path run_end
         # (that would be a lone run_end with no matching run_start).
-        [ "${EPISTEME_DRY_RUN:-0}" = "1" ]             || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "$reason" >/dev/null 2>&1 || true
+        [ "${EPISTEME_DRY_RUN:-0}" = "1" ] \
+            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "$reason" >/dev/null 2>&1 || true
         # A stop passes through; every other stage failure is exit 1 (exit 2
         # stays for the dispatcher's own rejections before run_start).
         case "$rc" in
