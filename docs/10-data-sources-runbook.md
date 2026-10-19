@@ -481,14 +481,14 @@ bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TE
 - A shard that already has a success marker is skipped as a `unit_skip` too, when you name it.
 - A name that matches no unit exits 2, and nothing is audited. Under `run_pipeline.sh` the runner then exits 1 (see the exit codes below).
 
-**Graph: a file that fails for a permanent reason.** The `graph` stage takes no `--skip-unit`. `--force --reason` does not help: it reloads every file, and the failing file fails again. The way past it is to rebuild that file's input:
+**Graph: a file that fails for a permanent reason.** The `graph` stage takes no `--skip-unit`. A failed file writes no `_graph_lineage` row, so every re-run tries it again. `--force --reason` does not help: the failing file fails again. What helps depends on the cause:
 
-1. Remove the file's extract success marker: `<processed root>/_ops/pubmed/success/<unit>.ok`.
-2. Run `extract` again. It redoes only that file.
-3. Load the new shard: `python -m episteme.data.load_articles --source pubmed --only <shard> --force --reason "TEXT"`.
-4. Run `graph` again. The file's `graph_sha256` changed, so the stage loads the file again.
-
-If the rebuilt file fails again, the graph stage stays blocked at that file. A graph `--skip-unit` is in the backlog.
+- The success marker or the relation files on disk are bad (a pre-1.6 marker, an unreadable marker, a missing or broken relation file). Rebuild them:
+  1. Remove the file's extract success marker: `<processed root>/_ops/pubmed/success/<unit>.ok`.
+  2. Run `extract` again. It redoes only that file.
+  3. Run `graph` again.
+- The raw input file is bad. Download it again first, then do the three steps above.
+- In every other case, the graph stage stays blocked at that file. A graph `--skip-unit` is in the backlog.
 
 **Exit codes.**
 
@@ -500,7 +500,7 @@ If the rebuilt file fails again, the graph stage stays blocked at that file. A g
 | 130 | Stopped with Ctrl-C. The runner prints `stopped at stage <name>`. |
 | 143 | Stopped with SIGTERM, or the parent runner died. |
 
-`run_pipeline.sh` exits 2 only when it rejects the arguments before `run_start`. After `run_start`, it passes 130 and 143 through and turns every other non-zero stage code into 1. For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
+When a stage fails, `run_pipeline.sh` passes 130 and 143 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
 
 **Stop handling.** Ctrl-C and SIGTERM stop the stage at once. A load or graph stage first cancels the running SQL statement.
 
