@@ -11,8 +11,9 @@ from typing import Any
 
 from episteme.data import article_schema
 from episteme.data.article_schema import ARTICLE_COLUMNS
+from episteme.ops.profile import default_batch_rows
 
-WRITE_BATCH_ROWS = 50_000
+WRITE_BATCH_ROWS = default_batch_rows()
 
 
 def rows_to_columnar(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:

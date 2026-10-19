@@ -24,6 +24,26 @@ def test_connect_applies_limit_and_temp_dir(tmp_path):
         con.close()
 
 
+def _clear_profile():
+    from episteme.ops import profile as prof
+
+    clear = getattr(prof.get_profile, "cache_clear", None)  # a test may have patched it
+    if clear:
+        clear()
+
+
+def _limit_of(spec):
+    """What DuckDB reports for ``SET memory_limit = spec`` (version-independent)."""
+    import duckdb
+
+    ref = duckdb.connect()
+    try:
+        ref.execute(f"SET memory_limit = '{spec}'")
+        return ref.execute("select current_setting('memory_limit')").fetchone()[0]
+    finally:
+        ref.close()
+
+
 @pytest.fixture
 def settings_root(tmp_path, monkeypatch):
     """Point get_settings() at tmp_path (processed root) and a 256MB DuckDB limit.
@@ -36,15 +56,17 @@ def settings_root(tmp_path, monkeypatch):
     # empty, not unset: an operator .env value would otherwise be loaded back
     monkeypatch.setenv("EPISTEME_DUCKDB_TEMP_DIR", "")
     duckdb_conn.get_settings.cache_clear()
+    _clear_profile()
     yield tmp_path
     duckdb_conn.get_settings.cache_clear()
+    _clear_profile()
 
 
 def test_connect_defaults_come_from_settings(settings_root):
     con = duckdb_conn.connect()
     try:
         limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
-        assert limit.startswith(("244", "256"))  # 256MB reported as 244.1 MiB or 256.0 MB
+        assert limit == _limit_of("256MB")  # the env override, folded into the profile
         spill = _temp_directory(con)
         assert spill.parent == settings_root / "_ops" / "_duckdb_tmp"
     finally:
@@ -98,7 +120,9 @@ def test_fetch_batches_sizes():
 
 
 def test_fetch_batches_default_size():
-    assert duckdb_conn.FETCH_BATCH_ROWS == 50_000
+    from episteme.ops.profile import default_batch_rows
+
+    assert duckdb_conn.FETCH_BATCH_ROWS == default_batch_rows()
 
 
 def test_connect_spills_under_the_configured_temp_dir(settings_root, tmp_path, monkeypatch):
@@ -109,6 +133,23 @@ def test_connect_spills_under_the_configured_temp_dir(settings_root, tmp_path, m
     con = duckdb_conn.connect()
     try:
         assert _temp_directory(con).parent == fast
+    finally:
+        con.close()
+
+
+def test_connect_default_limit_is_the_profile_rule_value(settings_root, monkeypatch):
+    """With the env limit unset, the limit equals the profile's duckdb_memory_limit."""
+    from episteme.ops import profile as prof
+    from episteme.ops.hardware import Hardware
+
+    monkeypatch.setenv("EPISTEME_DUCKDB_MEMORY_LIMIT", "")
+    duckdb_conn.get_settings.cache_clear()
+    p = prof.compute_profile(Hardware(4, 8 * 2**30, {"processed": "ssd"}), prof.Overrides())
+    monkeypatch.setattr(prof, "get_profile", lambda: p)
+    con = duckdb_conn.connect()
+    try:
+        limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
+        assert limit == _limit_of(p.duckdb_memory_limit)
     finally:
         con.close()
 
@@ -126,6 +167,6 @@ def test_connect_default_limit_comes_from_the_profile(settings_root, monkeypatch
     con = duckdb_conn.connect()
     try:
         limit = con.execute("select current_setting('memory_limit')").fetchone()[0]
-        assert limit.startswith(("244", "256"))
+        assert limit == _limit_of("256MB")
     finally:
         con.close()

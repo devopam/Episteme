@@ -60,6 +60,7 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
 from episteme.config import get_settings
+from episteme.ops import profile as ops_profile
 
 S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
 
@@ -592,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threads",
         type=int,
-        default=48,
+        default=ops_profile.get_profile().pmc_threads,
         help="Parallel download workers (each keeps its own connection open)",
     )
     parser.add_argument(

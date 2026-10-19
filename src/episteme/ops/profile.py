@@ -186,6 +186,21 @@ def _paths(s) -> dict[str, Path]:
     return paths
 
 
+def default_batch_rows() -> int:
+    """Batch size for the module constants (rows per write, load, fetch).
+
+    Uses RAM and the override only. It must not call ``get_profile()``: the
+    constants call this at import, and ``get_profile()`` runs disk detection.
+    """
+    from episteme.config import get_settings
+    from episteme.ops import hardware
+
+    override = get_settings().batch_rows
+    if override is not None:
+        return override
+    return 100_000 if hardware.ram_bytes() >= 48 * GB else 50_000
+
+
 @lru_cache(maxsize=1)
 def get_profile() -> Profile:
     from episteme.config import get_settings

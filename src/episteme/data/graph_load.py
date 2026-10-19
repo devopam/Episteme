@@ -31,8 +31,9 @@ from episteme.data.graph_files import (
     graph_file_path,
     marker_graph_info,
 )
+from episteme.ops.profile import default_batch_rows
 
-_BATCH_ROWS = 50_000
+_BATCH_ROWS = default_batch_rows()
 
 
 class GraphLoadError(RuntimeError):
