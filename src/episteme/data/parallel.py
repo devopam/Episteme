@@ -60,6 +60,7 @@ from episteme.ops.retry import RETRY_WAITS, TransientUnitError
 _LOG = logging.getLogger(__name__)
 
 _EXECUTORS = ("process", "thread")
+_SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 
 def default_workers() -> int:
@@ -98,7 +99,7 @@ def run_per_file(
     executor: str = "process",
     stop_on_failure: bool = True,
     waits: Sequence[float] = RETRY_WAITS,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     on_result: Callable[[dict[str, Any]], None] | None = None,
     **kwargs: Any,
 ) -> list[dict[str, Any]]:
@@ -112,6 +113,11 @@ def run_per_file(
     """
     if executor not in _EXECUTORS:
         raise ValueError(f"executor must be one of {_EXECUTORS}, not {executor!r}")
+    if sleep is None:
+        # Late lookup, so a test that patches ``_SLEEP`` reaches every caller.
+        def sleep(secs: float) -> None:
+            _SLEEP(secs)
+
     files = list(files)
     workers = max(1, int(workers))
     raw_dir = kwargs.get("raw_dir")
@@ -166,7 +172,7 @@ def _call_inline(
             _log_retry(path, tries, len(waits), wait_s, exc)
             sleep(wait_s)
         except Exception as exc:  # noqa: BLE001 - becomes a failed result, as in a pool
-            _LOG.error("failed on %s: %r", path, exc)
+            _LOG.exception("failed on %s: %r", path, exc)
             return _failed_result(path, raw_dir, exc)
 
 
@@ -207,8 +213,13 @@ def _run_pool(
                             continue
                         except RuntimeError as sub_exc:  # broken or shut-down pool
                             result = _failed_result(path, raw_dir, sub_exc)
+                    elif stopping:
+                        _LOG.error(
+                            "transient error on %s after the stop, not retried: %s", path, exc
+                        )
+                        result = _failed_result(path, raw_dir, exc)
                     else:
-                        _LOG.error("transient error on %s, not retried: %s", path, exc)
+                        _LOG.error("transient error on %s after %d retries: %s", path, tries, exc)
                         result = _failed_result(path, raw_dir, exc)
                 except BrokenExecutor as exc:
                     if not broken_logged:
@@ -216,7 +227,7 @@ def _run_pool(
                         broken_logged = True
                     result = _failed_result(path, raw_dir, exc)
                 except Exception as exc:  # noqa: BLE001 - one file's crash becomes its failed result
-                    _LOG.error("worker failed on %s: %r", path, exc)
+                    _LOG.exception("worker failed on %s: %r", path, exc)
                     result = _failed_result(path, raw_dir, exc)
                 emit(result)
                 if stop_on_failure and not stopping and is_failure(result):
@@ -239,18 +250,53 @@ def _run_pool(
         raise
 
 
+def _resolve_skip_names(
+    source: str, stage: str, keys: Sequence[str], skip_names: Sequence[str]
+) -> list[str]:
+    """Map each ``--skip-unit`` name to one unit key.
+
+    An exact key is kept. A bare basename that matches exactly one file maps to
+    that file's key. A basename that matches two or more files exits 2 and
+    lists the keys (one skip must never drop several units behind one audit
+    row). A name that matches nothing is passed on; ``apply_skips`` exits 2.
+    """
+    keyset = set(keys)
+    by_base: dict[str, list[str]] = {}
+    for key in keys:
+        by_base.setdefault(key.rsplit("__", 1)[-1], []).append(key)
+    resolved: list[str] = []
+    for name in skip_names:
+        if name in keyset:
+            resolved.append(name)
+            continue
+        hits = by_base.get(name, [])
+        if len(hits) > 1:
+            print(
+                f"error: --skip-unit {name!r} matches {len(hits)} {stage} units of {source}; "
+                f"name one of: {', '.join(sorted(hits))}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        resolved.append(hits[0] if hits else name)
+    return resolved
+
+
 def skip_files(
     source: str,
     stage: str,
     files: Sequence[Path],
+    raw_dir: Path,
     skip_names: Sequence[str] | None,
     reason: str | None,
 ) -> list[Path]:
-    """Drop the files named by ``--skip-unit`` (the unit name is the basename).
+    """Drop the files named by ``--skip-unit``.
 
-    Without skip names this returns ``files`` and touches no database. With
-    them, ``ops.skip.apply_skips`` exits 2 on a name that matches no file and
-    writes one ``unit_skip`` audit row per skipped name.
+    The unit name is ``input_key(path, raw_dir)`` -- the ``source_file`` that
+    ``record_first_failure`` writes. A bare basename is accepted when it
+    matches exactly one file. Without skip names this returns ``files`` and
+    touches no database. With them, a name that matches no file, or a basename
+    that matches several, exits 2 before any audit row; otherwise
+    ``ops.skip.apply_skips`` writes one ``unit_skip`` row per skipped unit.
     """
     files = list(files)
     if not skip_names:
@@ -258,42 +304,34 @@ def skip_files(
     from episteme.config import get_settings
     from episteme.ops.skip import apply_skips
 
-    keep = set(
-        apply_skips(
-            source,
-            stage,
-            [p.name for p in files],
-            skip_names,
-            reason,
-            run_id=get_settings().run_id,
-        )
-    )
-    for p in files:
-        if p.name not in keep:
-            print(f"skip-unit {p.name}", file=sys.stderr)
-    return [p for p in files if p.name in keep]
+    keys = [input_key(p, raw_dir) for p in files]
+    resolved = _resolve_skip_names(source, stage, keys, skip_names)
+    keep = set(apply_skips(source, stage, keys, resolved, reason, run_id=get_settings().run_id))
+    out: list[Path] = []
+    for path, key in zip(files, keys, strict=True):
+        if key in keep:
+            out.append(path)
+        else:
+            print(f"skip-unit {key}", file=sys.stderr)
+    return out
 
 
 def record_first_failure(
     source: str,
     stage: str,
-    files: Sequence[Path],
     results: Iterable[dict[str, Any]],
-    raw_dir: Path,
 ) -> str | None:
     """Write ``last_failure.json`` for the first failed result; return its unit.
 
-    The unit is the file basename -- the name ``--skip-unit`` takes. A result's
-    ``source_file`` is ``input_key(path, raw_dir)``; it maps back to the path.
+    The unit is the result's ``source_file`` (``input_key(path, raw_dir)``),
+    the name ``--skip-unit`` takes.
     """
     fail = first_failure(results)
     if fail is None:
         return None
     from episteme.ops.failure import record_failure
 
-    key = str(fail.get("source_file") or "")
-    by_key = {input_key(p, raw_dir): p for p in files}
-    unit = by_key[key].name if key in by_key else Path(key).name
+    unit = str(fail.get("source_file") or "")
     error = str(fail.get("error") or "")
     record_failure(source, stage, unit, error)
     print(f"stopped at {unit}: {error}", file=sys.stderr)

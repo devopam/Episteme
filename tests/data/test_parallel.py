@@ -33,6 +33,23 @@ def _exit_on_b(path: Path, *, raw_dir: Path) -> dict:
     return {"source_file": path.name, "skipped": False, "ok": True}
 
 
+def _exit_on_b_others_slow(path: Path, *, raw_dir: Path) -> dict:
+    """b kills its worker at once; every other file is still running then."""
+    if path.name == "b.txt":
+        os._exit(3)
+    time.sleep(3)
+    return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def _transient_then_exit(path: Path, *, raw_dir: Path, counter: Path) -> dict:
+    """First call: a transient error. The retry kills its worker."""
+    n = int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+    counter.write_text(str(n + 1), encoding="utf-8")
+    if n == 0:
+        raise TransientUnitError(path.name, "OSError(5, 'I/O error')")
+    os._exit(3)
+
+
 def _fail_on_b(path: Path, *, raw_dir: Path, log: Path | None = None) -> dict:
     """b.txt returns a failed result (the common case: process_one caught it)."""
     if log is not None:  # one file per call: concurrent appends are not atomic on Windows
@@ -286,7 +303,7 @@ def test_unknown_executor_is_rejected(tmp_path):
         run_per_file(_echo, files, workers=2, executor="fork", raw_dir=raw, tag="t")
 
 
-def test_broken_pool_is_permanent_and_not_retried(tmp_path, spawn_child_env):
+def test_broken_pool_fails_the_unit_without_sleeping(tmp_path, spawn_child_env):
     raw, files = _files(tmp_path, ("b.txt",))
     slept: list[float] = []
     [r] = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw, sleep=slept.append)
@@ -295,11 +312,25 @@ def test_broken_pool_is_permanent_and_not_retried(tmp_path, spawn_child_env):
     assert slept == []
 
 
-def test_dead_worker_stops_the_run(tmp_path, spawn_child_env):
+def test_broken_pool_after_a_retry_is_permanent(tmp_path, spawn_child_env):
+    raw, files = _files(tmp_path, ("a.txt",))
+    slept: list[float] = []
+    counter = tmp_path / "count.txt"
+    [r] = run_per_file(
+        _transient_then_exit, files, workers=2, raw_dir=raw, counter=counter, sleep=slept.append
+    )
+    assert slept == [30]  # one retry for the transient error, none after the break
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert r["ok"] is False and "BrokenProcessPool" in r["error"]
+
+
+def test_dead_worker_fails_every_unit_in_flight(tmp_path, spawn_child_env):
     raw, files = _files(tmp_path)
-    results = run_per_file(_exit_on_b, files, workers=2, raw_dir=raw)
-    assert first_failure(results) is not None
-    assert len(results) <= len(files)
+    results = run_per_file(_exit_on_b_others_slow, files, workers=2, raw_dir=raw)
+    assert results  # b at least
+    for r in results:
+        assert r["ok"] is False and r["skipped"] is False
+        assert "BrokenProcessPool" in r["error"]
 
 
 @pytest.mark.parametrize("executor", ["process", "thread"])
@@ -316,3 +347,20 @@ def test_a_stop_in_the_parent_cancels_the_pending_files(tmp_path, spawn_child_en
             _fail_on_b, files, workers=2, raw_dir=raw, log=log, executor=executor, on_result=_stop
         )
     assert len(list(log.iterdir())) < len(files)  # queued files never started
+
+
+def test_escaped_exception_is_logged_with_its_stack(tmp_path, caplog):
+    raw, files = _files(tmp_path, ("b.txt",))
+    with caplog.at_level("ERROR", logger="episteme.data.parallel"):
+        run_per_file(_boom_on_b, files, workers=1, raw_dir=raw)
+    assert any(r.exc_info and "kaboom" in str(r.exc_info[1]) for r in caplog.records)
+
+
+def test_default_sleep_goes_through_the_module_seam(tmp_path, monkeypatch):
+    import episteme.data.parallel as par
+
+    calls: list[float] = []
+    monkeypatch.setattr(par, "_SLEEP", calls.append)
+    raw, files = _files(tmp_path, ("a.txt",))
+    run_per_file(_always_transient, files, workers=1, raw_dir=raw)
+    assert calls == [30, 60, 120]

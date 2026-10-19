@@ -617,7 +617,7 @@ def extract_apollo(
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     files = discover_apollo_files(raw_dir)
-    files = skip_files(SOURCE, "extract", files, skip_units, skip_reason)
+    files = skip_files(SOURCE, "extract", files, raw_dir, skip_units, skip_reason)
     if max_files and max_files > 0:
         files = files[:max_files]
 
@@ -633,7 +633,7 @@ def extract_apollo(
         processed_dir=processed_dir,
         force=force,
     )
-    record_first_failure(SOURCE, "extract", files, results, raw_dir)
+    record_first_failure(SOURCE, "extract", results)
 
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
@@ -761,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
     add_skip_args(p)
     args = p.parse_args(argv)
     check_skip_args(p, args)
+    if args.report and args.skip_unit:
+        p.error("--skip-unit cannot be used with --report")
     workers = default_workers() if args.workers is None else max(1, args.workers)
 
     raw_dir: Path = args.raw_dir
@@ -787,7 +789,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_reason=args.reason,
     )
 
-    if res["inputs"] == 0:
+    # inputs == 0 after --skip-unit dropped every file is a clean run (R8).
+    if res["inputs"] == 0 and not args.skip_unit:
         print(f"ERROR: no apollo *.json(l) under {raw_dir}", file=sys.stderr)
         return 1
 
