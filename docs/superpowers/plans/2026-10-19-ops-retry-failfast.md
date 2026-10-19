@@ -413,6 +413,7 @@ Tests to flip: `test_graph_load.py` cases asserting a failed file is listed and 
 
 **Files:** every extractor and serializer `main`; `docs/10-data-sources-runbook.md` (section "Failure rules": fail fast, retries, `--skip-unit`, exit codes 1/130/143, `last_failure.json`, orphan sweep, application_name), `docs/project-incubation-baseline.md` (drift-log entry; backlog: downloads' record-and-continue and pause are PR 3).
 
+- `scripts/data/run_pipeline.sh`: accept `--skip-unit NAME` (repeatable; requires `--reason`; allowed only with one named stage, not `all`, else `die ... 2`) and forward `--skip-unit NAME` plus `--reason` to that stage's arguments (and the stage wrapper scripts pass them through). A skip is per run: there is no persistent skip marker. Test it with the dispatch-test harness.
 - [ ] Steps: wrap each main in `stage_guard(conn_ref)` (extractors hold no long DB statement; `conn_ref` returns None and only the handlers and the watchdog apply); a test per kind (one extractor, one serializer) that SIGTERM during `run_per_file` exits 143 and leaves the in-flight unit's marker; docs; full suite `timeout 1500 .venv/Scripts/python -m pytest -q -m "not pg"`; `ruff format --check .`; commit.
 
 ---
