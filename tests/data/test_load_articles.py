@@ -166,3 +166,205 @@ def test_only_loads_the_newer_sdtm_shard_and_never_the_older(
             (older,),
         )
         assert cur.fetchone()[0] == 0
+
+
+# --- fail-fast, retry and --skip-unit (operating standard PR 2, Task 5) ------
+
+
+class _FakeConn:
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
+@pytest.fixture
+def ff(monkeypatch, tmp_path):
+    """load_articles.main with no DB: fake connection, fake load_source_file,
+    audit rows collected, orphan sweep and stage_guard stubbed."""
+    from contextlib import contextmanager, nullcontext
+    from types import SimpleNamespace
+
+    import episteme.ops.failure as failure
+    import episteme.ops.skip as skip
+    from episteme.data import load_articles as la
+
+    # No module reload: patch the settings seam of the two modules that read it.
+    settings = SimpleNamespace(processed_root=tmp_path, run_id=None)
+    monkeypatch.setattr(la, "get_settings", lambda: settings)
+    monkeypatch.setattr(failure, "get_settings", lambda: settings)
+
+    staging = tmp_path / "staging" / "src"
+    staging.mkdir(parents=True)
+    for n in ("a.jsonl", "b.jsonl", "c.jsonl"):
+        (staging / n).write_text("", encoding="utf-8")
+
+    @contextmanager
+    def _connection():
+        yield _FakeConn()
+
+    rows = []
+
+    def _record(event, **kw):
+        rows.append((event, kw.get("object"), kw.get("reason")))
+        return "h"
+
+    state = {"calls": [], "behaviour": {}}
+
+    def _load(conn, *, source, staging_path, run_id):
+        name = Path(staging_path).name
+        state["calls"].append(name)
+        b = state["behaviour"].get(name)
+        if isinstance(b, list):
+            if b:
+                raise b.pop(0)
+        elif b is not None:
+            raise b
+        return {
+            "rows": 1,
+            "deleted": 0,
+            "body_deleted": 0,
+            "event": "load_commit",
+            "read_sec": 0,
+            "copy_sec": 0,
+            "rows_per_sec": 0,
+        }
+
+    for mod in (la, skip):
+        monkeypatch.setattr(mod, "connection", _connection)
+        monkeypatch.setattr(mod.audit_trail, "record", _record)
+    monkeypatch.setattr(la.postgres_loader, "load_source_file", _load)
+    monkeypatch.setattr(la.orphans, "sweep", lambda conn: [])
+    monkeypatch.setattr(la, "stage_guard", lambda ref: nullcontext())
+    sleeps = []
+    monkeypatch.setattr(la, "_SLEEP", sleeps.append)
+
+    def run(*extra):
+        return la.main(["--source", "src", "--processed-dir", str(tmp_path), *extra])
+
+    class NS:
+        pass
+
+    ns = NS()
+    ns.run, ns.rows, ns.state, ns.sleeps, ns.root, ns.la = run, rows, state, sleeps, tmp_path, la
+    return ns
+
+
+def test_permanent_failure_stops_the_run_and_names_the_shard(ff, capsys):
+    # FLIPPED: the loader used to count the failure and go on to later shards.
+    ff.state["behaviour"]["b.jsonl"] = ValueError("bad row")
+    assert ff.run() == 1
+    assert ff.state["calls"] == ["a.jsonl", "b.jsonl"]  # c.jsonl is never touched
+    out = capsys.readouterr().out
+    assert "FAIL b.jsonl: bad row" in out
+    assert "done shards=3 failed=1 stopped_at=b.jsonl" in out
+    import json
+
+    data = json.loads((ff.root / "_ops" / "src" / "last_failure.json").read_text())
+    assert data["stage"] == "load" and data["unit"] == "b.jsonl"
+    assert "bad row" in data["error"]
+    ends = [r for r in ff.rows if r[0] == "run_end"]
+    assert len(ends) == 1 and ends[0][2].startswith("failed at shard b.jsonl")
+    assert ff.sleeps == []  # permanent: no retry
+
+
+def test_transient_error_is_retried_and_the_shard_loads_once(ff, capsys):
+    import psycopg
+
+    ff.state["behaviour"]["a.jsonl"] = [psycopg.OperationalError("connection lost")]
+    assert ff.run() == 0
+    assert ff.state["calls"] == ["a.jsonl", "a.jsonl", "b.jsonl", "c.jsonl"]
+    assert ff.sleeps == [30]
+    assert "done shards=3 failed=0" in capsys.readouterr().out
+
+
+def test_transient_error_past_the_last_retry_is_permanent(ff, capsys):
+    import psycopg
+
+    ff.state["behaviour"]["a.jsonl"] = [psycopg.OperationalError("x")] * 4
+    assert ff.run() == 1
+    assert ff.state["calls"] == ["a.jsonl"] * 4
+    assert ff.sleeps == [30, 60, 120]
+    assert "stopped_at=a.jsonl" in capsys.readouterr().out
+
+
+def test_skip_unit_without_reason_exits_2(ff):
+    with pytest.raises(SystemExit) as e:
+        ff.run("--skip-unit", "b.jsonl")
+    assert e.value.code == 2
+    assert ff.state["calls"] == []
+
+
+def test_skip_unit_skips_the_shard_and_records_one_row(ff, capsys):
+    assert ff.run("--skip-unit", "b.jsonl", "--reason", "corrupt upstream") == 0
+    assert ff.state["calls"] == ["a.jsonl", "c.jsonl"]
+    skips = [r for r in ff.rows if r[0] == "unit_skip"]
+    assert skips == [("unit_skip", "src b.jsonl", "corrupt upstream")]
+    assert "done shards=3 failed=0 skipped_by_operator=1" in capsys.readouterr().out
+
+
+def test_skip_unit_unknown_name_exits_2_before_loading(ff):
+    with pytest.raises(SystemExit) as e:
+        ff.run("--skip-unit", "nope.jsonl", "--reason", "r")
+    assert e.value.code == 2
+    assert ff.state["calls"] == []
+    assert [r for r in ff.rows if r[0] == "unit_skip"] == []
+
+
+def test_skip_unit_is_matched_after_only_filtering(ff):
+    with pytest.raises(SystemExit) as e:
+        ff.run("--only", "a.jsonl", "--skip-unit", "b.jsonl", "--reason", "r")
+    assert e.value.code == 2
+
+
+@pytest.mark.pg
+def test_transient_error_then_success_writes_one_load_commit(pg_conn, monkeypatch, tmp_path):
+    """Real DB: the first attempt dies with a transient error after writing,
+    the retry runs on a fresh connection; exactly one load_commit row remains
+    and the shard is loaded once."""
+    import psycopg
+
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    raw, processed = tmp_path / "raw" / "cdisc_ct", tmp_path / "processed"
+    key = _write_sdtm_release(raw, processed, "1999-01-01")
+
+    import episteme.data.db.connection as conn_mod
+    from episteme.data import load_articles
+
+    importlib.reload(load_articles)
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
+    monkeypatch.setattr(load_articles, "_SLEEP", lambda s: None)
+    real = load_articles.postgres_loader.load_source_file
+    calls = []
+
+    def flaky(conn, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            real(conn, **kw)  # write, then die before the commit
+            raise psycopg.OperationalError("connection lost")
+        return real(conn, **kw)
+
+    monkeypatch.setattr(load_articles.postgres_loader, "load_source_file", flaky)
+    try:
+        rc = load_articles.main(["--source", "cdisc_ct", "--processed-dir", str(processed)])
+    finally:
+        if conn_mod._POOL is not None:
+            conn_mod._POOL.close()
+        conn_mod.get_settings.cache_clear()
+
+    assert rc == 0 and len(calls) == 2
+    pg_conn.rollback()
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM episteme._audit "
+            "WHERE event_type IN ('load_commit','load_replace')"
+        )
+        assert cur.fetchone()[0] == 1
+        cur.execute(
+            "SELECT count(*) FROM episteme.articles WHERE source='cdisc_ct' AND source_file=%s",
+            (key,),
+        )
+        assert cur.fetchone()[0] > 0

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,13 @@ from episteme.config import get_settings
 from episteme.data import checkpoint_markers, postgres_loader
 from episteme.data.article_schema import SCHEMA_VERSION, utc_now_iso
 from episteme.data.db.connection import connection
+from episteme.ops import orphans
+from episteme.ops.failure import record_failure
+from episteme.ops.retry import RETRY_WAITS, with_retries
+from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
+from episteme.ops.stop import stage_guard
+
+_SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 
 def _write_load_success(processed_root: Path, source: str, basename: str, stats: dict) -> Path:
@@ -104,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
             "any other discovered shard is neither loaded nor reported as failed"
         ),
     )
+    add_skip_args(parser)  # --skip-unit; --reason is shared with --force
     args = parser.parse_args(argv)
+    check_skip_args(parser, args)
 
     source: str = args.source
     processed_dir = Path(args.processed_dir)
@@ -139,38 +149,95 @@ def main(argv: list[str] | None = None) -> int:
         # SP1-β exit criteria only require correctness, so loading is sequential.
         print(f"note: --workers {args.workers} ignored; loading sequentially (SP1-β)")
 
-    failures = 0
-    with connection() as conn:
-        if own_bracket:
-            audit_trail.record("run_start", conn=conn, object=source, run_id=run_id)
-            conn.commit()
+    holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
+    def _bracket(event: str, reason: str | None = None) -> None:
+        with connection() as bconn:
+            audit_trail.record(event, conn=bconn, object=source, run_id=run_id, reason=reason)
+            bconn.commit()
+
+    def _load_one(shard: Path, name: str) -> dict:
+        """One attempt: a fresh connection, one transaction, one commit."""
+        with connection() as conn:
+            holder[0] = conn
+            try:
+                with audit_trail.deferred_mirror(conn):
+                    try:
+                        if args.force and args.reason:
+                            audit_trail.record(
+                                "force_override",
+                                conn=conn,
+                                object=f"{source} {name}",
+                                reason=args.reason,
+                                run_id=run_id,
+                            )
+                        result = postgres_loader.load_source_file(
+                            conn, source=source, staging_path=shard, run_id=run_id
+                        )
+                        audit_trail.commit(conn)
+                        return result
+                    except BaseException:
+                        try:
+                            audit_trail.rollback(conn)
+                        except Exception:  # noqa: BLE001 - keep the original error
+                            pass
+                        raise
+            finally:
+                holder[0] = None
+
+    def _on_retry(name: str):
+        def _cb(attempt: int, exc: BaseException, wait: float) -> None:
+            print(f"retry {name} ({attempt}/{len(RETRY_WAITS)}) in {wait}s: {exc!r}")
+
+        return _cb
+
+    with stage_guard(lambda: holder[0]):
+        if own_bracket:
+            _bracket("run_start")
+        with connection() as sconn:
+            orphans.sweep(sconn)
+
+        try:
+            keep = set(
+                apply_skips(
+                    source,
+                    "load",
+                    [s.name for s in shards],
+                    args.skip_unit,
+                    args.reason,
+                    run_id=run_id,
+                )
+            )
+        except SystemExit as exc:
+            if own_bracket:
+                _bracket("run_end", reason=f"failed: --skip-unit rejected (exit {exc.code})")
+            raise
+        skipped_by_operator = len(shards) - len(keep)
+
+        failed_at: str | None = None
         for shard in shards:
             name = shard.name
+            if name not in keep:
+                print(f"skip-unit {name}")
+                continue
             marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
             if marker.is_file() and not args.force:
                 print(f"skip {name}")
                 continue
 
-            if args.force and args.reason:
-                audit_trail.record(
-                    "force_override",
-                    conn=conn,
-                    object=f"{source} {name}",
-                    reason=args.reason,
-                    run_id=run_id,
-                )
-
             try:
-                result = postgres_loader.load_source_file(
-                    conn, source=source, staging_path=shard, run_id=run_id
+                result = with_retries(
+                    lambda shard=shard, name=name: _load_one(shard, name),
+                    sleep=lambda secs: _SLEEP(secs),
+                    on_retry=_on_retry(name),
                 )
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001 - report + continue to next shard
-                conn.rollback()
-                failures += 1
+            except Exception as exc:  # noqa: BLE001 - permanent: record, stop the run
+                failed_at = name
                 print(f"FAIL {name}: {exc}")
-                continue
+                record_failure(source, "load", name, repr(exc), run_id=run_id)
+                if own_bracket:
+                    _bracket("run_end", reason=f"failed at shard {name}: {exc!r}"[:500])
+                break
 
             _write_load_success(processed_dir, source, name, result)
             print(
@@ -180,12 +247,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"rows_per_sec={result['rows_per_sec']}"
             )
 
-        if own_bracket:
-            audit_trail.record("run_end", conn=conn, object=source, run_id=run_id)
-            conn.commit()
+        if failed_at is None and own_bracket:
+            _bracket("run_end")
 
-    print(f"done shards={len(shards)} failed={failures}")
-    return 1 if failures else 0
+    if failed_at is not None:
+        print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
+        return 1
+    extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
+    print(f"done shards={len(shards)} failed=0{extra}")
+    return 0
 
 
 if __name__ == "__main__":
