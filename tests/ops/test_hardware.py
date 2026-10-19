@@ -52,7 +52,15 @@ def test_disk_kind_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(hardware.sys, "platform", "win32")
     monkeypatch.setattr(hardware, "_windows_media_type", boom)
     assert hardware.disk_kind(tmp_path / "does-not-exist-yet") == "unknown"
-    assert hardware.disk_kind(Path(r"\server\share\x")) == "unknown"
+    assert hardware.disk_kind(Path(r"\\server\share\x")) == "unknown"
+
+
+def test_unc_path_skips_detection(monkeypatch):
+    calls = []
+    monkeypatch.setattr(hardware.sys, "platform", "win32")
+    monkeypatch.setattr(hardware, "_windows_media_type", lambda drive: calls.append(drive) or "SSD")
+    assert hardware.disk_kind(Path(r"\\server\share\x")) == "unknown"
+    assert calls == []
 
 
 def test_detect_builds_hardware(monkeypatch, tmp_path):
