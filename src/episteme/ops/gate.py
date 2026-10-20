@@ -572,6 +572,11 @@ def _cmd_migrations_check(_args: argparse.Namespace) -> int:
     from episteme.ops import gate_migrations
 
     files = sorted(p.name for p in _MIGRATIONS_DIR.glob("*.sql"))
+    for name in files:
+        reason = gate_migrations.DEFERRED_MIGRATIONS.get(name)
+        if reason is not None:
+            _err(f"{name}: deferred ({reason})")
+    files = [n for n in files if n not in gate_migrations.DEFERRED_MIGRATIONS]
     with _connect() as conn:
         missing = gate_migrations.missing_markers(conn, files)
     for name, objects in missing.items():

@@ -323,7 +323,11 @@ def test_check_all_reasons(tmp_path, rules_dir, fake_hash, capsys):
 def test_every_migration_file_has_markers():
     files = {p.name for p in gate._MIGRATIONS_DIR.glob("*.sql")}
     assert files
-    assert set(gate_migrations.MIGRATION_MARKERS) == files
+    deferred = set(gate_migrations.DEFERRED_MIGRATIONS)
+    assert deferred <= files
+    assert all(gate_migrations.DEFERRED_MIGRATIONS.values())
+    assert set(gate_migrations.MIGRATION_MARKERS) <= files
+    assert set(gate_migrations.MIGRATION_MARKERS) | deferred == files
     for markers in gate_migrations.MIGRATION_MARKERS.values():
         assert 1 <= len(markers) <= 3
         assert all(m.split(":")[0] in ("table", "column", "index") for m in markers)
@@ -435,3 +439,26 @@ def test_run_stops_the_child_on_an_unexpected_error(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         gate.main(["run", "--record", str(tmp_path / "r.json"), "--", sys.executable, "-c", code])
     assert started[0].poll() is not None
+
+
+def test_deferred_migration_is_skipped_and_reported_on_stderr(tmp_path, monkeypatch, capsys):
+    mig = tmp_path / "mig"
+    mig.mkdir()
+    for n in ("0001_a.sql", "0002_b.sql"):
+        (mig / n).write_text("select 1;")
+    monkeypatch.setattr(gate, "_MIGRATIONS_DIR", mig)
+    monkeypatch.setattr(
+        gate_migrations,
+        "MIGRATION_MARKERS",
+        {"0001_a.sql": ["table:s.a"], "0002_b.sql": ["table:s.b"]},
+    )
+    monkeypatch.setattr(gate_migrations, "DEFERRED_MIGRATIONS", {"0001_a.sql": "no pgvector"})
+    _fake_connect(monkeypatch, _MarkerConn({"table:s.b"}))
+    assert gate.main(["migrations-check"]) == 0
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "0001_a.sql: deferred (no pgvector)" in out.err
+
+    _fake_connect(monkeypatch, _MarkerConn(set()))
+    assert gate.main(["migrations-check"]) == 1
+    assert capsys.readouterr().out.splitlines() == ["0002_b.sql: missing table:s.b"]

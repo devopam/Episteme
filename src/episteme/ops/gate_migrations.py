@@ -10,6 +10,14 @@ A marker is ``table:<schema>.<name>``, ``column:<schema>.<table>.<column>`` or
 ``index:<schema>.<name>``. Every migration file needs an entry (a test enforces
 it). Note: the 0004 indexes are dropped on purpose during a bulk load, so 0004
 can show as missing while a load is in progress.
+
+Production's ``episteme._migrations`` table is empty because migrations were
+applied by hand, which is why the check uses objects.
+
+To add a migration: add its file name to ``MIGRATION_MARKERS`` with 1-3 markers,
+or, if production does not have it on purpose, to ``DEFERRED_MIGRATIONS`` with the
+reason. A deferred migration is reported on stderr and never counts as missing.
+Every ``*.sql`` file needs one of the two (a test enforces it).
 """
 
 from __future__ import annotations
@@ -52,6 +60,13 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme.articles_apollo",
         "table:episteme.articles_pubchem",
     ],
+}
+
+DEFERRED_MIGRATIONS: dict[str, str] = {
+    "0001_add_chunk_vector_columns.sql": (
+        "needs pgvector and pg_search, which the server does not have; "
+        "not applied in production (checked 2026-10-21)"
+    ),
 }
 
 
