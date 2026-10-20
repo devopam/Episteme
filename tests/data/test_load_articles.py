@@ -236,7 +236,7 @@ def ff(monkeypatch, tmp_path):
         monkeypatch.setattr(mod.audit_trail, "record", _record)
     monkeypatch.setattr(la.postgres_loader, "load_source_file", _load)
     monkeypatch.setattr(la.orphans, "sweep", lambda conn: [])
-    monkeypatch.setattr(la, "stage_guard", lambda ref: nullcontext())
+    monkeypatch.setattr(la, "stage_guard", lambda ref, **kw: nullcontext())
     sleeps = []
     monkeypatch.setattr(la, "_SLEEP", sleeps.append)
 
@@ -321,6 +321,11 @@ def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
     monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel, **kw: None)
     monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
     monkeypatch.setattr(ff.la, "stage_guard", stop.stage_guard)
+    from episteme.ops import lock
+
+    monkeypatch.setattr(
+        lock, "advisory_lock", lambda **kw: __import__("contextlib").nullcontext()
+    )  # no real DB
     ff.state["behaviour"]["a.jsonl"] = KeyboardInterrupt()
     with pytest.raises(SystemExit) as e:
         ff.run()

@@ -201,9 +201,13 @@ def start_parent_watchdog(
 
 
 @contextmanager
-def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
+def stage_guard(
+    conn_ref: Callable[[], Any], *, lock_stage: str | None = None, db_lock: bool = False
+) -> Iterator[None]:
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
-    stop to ``SystemExit`` 130 (INT) or 143 (TERM)."""
+    stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
+    holds the heavy lock (and, with ``db_lock``, the advisory lock) for the
+    block; a wait for the lock can be stopped like any other step."""
 
     def _cancel() -> None:
         c = conn_ref()
@@ -216,7 +220,13 @@ def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
     done = threading.Event()
     start_parent_watchdog(_cancel, stop=done)
     try:
-        yield
+        if lock_stage is None:
+            yield
+        else:
+            from episteme.ops import lock
+
+            with lock.stage_lock(lock_stage, db=db_lock):
+                yield
     except KeyboardInterrupt:
         try:
             _cancel()

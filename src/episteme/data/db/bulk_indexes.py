@@ -27,6 +27,7 @@ nothing pending / 1 pending / 3 error (e.g. migration 0005 not applied).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
 from typing import Any
@@ -38,6 +39,7 @@ from episteme import audit_trail
 from episteme.config import ConfigError, get_settings, require_actor
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
+from episteme.ops.stop import stage_guard
 
 SCHEMA = "episteme"
 # Parent indexes on the partitioned episteme.articles; dropping a parent index
@@ -270,8 +272,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return failure
 
+    # status only reads: it must not wait behind a running load
+    guard = (
+        contextlib.nullcontext()
+        if args.action == "status"
+        else stage_guard(lambda: None, lock_stage="load", db_lock=True)
+    )
     try:
-        with psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
+        with guard, psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
             if args.action == "status":
                 rows = status(conn)
                 for r in rows:

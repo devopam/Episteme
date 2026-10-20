@@ -62,7 +62,7 @@ def stub(monkeypatch):
     monkeypatch.setattr(dbc, "connection", fake_connection)
     monkeypatch.setattr(graph_builder, "build", fake_build)
     monkeypatch.setattr(graph_builder.orphans, "sweep", lambda conn: [])
-    monkeypatch.setattr(graph_builder, "stage_guard", lambda ref: contextlib.nullcontext())
+    monkeypatch.setattr(graph_builder, "stage_guard", lambda ref, **kw: contextlib.nullcontext())
     monkeypatch.setattr(graph_builder, "_SLEEP", lambda s: None)
     return calls, calls_files
 
@@ -188,7 +188,7 @@ def test_holder_reaches_stage_guard_conn_ref(stub, tmp_path, monkeypatch):
     refs = []
 
     @contextlib.contextmanager
-    def capture(ref):
+    def capture(ref, **kw):
         refs.append(ref)
         yield
 

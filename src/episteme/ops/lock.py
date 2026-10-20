@@ -315,12 +315,78 @@ def release(kind: str, run_id: str, *, owner_pid: int | None = None, d: Path | N
 def held(
     kind: str, run_id: str, stage: str, *, owner_pid: int | None = None, wait: bool = True
 ) -> Iterator[str]:
-    status = acquire(kind, run_id, stage, owner_pid=owner_pid, wait=wait)
+    # resolve time.sleep at call time, so a test can replace it
+    status = acquire(
+        kind, run_id, stage, owner_pid=owner_pid, wait=wait, sleep=lambda sec: time.sleep(sec)
+    )
     try:
         yield status
     finally:
         if status == "acquired":
             release(kind, run_id, owner_pid=owner_pid)
+
+
+@contextmanager
+def advisory_lock(
+    *, wait: bool = True, sleep: Callable[[float], None] = time.sleep
+) -> Iterator[None]:
+    """Hold the PostgreSQL advisory lock ``HEAVY_ADVISORY_KEY`` for the block.
+
+    It uses its own autocommit connection, tagged ``episteme:<run>:<pid>:lock``.
+    That connection is idle between polls, so the orphan sweep (active
+    backends only) never meets it; the server frees the lock when the process
+    dies. The lock is per database."""
+    import psycopg
+
+    from episteme.config import get_settings
+    from episteme.data.db.connection import app_name, dsn_from_settings
+
+    conn = psycopg.connect(
+        dsn_from_settings(),
+        autocommit=True,
+        application_name=app_name(get_settings(), suffix=":lock"),
+    )
+    got = False
+    try:
+        waited = 0.0
+        while True:
+            row = conn.execute("select pg_try_advisory_lock(%s)", (HEAVY_ADVISORY_KEY,)).fetchone()
+            if row and row[0]:
+                got = True
+                break
+            if not wait:
+                raise LockBusy({"stage": "advisory lock", "run_id": "another session"})
+            if waited % WAIT_LOG_SEC == 0:
+                _LOG.info("waiting for the database advisory lock")
+            sleep(POLL_SEC)
+            waited += POLL_SEC
+        yield
+    finally:
+        try:
+            if got:
+                conn.execute("select pg_advisory_unlock(%s)", (HEAVY_ADVISORY_KEY,))
+        except Exception:  # noqa: BLE001 - closing the connection frees the lock too
+            _LOG.exception("could not release the advisory lock")
+        finally:
+            conn.close()
+
+
+@contextmanager
+def stage_lock(stage: str, *, db: bool = False) -> Iterator[str]:
+    """The heavy lock for one stage; with ``db`` also the advisory lock. Yields
+    the run id. A stage run by a wrapper script re-enters the wrapper's lock:
+    the wrapper takes it as ``adhoc-<runner pid>`` owned by the runner PID."""
+    from episteme.config import get_settings
+
+    settings = get_settings()
+    owner = settings.runner_pid or os.getpid()
+    run_id = settings.run_id or f"adhoc-{owner}"
+    with held("heavy", run_id, stage, owner_pid=owner):
+        if db:
+            with advisory_lock():
+                yield run_id
+        else:
+            yield run_id
 
 
 def _heavy_wanted(d: Path) -> bool:

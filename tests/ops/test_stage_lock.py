@@ -1,0 +1,222 @@
+"""The stage lock and the advisory lock (ops/lock.py), wired into stage_guard."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+
+import pytest
+
+from episteme.config import get_settings
+from episteme.ops import lock, stop
+
+
+def _env(monkeypatch, run_id=None, runner_pid=None):
+    for key, val in (("EPISTEME_RUN_ID", run_id), ("EPISTEME_RUNNER_PID", runner_pid)):
+        if val is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, str(val))
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings():
+    yield
+    get_settings.cache_clear()
+
+
+def _heavy():
+    lock.lock_dir().mkdir(parents=True, exist_ok=True)
+    return lock.lock_dir() / "heavy.lock"
+
+
+def _rec(**fields):
+    rec = {
+        "kind": "heavy",
+        "pid": os.getpid(),
+        "create_time": lock._create_time(os.getpid()),
+        "run_id": "r1",
+        "stage": "s",
+        "started_at": "2026-10-20T00:00:00+00:00",
+        "state": "running",
+    }
+    rec.update(fields)
+    return rec
+
+
+def test_stage_lock_without_run_id_uses_this_pid(monkeypatch):
+    _env(monkeypatch)
+    with lock.stage_lock("load") as run_id:
+        assert run_id == f"adhoc-{os.getpid()}"
+        rec = json.loads(_heavy().read_text(encoding="utf-8"))
+        assert rec["pid"] == os.getpid()
+        assert rec["run_id"] == run_id
+        assert rec["stage"] == "load"
+    assert not _heavy().exists()
+
+
+def test_stage_lock_with_run_id_is_reentrant(monkeypatch):
+    _env(monkeypatch, run_id="r1", runner_pid=os.getpid())
+    _heavy().write_text(json.dumps(_rec(run_id="r1")), encoding="utf-8")
+    with lock.stage_lock("load") as run_id:
+        assert run_id == "r1"
+    assert _heavy().exists()  # the outer owner still holds it
+
+
+def test_stage_lock_child_of_a_directly_run_wrapper_reenters(monkeypatch):
+    """The bash wrapper holds the lock as adhoc-<runner pid> with owner <runner pid>;
+    its Python child has no run id and must re-enter, not wait."""
+    _env(monkeypatch, runner_pid=os.getpid())
+    _heavy().write_text(json.dumps(_rec(run_id=f"adhoc-{os.getpid()}")), encoding="utf-8")
+    waits = []
+    monkeypatch.setattr(lock.time, "sleep", lambda s: waits.append(s))
+    with lock.stage_lock("extract") as run_id:
+        assert run_id == f"adhoc-{os.getpid()}"
+    assert waits == []
+    assert _heavy().exists()
+
+
+def test_stage_guard_waits_for_another_live_run(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    _heavy().write_text(json.dumps(_rec(run_id="other")), encoding="utf-8")
+    sleeps = []
+
+    def fake_sleep(sec):
+        sleeps.append(sec)
+        if len(sleeps) == 2:
+            _heavy().unlink()
+
+    monkeypatch.setattr(lock.time, "sleep", fake_sleep)
+    ran = []
+    with stop.stage_guard(lambda: None, lock_stage="load"):
+        ran.append(json.loads(_heavy().read_text(encoding="utf-8"))["run_id"])
+    assert ran == [f"adhoc-{os.getpid()}"]
+    assert len(sleeps) >= 2
+    assert not _heavy().exists()
+
+
+def test_stage_guard_without_lock_stage_takes_no_lock(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    with stop.stage_guard(lambda: None):
+        assert not _heavy().exists()
+
+
+def test_stage_lock_db_enters_and_leaves_the_advisory_lock(monkeypatch):
+    _env(monkeypatch)
+    events = []
+
+    @contextlib.contextmanager
+    def fake_advisory(**kw):
+        events.append("enter")
+        assert _heavy().exists()  # the file lock comes first
+        yield
+        events.append("exit")
+
+    monkeypatch.setattr(lock, "advisory_lock", fake_advisory)
+    with lock.stage_lock("load", db=True):
+        assert events == ["enter"]
+    assert events == ["enter", "exit"]
+    with lock.stage_lock("load"):
+        pass
+    assert events == ["enter", "exit"]
+
+
+class _Stop(Exception):
+    pass
+
+
+def _guard_kwargs(monkeypatch, module, argv=()):
+    """Run ``module.main`` with a recording stage_guard that stops the run."""
+    got = {}
+
+    def fake_guard(ref, **kw):
+        got.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(module, "stage_guard", fake_guard)
+    with pytest.raises(_Stop):
+        module.main(list(argv))
+    return got
+
+
+def test_extractor_main_passes_lock_stage(monkeypatch):
+    from episteme.data.pubmed import extract_pubmed
+
+    assert _guard_kwargs(monkeypatch, extract_pubmed) == {"lock_stage": "extract"}
+
+
+def test_serializer_main_passes_lock_stage(monkeypatch):
+    from episteme.data.mesh import serialize_mesh
+
+    assert _guard_kwargs(monkeypatch, serialize_mesh) == {"lock_stage": "serialize"}
+
+
+@pytest.mark.pg
+def test_advisory_lock_excludes_a_second_connection(pg_conn):
+    import psycopg
+
+    from episteme.data.db.connection import dsn_from_settings
+
+    with psycopg.connect(dsn_from_settings(), autocommit=True) as other:
+        with lock.advisory_lock():
+            row = other.execute(
+                "select pg_try_advisory_lock(%s)", (lock.HEAVY_ADVISORY_KEY,)
+            ).fetchone()
+            assert row[0] is False
+        row = other.execute(
+            "select pg_try_advisory_lock(%s)", (lock.HEAVY_ADVISORY_KEY,)
+        ).fetchone()
+        assert row[0] is True
+        other.execute("select pg_advisory_unlock(%s)", (lock.HEAVY_ADVISORY_KEY,))
+
+
+@pytest.mark.pg
+def test_advisory_lock_no_wait_raises_lockbusy(pg_conn):
+    import psycopg
+
+    from episteme.data.db.connection import dsn_from_settings
+
+    with psycopg.connect(dsn_from_settings(), autocommit=True) as other:
+        other.execute("select pg_advisory_lock(%s)", (lock.HEAVY_ADVISORY_KEY,))
+        try:
+            with pytest.raises(lock.LockBusy):
+                with lock.advisory_lock(wait=False):
+                    pass
+        finally:
+            other.execute("select pg_advisory_unlock(%s)", (lock.HEAVY_ADVISORY_KEY,))
+
+
+@pytest.mark.pg
+def test_advisory_lock_connection_is_tagged(pg_conn, monkeypatch):
+    import psycopg
+
+    seen = {}
+    real = psycopg.connect
+
+    def spy(*a, **kw):
+        conn = real(*a, **kw)
+        seen["name"] = conn.execute("show application_name").fetchone()[0]
+        return conn
+
+    monkeypatch.setattr(psycopg, "connect", spy)
+    with lock.advisory_lock():
+        pass
+    assert seen["name"].startswith("episteme:")
+    assert seen["name"].endswith(":lock")
+    assert len(seen["name"].encode()) <= 63
+
+
+def test_app_name_suffix_keeps_the_63_byte_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from episteme.data.db import connection as dbc
+
+    name = dbc.app_name(SimpleNamespace(run_id="r" * 200), suffix=":lock")
+    assert len(name.encode()) == 63
+    assert name.endswith(f":{os.getpid()}:lock")

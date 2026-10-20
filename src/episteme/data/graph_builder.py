@@ -841,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
 
     holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
-    with stage_guard(lambda: holder[0]):
+    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True):
 
         def _sweep() -> None:
             with connection() as sconn:

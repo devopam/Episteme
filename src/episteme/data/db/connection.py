@@ -33,13 +33,14 @@ _APP_PREFIX = "episteme"
 _APP_NAME_MAX = 63  # PostgreSQL truncates application_name at NAMEDATALEN - 1 bytes
 
 
-def app_name(settings) -> str:
+def app_name(settings, suffix: str = "") -> str:
     """``episteme:<run_id>:<pid>`` for ``application_name``, at most 63 bytes.
     The run id is shortened first, so ``:<pid>`` always survives; the orphan
     sweep reads the client PID from the last field. ``adhoc`` stands in for a
-    standalone CLI (no run id). The PID is read at call time."""
+    standalone CLI (no run id). The PID is read at call time. ``suffix`` (for
+    example ``:lock``) goes after the PID; it takes room from the run id."""
     run = settings.run_id or "adhoc"
-    head, tail = f"{_APP_PREFIX}:", f":{os.getpid()}"
+    head, tail = f"{_APP_PREFIX}:", f":{os.getpid()}{suffix}"
     room = _APP_NAME_MAX - len(head.encode()) - len(tail.encode())
     run = run.encode()[:room].decode("utf-8", errors="ignore")
     return f"{head}{run}{tail}"

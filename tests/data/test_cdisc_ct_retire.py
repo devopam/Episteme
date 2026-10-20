@@ -80,6 +80,11 @@ def test_keep_set_uses_shard_filename_with_extension_for_the_marker(tmp_path, mo
         "episteme.data.cdisc_ct.retire.connection",
         lambda: _FakeConnCtx(),
     )
+    # no real DB for the advisory lock
+    monkeypatch.setattr(
+        "episteme.ops.lock.advisory_lock",
+        lambda **kw: __import__("contextlib").nullcontext(),
+    )
     # This test is about the marker-filename-extension logic, not I2's DB
     # verification (which needs a real cursor) -- stub it out as confirmed.
     monkeypatch.setattr(

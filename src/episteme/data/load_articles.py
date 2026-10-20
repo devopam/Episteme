@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failed_at: str | None = None
     skipped_by_operator = 0
-    with stage_guard(lambda: holder[0]):
+    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True):
         if own_bracket:
             _bracket("run_start")
         try:
