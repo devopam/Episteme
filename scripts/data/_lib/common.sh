@@ -275,6 +275,10 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     local pyx=""
     if [ -n "${EPISTEME_RUN_ID:-}" ]; then
         pyx="$(_http_fetch_python)" || log WARN "http_fetch: python not found — pause points and status calls skipped"
+        if [ -n "$pyx" ] && ! "$pyx" -c 'import episteme.ops.lock' >/dev/null 2>&1; then
+            log WARN "http_fetch: $pyx cannot run episteme.ops.lock — pause points and status calls disabled"
+            pyx=""
+        fi
     fi
     while [ "$start" -lt "$total" ]; do
         i=$((i + 1))
@@ -300,19 +304,16 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
 
 _http_fetch_python() { # the Python the wrappers use: $PYTHON, else the repo venv, else python
     local c
-    if [ -n "${PYTHON:-}" ]; then printf '%s
-' "$PYTHON"; return 0; fi
+    if [ -n "${PYTHON:-}" ]; then printf '%s\n' "$PYTHON"; return 0; fi
     for c in "$_COMMON_LIB_DIR/../../../.venv/Scripts/python.exe" "$_COMMON_LIB_DIR/../../../.venv/bin/python" python; do
-        command -v "$c" >/dev/null 2>&1 && { printf '%s
-' "$c"; return 0; }
+        command -v "$c" >/dev/null 2>&1 && { printf '%s\n' "$c"; return 0; }
     done
     return 1
 }
 
 _hf_record_failed() { # _hf_record_failed DEST_DIR URL REL REASON
     local f="${_HF_FAILED:-$1/.failed_files.txt}"
-    printf '%s	%s	%s
-' "$2" "$3" "$4" >> "$f"
+    printf '%s\t%s\t%s\n' "$2" "$3" "$4" >> "$f"
 }
 
 _http_fetch_batch() { # _http_fetch_batch DEST_DIR LINE... — one batch through aria2c (curl fallback)
@@ -342,7 +343,7 @@ _http_fetch_batch() { # _http_fetch_batch DEST_DIR LINE... — one batch through
         if ! command -v curl >/dev/null 2>&1; then
             [ "${#retry[@]}" -gt 0 ] || retry=("${urls[@]}")
             for line in "${retry[@]}"; do
-                url="${line%%$'	'*}"; rel="${line#*$'	'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+                url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
                 _hf_record_failed "$dest_dir" "$url" "$rel" "aria2c exit $rc"
             done
             return "$rc"

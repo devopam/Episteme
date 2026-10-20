@@ -51,6 +51,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -707,13 +708,15 @@ def main() -> None:
     samples: list[tuple[str, str]] = []
 
     settings = get_settings()
-    failed_fh = None
     if settings.run_dir:
         settings.run_dir.mkdir(parents=True, exist_ok=True)
-        failed_fh = (settings.run_dir / "failed_files.txt").open("a", encoding="utf-8")
+        failed_path: Path | None = settings.run_dir / "failed_files.txt"
+    else:
+        failed_path = None
 
     with (
         ThreadPoolExecutor(max_workers=args.threads) as ex,
+        failed_path.open("a", encoding="utf-8") if failed_path else nullcontext() as failed_fh,
         ledger_path.open("a", encoding="utf-8") as ledger_fh,
         tqdm(total=args.limit if args.limit > 0 else len(todo), desc="PMC commercial") as bar,
     ):
@@ -757,8 +760,6 @@ def main() -> None:
             if failed_fh:
                 failed_fh.flush()
 
-    if failed_fh:
-        failed_fh.close()
     print(f"\nDone: {ok_n:,} ok, {nc_n:,} non-commercial, {fail_n:,} failed")
     if samples:
         print("Failure reasons:", dict(reasons))
