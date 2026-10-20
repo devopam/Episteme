@@ -24,13 +24,16 @@ dynamic import (``importlib``) is not found.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -377,3 +380,257 @@ def pass_valid(source: str, stage: str, processed_root: Path) -> tuple[bool, str
     if rec.get("rules_hash") != rules_hash(source):
         return False, "rules changed"
     return True, "ok"
+
+
+# --- command line -------------------------------------------------------------
+#
+# ``python -m episteme.ops.gate <command>``. A command that prints a value for the
+# bash runner to capture (``prepare``, ``paths``) prints only that value on
+# stdout; logs and diagnostics go to stderr. ``check`` prints its reason
+# ("ok", "not gated", "no pass", "code changed", "rules changed") on stdout.
+
+POLL_S = 0.5
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "data" / "db" / "migrations"
+
+
+def _err(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+@contextlib.contextmanager
+def _connect():
+    """The configured database (the runner sets ``EPISTEME_DB_TARGET=secondary``)."""
+    from episteme.data.db.connection import connection
+
+    with connection() as conn:
+        yield conn
+
+
+def _tree_rss(proc: Any) -> int:
+    """Summed RSS (bytes) of ``proc`` and all its descendants, now."""
+    import psutil
+
+    total = 0
+    try:
+        procs = [proc, *proc.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0
+    for p in procs:
+        try:
+            total += p.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return total
+
+
+def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
+    """Terminate the child and the descendants seen now (only what this run started)."""
+    import psutil
+
+    try:
+        victims = proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        victims = []
+    victims.append(proc)
+    for p in victims:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.terminate()
+    _gone, alive = psutil.wait_procs(victims, timeout=5)
+    for p in alive:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.kill()
+    with contextlib.suppress(Exception):
+        child.wait(timeout=5)
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    import psutil
+
+    cmd = args.command
+    if not cmd:
+        _err("gate run: no command given (use: run --record F -- <command...>)")
+        return 2
+    t0 = time.monotonic()
+    try:
+        child = subprocess.Popen(cmd)
+    except OSError as exc:
+        _err(f"gate run: cannot start {cmd[0]}: {exc}")
+        return 127
+    proc = psutil.Process(child.pid)
+    peak = 0
+    interrupted = False
+    try:
+        while True:
+            peak = max(peak, _tree_rss(proc))
+            try:
+                rc = child.wait(timeout=POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except KeyboardInterrupt:
+        interrupted = True
+        _stop_tree(proc, child)
+        rc = 130
+    record = {
+        "elapsed_s": round(time.monotonic() - t0, 3),
+        "rc": rc,
+        "peak_rss_mb": round(peak / (1024 * 1024), 1),
+    }
+    if interrupted:
+        record["interrupted"] = True
+    out = Path(args.record)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return rc
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    from episteme.ops import gate_slice
+
+    processed = Path(args.processed_root) if args.processed_root else None
+    try:
+        gate_slice.prepare(
+            args.source, Path(args.raw_root), Path(args.sample_root), processed_root=processed
+        )
+    except (gate_slice.SliceError, FileNotFoundError) as exc:
+        _err(f"gate prepare: {exc}")
+        return 2
+    print(Path(args.sample_root))
+    return 0
+
+
+def _cmd_paths(_args: argparse.Namespace) -> int:
+    from episteme.config import get_settings
+
+    print(get_settings().processed_root)
+    return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    if not is_gated(args.source, args.stage):
+        print("not gated")
+        return 0
+    ok, reason = pass_valid(args.source, args.stage, Path(args.pass_root))
+    print(reason)
+    return 0 if ok else 1
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from episteme.data.checkpoint_markers import input_key
+    from episteme.ops import gate_report, gate_slice
+
+    source, stage = args.source, args.stage
+    rules = load_rules(source)
+    stage_rules = rules.get(stage) if rules else None
+    if not isinstance(stage_rules, dict):
+        _err(f"gate report: ({source}, {stage}) has no gate rules")
+        return 2
+    sample_root = Path(args.sample_root)
+    try:
+        slice_meta = json.loads((sample_root / "slice.json").read_text(encoding="utf-8"))
+        record = json.loads(Path(args.record).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        _err(f"gate report: {exc}")
+        return 2
+    raw_dir = sample_root / "01_raw" / gate_slice.SLICES[source].raw_subpath
+    inputs = [raw_dir / rel for rel in slice_meta["files"]]
+    staging_dir = (
+        Path(args.staging_dir)
+        if args.staging_dir
+        else sample_root / "02_processed" / "staging" / source
+    )
+    measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+    if stage == "load":
+        source_files = [input_key(p, raw_dir) for p in inputs]
+        with _connect() as conn:
+            measures.update(
+                gate_report.measure_load(
+                    conn, source, source_files, staging_rows=measures.get("rows")
+                )
+            )
+    failures = evaluate(measures, stage_rules)
+    if record.get("rc") not in (0, None):
+        failures.insert(0, f"run record: the command exited with rc {record['rc']}")
+    report_path = gate_report.write_report(measures, failures, sample_root)
+    if failures:
+        print(f"gate FAIL for {source} {stage}:")
+        for line in failures:
+            print(f"  {line}")
+        print(f"report: {report_path}")
+        return 1
+    pass_file = write_pass(source, stage, Path(args.pass_root), report_path)
+    print(f"gate PASS for {source} {stage}: {pass_file}")
+    return 0
+
+
+def _cmd_migrations_check(_args: argparse.Namespace) -> int:
+    files = sorted(p.name for p in _MIGRATIONS_DIR.glob("*.sql"))
+    from psycopg import errors
+
+    applied: set[str] = set()
+    with _connect() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM episteme._migrations")
+                applied = {row[0] for row in cur.fetchall()}
+        except errors.UndefinedTable:
+            # No tracking table: the migration script never ran, so none is applied.
+            conn.rollback()
+    missing = [name for name in files if name not in applied]
+    for name in missing:
+        print(name)
+    return 1 if missing else 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="python -m episteme.ops.gate", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("prepare", help="build the raw slice of a sample run")
+    p.add_argument("--source", required=True)
+    p.add_argument("--raw-root", required=True)
+    p.add_argument("--sample-root", required=True)
+    p.add_argument("--processed-root")
+    p.set_defaults(fn=_cmd_prepare)
+
+    p = sub.add_parser("run", help="run a command; record time, exit code, peak RSS")
+    p.add_argument("--record", required=True)
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=_cmd_run)
+
+    p = sub.add_parser("report", help="measure a sample run, evaluate, write the pass")
+    p.add_argument("--source", required=True)
+    p.add_argument("--stage", required=True)
+    p.add_argument("--sample-root", required=True)
+    p.add_argument("--pass-root", required=True)
+    p.add_argument("--record", required=True)
+    p.add_argument("--staging-dir")
+    p.set_defaults(fn=_cmd_report)
+
+    p = sub.add_parser("check", help="exit 0 when the stage is not gated or has a valid pass")
+    p.add_argument("--source", required=True)
+    p.add_argument("--stage", required=True)
+    p.add_argument("--pass-root", required=True)
+    p.set_defaults(fn=_cmd_check)
+
+    p = sub.add_parser("paths", help="print the processed root")
+    p.set_defaults(fn=_cmd_paths)
+
+    p = sub.add_parser("migrations-check", help="list migrations not applied to the database")
+    p.set_defaults(fn=_cmd_migrations_check)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.cmd == "run" and args.command[:1] == ["--"]:
+        args.command = args.command[1:]
+    try:
+        return int(args.fn(args))
+    except ValueError as exc:
+        _err(f"gate {args.cmd}: {exc}")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
