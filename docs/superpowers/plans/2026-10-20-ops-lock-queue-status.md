@@ -797,7 +797,7 @@ Behaviour:
 
 Do not pull this branch into the main checkout while a pipeline run is in progress there. Merge between runs. After the merge, the first run creates `<data root>/_ops/locks/` and `<processed root>/_ops/runs/`.
 
-## Open decisions for the user (plan review)
+## Decisions (user, 2026-10-20: "yes please" — all four defaults)
 
 1. Lock folder: the spec's `<data root>/_ops/locks/`, with `EPISTEME_LOCK_DIR` as an override (default), or `<processed root>/_ops/locks/`.
 2. Spec 6.3 (`failed_files.txt`, record and continue) is in this PR (Task 5), because PR 2 deferred downloads here (default), or it moves to a later PR.
