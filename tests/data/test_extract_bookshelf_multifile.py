@@ -28,7 +28,8 @@ def _wrapper(inner, title="Multi Book"):
     return f"<book-part-wrapper>{_meta(title)}{inner}</book-part-wrapper>"
 
 
-def _chapter(part_id, title, body=_LONG):
+def _chapter(part_id, title, body=None):
+    body = body or f"{_LONG} UNIQUE-{title.replace(' ', '-')}"
     idattr = f' id="{part_id}"' if part_id else ""
     return (
         f"<book-part{idattr}><book-part-meta><title-group><title>{title}</title>"
@@ -68,7 +69,8 @@ def test_multi_file_package(tmp_path):
             "NBK77/app1.nxml",
             _wrapper(
                 '<book-app id="app1"><book-app-meta><title-group><title>Appendix A</title>'
-                f"</title-group></book-app-meta><body><p>{_LONG}</p></body></book-app>"
+                "</title-group></book-app-meta><body><p>"
+                f"{_LONG} UNIQUE-Appendix-A</p></body></book-app>"
             ),
         ),
         ("NBK77/ack.nxml", _wrapper('<book-part id="ack"><body/></book-part>')),
@@ -77,6 +79,10 @@ def test_multi_file_package(tmp_path):
     assert len(book) == 1
     assert [p["source_record_id"] for p in parts] == ["ch1", "ch2", "app1"]
     assert [p["title"] for p in parts] == ["Chapter One", "Chapter Two", "Appendix A"]
+    for p, marker in zip(parts, ["Chapter-One", "Chapter-Two", "Appendix-A"], strict=True):
+        assert f"UNIQUE-{marker}" in p["text"]
+        others = [m for m in ("Chapter-One", "Chapter-Two", "Appendix-A") if m != marker]
+        assert not any(f"UNIQUE-{m}" in p["text"] for m in others)
     assert book[0]["title"] == "Multi Book"
     assert "Contents list" in book[0]["text"]
     assert book[0]["license"] == "CC BY"
@@ -99,6 +105,7 @@ def test_repeated_part_id_across_members_kept(tmp_path):
         "bookshelf:NBK78:sec1__b",
         "bookshelf:NBK78:sec1__c",
     ]
+    assert [p["source_record_id"] for p in parts] == ["sec1", "sec1", "sec1"]
     assert len({r["id"] for r in rows}) == len(rows)
 
 
@@ -187,3 +194,26 @@ def test_members_parse_one_tree_at_a_time(tmp_path, monkeypatch):
     # output order is still archive order
     parts = [r for r in rows if r["container_id"] is not None]
     assert [p["source_record_id"] for p in parts] == ["ch1", "ch2"]
+
+
+def test_preferred_member_last_each_member_opened_once(tmp_path, monkeypatch):
+    members = [
+        ("NBK91/ch1.nxml", _wrapper(_chapter("ch1", "C1"), "Chapter Title")),
+        ("NBK91/ch2.nxml", _wrapper(_chapter("ch2", "C2"), "Chapter Title")),
+        ("NBK91/NBK91.nxml", _wrapper("<toc><toc-entry>t</toc-entry></toc>", "Main Title")),
+    ]
+    raw_dir = _write_pkg(tmp_path, "tr10_NBK91.tar.gz", members)
+
+    opened: list[str] = []
+    real_extractfile = tarfile.TarFile.extractfile
+
+    def spy(self, member):
+        opened.append(member if isinstance(member, str) else member.name)
+        return real_extractfile(self, member)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", spy)
+    rows = parse_book_archive(raw_dir / "tr10_NBK91.tar.gz", raw_dir)
+    assert opened == ["NBK91/ch1.nxml", "NBK91/ch2.nxml", "NBK91/NBK91.nxml"]
+    book = [r for r in rows if r["container_id"] is None][0]
+    assert book["title"] == "Main Title"
+    assert [r["source_record_id"] for r in rows if r["container_id"]] == ["ch1", "ch2"]

@@ -433,34 +433,28 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     # must not collapse to the same source_file value.
     source_file = input_key(path, raw_dir)
 
-    # Memory: one parsed tree is alive at a time (packages reach GBs). The
-    # preferred member is parsed first for the book fields; every member then
-    # yields plain-data part candidates in archive order and its tree is dropped.
+    # One pass in archive order (the gzip stream is never rewound), and one
+    # parsed tree alive at a time (packages reach GBs): each member yields
+    # plain-data part candidates, the preferred member also yields the book
+    # fields, then its tree is dropped.
     cands_by_member: list[list[dict[str, Any]]] = []
     stems: list[str] = []
-    book: dict[str, Any] = {}
+    book: dict[str, Any] | None = None
     with tarfile.open(path, "r:gz") as tar:
         members = _nxml_members(tar)
         preferred = _find_nxml_member(members, nbk)
-
-        def _open_root(member: tarfile.TarInfo) -> ET.Element:
+        for member in members:
             fh = tar.extractfile(member)
             if fh is None:
                 raise ValueError(f"cannot extract {member.name} from {source_file}")
-            return ET.parse(fh).getroot()
-
-        root = _open_root(preferred)
-        book = _book_fields(root)
-        preferred_cands = _part_candidates(root)
-        del root
-        for member in members:
-            stems.append(Path(member.name).stem)
+            root = ET.parse(fh).getroot()
             if member is preferred:
-                cands_by_member.append(preferred_cands)
-                continue
-            member_root = _open_root(member)
-            cands_by_member.append(_part_candidates(member_root))
-            del member_root
+                book = _book_fields(root)
+            stems.append(Path(member.name).stem)
+            cands_by_member.append(_part_candidates(root))
+            del root
+    if book is None:  # unreachable: the preferred member is one of the members
+        raise ValueError(f"no book-level member in {source_file}")
     book_license_text = book["license_text"]
     book_year = book["year"]
     book_lic, book_lic_url, book_lic_raw = book["license"]
@@ -473,7 +467,8 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     for stem, cands in zip(stems, cands_by_member, strict=True):
         for c in cands:
-            bp_id = c["id"] or f"part{len(part_rows) + 1}"
+            native_id = c["id"] or f"part{len(part_rows) + 1}"
+            bp_id = native_id
             part_title = c["title"]
             if bp_id in seen_ids:
                 # An id repeated inside the package (one file per chapter often
@@ -496,7 +491,7 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
                         "id": f"bookshelf:{id_key}:{bp_id}",
                         "source": SOURCE,
                         "source_file": source_file,
-                        "source_record_id": bp_id,
+                        "source_record_id": native_id,
                         "pmid": None,
                         "pmcid": None,
                         "doi": None,

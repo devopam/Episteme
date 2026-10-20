@@ -1,4 +1,7 @@
-"""``get_pool`` registers an ``atexit`` close hook, once per process."""
+"""``get_pool``: one pool per process, and exit hooks that close it once."""
+
+import threading
+import time
 
 from episteme.data.db import connection as conn_mod
 
@@ -7,43 +10,79 @@ _REAL_GET_POOL = conn_mod.get_pool
 
 
 class _FakePool:
+    built = 0
+
     def __init__(self, *a, **kw):
-        self.closed_with = "not closed"
+        time.sleep(0.05)  # widen the race window
+        type(self).built += 1
+        self.close_calls = []
 
     def close(self, timeout=5.0):
-        self.closed_with = timeout
+        self.close_calls.append(timeout)
 
 
 def _patch(monkeypatch):
-    registered = []
-    monkeypatch.setattr(conn_mod.atexit, "register", lambda fn, *a, **k: registered.append(fn))
+    atexits, finalizers = [], []
+    _FakePool.built = 0
+    monkeypatch.setattr(conn_mod.atexit, "register", lambda fn, *a, **k: atexits.append(fn))
+    monkeypatch.setattr(
+        conn_mod.mp_util, "Finalize", lambda obj, fn, *a, **k: finalizers.append((fn, k))
+    )
     monkeypatch.setattr(conn_mod, "ConnectionPool", _FakePool)
     monkeypatch.setattr(conn_mod, "dsn_from_settings", lambda: "dsn")
     monkeypatch.setattr(conn_mod, "connect_kwargs", lambda s: {})
     monkeypatch.setattr(conn_mod, "_POOL", None)
     monkeypatch.setattr(conn_mod, "_ATEXIT_PID", None)
-    return registered
+    monkeypatch.setattr(conn_mod, "_CLOSED_POOL", None)
+    return atexits, finalizers
 
 
-def test_get_pool_registers_atexit_once(monkeypatch):
-    registered = _patch(monkeypatch)
+def test_get_pool_registers_both_hooks_once(monkeypatch):
+    atexits, finalizers = _patch(monkeypatch)
     pool = _REAL_GET_POOL()
     assert _REAL_GET_POOL() is pool
-    assert len(registered) == 1
-    # a rebuilt pool in the same process does not register a second hook
+    assert len(atexits) == 1
+    assert len(finalizers) == 1
+    assert finalizers[0][1] == {"exitpriority": 10}
+    # a rebuilt pool in the same process does not register again
     monkeypatch.setattr(conn_mod, "_POOL", None)
     _REAL_GET_POOL()
-    assert len(registered) == 1
+    assert len(atexits) == 1
+    assert len(finalizers) == 1
 
 
-def test_atexit_hook_closes_pool_with_short_timeout_and_swallows_errors(monkeypatch):
-    registered = _patch(monkeypatch)
+def test_two_threads_build_exactly_one_pool(monkeypatch):
+    atexits, finalizers = _patch(monkeypatch)
+    pools = []
+    barrier = threading.Barrier(2)
+
+    def work():
+        barrier.wait()
+        pools.append(_REAL_GET_POOL())
+
+    threads = [threading.Thread(target=work) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert _FakePool.built == 1
+    assert pools[0] is pools[1]
+    assert len(atexits) == 1
+    assert len(finalizers) == 1
+
+
+def test_exit_hook_closes_once_with_short_timeout_and_swallows_errors(monkeypatch):
+    atexits, finalizers = _patch(monkeypatch)
     pool = _REAL_GET_POOL()
-    registered[0]()
-    assert pool.closed_with <= 2
+    atexits[0]()
+    finalizers[0][0]()  # the second hook for the same pool is harmless
+    assert len(pool.close_calls) == 1
+    assert pool.close_calls[0] <= 2
+
+    monkeypatch.setattr(conn_mod, "_CLOSED_POOL", None)
 
     def boom(timeout=5.0):
         raise RuntimeError("x")
 
     pool.close = boom
-    registered[0]()  # must not raise
+    atexits[0]()  # must not raise
