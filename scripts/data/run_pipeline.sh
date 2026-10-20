@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -31,6 +31,8 @@ require_env EPISTEME_ACTOR
 
 FORCE=0
 BULK=0
+SAMPLE=0
+SKIP_GATE=0
 NO_WAIT=0
 REASON=""
 MAX_FILES=""
@@ -66,6 +68,13 @@ while [ $# -gt 0 ]; do
         # Do not wait for a busy stage lock: refuse with exit 75 instead. The
         # Python stages see EPISTEME_NO_WAIT and refuse a busy advisory lock too.
         --no-wait) NO_WAIT=1; export EPISTEME_NO_WAIT=1; shift ;;
+        # The sample gate (operating standard spec 7). --sample: run one stage
+        # on a small raw slice, write under <processed root>/_sample/<source>/
+        # and to the secondary database, then measure it (a pass on success).
+        --sample) SAMPLE=1; shift ;;
+        # Run gated stages that have no valid pass (needs --reason): one
+        # audited gate_override row per such stage.
+        --skip-gate) SKIP_GATE=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -91,6 +100,22 @@ fi
 if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
+fi
+if [ "$SKIP_GATE" = "1" ]; then
+    [ "$SAMPLE" = "0" ] || die "--sample and --skip-gate cannot be used together" 2
+    [ -n "$REASON" ] || die "--skip-gate requires --reason" 2
+fi
+if [ "$SAMPLE" = "1" ]; then
+    case "$STAGE" in
+        extract|serialize|load) ;;
+        all) die "--sample needs one named stage, not 'all'" 2 ;;
+        *) die "--sample is valid with the extract, serialize or load stage only (not $STAGE)" 2 ;;
+    esac
+    [ "$BULK" = "0" ] || die "--sample cannot be used with --bulk" 2
+    [ "$FORCE" = "0" ] || die "--sample cannot be used with --force" 2
+    [ "${EPISTEME_DRY_RUN:-0}" != "1" ] || die "--sample cannot be used with --dry-run" 2
+    # The sample writes to the secondary database (episteme_test).
+    require_env PGDATABASE_SECONDARY
 fi
 
 # source token -> download wrapper path (relative to $HERE). SP3 wires the
@@ -241,6 +266,104 @@ if [ "$SOURCE" = "pmc" ]; then
         # which guard actually fired.
         *) die "pmc: $STAGE is not wired (early validation)" 3 ;;
     esac
+fi
+
+# The sample gate (operating standard spec 7). PASS_ROOT is the production
+# processed root, read before any --sample redirect: the pass files are read
+# and written there. A dry run is never gated.
+_chain_stages() { # the stages this run executes, in order (keep in step with the dispatch below)
+    if [ "$STAGE" != "all" ]; then
+        echo "$STAGE"
+    elif [ "$SOURCE" = "pmc" ]; then
+        echo download extract load graph materialize enrich
+    elif _is_structured "$SOURCE"; then
+        echo download serialize load
+        if [ "$SOURCE" = "mesh" ]; then echo graph; fi
+    elif _is_lit "$SOURCE"; then
+        echo download extract load graph
+    else
+        echo download
+    fi
+}
+PASS_ROOT=""
+GATE_OVERRIDES=()  # the gated stages that run without a valid pass (--skip-gate)
+if [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+    PASS_ROOT="$("$PY" -m episteme.ops.gate paths)" || die "gate: could not read the processed root" 1
+    PASS_ROOT="${PASS_ROOT%$'\r'}"  # a Windows Python can write CRLF to a pipe
+    PASS_ROOT="${PASS_ROOT//\\//}"
+fi
+if [ "${EPISTEME_DRY_RUN:-0}" != "1" ] && [ "$SAMPLE" = "0" ]; then
+    # A full run: every gated stage of the run needs a valid pass. Exit 0 of
+    # `gate check` is "ok" or "not gated"; any other exit code fails closed.
+    gate_refused=()
+    for gate_stage in $(_chain_stages); do
+        gate_rc=0
+        gate_out="$("$PY" -m episteme.ops.gate check --source "$SOURCE" --stage "$gate_stage" --pass-root "$PASS_ROOT")" || gate_rc=$?
+        gate_out="${gate_out%$'\r'}"
+        [ "$gate_rc" -ne 0 ] || continue
+        [ -n "$gate_out" ] || gate_out="gate check failed, rc=$gate_rc"
+        if [ "$SKIP_GATE" = "1" ]; then
+            log WARN "gate: $SOURCE $gate_stage has no valid pass ($gate_out); --skip-gate overrides it: $REASON"
+            GATE_OVERRIDES+=("$gate_stage")
+        else
+            gate_refused+=("$gate_stage ($gate_out)")
+        fi
+    done
+    if [ "${#gate_refused[@]}" -gt 0 ]; then
+        for gate_stage in "${gate_refused[@]}"; do
+            log ERROR "gate: no valid pass for $SOURCE $gate_stage"
+        done
+        die "gate: refused; run '$0 $SOURCE <stage> --sample' until it passes, or use --skip-gate --reason REASON" 2
+    fi
+fi
+
+# --sample: the stage runs on a raw slice under SAMPLE_ROOT. Only the raw,
+# processed and corpus roots and the database target are redirected; the data
+# root and the lock folder stay, so a sample run and a production heavy job
+# never run at the same time. The run_start/run_end rows go to the secondary
+# database too.
+SAMPLE_ROOT=""
+SAMPLE_RECORD=""
+NATIVE_BASH="$BASH"
+if [ "$SAMPLE" = "1" ]; then
+    [ -n "$PASS_ROOT" ] || die "--sample: could not read the processed root" 1
+    gate_rc=0
+    gate_out="$("$PY" -m episteme.ops.gate check --source "$SOURCE" --stage "$STAGE" --pass-root "$PASS_ROOT")" || gate_rc=$?
+    gate_out="${gate_out%$'\r'}"
+    case "$gate_out" in
+        "not gated") die "--sample: $SOURCE $STAGE has no gate rules (src/episteme/ops/gate_rules/$SOURCE.json)" 2 ;;
+        ok|"no pass"|"code changed"|"rules changed") ;;
+        *) die "--sample: gate check failed for $SOURCE $STAGE (rc=$gate_rc): $gate_out" 2 ;;
+    esac
+    SAMPLE_ROOT="$PASS_ROOT/_sample/$SOURCE"
+    SAMPLE_RECORD="$SAMPLE_ROOT/run_record_$STAGE.json"
+    # The production raw root (common.sh resolve_dest reads it the same way).
+    PROD_RAW_ROOT="${EPISTEME_RAW_ROOT:-${EPISTEME_DATA_ROOT:-.}/01_raw}"
+    if [ "$STAGE" = "load" ]; then
+        sample_staging="$SAMPLE_ROOT/02_processed/staging/$SOURCE"
+        [ -n "$(ls -A "$sample_staging" 2>/dev/null)" ] \
+            || die "--sample load: no sample staging in $sample_staging; run the sample extract first" 2
+    fi
+    export EPISTEME_RAW_ROOT="$SAMPLE_ROOT/01_raw"
+    export EPISTEME_PROCESSED_ROOT="$SAMPLE_ROOT/02_processed"
+    export EPISTEME_CORPUS_ROOT="$SAMPLE_ROOT/03_corpus"
+    export EPISTEME_DB_TARGET=secondary
+    if [ "$STAGE" = "load" ]; then
+        # The secondary database must have every migration before a sample load.
+        mig_rc=0
+        mig_out="$("$PY" -m episteme.ops.gate migrations-check)" || mig_rc=$?
+        mig_out="${mig_out//$'\r'/}"
+        if [ "$mig_rc" -ne 0 ]; then
+            [ -n "$mig_out" ] || die "--sample load: could not check the migrations of the secondary database (rc=$mig_rc)" 2
+            printf '%s\n' "$mig_out" >&2
+            die "--sample load: the secondary database lacks the migrations above; apply them first (scripts/data/db/migrate_database.sh)" 2
+        fi
+    fi
+    # `gate run` starts the stage from Python: on Windows it needs the path of
+    # this bash, or the system search finds the WSL bash in System32 first.
+    if command -v cygpath >/dev/null 2>&1; then
+        NATIVE_BASH="$(cygpath -m "$BASH")"
+    fi
 fi
 
 RUN_ID="${SOURCE}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -441,7 +564,13 @@ run_stage() {
     STATUS_OPEN="$name"
     # `if ! cmd` would lose the exit code; capture it so it can be reused.
     local rc=0
-    "$@" || rc=$?
+    if [ "$SAMPLE" = "1" ]; then
+        # The sample measures the stage: time, exit code and peak RSS.
+        [ "$1" != "bash" ] || shift
+        "$PY" -m episteme.ops.gate run --record "$SAMPLE_RECORD" -- "$NATIVE_BASH" "$@" || rc=$?
+    else
+        "$@" || rc=$?
+    fi
     if [ "$rc" -ne 0 ]; then
         local reason state unit_args=()
         case "$rc" in
@@ -564,6 +693,37 @@ if [ "$STAGE" != "all" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
         _status_set "$STAGE" running --runner-pid "$EPISTEME_RUNNER_PID"
     fi
 fi
+
+# --sample, under the lock: an extract or serialize starts from the new slice
+# and an empty sample output (old staging or markers would skip the slice); a
+# load re-loads every sample shard.
+if [ "$SAMPLE" = "1" ]; then
+    if [ "$STAGE" = "load" ]; then
+        rm -rf "$SAMPLE_ROOT/02_processed/_ops/$SOURCE/load_success"
+    else
+        log INFO "sample: building the raw slice in $SAMPLE_ROOT"
+        prep_rc=0
+        "$PY" -m episteme.ops.gate prepare --source "$SOURCE" --raw-root "$PROD_RAW_ROOT" \
+            --sample-root "$SAMPLE_ROOT" --processed-root "$PASS_ROOT" >&2 || prep_rc=$?
+        if [ "$prep_rc" -ne 0 ]; then
+            _status_set "$STAGE" failed --reason "sample: could not build the raw slice (rc=$prep_rc)"
+            die "sample: could not build the raw slice for $SOURCE (rc=$prep_rc)" 2
+        fi
+        rm -rf "$SAMPLE_ROOT/02_processed/staging" "$SAMPLE_ROOT/02_processed/_ops/$SOURCE" \
+            "$SAMPLE_ROOT/03_corpus"
+    fi
+fi
+
+# --skip-gate: one gate_override row per gated stage without a valid pass,
+# before run_start. A full run is never redirected, so the rows go to
+# production. No row, no run: an override is never unaudited.
+for gate_stage in "${GATE_OVERRIDES[@]+"${GATE_OVERRIDES[@]}"}"; do
+    if ! "$PY" -m episteme.audit_trail record gate_override --object "$SOURCE $gate_stage" \
+        --run-id "$RUN_ID" --reason "$REASON" >/dev/null; then
+        _status_set "$STAGE" failed --reason "gate: could not write the gate_override audit row for $SOURCE $gate_stage"
+        die "gate: could not write the gate_override audit row for $SOURCE $gate_stage; the run does not go on" 1
+    fi
+done
 
 if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
     log INFO "dry-run: skipping run_start/run_end audit bracket"
@@ -707,5 +867,17 @@ else
     RUN_OPEN=0
     "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
         || log WARN "run_end audit failed (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
+fi
+# --sample: measure the output and evaluate the rules; a pass is written under
+# the production processed root. The failed rules are on stdout.
+if [ "$SAMPLE" = "1" ]; then
+    report_rc=0
+    "$PY" -m episteme.ops.gate report --source "$SOURCE" --stage "$STAGE" --sample-root "$SAMPLE_ROOT" \
+        --pass-root "$PASS_ROOT" --record "$SAMPLE_RECORD" || report_rc=$?
+    if [ "$report_rc" -ne 0 ]; then
+        _status_set "$STAGE" failed --reason "sample gate: no pass for $SOURCE $STAGE (rc=$report_rc)"
+        die "sample gate: no pass for $SOURCE $STAGE (rc=$report_rc); see the failed rules above" 1
+    fi
+    log INFO "sample gate: pass for $SOURCE $STAGE"
 fi
 log INFO "pipeline done: $SOURCE $STAGE"

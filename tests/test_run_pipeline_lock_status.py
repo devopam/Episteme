@@ -549,7 +549,15 @@ def test_every_python_cli_capture_strips_a_trailing_cr():
     machine cannot show the bug; this guards the strip in the scripts."""
     cr = bytes([92]) + b"r"
     checks = {
-        "scripts/data/run_pipeline.sh": ("RUN_DIR", "out", "detail", "unit"),
+        "scripts/data/run_pipeline.sh": (
+            "RUN_DIR",
+            "out",
+            "detail",
+            "unit",
+            "PASS_ROOT",
+            "gate_out",
+            "mig_out",
+        ),
         "scripts/data/db/bulk_load_indexes.sh": ("lock_out",),
         "scripts/data/db/migrate_database.sh": ("lock_out",),
     }
