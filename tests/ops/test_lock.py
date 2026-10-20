@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import queue
 import subprocess
 import sys
 import time
@@ -144,11 +145,20 @@ def test_two_process_race_has_one_winner(tmp_path):
     ]
     for p in procs:
         p.start()
+    deadline = time.monotonic() + 120
+    results = []
     try:
-        results = [out.get(timeout=120) for _ in range(rounds * 2)]
+        while len(results) < rounds * 2:
+            left = deadline - time.monotonic()
+            try:
+                results.append(out.get(timeout=max(0.1, min(left, 5))))
+            except queue.Empty:
+                codes = [p.exitcode for p in procs]
+                if left <= 0 or any(c not in (None, 0) for c in codes):
+                    pytest.fail(f"race workers stalled: {len(results)} results, exit codes {codes}")
     finally:
         for p in procs:
-            p.join(timeout=30)
+            p.join(timeout=10)
             if p.is_alive():
                 p.terminate()
     for r in range(rounds):
@@ -242,3 +252,90 @@ def test_cli_acquire_busy_and_status(capsys):
     assert "heavy.lock" in out and "download.lock" in out and "heavy.request" in out
     assert "r1" in out
     assert lock.main(["release", "heavy", "--run-id", "r1"]) == 0
+
+
+def _fail_n_times(real, n):
+    calls = {"n": 0}
+
+    def wrapper(*args, **kwargs):
+        if calls["n"] < n:
+            calls["n"] += 1
+            raise PermissionError(13, "in use")
+        return real(*args, **kwargs)
+
+    return wrapper
+
+
+def test_release_retries_permission_error(tmp_path, monkeypatch):
+    lock.acquire("heavy", "r1", "a", d=tmp_path)
+    monkeypatch.setattr(os, "unlink", _fail_n_times(os.unlink, 2))
+    assert lock.release("heavy", "r1", d=tmp_path) is True
+    assert not (tmp_path / "heavy.lock").exists()
+
+
+def test_release_gives_up_without_raising(tmp_path, monkeypatch, caplog):
+    lock.acquire("heavy", "r1", "a", d=tmp_path)
+    monkeypatch.setattr(os, "unlink", _fail_n_times(os.unlink, 99))
+    with caplog.at_level(logging.ERROR, logger="episteme.ops.lock"):
+        assert lock.release("heavy", "r1", d=tmp_path) is False
+    assert "could not release" in caplog.text
+    assert (tmp_path / "heavy.lock").exists()
+
+
+def test_acquire_returns_acquired_when_request_clear_is_blocked(tmp_path, monkeypatch):
+    lock.acquire("download", "dl", "x", d=tmp_path)
+
+    def sleep(_sec):
+        lock.release("download", "dl", d=tmp_path)
+        monkeypatch.setattr(os, "unlink", _fail_n_times(os.unlink, 2))
+
+    assert lock.acquire("heavy", "h", "a", d=tmp_path, sleep=sleep) == "acquired"
+    assert not (tmp_path / "heavy.request").exists()
+
+
+def test_acquire_survives_request_clear_that_never_works(tmp_path, monkeypatch, caplog):
+    lock.acquire("download", "dl", "x", d=tmp_path)
+
+    def sleep(_sec):
+        lock.release("download", "dl", d=tmp_path)
+        monkeypatch.setattr(os, "unlink", _fail_n_times(os.unlink, 99))
+
+    with caplog.at_level(logging.ERROR, logger="episteme.ops.lock"):
+        assert lock.acquire("heavy", "h", "a", d=tmp_path, sleep=sleep) == "acquired"
+    assert "could not remove heavy.request" in caplog.text
+
+
+def test_pause_point_resumes_when_replace_fails_twice(tmp_path, monkeypatch):
+    lock.acquire("download", "dl", "x", d=tmp_path)
+    _write(tmp_path / "heavy.request", run_id="h")
+    monkeypatch.setattr(os, "replace", _fail_n_times(os.replace, 2))
+
+    def fake_sleep(_sec):
+        (tmp_path / "heavy.request").unlink()
+
+    assert lock.pause_point("dl", d=tmp_path, sleep=fake_sleep) is True
+    assert lock.read(tmp_path / "download.lock")["state"] == "running"
+
+
+def test_locked_file_fails_closed(tmp_path, monkeypatch):
+    path = tmp_path / "heavy.lock"
+    _write(path, pid=_dead_pid(), create_time=1.0)
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+
+    def deny(self, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(type(path), "read_text", deny)
+    assert lock.read(path) is lock._LOCKED
+    status, _rec = lock.try_acquire("heavy", "r1", "a", d=tmp_path)
+    assert status == "busy"
+    assert path.exists()
+    with pytest.raises(lock.LockBusy):
+        lock.acquire("download", "dl", "x", wait=False, d=tmp_path)
+
+
+def test_stale_request_is_ignored(tmp_path):
+    _write(tmp_path / "heavy.request", pid=_dead_pid(), create_time=1.0, run_id="h")
+    assert lock.acquire("download", "dl", "x", wait=False, d=tmp_path) == "acquired"
+    assert lock.pause_point("dl", d=tmp_path) is False

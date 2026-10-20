@@ -4,7 +4,11 @@ Files under ``lock_dir()``: ``heavy.lock`` and ``download.lock`` (JSON: pid,
 create_time, run_id, stage, started_at, state) and ``heavy.request`` (a heavy
 job that waits). An owner is a PID plus that process's create time, so a PID
 that Windows reused counts as gone. Limits: a lock owned by a live but unrelated
-process (a wrong inherited EPISTEME_RUNNER_PID) is not detected.
+process (a wrong inherited EPISTEME_RUNNER_PID) is not detected. A download and
+a heavy job can both acquire at the same instant (each checks the other, then
+creates its own file); the download then pauses at its first pause point, by
+design (spec 6.1). A file that stays locked by another process (Windows) reads as
+``_LOCKED`` and counts as live: the lock fails closed.
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ TAKEOVER_EXPIRE_SEC = 30.0
 UNREADABLE_GRACE_SEC = 60.0
 _TRY_ROUNDS = 40  # with the pause below, about 1 s of contention before a caller sees busy
 _TRY_PAUSE_SEC = 0.02
+_FS_TRIES = 5
+_LOCKED = {"_unreadable": "locked"}  # read() sentinel: could not open the file, not stale
 KINDS = ("heavy", "download")
 
 
@@ -48,6 +54,8 @@ def lock_dir() -> Path:
 
 
 def describe(rec: dict | None) -> str:
+    if rec is _LOCKED:
+        return "a lock file that another process holds open"
     if not rec:
         return "an unreadable lock file"
     return (
@@ -83,19 +91,34 @@ def owner_alive(rec: dict) -> bool:
     return ct is None or abs(now_ct - float(ct)) < 1.0
 
 
-def read(path: Path) -> dict | None:
-    """The record; None when there is no file; {} when it cannot be parsed."""
-    text = None
-    for attempt in range(5):
+def _retry(fn: Callable, *args):
+    """Call ``fn``; on PermissionError (Windows: a reader holds the file) try again
+    a few times, then raise the last error."""
+    for attempt in range(_FS_TRIES):
         try:
-            text = path.read_text(encoding="utf-8")
-            break
-        except FileNotFoundError:
-            return None
-        except PermissionError:  # Windows: the file is being deleted or replaced right now
+            return fn(*args)
+        except PermissionError:
+            if attempt == _FS_TRIES - 1:
+                raise
             time.sleep(0.01 * (attempt + 1))
-    if text is None:
-        return {}
+
+
+def _unlink(path: Path) -> None:
+    try:
+        _retry(os.unlink, path)
+    except FileNotFoundError:
+        pass
+
+
+def read(path: Path) -> dict | None:
+    """The record; None when there is no file; {} when it cannot be parsed;
+    ``_LOCKED`` when the file stays unopenable (treated as live)."""
+    try:
+        text = _retry(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        return _LOCKED
     try:
         rec = json.loads(text)
     except ValueError:
@@ -104,6 +127,8 @@ def read(path: Path) -> dict | None:
 
 
 def _is_stale(path: Path, rec: dict) -> bool:
+    if rec is _LOCKED:  # fail closed: never stale, no grace time
+        return False
     if rec == {}:  # being written, or damaged: stale only after a grace time
         try:
             return time.time() - path.stat().st_mtime > UNREADABLE_GRACE_SEC
@@ -149,7 +174,7 @@ def _write_new(path: Path, rec: dict) -> bool:
 def _rewrite(path: Path, rec: dict) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(rec), encoding="utf-8")
-    os.replace(tmp, path)
+    _retry(os.replace, tmp, path)
 
 
 def _take_over_stale(path: Path, rec: dict) -> None:
@@ -157,23 +182,27 @@ def _take_over_stale(path: Path, rec: dict) -> None:
     guard = path.with_name(path.name + ".takeover")
     try:
         fd = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
+    except (FileExistsError, PermissionError):
         try:
             if time.time() - guard.stat().st_mtime > TAKEOVER_EXPIRE_SEC:
-                guard.unlink(missing_ok=True)  # a taker died holding the guard
-        except FileNotFoundError:
+                _unlink(guard)  # a taker died holding the guard
+        except (FileNotFoundError, PermissionError):
             pass
         return
     os.close(fd)
     try:
-        if read(path) == rec:  # still the same stale record: no one replaced it
+        now = read(path)
+        if now is not _LOCKED and now == rec:  # still the same stale record
             try:
-                path.unlink(missing_ok=True)
-            except PermissionError:  # Windows: a reader holds it; the caller tries again
+                _unlink(path)
+            except PermissionError:  # a reader still holds it; the caller tries again
                 return
             _LOG.warning("took over a stale %s from %s", path.name, describe(rec))
     finally:
-        guard.unlink(missing_ok=True)
+        try:
+            _unlink(guard)
+        except PermissionError:
+            _LOG.error("could not remove %s; it expires in %s s", guard.name, TAKEOVER_EXPIRE_SEC)
 
 
 def _blocker(kind: str, d: Path) -> dict | None:
@@ -185,7 +214,13 @@ def _blocker(kind: str, d: Path) -> dict | None:
 
 
 def try_acquire(
-    kind: str, run_id: str, stage: str, *, owner_pid: int | None = None, d: Path | None = None
+    kind: str,
+    run_id: str,
+    stage: str,
+    *,
+    owner_pid: int | None = None,
+    d: Path | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, dict]:
     d = d or lock_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -197,13 +232,13 @@ def try_acquire(
             new = _record(kind, run_id, stage, pid)
             if _write_new(path, new):
                 return "acquired", new
-            time.sleep(_TRY_PAUSE_SEC)
+            sleep(_TRY_PAUSE_SEC)
             continue  # another taker won the create: read it again
         if rec.get("run_id") == run_id and rec.get("pid") == pid and owner_alive(rec):
             return "reentrant", rec
         if _is_stale(path, rec):
             _take_over_stale(path, rec)
-            time.sleep(_TRY_PAUSE_SEC)  # another taker may hold the guard
+            sleep(_TRY_PAUSE_SEC)  # another taker may hold the guard
             continue
         return "busy", rec
     return "busy", read(path) or {}
@@ -219,7 +254,10 @@ def _clear_request(run_id: str, d: Path) -> None:
     path = _request_path(d)
     rec = read(path)
     if rec is not None and rec.get("run_id") == run_id:
-        path.unlink(missing_ok=True)
+        try:
+            _unlink(path)
+        except PermissionError:  # never raise from acquire's finally
+            _LOG.error("could not remove %s", path.name)
 
 
 def acquire(
@@ -241,7 +279,7 @@ def acquire(
         while True:
             blocker = _blocker(kind, d)
             if blocker is None:
-                status, rec = try_acquire(kind, run_id, stage, owner_pid=pid, d=d)
+                status, rec = try_acquire(kind, run_id, stage, owner_pid=pid, d=d, sleep=sleep)
                 if status != "busy":
                     return status
                 blocker = rec
@@ -264,7 +302,11 @@ def release(kind: str, run_id: str, *, owner_pid: int | None = None, d: Path | N
     path = _path(kind, d)
     rec = read(path)
     if rec and rec.get("run_id") == run_id and rec.get("pid") == (owner_pid or os.getpid()):
-        path.unlink(missing_ok=True)
+        try:
+            _unlink(path)
+        except PermissionError:  # never raise from a finally: the lock stays
+            _LOG.error("could not release %s: another process holds it open", path.name)
+            return False
         return True
     return False
 
@@ -299,7 +341,10 @@ def pause_point(
         rec = read(path)
         if rec and rec.get("run_id") == run_id:
             rec["state"] = state
-            _rewrite(path, rec)
+            try:
+                _rewrite(path, rec)
+            except PermissionError:  # never raise from the finally below
+                _LOG.error("could not set the download lock state to %s", state)
 
     _set("paused")
     _LOG.info("download paused: a heavy job holds or wants the heavy lock")
