@@ -39,6 +39,7 @@ from episteme import audit_trail
 from episteme.config import ConfigError, get_settings, require_actor
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
+from episteme.ops.status import current
 from episteme.ops.stop import stage_guard
 
 SCHEMA = "episteme"
@@ -133,7 +134,10 @@ def _index_validity(cur: psycopg.Cursor, name: str) -> bool | None:
 
 
 def _drop_index(cur: psycopg.Cursor, schema: str, name: str) -> None:
-    cur.execute(sql.SQL("DROP INDEX {}.{}").format(sql.Identifier(schema), sql.Identifier(name)))
+    with current().long_statement(f"DROP INDEX {name}"):
+        cur.execute(
+            sql.SQL("DROP INDEX {}.{}").format(sql.Identifier(schema), sql.Identifier(name))
+        )
 
 
 def drop(conn: psycopg.Connection, *, run_id: str | None, group: str = "articles") -> list[str]:
@@ -220,7 +224,8 @@ def rebuild(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
                 elif validity is False:
                     _drop_index(cur, schema, name)
                 if validity is not True:
-                    cur.execute(statement)
+                    with current().long_statement(f"CREATE INDEX {name}"):
+                        cur.execute(statement)
                 cur.execute(
                     "DELETE FROM episteme._bulk_index_state WHERE index_name = %s", (full_name,)
                 )

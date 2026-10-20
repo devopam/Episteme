@@ -56,6 +56,7 @@ from typing import Any
 
 from episteme.data.checkpoint_markers import input_key
 from episteme.ops.retry import RETRY_WAITS, TransientUnitError
+from episteme.ops.status import current
 
 _LOG = logging.getLogger(__name__)
 
@@ -125,6 +126,11 @@ def run_per_file(
 
     def _emit(result: dict[str, Any]) -> None:
         results.append(result)
+        current().progress(
+            unit=str(result.get("source_file") or ""),
+            units_done=len(results),
+            units_total=len(files),
+        )
         if on_result is not None:
             on_result(result)
 

@@ -173,6 +173,8 @@ def test_only_loads_the_newer_sdtm_shard_and_never_the_older(
 
 
 class _FakeConn:
+    info = type("Info", (), {"backend_pid": 4242})()
+
     def commit(self):
         pass
 

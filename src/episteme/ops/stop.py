@@ -221,19 +221,61 @@ def stage_guard(
     install_stop_handlers()
     done = threading.Event()
     start_parent_watchdog(_cancel, stop=done)
+    st: Any = None
+    beat: threading.Thread | None = None
+    end_state = "failed"
     try:
         if lock_stage is None:
             yield
         else:
             from episteme.ops import lock
 
-            with lock.stage_lock(lock_stage, db=db_lock):
+            with lock.stage_lock(lock_stage, db=db_lock) as run_id:
+                st, beat = _begin_status(run_id, lock_stage, done)
                 yield
+        end_state = "done"
     except KeyboardInterrupt:
+        end_state = "stopped"
         try:
             _cancel()
         except Exception:  # noqa: BLE001 - best effort; the exit follows
             _LOG.exception("cancel failed on stop")
         raise SystemExit(EXIT_TERM if _TERM_SEEN else EXIT_INT) from None
+    except SystemExit as exc:
+        if exc.code in (EXIT_INT, EXIT_TERM):
+            end_state = "stopped"
+        elif exc.code in (0, None):
+            end_state = "done"
+        raise
     finally:
         done.set()  # a finished stage must not leave a watchdog behind
+        if beat is not None:
+            beat.join(5.0)  # no heartbeat write after the end state
+        _end_status(st, end_state)
+
+
+def _begin_status(
+    run_id: str, stage: str, stop_beat: threading.Event
+) -> tuple[Any, threading.Thread]:
+    """Create this run's status, record the stage process, start the heartbeat."""
+    from episteme.ops import status
+    from episteme.ops.lock import create_time
+
+    st = status.RunStatus(status.run_dir(run_id))
+    pids = dict(st.read().get("pids") or {})  # keep the runner entry
+    pids["stage"] = {"pid": os.getpid(), "create_time": create_time(os.getpid())}
+    st.update(run_id=run_id, stage=stage, state="running", pids=pids)
+    status.set_current(st)
+    return st, st.start_heartbeat(stop_beat)
+
+
+def _end_status(st: Any, end_state: str) -> None:
+    """Write the end state of a direct run and drop the process-wide status."""
+    if st is None:
+        return
+    from episteme.ops import status
+
+    # Under run_pipeline.sh the runner writes the final state; do not overwrite it.
+    if "runner" not in (st.read().get("pids") or {}):
+        st.update(state=end_state)
+    status.set_current(status.NullStatus())

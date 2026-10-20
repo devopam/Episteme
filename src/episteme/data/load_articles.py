@@ -42,6 +42,7 @@ from episteme.ops import orphans
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
+from episteme.ops.status import current
 from episteme.ops.stop import stage_guard
 
 _LOG = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         """One attempt: a connection from the pool, one transaction, one commit."""
         with connection() as conn:
             holder[0] = conn
+            current().update(unit=name, backend_pid=conn.info.backend_pid)
             try:
                 with audit_trail.deferred_mirror(conn):
                     try:
@@ -243,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             skipped_by_operator = len(shards) - len(keep)
 
+            shards_done = 0
             for shard in shards:
                 name = shard.name
                 if name not in keep:
@@ -267,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
                     break
 
                 _write_load_success(processed_dir, source, name, result)
+                shards_done += 1
+                current().progress(unit=name, units_done=shards_done, units_total=len(keep))
                 print(
                     f"ok {name} rows={result['rows']} deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
