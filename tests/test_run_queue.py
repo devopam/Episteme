@@ -26,11 +26,11 @@ exit 0
 
 # Logs the step; prints the done line unless NODONE names the step; WRONGDONE
 # prints another step's line; exits $RC_<src>_<stage>; TOUCH_AT "<src> <stage>"
-# edits a tracked file under scripts/data.
+# edits TOUCH_FILE (a path under scripts/data; default a tracked file).
 FAKE_PIPELINE = """#!/usr/bin/env bash
 echo "step $1 $2" >> "$CALLS"
 if [ "${TOUCH_AT:-}" = "$1 $2" ]; then
-    echo changed >> "$(dirname "$0")/_lib/common.sh"
+    echo changed >> "$(dirname "$0")/${TOUCH_FILE:-_lib/common.sh}"
 fi
 rc_var="RC_${1}_${2}"
 if [ -n "${WRONGDONE:-}" ]; then
@@ -126,6 +126,36 @@ def test_code_change_between_steps_stops(tree):
     assert proc.returncode == 1
     assert "STOPPED at pubmed graph: code changed since the queue started" in proc.stdout
     assert steps == ["step pubmed load"]
+
+
+def test_edit_of_a_file_already_modified_at_start_stops(tree):
+    """I2: the guard hashes content, not only the names of changed files."""
+    repo, _ = tree
+    with (repo / "scripts" / "data" / "_lib" / "common.sh").open("a", encoding="utf-8") as fh:
+        fh.write("# edited before the queue\n")
+    proc, steps = _run(tree, "pubmed:load,graph", TOUCH_AT="pubmed load")
+    assert proc.returncode == 1
+    assert "STOPPED at pubmed graph: code changed since the queue started" in proc.stdout
+    assert steps == ["step pubmed load"]
+
+
+def test_edit_of_an_untracked_file_already_there_stops(tree):
+    repo, _ = tree
+    (repo / "scripts" / "data" / "extra.sh").write_text("# untracked\n", encoding="utf-8")
+    proc, steps = _run(tree, "pubmed:load,graph", TOUCH_AT="pubmed load", TOUCH_FILE="extra.sh")
+    assert proc.returncode == 1
+    assert "STOPPED at pubmed graph: code changed since the queue started" in proc.stdout
+    assert steps == ["step pubmed load"]
+
+
+def test_unchanged_dirty_tree_runs_every_step(tree):
+    repo, _ = tree
+    (repo / "scripts" / "data" / "extra.sh").write_text("# untracked\n", encoding="utf-8")
+    with (repo / "scripts" / "data" / "_lib" / "common.sh").open("a", encoding="utf-8") as fh:
+        fh.write("# edited before the queue\n")
+    proc, steps = _run(tree, "pubmed:load,graph")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert steps == ["step pubmed load", "step pubmed graph"]
 
 
 def test_no_git_runs_unguarded(tree):

@@ -57,15 +57,25 @@ QLOG="$QDIR/queue.log"
 
 qlog() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$QLOG"; }
 
-# Code-changed guard: HEAD plus a hash of the working-tree status of
-# scripts/data and src. Without git, or outside a git repo: warn once, run
+# Code-changed guard: HEAD, plus a hash of the content of every change under
+# scripts/data and src (the diff against HEAD, and the names and contents of
+# the untracked files). An edit to a file that was already changed at the
+# queue start counts too. Without git, or outside a git repo: warn once, run
 # without the guard.
 GUARD=1
 code_state() {
-    local head dirty
+    local head diff names untracked
     head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || return 1
-    dirty="$(git -C "$REPO" status --porcelain -- scripts/data src 2>/dev/null | cksum)" || return 1
-    printf '%s %s' "$head" "$dirty"
+    diff="$(git -C "$REPO" diff HEAD --binary -- scripts/data src 2>/dev/null | cksum)" || return 1
+    # NUL-separated names (safe for any name), one per line for hash-object.
+    names="$(git -C "$REPO" ls-files -o --exclude-standard -z -- scripts/data src 2>/dev/null | tr '\0' '\n')" \
+        || return 1
+    untracked="$(printf '%s\n' "$names" | cksum)"
+    if [ -n "$names" ]; then
+        untracked="$untracked $(printf '%s\n' "$names" | git -C "$REPO" hash-object --stdin-paths 2>/dev/null | cksum)" \
+            || return 1
+    fi
+    printf '%s %s %s' "$head" "$diff" "$untracked"
 }
 START_STATE=""
 if ! START_STATE="$(code_state)"; then
