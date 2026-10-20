@@ -134,12 +134,15 @@ class SliceSpec:
     name: str
     max_bytes: int
     select: Callable[[Path], list[Path]]
+    raw_subpath: Path
 
 
 SLICES: dict[str, SliceSpec] = {
-    "bookshelf": SliceSpec("bookshelf", 2 * GB, _select_bookshelf),
-    "europepmc_manuscript": SliceSpec("europepmc_manuscript", 1 * GB, _select_europepmc_manuscript),
-    "apollo": SliceSpec("apollo", 4 * GB, _select_apollo),
+    "bookshelf": SliceSpec("bookshelf", 2 * GB, _select_bookshelf, Path("bookshelf")),
+    "europepmc_manuscript": SliceSpec(
+        "europepmc_manuscript", 1 * GB, _select_europepmc_manuscript, Path("europepmc/manuscripts")
+    ),
+    "apollo": SliceSpec("apollo", 4 * GB, _select_apollo, Path("apollo")),
 }
 
 
@@ -150,9 +153,10 @@ def _spec(source: str) -> SliceSpec:
         raise SliceError(f"no slice defined for source '{source}'") from None
 
 
-def select(source: str, raw_source_dir: Path) -> list[Path]:
+def select(source: str, raw_root: Path) -> list[Path]:
     """The raw files of the slice, in a deterministic order."""
-    return _spec(source).select(Path(raw_source_dir))
+    spec = _spec(source)
+    return spec.select(Path(raw_root).resolve() / spec.raw_subpath)
 
 
 def _sample_base(processed_root: Path | None) -> Path:
@@ -163,13 +167,26 @@ def _sample_base(processed_root: Path | None) -> Path:
     return Path(processed_root).resolve() / "_sample"
 
 
+def _reject_links(root: Path, dest_root: Path) -> None:
+    """Refuse a symlink or junction at or under the sample root, up to dest_root."""
+    p = dest_root
+    while True:
+        is_junction = getattr(p, "is_junction", None)
+        if os.path.islink(p) or (is_junction is not None and is_junction()):
+            raise SliceError(f"refusing: {p} is a symlink or junction")
+        if p == root or p.parent == p:
+            return
+        p = p.parent
+
+
 def prepare(
     source: str,
-    raw_source_dir: Path,
+    raw_root: Path,
     sample_root: Path,
+    *,
     processed_root: Path | None = None,
 ) -> dict:
-    """Build ``sample_root/01_raw/<source>/`` from the slice and write ``slice.json``.
+    """Build ``sample_root/01_raw/<raw subpath>/`` from the slice and write ``slice.json``.
 
     Nothing is deleted unless ``sample_root`` resolves inside
     ``<processed root>/_sample/``.
@@ -179,8 +196,10 @@ def prepare(
     target_root = Path(sample_root).resolve()
     if target_root == base or base not in target_root.parents:
         raise SliceError(f"refusing: sample root {target_root} is not inside {base}")
-    raw = Path(raw_source_dir)
-    files = select(source, raw)
+    raw = Path(raw_root).resolve() / spec.raw_subpath
+    dest_root = Path(sample_root).absolute() / "01_raw" / spec.raw_subpath
+    _reject_links(Path(sample_root).absolute(), dest_root)
+    files = select(source, raw_root)
     missing = [p for p in files if not p.is_file()]
     if missing:
         raise FileNotFoundError(f"selected file is missing: {missing[0]}")
@@ -188,7 +207,8 @@ def prepare(
     if total > spec.max_bytes:
         raise SliceError(f"{source}: slice is {total} bytes, over the cap of {spec.max_bytes}")
 
-    dest_root = target_root / "01_raw" / raw.name
+    meta_path = target_root / "slice.json"
+    meta_path.unlink(missing_ok=True)
     if dest_root.exists():
         shutil.rmtree(dest_root)
     dest_root.mkdir(parents=True)
@@ -206,5 +226,5 @@ def prepare(
             copied += 1
         rels.append(rel.as_posix())
     result = {"files": rels, "bytes": total, "linked": linked, "copied": copied}
-    (target_root / "slice.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
