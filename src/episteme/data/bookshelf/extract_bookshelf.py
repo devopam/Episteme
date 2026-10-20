@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Extraction: NCBI Bookshelf — parse each book package (``*.tar.gz`` holding
-one ``<book>`` NXML document) into the unified ``episteme.articles`` row schema
+one ``<book>`` NXML document, or one NXML file per chapter) into the unified
+``episteme.articles`` row schema
 (contract v1.4): ONE book row + N book-part rows, linked by ``container_id``.
 
-Unit of work: one input ``.tar.gz`` archive. Per archive: open the tar, find
-the single ``.nxml``/``.xml`` member, parse it with ``defusedxml``, build the
-book row (``container_id=None``, ``book_meta`` set) and one row per kept
-``<book-part>`` (``container_id = <book row id>``, ``book_meta=None``), then
+Unit of work: one input ``.tar.gz`` archive. Per archive: open the tar, parse
+EVERY ``.nxml``/``.xml`` member (archive order) with ``defusedxml``, build the
+book row (``container_id=None``, ``book_meta`` set) from ONE preferred member
+(the one named after the accession, else ``TOC``, else the first) and one row
+per kept ``<book-part>``/``<book-app>`` across all members
+(``container_id = <book row id>``, ``book_meta=None``; a part id that repeats
+inside the package is suffixed ``__<member stem>``), then
 one ``staging_writer.write_rows`` call for the whole archive (book + parts in
 one shard), then ``checkpoint_markers.mark_success``/``mark_failed``, then a
 best-effort chained ``audit_trail`` row.
@@ -80,7 +84,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
-from episteme.data.jats import child_text, iter_book_parts, itertext, local_name  # noqa: E402
+from episteme.data.jats import child_text, itertext, local_name  # noqa: E402
 from episteme.data.parallel import (  # noqa: E402
     default_workers,
     record_first_failure,
@@ -225,9 +229,23 @@ def _part_id(bp: ET.Element, meta: ET.Element | None, fallback: str) -> str:
     return fallback
 
 
-def _part_title(bp: ET.Element) -> str:
+def _part_meta(bp: ET.Element) -> ET.Element | None:
+    """``<book-part-meta>`` of a ``<book-part>``, or ``<book-app-meta>`` of a
+    ``<book-app>``."""
     meta = _find_child(bp, "book-part-meta")
-    return _title_from(meta, "title", "title-group") or ""
+    return meta if meta is not None else _find_child(bp, "book-app-meta")
+
+
+def _part_title(bp: ET.Element) -> str:
+    return _title_from(_part_meta(bp), "title", "title-group") or ""
+
+
+def _iter_parts(root: ET.Element):
+    """Every ``<book-part>`` and ``<book-app>`` under ``root``, depth-first,
+    nested included."""
+    for el in root.iter():
+        if local_name(el.tag) in ("book-part", "book-app"):
+            yield el
 
 
 def _should_skip_part(title: str, body_el: ET.Element | None) -> bool:
@@ -302,16 +320,25 @@ def _id_key_from_filename(path: Path, raw_dir: Path) -> str:
     return key
 
 
-def _find_nxml_member(tar: tarfile.TarFile, nbk: str) -> tarfile.TarInfo:
+def _nxml_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Every ``.nxml``/``.xml`` file member, in archive order."""
     members = [
         m for m in tar.getmembers() if m.isfile() and m.name.lower().endswith((".nxml", ".xml"))
     ]
     if not members:
         raise ValueError("no .nxml/.xml member in archive")
-    # Prefer the member whose stem matches the accession id (the real Bookshelf
-    # layout nests it as <NBK>/<NBK>.nxml); otherwise take the first found.
+    return members
+
+
+def _find_nxml_member(members: list[tarfile.TarInfo], nbk: str) -> tarfile.TarInfo:
+    """The member that carries the book-level metadata. Prefer the one whose
+    stem matches the accession id (the real Bookshelf layout nests it as
+    ``<NBK>/<NBK>.nxml``), then ``TOC`` (case-insensitive), else the first."""
     for m in members:
         if Path(m.name).stem == nbk:
+            return m
+    for m in members:
+        if Path(m.name).stem.lower() == "toc":
             return m
     return members[0]
 
@@ -331,12 +358,16 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     # must not collapse to the same source_file value.
     source_file = input_key(path, raw_dir)
 
+    roots: list[tuple[str, ET.Element]] = []  # (member stem, root), archive order
     with tarfile.open(path, "r:gz") as tar:
-        member = _find_nxml_member(tar, nbk)
-        fh = tar.extractfile(member)
-        if fh is None:
-            raise ValueError(f"cannot extract {member.name} from {source_file}")
-        root = ET.parse(fh).getroot()
+        members = _nxml_members(tar)
+        preferred = _find_nxml_member(members, nbk)
+        for member in members:
+            fh = tar.extractfile(member)
+            if fh is None:
+                raise ValueError(f"cannot extract {member.name} from {source_file}")
+            roots.append((Path(member.name).stem, ET.parse(fh).getroot()))
+    root = next(r for (stem, r), m in zip(roots, members, strict=True) if m is preferred)
 
     book_meta_el = _find_child(root, "book-meta")
     title = _title_from(book_meta_el, "book-title", "book-title-group")
@@ -386,51 +417,62 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     # (the single <book-part> sits directly under the wrapper); iter_book_parts
     # walks the whole tree regardless, so gating on a book-level <body> here
     # silently dropped every part row on real data (found live, see report).
-    for bp in iter_book_parts(root):
-        meta = _find_child(bp, "book-part-meta")
-        bp_id = _part_id(bp, meta, f"part{len(part_rows) + 1}")
-        part_title = _part_title(bp) or None
-        part_body_el = _find_child(bp, "body")
-        if _should_skip_part(part_title or "", part_body_el):
-            continue
-        part_text = itertext(part_body_el) or None
-        # Inherit the book's license when the part carries none of its own
-        # (the book-level <permissions> almost always covers the whole work;
-        # per-part license text is rare) -- one of the two brief-sanctioned
-        # options ("inherit the book's license").
-        p_lic, p_lic_url, p_lic_raw = normalize_license(_license_text(bp) or book_license_text)
-        p_subset = subset_from_license(p_lic)
-        part_rows.append(
-            finalize_row(
-                {
-                    "id": f"bookshelf:{id_key}:{bp_id}",
-                    "source": SOURCE,
-                    "source_file": source_file,
-                    "source_record_id": bp_id,
-                    "pmid": None,
-                    "pmcid": None,
-                    "doi": None,
-                    "title": part_title,
-                    "text": part_text,
-                    "authors": None,
-                    "journal": None,
-                    # Parts inherit the book's publication year (no per-part
-                    # pub-date exists in practice) -- keeps them out of the
-                    # articles_bookshelf_y0 sentinel partition alongside the
-                    # book row, and year is a bibliographic fact of the book,
-                    # not of the chapter.
-                    "year": book_year,
-                    "mesh": None,
-                    "language": None,
-                    "license": p_lic,
-                    "license_url": p_lic_url,
-                    "license_raw": p_lic_raw,
-                    "subset": p_subset,
-                    "container_id": f"bookshelf:{id_key}",
-                    "book_meta": None,
-                }
+    seen_ids: set[str] = set()
+    for stem, member_root in roots:
+        for bp in _iter_parts(member_root):
+            meta = _part_meta(bp)
+            bp_id = _part_id(bp, meta, f"part{len(part_rows) + 1}")
+            part_title = _part_title(bp) or None
+            part_body_el = _find_child(bp, "body")
+            if _should_skip_part(part_title or "", part_body_el):
+                continue
+            if bp_id in seen_ids:
+                # An id repeated inside the package (one file per chapter often
+                # restarts its numbering): suffix the member stem, then a counter.
+                base = f"{bp_id}__{stem}"
+                bp_id, n = base, 2
+                while bp_id in seen_ids:
+                    bp_id = f"{base}_{n}"
+                    n += 1
+            seen_ids.add(bp_id)
+            part_text = itertext(part_body_el) or None
+            # Inherit the book's license when the part carries none of its own
+            # (the book-level <permissions> almost always covers the whole work;
+            # per-part license text is rare) -- one of the two brief-sanctioned
+            # options ("inherit the book's license").
+            p_lic, p_lic_url, p_lic_raw = normalize_license(_license_text(bp) or book_license_text)
+            p_subset = subset_from_license(p_lic)
+            part_rows.append(
+                finalize_row(
+                    {
+                        "id": f"bookshelf:{id_key}:{bp_id}",
+                        "source": SOURCE,
+                        "source_file": source_file,
+                        "source_record_id": bp_id,
+                        "pmid": None,
+                        "pmcid": None,
+                        "doi": None,
+                        "title": part_title,
+                        "text": part_text,
+                        "authors": None,
+                        "journal": None,
+                        # Parts inherit the book's publication year (no per-part
+                        # pub-date exists in practice) -- keeps them out of the
+                        # articles_bookshelf_y0 sentinel partition alongside the
+                        # book row, and year is a bibliographic fact of the book,
+                        # not of the chapter.
+                        "year": book_year,
+                        "mesh": None,
+                        "language": None,
+                        "license": p_lic,
+                        "license_url": p_lic_url,
+                        "license_raw": p_lic_raw,
+                        "subset": p_subset,
+                        "container_id": f"bookshelf:{id_key}",
+                        "book_meta": None,
+                    }
+                )
             )
-        )
 
     book_meta_dict["n_parts"] = len(part_rows)
 
