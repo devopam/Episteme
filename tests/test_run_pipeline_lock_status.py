@@ -51,6 +51,8 @@ fi
 if [ -n "${FOREIGN_LOCK:-}" ] && [ "$name" = "${FOREIGN_AT:-}" ]; then
     printf '%s' "$FOREIGN_LOCK" > "$EPISTEME_LOCK_DIR/heavy.lock"
 fi
+sig_var="SIG_${name}"
+[ -z "${!sig_var:-}" ] || kill -"${!sig_var}" "$PPID"
 rc_var="RC_${name}"
 exit "${!rc_var:-0}"
 """
@@ -241,6 +243,54 @@ def test_a_failed_stage_leaves_failed(tree):
     assert _status(tree[1])["state"] == "failed"
 
 
+@pytest.mark.parametrize(("sig", "rc"), [("INT", 130), ("TERM", 143)])
+def test_a_signal_to_the_runner_writes_one_stopped_run_end(tree, sig, rc):
+    """The INT/TERM trap fires before run_stage's own run_end; _on_exit writes it."""
+    proc, _, audit = _run(tree, "load", SIG_load_pubmed=sig, RC_load_pubmed=str(rc))
+    assert proc.returncode == rc, proc.stderr
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1, audit
+    assert "stopped at stage load" in ends[0]
+    assert _status(tree[1])["state"] == "stopped"
+    assert not (_locks(tree[1]) / "heavy.lock").exists()
+
+
+FAKE_FAIL_UNIT = """#!/usr/bin/env bash
+"$REAL_PY" -c "import os; from episteme.ops.failure import record_failure; \\
+record_failure('pubmed', 'load', os.environ['UNIT'], 'boom: x')"
+exit 1
+"""
+
+
+@pytest.mark.parametrize("unit", ["a: b.xml", ""])
+def test_the_failed_unit_reaches_the_status_whole(tree, unit):
+    _write(tree[0] / "pubmed" / "load_pubmed.sh", FAKE_FAIL_UNIT)
+    proc, _, audit = _run(tree, "load", UNIT=unit)
+    assert proc.returncode == 1, proc.stderr
+    st = _status(tree[1])
+    assert st["state"] == "failed"
+    assert st.get("unit") == (unit or None)
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1 and f"failed at stage load: {unit}: boom: x" in ends[0]
+
+
+def test_a_refusal_without_a_holder_in_the_message_says_lock_busy(tree):
+    tmp = tree[1]
+    _write(
+        tmp / "fakepy",
+        FAKE_PY.replace(
+            '*"episteme.ops.lock release"*)',
+            '*"episteme.ops.lock acquire"*) echo "busy: odd" >&2; exit 75 ;;\n'
+            '    *"episteme.ops.lock release"*)',
+        ),
+    )
+    proc, _, audit = _run(tree, "load", "--no-wait")
+    assert proc.returncode == 75, proc.stderr
+    assert "refused: heavy lock busy" in proc.stderr
+    assert audit == []
+    assert _status(tmp)["reason"] == "refused: heavy lock busy"
+
+
 def test_a_stage_that_exits_75_passes_through(tree):
     proc, _, audit = _run(tree, "load", RC_load_pubmed="75")
     assert proc.returncode == 75, proc.stderr
@@ -323,7 +373,8 @@ def test_migrate_database_passes_75_through(tree):
     locks = _locks(tmp)
     locks.mkdir(parents=True)
     (locks / "heavy.lock").write_text(_foreign_lock(), encoding="utf-8")
-    # The scripts wait by default; a fake lock module answers busy at once.
+    # This proves the exit-75 pass-through only, not the real wait: the script
+    # waits by default, so a fake lock module answers busy at once.
     _write(
         tmp / "fakepy",
         FAKE_PY.replace(

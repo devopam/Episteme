@@ -252,6 +252,7 @@ export EPISTEME_RUN_ID="$RUN_ID"
 # Run status: <processed root>/_ops/runs/<run id>/status.json. Every stage
 # sees the folder as EPISTEME_RUN_DIR.
 RUN_DIR="$("$PY" -m episteme.ops.status run-dir --run-id "$RUN_ID" 2>/dev/null)" || RUN_DIR=""
+[ -n "$RUN_DIR" ] || log WARN "status: could not resolve the run folder; EPISTEME_RUN_DIR is empty (no failed_files.txt in a run folder for this run)"
 export EPISTEME_RUN_DIR="$RUN_DIR"
 
 # The stage lock (operating standard spec 6.1): download -> the download lock;
@@ -328,12 +329,18 @@ _on_exit() {
             log ERROR "bulk: index rebuild failed (rc=$rrc); the secondary indexes are still dropped — finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
         fi
     fi
+    # STATUS_OPEN is still set only when a signal trap ended the runner before
+    # run_stage wrote its end state and run_end (run_stage clears it before its
+    # own run_end), so the audit bracket is closed here exactly once.
     if [ -n "$STATUS_OPEN" ]; then
+        local why state
         case "$rc" in
-            130|143) _status_set "$STATUS_OPEN" stopped --reason "stopped at stage $STATUS_OPEN" ;;
-            *) _status_set "$STATUS_OPEN" failed --reason "failed at stage $STATUS_OPEN" ;;
+            130|143) why="stopped at stage $STATUS_OPEN"; state=stopped ;;
+            *) why="failed at stage $STATUS_OPEN"; state=failed ;;
         esac
+        _status_set "$STATUS_OPEN" "$state" --reason "$why"
         STATUS_OPEN=""
+        _run_end "$why"
     fi
     _lock_drop
     [ "$rc" -ne 0 ] && exit "$rc"
@@ -389,12 +396,12 @@ run_stage() {
             *)
                 reason="failed at stage $name"
                 state=failed
-                local unit
-                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || unit=""
-                if [ -n "$unit" ]; then
-                    reason="$reason: $unit"
-                    unit_args=(--unit "${unit%%: *}")
-                fi
+                local detail unit
+                detail="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || detail=""
+                [ -z "$detail" ] || reason="$reason: $detail"
+                # The unit alone (a name may hold ": "); an empty unit passes no --unit.
+                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" --field unit 2>/dev/null)" || unit=""
+                [ -z "$unit" ] || unit_args=(--unit "$unit")
                 ;;
         esac
         log ERROR "stage failed: $name"

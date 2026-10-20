@@ -45,6 +45,16 @@ def test_show_prints_nothing_on_run_id_mismatch_or_missing(monkeypatch, tmp_path
     assert capsys.readouterr().out == ""
 
 
+def test_show_field_unit_prints_the_unit_alone(monkeypatch, tmp_path, capsys):
+    _root(monkeypatch, tmp_path)
+    failure.record_failure("src", "load", "a: b.xml", "boom: x")
+    assert failure.main(["show", "--source", "src", "--run-id", "src-1", "--field", "unit"]) == 0
+    assert capsys.readouterr().out == "a: b.xml\n"
+    failure.record_failure("src", "load", "", "boom")
+    assert failure.main(["show", "--source", "src", "--run-id", "src-1", "--field", "unit"]) == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_clear_removes_the_record_and_tolerates_absence(monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
     path = failure.record_failure("src", "load", "u", "e")

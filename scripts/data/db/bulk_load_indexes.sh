@@ -42,6 +42,9 @@ if [ "$ACTION" != "status" ]; then
         --stage bulk_load_indexes --owner-pid "$EPISTEME_RUNNER_PID")" || lock_rc=$?
     [ "$lock_rc" -eq 0 ] || exit "$lock_rc"
     log INFO "bulk_load_indexes: heavy lock: $lock_out"
+    # Under run_pipeline.sh the acquire re-enters the runner's lock, so no trap
+    # is set here: a Ctrl-C follows the runner's handling, and the runner
+    # releases its own lock.
     if [ "$lock_out" = "acquired" ]; then
         # shellcheck disable=SC2329 # called by the EXIT trap
         _release_lock() {

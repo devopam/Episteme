@@ -52,13 +52,17 @@ def clear(source: str) -> None:
     _path(source).unlink(missing_ok=True)
 
 
-def _show(source: str, run_id: str) -> str:
+def _show(source: str, run_id: str, field: str | None = None) -> str:
+    """``unit: error``; with ``field`` only that field. Empty when there is no
+    record of this run."""
     try:
         data = json.loads(_path(source).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
     if not isinstance(data, dict) or data.get("run_id") != run_id:
         return ""
+    if field is not None:
+        return str(data.get(field) or "")
     return f"{data.get('unit', '')}: {data.get('error', '')}"
 
 
@@ -68,11 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     show = sub.add_parser("show")
     show.add_argument("--source", required=True)
     show.add_argument("--run-id", required=True)
+    show.add_argument("--field", choices=("unit", "error", "stage"), default=None)
     clr = sub.add_parser("clear")
     clr.add_argument("--source", required=True)
     args = parser.parse_args(argv)
     if args.cmd == "show":
-        text = _show(args.source, args.run_id)
+        text = _show(args.source, args.run_id, args.field)
         if text:
             print(text)
     else:

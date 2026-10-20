@@ -126,7 +126,9 @@ def test_bulk_rebuilds_after_an_interrupted_load(tree):
     proc, calls = _run(tree, "load", "--bulk", FAKE_LOAD="term")
     assert proc.returncode == 143, proc.stderr
     assert calls.count("bulk rebuild") == 1
-    assert calls[-1] == "bulk rebuild"
+    # The TERM trap ends the runner; _on_exit rebuilds, then closes the audit bracket.
+    assert calls[-2:] == ["bulk rebuild", "run_end"]
+    assert calls.count("run_end") == 1
     assert "load" in calls
 
 
