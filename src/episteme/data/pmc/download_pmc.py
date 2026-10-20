@@ -60,6 +60,7 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
 from episteme.config import get_settings
+from episteme.ops import lock as ops_lock
 from episteme.ops import profile as ops_profile
 
 S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
@@ -705,6 +706,12 @@ def main() -> None:
     reasons: Counter[str] = Counter()
     samples: list[tuple[str, str]] = []
 
+    settings = get_settings()
+    failed_fh = None
+    if settings.run_dir:
+        settings.run_dir.mkdir(parents=True, exist_ok=True)
+        failed_fh = (settings.run_dir / "failed_files.txt").open("a", encoding="utf-8")
+
     with (
         ThreadPoolExecutor(max_workers=args.threads) as ex,
         ledger_path.open("a", encoding="utf-8") as ledger_fh,
@@ -715,6 +722,8 @@ def main() -> None:
             size = SUBMIT_BATCH if args.limit <= 0 else max(1, min(SUBMIT_BATCH, args.limit - ok_n))
             batch = todo[start : start + size]
             start += size
+            if settings.run_id:  # wait here while a heavy job holds or wants the heavy lock
+                ops_lock.pause_point(settings.run_id)
             futs = []
             for item in batch:
                 if isinstance(item, int):
@@ -740,10 +749,16 @@ def main() -> None:
                 else:
                     fail_n += 1
                     reasons[err.split(":")[0]] += 1
+                    if failed_fh:
+                        failed_fh.write(f"{pid}\t{err}\n")
                     if len(samples) < 15:
                         samples.append((pid, err))
             ledger_fh.flush()
+            if failed_fh:
+                failed_fh.flush()
 
+    if failed_fh:
+        failed_fh.close()
     print(f"\nDone: {ok_n:,} ok, {nc_n:,} non-commercial, {fail_n:,} failed")
     if samples:
         print("Failure reasons:", dict(reasons))

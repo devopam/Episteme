@@ -260,6 +260,64 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     fi
     mkdir -p "$dest_dir"
 
+    local failed_file="${EPISTEME_RUN_DIR:+$EPISTEME_RUN_DIR/failed_files.txt}"
+    failed_file="${failed_file:-$dest_dir/.failed_files.txt}"
+    [ -n "${EPISTEME_RUN_DIR:-}" ] || rm -f "$failed_file"
+    [ -z "${EPISTEME_RUN_DIR:-}" ] || mkdir -p "$EPISTEME_RUN_DIR"
+    local failed_before=0
+    [ ! -f "$failed_file" ] || failed_before="$(wc -l < "$failed_file")"
+    _HF_FAILED="$failed_file"; _HF_WARNED=""
+
+    local batch="${EPISTEME_FETCH_BATCH:-64}"
+    case "$batch" in ''|*[!0-9]*|0) log WARN "EPISTEME_FETCH_BATCH not a positive number — using 64"; batch=64 ;; esac
+    local total="${#urls[@]}" nbatch i=0 start=0 rc=0 brc
+    nbatch=$(( (total + batch - 1) / batch ))
+    local pyx=""
+    if [ -n "${EPISTEME_RUN_ID:-}" ]; then
+        pyx="$(_http_fetch_python)" || log WARN "http_fetch: python not found — pause points and status calls skipped"
+    fi
+    while [ "$start" -lt "$total" ]; do
+        i=$((i + 1))
+        if [ -n "$pyx" ]; then
+            "$pyx" -m episteme.ops.lock pause-point --run-id "$EPISTEME_RUN_ID" || true
+            "$pyx" -m episteme.ops.status progress --run-id "$EPISTEME_RUN_ID" --unit "batch $i/$nbatch" >/dev/null 2>&1 || true
+            "$pyx" -m episteme.ops.status long-begin --run-id "$EPISTEME_RUN_ID" --label "aria2c batch $i/$nbatch" >/dev/null 2>&1 || true
+        fi
+        _http_fetch_batch "$dest_dir" "${urls[@]:start:batch}"; brc=$?
+        [ -z "$pyx" ] || "$pyx" -m episteme.ops.status long-end --run-id "$EPISTEME_RUN_ID" >/dev/null 2>&1 || true
+        [ "$brc" -eq 0 ] || rc=$brc
+        start=$((start + batch))
+    done
+    local failed_now=0
+    [ ! -f "$failed_file" ] || failed_now="$(wc -l < "$failed_file")"
+    failed_now=$(( failed_now - failed_before ))
+    if [ "$failed_now" -gt 0 ]; then
+        log ERROR "http_fetch: $failed_now file(s) failed; see $failed_file"
+        return 1
+    fi
+    return "$rc"
+}
+
+_http_fetch_python() { # the Python the wrappers use: $PYTHON, else the repo venv, else python
+    local c
+    if [ -n "${PYTHON:-}" ]; then printf '%s
+' "$PYTHON"; return 0; fi
+    for c in "$_COMMON_LIB_DIR/../../../.venv/Scripts/python.exe" "$_COMMON_LIB_DIR/../../../.venv/bin/python" python; do
+        command -v "$c" >/dev/null 2>&1 && { printf '%s
+' "$c"; return 0; }
+    done
+    return 1
+}
+
+_hf_record_failed() { # _hf_record_failed DEST_DIR URL REL REASON
+    local f="${_HF_FAILED:-$1/.failed_files.txt}"
+    printf '%s	%s	%s
+' "$2" "$3" "$4" >> "$f"
+}
+
+_http_fetch_batch() { # _http_fetch_batch DEST_DIR LINE... — one batch through aria2c (curl fallback)
+    local dest_dir="$1"; shift
+    local -a urls=("$@")
     if command -v aria2c >/dev/null 2>&1; then
         local aria_in session rc; aria_in="$(mktemp)"; session="$(mktemp)"
         local line url rel
@@ -278,10 +336,17 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         # aria2c can fail where curl works: the Windows build's TLS stack failed
         # every handshake with ftp.expasy.org on 2026-10-11 ("The function requested
         # is not supported") while curl fetched the same URLs.
-        command -v curl >/dev/null 2>&1 || { rm -f "$session"; return "$rc"; }
         local -a retry=()
         mapfile -t retry < <(_aria2_unfinished "$session" "${urls[@]}")
         rm -f "$session"
+        if ! command -v curl >/dev/null 2>&1; then
+            [ "${#retry[@]}" -gt 0 ] || retry=("${urls[@]}")
+            for line in "${retry[@]}"; do
+                url="${line%%$'	'*}"; rel="${line#*$'	'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
+                _hf_record_failed "$dest_dir" "$url" "$rel" "aria2c exit $rc"
+            done
+            return "$rc"
+        fi
         # no usable session (aria2c killed before writing it): retry every line
         [ "${#retry[@]}" -gt 0 ] || retry=("${urls[@]}")
         log WARN "aria2c exit $rc — retrying ${#retry[@]} unfinished file(s) with curl"
@@ -290,7 +355,7 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     fi
 
     command -v curl >/dev/null 2>&1 || die "no download tool: install aria2c (or curl for the slow path)"
-    log WARN "aria2c not found — sequential curl fallback (degraded throughput)"
+    [ -n "${_HF_WARNED:-}" ] || { log WARN "aria2c not found — sequential curl fallback (degraded throughput)"; _HF_WARNED=1; }
     _curl_fetch_all "$dest_dir" "${urls[@]}"
 }
 
@@ -312,7 +377,7 @@ _aria2_unfinished() { # _aria2_unfinished SESSION LINE... — the http_fetch lin
 
 _curl_fetch_all() { # _curl_fetch_all DEST_DIR LINE... — sequential resumable curl over http_fetch lines
     local dest_dir="$1"; shift
-    local line url rel out
+    local line url rel out nfail=0
     for line in "$@"; do
         url="${line%%$'\t'*}"; rel="${line#*$'\t'}"; [ "$rel" = "$line" ] && rel="$(basename "$url")"
         _safe_rel "$rel" || { log ERROR "http_fetch: unsafe relpath '$rel' — skipping"; continue; }
@@ -325,8 +390,13 @@ _curl_fetch_all() { # _curl_fetch_all DEST_DIR LINE... — sequential resumable 
             continue  # already complete (aria2c removes the control file when done)
         fi
         mkdir -p "$(dirname "$out")"
-        _curl_resume "$out" "$url" || die "curl failed: $url"
+        if ! _curl_resume "$out" "$url"; then
+            log ERROR "curl failed: $url"
+            _hf_record_failed "$dest_dir" "$url" "$rel" "curl failed"
+            nfail=$((nfail + 1))
+        fi
     done
+    [ "$nfail" -eq 0 ]
 }
 
 _curl_resume() { # _curl_resume DEST URL — resumable curl; re-run only on transient network exits
