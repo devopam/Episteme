@@ -226,3 +226,36 @@ def test_pubmed_stop_propagates_to_stage_guard(stub, tmp_path, monkeypatch):
     monkeypatch.setattr(graph_builder, "build", stop)
     with pytest.raises(KeyboardInterrupt):
         graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)])
+
+
+def test_one_transaction_build_runs_as_a_long_statement(stub, tmp_path, monkeypatch):
+    """I3: the non-pubmed graph build writes no unit progress; it is marked as
+    one long statement, so the stall check allows it more time."""
+    from episteme.ops import status
+
+    events = []
+
+    class _Status(status.NullStatus):
+        @contextlib.contextmanager
+        def long_statement(self, label):
+            events.append(("begin", label))
+            yield
+            events.append(("end", label))
+
+    real = graph_builder.build
+
+    def spy(conn, **kw):
+        events.append(("build", kw["source"]))
+        return real(conn, **kw)
+
+    monkeypatch.setattr(graph_builder, "build", spy)
+    status.set_current(_Status())
+    try:
+        assert graph_builder.main(["--source", "pmc", "--raw-dir", str(tmp_path)]) == 0
+    finally:
+        status.set_current(status.NullStatus())
+    assert events == [
+        ("begin", "graph build pmc"),
+        ("build", "pmc"),
+        ("end", "graph build pmc"),
+    ]

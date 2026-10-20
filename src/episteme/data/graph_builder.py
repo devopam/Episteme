@@ -77,6 +77,7 @@ from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
 from episteme.data.pubmed.relations import normalize_orcid
 from episteme.ops import orphans
+from episteme.ops import status as ops_status
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.stop import stage_guard
@@ -910,7 +911,12 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     with audit_trail.deferred_mirror(conn):
                         try:
-                            res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
+                            # One transaction, no unit progress: a long statement
+                            # for the stall check.
+                            with ops_status.current().long_statement(f"graph build {args.source}"):
+                                res = build(
+                                    conn, source=args.source, raw_dir=raw_dir, run_id=run_id
+                                )
                             audit_trail.commit(conn)
                             return res
                         except BaseException as exc:

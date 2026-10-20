@@ -86,3 +86,39 @@ def test_failed_pmcid_lands_in_failed_files(tmp_path, monkeypatch):
     assert len(lines) == 1
     pmcid, reason = lines[0].split("\t")
     assert pmcid == "PMC9" and "request failed" in reason
+
+
+def test_progress_once_per_submit_batch(tmp_path, monkeypatch):
+    """I3: under run_pipeline.sh (a run id) each submit batch writes progress."""
+    from episteme.ops import status
+
+    cfg = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(dp, "SUBMIT_BATCH", 2)
+    monkeypatch.setattr(dp.ops_lock, "pause_point", lambda run_id, **kw: False)
+    seen = []
+    real = status.RunStatus.progress
+
+    def spy(self, **kw):
+        seen.append((kw["units_done"], kw["units_total"]))
+        return real(self, **kw)
+
+    monkeypatch.setattr(status.RunStatus, "progress", spy)
+    _go(monkeypatch, tmp_path, {n: 1 for n in range(1, 6)}, lambda vid: None)
+    try:
+        dp.main()
+        rec = status.RunStatus(status.run_dir("R1")).read()
+    finally:
+        cfg.get_settings.cache_clear()
+    assert seen == [(2, 5), (4, 5), (5, 5)]
+    assert rec["units_done"] == 5 and rec["units_total"] == 5 and rec["last_progress"]
+
+
+def test_no_run_id_writes_no_progress(tmp_path, monkeypatch):
+    cfg = _env(tmp_path, monkeypatch, run_id=None)
+    monkeypatch.setattr(dp.ops_lock, "pause_point", lambda run_id, **kw: False)
+    _go(monkeypatch, tmp_path, {1: 1}, lambda vid: None)
+    try:
+        dp.main()
+    finally:
+        cfg.get_settings.cache_clear()
+    assert not (tmp_path / "proc" / "_ops").exists()

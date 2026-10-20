@@ -63,6 +63,7 @@ from tqdm import tqdm
 from episteme.config import get_settings
 from episteme.ops import lock as ops_lock
 from episteme.ops import profile as ops_profile
+from episteme.ops import status as ops_status
 
 S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
 
@@ -713,6 +714,12 @@ def main() -> None:
         failed_path: Path | None = settings.run_dir / "failed_files.txt"
     else:
         failed_path = None
+    # Under run_pipeline.sh: one progress record per submit batch (the stall check).
+    run_status = (
+        ops_status.RunStatus(ops_status.run_dir(settings.run_id))
+        if settings.run_id
+        else ops_status.NullStatus()
+    )
 
     with (
         ThreadPoolExecutor(max_workers=args.threads) as ex,
@@ -759,6 +766,7 @@ def main() -> None:
             ledger_fh.flush()
             if failed_fh:
                 failed_fh.flush()
+            run_status.progress(units_done=min(start, len(todo)), units_total=len(todo))
 
     print(f"\nDone: {ok_n:,} ok, {nc_n:,} non-commercial, {fail_n:,} failed")
     if samples:
