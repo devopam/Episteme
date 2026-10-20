@@ -385,3 +385,25 @@ def test_stalled_runner_entry_wins_over_a_dead_stage():
         "pids": {"runner": me, "stage": {"pid": _dead_pid(), "create_time": 1.0}},
     }
     assert status.stalled(rec) is None
+
+
+def test_stalled_lock_wait_is_not_a_stall():
+    """A runner that waits for a stage lock makes no progress by design."""
+    me = {"pid": os.getpid(), "create_time": lock.create_time(os.getpid())}
+    rec = {
+        "state": "running",
+        "unit": "waiting for the heavy lock",
+        "last_progress": _iso(9999),
+        "pids": {"runner": me},
+    }
+    assert status.stalled(rec) is None
+
+
+def test_stalled_lock_wait_of_a_dead_runner_is_crashed():
+    rec = {
+        "state": "running",
+        "unit": "waiting for the heavy lock",
+        "last_progress": _iso(9999),
+        "pids": {"runner": {"pid": _dead_pid(), "create_time": 1.0}},
+    }
+    assert status.stalled(rec).startswith("crashed:")

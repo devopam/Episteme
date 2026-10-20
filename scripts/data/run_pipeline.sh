@@ -586,7 +586,9 @@ _bulk_rebuild() {
     [ "$BULK_PENDING" = "1" ] || return 0
     BULK_PENDING=0
     log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
-    bash "$HERE/db/bulk_load_indexes.sh" rebuild
+    # The rebuild always waits, also under --no-wait: a refused rebuild would
+    # leave the secondary indexes dropped.
+    EPISTEME_NO_WAIT='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 if [ "$BULK" = "1" ]; then
     log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"
@@ -597,9 +599,16 @@ if [ "$BULK" = "1" ]; then
     BULK_DROPPING=0
     BULK_NOTE=""
     if [ "$drop_rc" -ne 0 ]; then
+        # 75: --no-wait and the advisory lock is busy; nothing was dropped.
+        drop_why="failed at stage $STAGE (bulk index drop)"
+        drop_state=failed
+        if [ "$drop_rc" -eq 75 ]; then
+            drop_why="refused at stage $STAGE (bulk index drop: the advisory lock is busy)"
+            drop_state=refused
+        fi
         log ERROR "bulk: index drop failed (rc=$drop_rc); the $STAGE was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
-        _run_end "failed at stage $STAGE (bulk index drop)"
-        _status_set "$STAGE" failed --reason "failed at stage $STAGE (bulk index drop)"
+        _run_end "$drop_why"
+        _status_set "$STAGE" "$drop_state" --reason "$drop_why"
         exit "$drop_rc"
     fi
     BULK_PENDING=1

@@ -503,7 +503,7 @@ bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TE
 | 2 | Usage error, for example `--skip-unit` without `--reason`. |
 | 130 | Stopped with Ctrl-C. The audit `run_end` reason is `stopped at stage <name>`. |
 | 143 | Stopped with SIGTERM, or the parent runner died. |
-| 75 | Refused: a lock is busy and `--no-wait` is set (section 4.8). `migrate_database.sh` and `bulk_load_indexes.sh` run directly always wait, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop or rebuild exits 75 when the advisory lock is busy. |
+| 75 | Refused: a lock is busy and `--no-wait` is set (section 4.8). `migrate_database.sh` and `bulk_load_indexes.sh` run directly always wait, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop exits 75 when the advisory lock is busy; the rebuild always waits. |
 
 When a stage fails, `run_pipeline.sh` passes 130, 143 and 75 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
 
@@ -561,12 +561,12 @@ One heavy job runs at a time on this machine. A download may run beside a heavy 
 **Waiting and refusing.**
 
 - Without a flag, a job waits while the lock is busy. It checks every 5 seconds. It logs `waiting for the heavy lock: held by ...` at the start and every 5 minutes. When a running download blocks it, the line is `waiting for the heavy lock: download <run> (<stage>) has no pause point or has not reached one`. No order is promised between two waiting jobs.
-- While `run_pipeline.sh` waits for a stage lock, the status shows `state` `running`, the stage that waits, and `unit` `waiting for the <kind> lock`.
+- While `run_pipeline.sh` waits for a stage lock, the status shows `state` `running`, the stage that waits, and `unit` `waiting for the <kind> lock`. `--stalled` does not report such a wait as a stall (only a gone runner, as `crashed`).
 - A heavy job that waits writes `heavy.request`. A running download sees it and pauses.
 - A heavy job waits while a download is `running`. It does not wait for a download that is `paused`.
 - A second download waits for the first.
 - With `--no-wait`, a busy lock does not make the run wait. The run logs `refused: <kind> lock held by <run> (<stage>)`, sets the status `refused` and exits 75. A single stage writes no audit row. In an `all` chain, the earlier stages stay done, and the run writes `run_end` with the refusal as the reason.
-- `migrate_database.sh` and `bulk_load_indexes.sh` have no `--no-wait`. Run directly, they always wait for the heavy lock and the advisory lock, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop and rebuild see `EPISTEME_NO_WAIT=1` and exit 75 when the advisory lock is busy.
+- `migrate_database.sh` and `bulk_load_indexes.sh` have no `--no-wait`. Run directly, they always wait for the heavy lock and the advisory lock, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop sees `EPISTEME_NO_WAIT=1` and exits 75 when the advisory lock is busy (status `refused`). The rebuild always waits, so a refusal never leaves the indexes dropped.
 
 To refuse instead of wait, add `--no-wait`:
 
@@ -664,7 +664,7 @@ python -m episteme.ops.status --stalled
 2. it made no progress for 10 minutes, or
 3. it made no progress for 60 minutes while `long_statement` is set.
 
-A run in `done`, `failed`, `stopped` or `refused` is never stalled. The heartbeat does not count as progress.
+A run in `done`, `failed`, `stopped` or `refused` is never stalled. Nor is a run that waits for a stage lock (`unit` `waiting for the <kind> lock`), unless its runner is gone. The heartbeat does not count as progress.
 
 **The queue.** `run_queue.sh` runs several `run_pipeline.sh` steps one after the other.
 

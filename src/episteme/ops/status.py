@@ -256,6 +256,9 @@ def stalled(rec: dict[str, Any], now: datetime | None = None) -> str | None:
         stage = pids.get("stage")
         if isinstance(stage, dict) and not owner_alive(stage):
             return "crashed: the stage process is gone"
+    # run_pipeline.sh waits for a stage lock: a wait is not a stall.
+    if str(rec.get("unit") or "").startswith("waiting for the "):
+        return None
     last = rec.get("last_progress") or rec.get("started_at")
     if not last:
         return None

@@ -63,8 +63,12 @@ if [ -n "${WAITKILL_SIG:-}" ] && [ "$name" = "${FOREIGN_AT:-}" ]; then
             sleep 0.2; n=$((n + 1))
         done
         echo "waitstatus $(tr -d '\\r\\n' < "$EPISTEME_RUN_DIR/status.json")" >> "$CALLS"
-        kill -"$WAITKILL_SIG" "$runner"
-        sleep 1
+        # Signal only the runner of this test, and only while it still waits:
+        # after a time-out its PID may belong to another process.
+        if [ -f "$EPISTEME_LOCK_DIR/heavy.request" ] && kill -0 "$runner" 2>/dev/null; then
+            kill -"$WAITKILL_SIG" "$runner"
+            sleep 1
+        fi
         rm -f "$EPISTEME_LOCK_DIR/heavy.lock"
     ) </dev/null >/dev/null 2>&1 &
 fi
@@ -75,7 +79,8 @@ exit "${!rc_var:-0}"
 """
 
 FAKE_BULK = """#!/usr/bin/env bash
-echo "bulk $1" >> "$CALLS"
+echo "bulk $1${EPISTEME_NO_WAIT:+ no_wait=$EPISTEME_NO_WAIT}" >> "$CALLS"
+[ "$1" = drop ] && [ -n "${RC_BULK_DROP:-}" ] && exit "$RC_BULK_DROP"
 [ "$1" = drop ] && [ -n "${SIG_BULK_DROP:-}" ] && kill -"$SIG_BULK_DROP" "$PPID"
 exit 0
 """
@@ -499,3 +504,23 @@ def test_no_wait_reaches_the_python_stages(tree):
     proc, calls, _ = _run(tree, "graph")
     assert proc.returncode == 0, proc.stderr
     assert not any(c.startswith("no_wait") for c in calls)
+
+
+def test_no_wait_reaches_the_bulk_drop_but_not_the_rebuild(tree):
+    """The drop may refuse under --no-wait; the rebuild always waits, so the
+    secondary indexes are never left dropped by a refusal."""
+    _write(tree[0] / "db" / "bulk_load_indexes.sh", FAKE_BULK)
+    proc, calls, _ = _run(tree, "load", "--bulk", "--no-wait")
+    assert proc.returncode == 0, proc.stderr
+    assert [c for c in calls if c.startswith("bulk ")] == ["bulk drop no_wait=1", "bulk rebuild"]
+
+
+def test_a_bulk_drop_refused_with_75_is_refused(tree):
+    _write(tree[0] / "db" / "bulk_load_indexes.sh", FAKE_BULK)
+    proc, calls, audit = _run(tree, "load", "--bulk", "--no-wait", RC_BULK_DROP="75")
+    assert proc.returncode == 75, proc.stderr
+    assert "stage load_pubmed" not in calls
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1 and "refused at stage load (bulk index drop" in ends[0]
+    assert _status(tree[1])["state"] == "refused"
+    assert not (_locks(tree[1]) / "heavy.lock").exists()
