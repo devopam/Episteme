@@ -11,7 +11,8 @@ import shutil
 import subprocess
 
 import pytest
-from tests.test_run_pipeline_bulk import BASH, FAKE_PY, REPO_ROOT, _write
+
+from test_run_pipeline_bulk import BASH, FAKE_PY, REPO_ROOT, _write
 
 FAKE_STAGE = """#!/usr/bin/env bash
 echo "$(basename "$0") $*" >> "$CALLS"
