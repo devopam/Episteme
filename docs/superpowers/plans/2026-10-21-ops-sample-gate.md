@@ -333,7 +333,7 @@ Once merged, a full run of a gated stage (bookshelf, europepmc_manuscript and ap
 
 Do not pull this branch into the main checkout while a pipeline run is in progress.
 
-## Open decisions for the user (plan review)
+## Decisions (user, 2026-10-21: "Ok" — all six defaults)
 
 1. **Gated stages:** `extract` (and `serialize`) plus `load`, with the sample load going to `episteme_test` (default), or `extract`/`serialize` only.
 2. **`pubchem`:** its slice ("the first 2 parts and 1 from the middle") needs the parts from sub-project 2, so its rules and slice wait for that (default), or a whole-file slice now.
