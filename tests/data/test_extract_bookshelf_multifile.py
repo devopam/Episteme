@@ -217,3 +217,18 @@ def test_preferred_member_last_each_member_opened_once(tmp_path, monkeypatch):
     book = [r for r in rows if r["container_id"] is None][0]
     assert book["title"] == "Main Title"
     assert [r["source_record_id"] for r in rows if r["container_id"]] == ["ch1", "ch2"]
+
+
+def test_non_bookshelf_member_fails_package(tmp_path):
+    import pytest
+
+    members = [
+        ("NBK92/ch1.nxml", _wrapper(_chapter("ch1", "C1"))),
+        ("NBK92/manifest.xml", "<manifest/>"),
+    ]
+    raw_dir = _write_pkg(tmp_path, "tr11_NBK92.tar.gz", members)
+    with pytest.raises(ValueError) as exc:
+        parse_book_archive(raw_dir / "tr11_NBK92.tar.gz", raw_dir)
+    assert str(exc.value) == (
+        "tr11_NBK92.tar.gz: member NBK92/manifest.xml is not a Bookshelf document (root <manifest>)"
+    )

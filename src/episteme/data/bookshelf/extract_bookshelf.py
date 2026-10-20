@@ -418,6 +418,12 @@ def _book_fields(root: ET.Element) -> dict[str, Any]:
     }
 
 
+# Root elements a Bookshelf package member may have (local names).
+_BOOKSHELF_ROOTS = frozenset(
+    {"book", "book-part-wrapper", "book-part", "book-app", "book-app-group"}
+)
+
+
 def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     """One ``.tar.gz`` book package -> ``[book_row, *kept_part_rows]``, each a
     finalized ``episteme.articles`` row."""
@@ -448,6 +454,11 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
             if fh is None:
                 raise ValueError(f"cannot extract {member.name} from {source_file}")
             root = ET.parse(fh).getroot()
+            if local_name(root.tag) not in _BOOKSHELF_ROOTS:
+                raise ValueError(
+                    f"{source_file}: member {member.name} is not a Bookshelf document "
+                    f"(root <{local_name(root.tag)}>)"
+                )
             if member is preferred:
                 book = _book_fields(root)
             stems.append(Path(member.name).stem)
