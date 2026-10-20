@@ -35,12 +35,23 @@ def write_marker(path: Path, payload: dict[str, Any]) -> Path:
     """Write a marker atomically: a temp file in the same directory, then
     ``os.replace``. A write that fails part way (a disk error) leaves no
     marker, so a marker that exists is always complete; the presence checks
-    (``is_success``, the load and graph skips) rely on that."""
+    (``is_success``, the load and graph skips) rely on that. The temp file is
+    fsynced before the rename (and, on POSIX, the directory after it), so a
+    power loss leaves either no marker or a complete one."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
+        if os.name == "posix":
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
