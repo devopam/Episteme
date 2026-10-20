@@ -207,6 +207,8 @@ class Settings:
     pg_work_mem: str | None = None
     sys_admin_password: str = ""
     runner_pid: int | None = None
+    # Folder of the current run's status file (the wrapper exports it).
+    run_dir: Path | None = None
 
     def pg_dsn(self) -> str:
         return (
@@ -309,6 +311,9 @@ def get_settings() -> Settings:
         # Windows PID of the outermost pipeline script (scripts/data/_lib/common.sh
         # exports it); the parent watchdog (episteme.ops.stop) watches it.
         runner_pid=_get_pid_or_none("EPISTEME_RUNNER_PID"),
+        run_dir=Path(_get("EPISTEME_RUN_DIR")).expanduser()
+        if (_get("EPISTEME_RUN_DIR") or "").strip()
+        else None,
     )
 
 
