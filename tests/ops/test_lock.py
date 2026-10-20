@@ -27,7 +27,7 @@ def _write(path, **fields):
     rec = {
         "kind": "heavy",
         "pid": os.getpid(),
-        "create_time": lock._create_time(os.getpid()),
+        "create_time": lock.create_time(os.getpid()),
         "run_id": "r0",
         "stage": "s",
         "started_at": "2026-10-20T00:00:00+00:00",
@@ -85,7 +85,7 @@ def test_dead_owner_is_taken_over_and_logged(tmp_path, caplog):
 
 
 def test_pid_reuse_counts_as_stale(tmp_path):
-    ct = lock._create_time(os.getpid())
+    ct = lock.create_time(os.getpid())
     _write(tmp_path / "heavy.lock", create_time=ct - 100)
     assert lock.try_acquire("heavy", "r1", "a", d=tmp_path)[0] == "acquired"
 

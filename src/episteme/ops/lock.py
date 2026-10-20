@@ -74,7 +74,7 @@ def _request_path(d: Path) -> Path:
     return d / "heavy.request"
 
 
-def _create_time(pid: int) -> float | None:
+def create_time(pid: int) -> float | None:
     try:
         return psutil.Process(pid).create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
@@ -85,13 +85,13 @@ def owner_alive(rec: dict) -> bool:
     pid, ct = rec.get("pid"), rec.get("create_time")
     if not isinstance(pid, int):
         return False
-    now_ct = _create_time(pid)
+    now_ct = create_time(pid)
     if now_ct is None:
         return False
     return ct is None or abs(now_ct - float(ct)) < 1.0
 
 
-def _retry(fn: Callable, *args):
+def retry_io(fn: Callable, *args):
     """Call ``fn``; on PermissionError (Windows: a reader holds the file) try again
     a few times, then raise the last error."""
     for attempt in range(_FS_TRIES):
@@ -105,7 +105,7 @@ def _retry(fn: Callable, *args):
 
 def _unlink(path: Path) -> None:
     try:
-        _retry(os.unlink, path)
+        retry_io(os.unlink, path)
     except FileNotFoundError:
         pass
 
@@ -114,7 +114,7 @@ def read(path: Path) -> dict | None:
     """The record; None when there is no file; {} when it cannot be parsed;
     ``_LOCKED`` when the file stays unopenable (treated as live)."""
     try:
-        text = _retry(lambda: path.read_text(encoding="utf-8"))
+        text = retry_io(lambda: path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except PermissionError:
@@ -153,7 +153,7 @@ def _record(kind: str, run_id: str, stage: str, pid: int) -> dict:
     return {
         "kind": kind,
         "pid": pid,
-        "create_time": _create_time(pid),
+        "create_time": create_time(pid),
         "run_id": run_id,
         "stage": stage,
         "started_at": _now(),
@@ -174,7 +174,7 @@ def _write_new(path: Path, rec: dict) -> bool:
 def _rewrite(path: Path, rec: dict) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(rec), encoding="utf-8")
-    _retry(os.replace, tmp, path)
+    retry_io(os.replace, tmp, path)
 
 
 def _take_over_stale(path: Path, rec: dict) -> None:

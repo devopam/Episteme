@@ -36,7 +36,7 @@ def _rec(**fields):
     rec = {
         "kind": "heavy",
         "pid": os.getpid(),
-        "create_time": lock._create_time(os.getpid()),
+        "create_time": lock.create_time(os.getpid()),
         "run_id": "r1",
         "stage": "s",
         "started_at": "2026-10-20T00:00:00+00:00",

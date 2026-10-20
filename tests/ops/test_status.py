@@ -122,7 +122,7 @@ def test_stalled_dead_runner_is_crashed():
 
 
 def test_stalled_live_runner_fresh_is_none():
-    me = {"pid": os.getpid(), "create_time": lock._create_time(os.getpid())}
+    me = {"pid": os.getpid(), "create_time": lock.create_time(os.getpid())}
     assert (
         status.stalled({"state": "running", "last_progress": _iso(1), "pids": {"runner": me}})
         is None
@@ -189,3 +189,125 @@ def test_cli_stalled_skips_damaged_file(capsys):
     status.main(["set", "--run-id", "OK", "--source", "s", "--stage", "a", "--state", "running"])
     assert status.main(["--stalled"]) == 0
     assert "BAD" in capsys.readouterr().err
+
+
+def test_update_retries_a_transient_permission_error(tmp_path, monkeypatch):
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("held")
+        return real(a, b)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    st = status.RunStatus(tmp_path)
+    st.update(a=1)
+    assert st.read()["a"] == 1
+
+
+def test_update_never_raises_when_replace_always_fails(tmp_path, monkeypatch, caplog):
+    def broken(a, b):
+        raise PermissionError("held")
+
+    st = status.RunStatus(tmp_path)
+    monkeypatch.setattr(os, "replace", broken)
+    with caplog.at_level("WARNING"):
+        rec = st.progress(rows_done=5)
+    assert rec["rows_done"] == 5
+    assert "could not write" in caplog.text
+    assert [p.name for p in tmp_path.iterdir()] == []
+    with st.long_statement("X"):  # the stage goes on
+        pass
+    with pytest.raises(RuntimeError):  # the finally never hides the body error
+        with st.long_statement("X"):
+            raise RuntimeError("boom")
+    args = ["set", "--run-id", "Z", "--source", "s", "--stage", "a", "--state", "done"]
+    assert status.main(args) == 0
+
+
+def test_read_retries_then_gives_empty(tmp_path, monkeypatch, caplog):
+    st = status.RunStatus(tmp_path / "runs" / "r1")
+    st.update(a=1)
+    real = status.Path.read_text
+    calls = {"n": 0}
+
+    def flaky(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("held")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(status.Path, "read_text", flaky)
+    assert st.read()["a"] == 1
+
+    def broken(self, *a, **k):
+        raise PermissionError("held")
+
+    monkeypatch.setattr(status.Path, "read_text", broken)
+    with caplog.at_level("WARNING"):
+        assert st.read() == {}
+    assert "could not read" in caplog.text
+    assert status.list_runs(tmp_path / "runs") == [("r1", {})]
+
+
+def test_heartbeat_keeps_fields_written_by_another_writer(tmp_path):
+    st = status.RunStatus(tmp_path)
+    st.update(a=1)
+    other = status.RunStatus(tmp_path)  # a CLI process
+    other.update(long_statement={"label": "L", "since": "x"})
+    st.heartbeat()
+    rec = st.read()
+    assert rec["long_statement"]["label"] == "L" and rec["heartbeat"] and rec["a"] == 1
+
+
+def test_null_status_heartbeat_returns_a_thread():
+    t = status.NullStatus().start_heartbeat(threading.Event())
+    t.join(timeout=1)
+    assert not t.is_alive()
+
+
+def test_cli_progress_on_unknown_run_exits_2(capsys):
+    assert status.main(["progress", "--run-id", "NOPE"]) == 2
+    assert "no status file" in capsys.readouterr().err
+    assert not status.run_dir("NOPE").exists()
+
+
+def test_stalled_naive_timestamp_counts_as_utc():
+    naive = (datetime.now(timezone.utc) - timedelta(seconds=700)).replace(tzinfo=None)
+    rec = {"state": "running", "last_progress": naive.isoformat(timespec="seconds")}
+    assert status.stalled(rec).startswith("stalled:")
+
+
+def test_set_keeps_started_at_when_stage_unchanged():
+    args = ["set", "--run-id", "K", "--source", "s", "--stage", "a", "--state", "running"]
+    status.main(args)
+    first = status.RunStatus(status.run_dir("K")).read()["started_at"]
+    time.sleep(1.1)
+    status.main(args)
+    assert status.RunStatus(status.run_dir("K")).read()["started_at"] == first
+
+
+def test_queue_dir_is_under_processed_root(capsys):
+    from episteme.config import get_settings
+
+    status.main(["queue-dir", "--queue-id", "Q9"])
+    out = capsys.readouterr().out.strip()
+    assert out == str(get_settings().processed_root / "_ops" / "queue" / "Q9")
+
+
+def test_two_threads_update_lose_no_fields(tmp_path):
+    st = status.RunStatus(tmp_path)
+
+    def work(prefix):
+        for i in range(30):
+            st.update(**{f"{prefix}{i}": i})
+
+    ts = [threading.Thread(target=work, args=(p,)) for p in "ab"]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    rec = st.read()
+    assert all(f"{p}{i}" in rec for p in "ab" for i in range(30))
