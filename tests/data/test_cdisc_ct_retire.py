@@ -10,6 +10,7 @@ shard-name-with-extension marker check without a live connection.
 from __future__ import annotations
 
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 
 from episteme.data.cdisc_ct import retire
@@ -80,10 +81,14 @@ def test_keep_set_uses_shard_filename_with_extension_for_the_marker(tmp_path, mo
         "episteme.data.cdisc_ct.retire.connection",
         lambda: _FakeConnCtx(),
     )
-    # no real DB for the advisory lock
+    # real stage_guard: no handlers, no watchdog, no real DB for the advisory lock
+    from episteme.ops import stop
+
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel, **kw: None)
     monkeypatch.setattr(
         "episteme.ops.lock.advisory_lock",
-        lambda **kw: __import__("contextlib").nullcontext(),
+        lambda **kw: nullcontext(),
     )
     # This test is about the marker-filename-extension logic, not I2's DB
     # verification (which needs a real cursor) -- stub it out as confirmed.

@@ -157,6 +157,74 @@ def test_serializer_main_passes_lock_stage(monkeypatch):
     assert _guard_kwargs(monkeypatch, serialize_mesh) == {"lock_stage": "serialize"}
 
 
+def test_stop_during_the_file_lock_wait_exits_130_and_leaves_no_files(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    heavy = _heavy()
+    heavy.write_text(json.dumps(_rec(run_id="other")), encoding="utf-8")
+
+    def interrupt(sec):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lock.time, "sleep", interrupt)
+    with pytest.raises(SystemExit) as exc:
+        with stop.stage_guard(lambda: None, lock_stage="load"):
+            pytest.fail("the body must not run while another run holds the lock")
+    assert exc.value.code == 130
+    assert json.loads(heavy.read_text(encoding="utf-8"))["run_id"] == "other"  # not ours
+    assert not (heavy.parent / "heavy.request").exists()
+
+
+class _FakeConn:
+    def __init__(self, try_result=True):
+        self.calls = []
+        self.closed = False
+        self.try_result = try_result
+
+    def execute(self, sql, params=None):
+        self.calls.append(sql)
+        outer = self
+
+        class _Cur:
+            def fetchone(self):
+                return (outer.try_result,)
+
+        return _Cur()
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_connect(monkeypatch, conn):
+    import psycopg
+
+    from episteme.data.db import connection as dbc
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: conn)
+    monkeypatch.setattr(dbc, "dsn_from_settings", lambda: "dbname=x")
+
+
+def test_advisory_lock_unlocks_and_closes_when_the_body_raises(monkeypatch):
+    conn = _FakeConn()
+    _fake_connect(monkeypatch, conn)
+    with pytest.raises(RuntimeError, match="boom"):
+        with lock.advisory_lock():
+            raise RuntimeError("boom")
+    assert any("pg_advisory_unlock" in c for c in conn.calls)
+    assert conn.closed
+
+
+def test_advisory_lock_busy_closes_without_unlock(monkeypatch):
+    conn = _FakeConn(try_result=False)
+    _fake_connect(monkeypatch, conn)
+    with pytest.raises(lock.LockBusy):
+        with lock.advisory_lock(wait=False):
+            pass
+    assert not any("pg_advisory_unlock" in c for c in conn.calls)
+    assert conn.closed
+
+
 @pytest.mark.pg
 def test_advisory_lock_excludes_a_second_connection(pg_conn):
     import psycopg

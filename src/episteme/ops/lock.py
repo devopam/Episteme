@@ -220,8 +220,9 @@ def try_acquire(
     *,
     owner_pid: int | None = None,
     d: Path | None = None,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> tuple[str, dict]:
+    sleep = sleep or time.sleep
     d = d or lock_dir()
     d.mkdir(parents=True, exist_ok=True)
     pid = owner_pid or os.getpid()
@@ -268,8 +269,9 @@ def acquire(
     owner_pid: int | None = None,
     wait: bool = True,
     d: Path | None = None,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> str:
+    sleep = sleep or time.sleep
     d = d or lock_dir()
     d.mkdir(parents=True, exist_ok=True)
     pid = owner_pid or os.getpid()
@@ -313,12 +315,15 @@ def release(kind: str, run_id: str, *, owner_pid: int | None = None, d: Path | N
 
 @contextmanager
 def held(
-    kind: str, run_id: str, stage: str, *, owner_pid: int | None = None, wait: bool = True
+    kind: str,
+    run_id: str,
+    stage: str,
+    *,
+    owner_pid: int | None = None,
+    wait: bool = True,
+    sleep: Callable[[float], None] | None = None,
 ) -> Iterator[str]:
-    # resolve time.sleep at call time, so a test can replace it
-    status = acquire(
-        kind, run_id, stage, owner_pid=owner_pid, wait=wait, sleep=lambda sec: time.sleep(sec)
-    )
+    status = acquire(kind, run_id, stage, owner_pid=owner_pid, wait=wait, sleep=sleep)
     try:
         yield status
     finally:
@@ -328,7 +333,7 @@ def held(
 
 @contextmanager
 def advisory_lock(
-    *, wait: bool = True, sleep: Callable[[float], None] = time.sleep
+    *, wait: bool = True, sleep: Callable[[float], None] | None = None
 ) -> Iterator[None]:
     """Hold the PostgreSQL advisory lock ``HEAVY_ADVISORY_KEY`` for the block.
 
@@ -336,6 +341,7 @@ def advisory_lock(
     That connection is idle between polls, so the orphan sweep (active
     backends only) never meets it; the server frees the lock when the process
     dies. The lock is per database."""
+    sleep = sleep or time.sleep
     import psycopg
 
     from episteme.config import get_settings
@@ -372,7 +378,9 @@ def advisory_lock(
 
 
 @contextmanager
-def stage_lock(stage: str, *, db: bool = False) -> Iterator[str]:
+def stage_lock(
+    stage: str, *, db: bool = False, sleep: Callable[[float], None] | None = None
+) -> Iterator[str]:
     """The heavy lock for one stage; with ``db`` also the advisory lock. Yields
     the run id. A stage run by a wrapper script re-enters the wrapper's lock:
     the wrapper takes it as ``adhoc-<runner pid>`` owned by the runner PID."""
@@ -381,9 +389,9 @@ def stage_lock(stage: str, *, db: bool = False) -> Iterator[str]:
     settings = get_settings()
     owner = settings.runner_pid or os.getpid()
     run_id = settings.run_id or f"adhoc-{owner}"
-    with held("heavy", run_id, stage, owner_pid=owner):
+    with held("heavy", run_id, stage, owner_pid=owner, sleep=sleep):
         if db:
-            with advisory_lock():
+            with advisory_lock(sleep=sleep):
                 yield run_id
         else:
             yield run_id

@@ -207,7 +207,9 @@ def stage_guard(
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
     stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
     holds the heavy lock (and, with ``db_lock``, the advisory lock) for the
-    block; a wait for the lock can be stopped like any other step."""
+    block; a wait for the lock can be stopped like any other step. The
+    watchdog's ``os._exit(143)`` leaves ``heavy.lock`` behind; the next run
+    takes it over as stale."""
 
     def _cancel() -> None:
         c = conn_ref()

@@ -9,6 +9,7 @@ Only the last test is ``pg``-marked; the rest never open a DB connection.
 from __future__ import annotations
 
 import importlib
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -323,9 +324,7 @@ def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
     monkeypatch.setattr(ff.la, "stage_guard", stop.stage_guard)
     from episteme.ops import lock
 
-    monkeypatch.setattr(
-        lock, "advisory_lock", lambda **kw: __import__("contextlib").nullcontext()
-    )  # no real DB
+    monkeypatch.setattr(lock, "advisory_lock", lambda **kw: nullcontext())  # no real DB
     ff.state["behaviour"]["a.jsonl"] = KeyboardInterrupt()
     with pytest.raises(SystemExit) as e:
         ff.run()
