@@ -44,6 +44,7 @@ lock_rc=0
 lock_out="$("$PY" -m episteme.ops.lock acquire heavy --run-id "$LOCK_RUN_ID" \
     --stage migrate_database --owner-pid "$EPISTEME_RUNNER_PID")" || lock_rc=$?
 [ "$lock_rc" -eq 0 ] || exit "$lock_rc"
+lock_out="${lock_out%$''}"  # a Windows Python can write CRLF to a pipe
 log INFO "migrate_database.sh: heavy lock: $lock_out"
 # Under run_pipeline.sh the acquire re-enters the runner's lock, so no trap
 # is set here: a Ctrl-C follows the runner's handling, and the runner

@@ -565,6 +565,11 @@ def read_noncommercial(path: Path) -> set[str]:
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
+def _one_line(text: str) -> str:
+    """One line for failed_files.txt: a tab or newline would split the record."""
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _ledger_entry(pmcid: str, err: str) -> str:
     return err.rsplit("highest=", 1)[1] if "highest=" in err else pmcid
 
@@ -760,7 +765,7 @@ def main() -> None:
                     fail_n += 1
                     reasons[err.split(":")[0]] += 1
                     if failed_fh:
-                        failed_fh.write(f"{pid}\t{err}\n")
+                        failed_fh.write(f"{pid}\t{_one_line(err)}\n")
                     if len(samples) < 15:
                         samples.append((pid, err))
             ledger_fh.flush()

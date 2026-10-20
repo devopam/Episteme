@@ -221,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
 
     failed_at: str | None = None
     skipped_by_operator = 0
-    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True) as g:
+    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True, argv=argv) as g:
+        current().update(source=source)  # a direct run: the source comes from the arguments
         if own_bracket:
             _bracket("run_start")
         try:

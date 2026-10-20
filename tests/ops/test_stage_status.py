@@ -271,4 +271,15 @@ def test_bulk_indexes_main_passes_keep_stage(monkeypatch):
     monkeypatch.setattr(bulk_indexes.db_connection, "admin_dsn_from_settings", lambda: "x")
     with pytest.raises(_Stop):
         bulk_indexes.main(["drop", "--group", "pubmed_graph"])
-    assert got == {"lock_stage": "load", "db_lock": True, "keep_stage": True}
+    assert got == {
+        "lock_stage": "load",
+        "db_lock": True,
+        "keep_stage": True,
+        "argv": ["drop", "--group", "pubmed_graph"],
+    }
+
+
+def test_direct_run_writes_the_source():
+    with stop.stage_guard(lambda: None, lock_stage="extract", source="pmc"):
+        assert _rec()["source"] == "pmc"
+    assert _rec()["source"] == "pmc"

@@ -30,7 +30,14 @@ case "$*" in
     *audit_trail*run_end*) echo "run_end $*" >> "$AUDIT"; exit 0 ;;
     *audit_trail*) exit 0 ;;
     *"episteme.ops.lock release"*) echo "release $4" >> "$CALLS"; exec "$REAL_PY" "$@" ;;
-    *"-m episteme.ops."*) exec "$REAL_PY" "$@" ;;
+    *"-m episteme.ops."*)
+        if [ -n "${CRLF:-}" ]; then  # a Windows Python can write CRLF to a pipe
+            out="$("$REAL_PY" "$@")"; rc=$?
+            [ -z "$out" ] || printf '%s
+' "$out"
+            exit "$rc"
+        fi
+        exec "$REAL_PY" "$@" ;;
     *bulk_indexes*) echo "bulk_indexes $3" >> "$CALLS"; exit 0 ;;
 esac
 exit 0
@@ -42,6 +49,7 @@ FAKE_STAGE = """#!/usr/bin/env bash
 name="$(basename "$0" .sh)"
 echo "stage $name" >> "$CALLS"
 [ -z "${EPISTEME_NO_WAIT:-}" ] || echo "no_wait $EPISTEME_NO_WAIT" >> "$CALLS"
+case "${EPISTEME_RUN_DIR:-}" in *$'\\r'*) echo "rundir_cr" >> "$CALLS" ;; esac
 for k in heavy download; do
     f="$EPISTEME_LOCK_DIR/$k.lock"
     [ -f "$f" ] && echo "lock $k $(tr -d '\\r\\n' < "$f")" >> "$CALLS"
@@ -524,3 +532,11 @@ def test_a_bulk_drop_refused_with_75_is_refused(tree):
     assert len(ends) == 1 and "refused at stage load (bulk index drop" in ends[0]
     assert _status(tree[1])["state"] == "refused"
     assert not (_locks(tree[1]) / "heavy.lock").exists()
+
+
+def test_crlf_cli_output_still_releases_the_lock(tree):
+    proc, calls, _ = _run(tree, "load", CRLF="1")
+    assert proc.returncode == 0, proc.stderr
+    assert not (_locks(tree[1]) / "heavy.lock").exists()
+    assert "rundir_cr" not in calls
+    assert any(c.startswith("release ") for c in calls)

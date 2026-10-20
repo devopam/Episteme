@@ -842,7 +842,8 @@ def main(argv: list[str] | None = None) -> int:
 
     holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
-    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True) as g:
+    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True, argv=argv) as g:
+        ops_status.current().update(source=args.source)  # a direct run: the source is an argument
 
         def _sweep() -> None:
             with connection() as sconn:

@@ -148,13 +148,21 @@ def _guard_kwargs(monkeypatch, module, argv=()):
 def test_extractor_main_passes_lock_stage(monkeypatch):
     from episteme.data.pubmed import extract_pubmed
 
-    assert _guard_kwargs(monkeypatch, extract_pubmed) == {"lock_stage": "extract"}
+    assert _guard_kwargs(monkeypatch, extract_pubmed) == {
+        "lock_stage": "extract",
+        "argv": [],
+        "source": "pubmed",
+    }
 
 
 def test_serializer_main_passes_lock_stage(monkeypatch):
     from episteme.data.mesh import serialize_mesh
 
-    assert _guard_kwargs(monkeypatch, serialize_mesh) == {"lock_stage": "serialize"}
+    assert _guard_kwargs(monkeypatch, serialize_mesh) == {
+        "lock_stage": "serialize",
+        "argv": [],
+        "source": "mesh",
+    }
 
 
 def test_stop_during_the_file_lock_wait_exits_130_and_leaves_no_files(monkeypatch):
@@ -358,3 +366,29 @@ def test_no_wait_busy_heavy_lock_exits_75(monkeypatch):
             pytest.fail("the body must not run while another run holds the lock")
     assert exc.value.code == 75
     assert json.loads(heavy.read_text(encoding="utf-8"))["run_id"] == "other"
+
+
+def test_help_takes_no_lock_and_writes_no_status(monkeypatch):
+    """--help must not wait behind a live heavy job, and writes no status."""
+    from episteme.data.pmc import extract_pmc
+    from episteme.ops import status
+
+    _env(monkeypatch, run_id="r-help")
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    _heavy().write_text(json.dumps(_rec(run_id="other")), encoding="utf-8")
+
+    def no_wait(sec):
+        raise AssertionError("--help waited for the lock")
+
+    monkeypatch.setattr(lock.time, "sleep", no_wait)
+    with pytest.raises(SystemExit) as exc:
+        extract_pmc.main(["--help"])
+    assert exc.value.code == 0
+    assert json.loads(_heavy().read_text(encoding="utf-8"))["run_id"] == "other"
+    assert not (status.run_dir("r-help") / "status.json").exists()
+    # argv=None reads sys.argv[1:]
+    monkeypatch.setattr(stop.sys, "argv", ["prog", "-h"])
+    with stop.stage_guard(lambda: None, lock_stage="load"):
+        pass
+    assert not (status.run_dir("r-help") / "status.json").exists()

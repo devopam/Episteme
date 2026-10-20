@@ -18,7 +18,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
@@ -229,6 +229,8 @@ def stage_guard(
     lock_stage: str | None = None,
     db_lock: bool = False,
     keep_stage: bool = False,
+    argv: Sequence[str] | None = None,
+    source: str | None = None,
 ) -> Iterator[StageHandle]:
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
     stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
@@ -243,7 +245,9 @@ def stage_guard(
     ``bulk_indexes`` under ``--bulk graph``) an existing stage label is kept,
     and a ``done`` end does not replace the end state that stage wrote. The
     watchdog's ``os._exit(143)`` leaves ``heavy.lock`` behind; the next run
-    takes it over as stale."""
+    takes it over as stale. ``source`` is written with the status. A help
+    request (``-h``/``--help`` in ``argv``, else in ``sys.argv[1:]``) takes no
+    lock and writes no status: only the handlers apply."""
 
     def _cancel() -> None:
         c = conn_ref()
@@ -260,8 +264,10 @@ def stage_guard(
     beat: threading.Thread | None = None
     kept: str | None = None
     end_state = "failed"
+    check = sys.argv[1:] if argv is None else argv
+    help_only = any(a in ("-h", "--help") for a in check)
     try:
-        if lock_stage is None:
+        if lock_stage is None or help_only:
             yield handle
         else:
             from episteme.ops import lock
@@ -269,7 +275,9 @@ def stage_guard(
 
             with ExitStack() as stack:
                 run_id = stack.enter_context(lock.heavy_stage_lock(lock_stage))
-                st, beat, kept = _begin_status(run_id, lock_stage, done, keep_stage=keep_stage)
+                st, beat, kept = _begin_status(
+                    run_id, lock_stage, done, keep_stage=keep_stage, source=source
+                )
                 if db_lock:
                     with ops_status.current().long_statement("waiting for the advisory lock"):
                         stack.enter_context(lock.advisory_lock(wait=not lock.no_wait()))
@@ -303,7 +311,12 @@ _ENDED = ("done", "failed", "stopped", "refused")
 
 
 def _begin_status(
-    run_id: str, stage: str, stop_beat: threading.Event, *, keep_stage: bool = False
+    run_id: str,
+    stage: str,
+    stop_beat: threading.Event,
+    *,
+    keep_stage: bool = False,
+    source: str | None = None,
 ) -> tuple[Any, threading.Thread | None, str | None]:
     """Create this run's status, record the stage process, start the heartbeat.
     Returns (status, heartbeat thread, kept end state). With ``keep_stage`` and
@@ -325,6 +338,8 @@ def _begin_status(
             "pids": pids,
             "last_progress": now,
         }
+        if source is not None:
+            fields["source"] = source
         kept: str | None = None
         if keep_stage and old.get("stage"):
             kept = old.get("state") if old.get("state") in _ENDED else None

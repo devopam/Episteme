@@ -88,6 +88,26 @@ def test_failed_pmcid_lands_in_failed_files(tmp_path, monkeypatch):
     assert pmcid == "PMC9" and "request failed" in reason
 
 
+def test_failed_reason_with_tab_and_newline_stays_one_record(tmp_path, monkeypatch):
+    cfg = _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(dp.ops_lock, "pause_point", lambda run_id, **kw: False)
+
+    def boom(vid):
+        raise dp.FetchError("GET x:\tbad\r\nline two")
+
+    _go(monkeypatch, tmp_path, {9: 1}, boom)
+    try:
+        with pytest.raises(SystemExit):
+            dp.main()
+    finally:
+        cfg.get_settings.cache_clear()
+    text = (tmp_path / "run" / "failed_files.txt").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert len(lines) == 1 and text.endswith("\n")
+    pmcid, reason = lines[0].split("\t")
+    assert pmcid == "PMC9" and "bad" in reason and "line two" in reason
+
+
 def test_progress_once_per_submit_batch(tmp_path, monkeypatch):
     """I3: under run_pipeline.sh (a run id) each submit batch writes progress."""
     from episteme.ops import status

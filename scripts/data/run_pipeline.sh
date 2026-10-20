@@ -253,6 +253,7 @@ export EPISTEME_RUN_ID="$RUN_ID"
 # Run status: <processed root>/_ops/runs/<run id>/status.json. Every stage
 # sees the folder as EPISTEME_RUN_DIR.
 RUN_DIR="$("$PY" -m episteme.ops.status run-dir --run-id "$RUN_ID" 2>/dev/null)" || RUN_DIR=""
+RUN_DIR="${RUN_DIR%$''}"  # a Windows Python can write CRLF to a pipe
 [ -n "$RUN_DIR" ] || log WARN "status: could not resolve the run folder; EPISTEME_RUN_DIR is empty (no failed_files.txt in a run folder for this run)"
 export EPISTEME_RUN_DIR="$RUN_DIR"
 
@@ -289,6 +290,7 @@ _lock_take() { # KIND STAGE -> 0; 75 when busy under --no-wait; another code on 
         # Waits while another run holds the lock; its log lines reach stderr.
         out="$("$PY" "${args[@]}")" || rc=$?
     fi
+    out="${out%$''}"  # a Windows Python can write CRLF to a pipe
     if [ "$rc" -eq 75 ]; then
         WAIT_KIND=""
         WAIT_STAGE=""
@@ -450,9 +452,11 @@ run_stage() {
                 state=failed
                 local detail unit
                 detail="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || detail=""
+                detail="${detail//$''/}"
                 [ -z "$detail" ] || reason="$reason: $detail"
                 # The unit alone (a name may hold ": "); an empty unit passes no --unit.
                 unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" --field unit 2>/dev/null)" || unit=""
+                unit="${unit%$''}"
                 [ -z "$unit" ] || unit_args=(--unit "$unit")
                 ;;
         esac
