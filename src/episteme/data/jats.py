@@ -55,6 +55,7 @@ def parse_jats_fields(xml_path: Path) -> dict[str, Any]:
         return out
 
     lang = root.get("{http://www.w3.org/XML/1998/namespace}lang") or root.get("lang")
+    lang = (lang or "").strip().lower()
     if lang:
         out["language"] = lang
 

@@ -61,3 +61,11 @@ def test_iter_book_parts_yields_each_part(tmp_path):
     root = ET.parse(str(p)).getroot()
     ids = [bp.get("id") for bp in iter_book_parts(root)]
     assert ids == ["p1", "p2"]
+
+
+def test_parse_jats_fields_normalises_language_code(tmp_path):
+    p = tmp_path / "a.xml"
+    p.write_text(
+        '<article xml:lang=" EN "><front><article-meta/></front><body><p>x</p></body></article>'
+    )
+    assert parse_jats_fields(p)["language"] == "en"
