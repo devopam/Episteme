@@ -311,3 +311,50 @@ def test_two_threads_update_lose_no_fields(tmp_path):
         t.join()
     rec = st.read()
     assert all(f"{p}{i}" in rec for p in "ab" for i in range(30))
+
+
+def test_failed_read_never_overwrites_an_existing_record(tmp_path, monkeypatch):
+    st = status.RunStatus(tmp_path)
+    st.update(source="s", stage="a", pids={"runner": {"pid": 1}})
+    before = st.path.read_bytes()
+
+    def broken(self, *a, **k):
+        raise PermissionError("held")
+
+    monkeypatch.setattr(status.Path, "read_text", broken)
+    rec = st.update(x=1)
+    assert rec["x"] == 1
+    st.heartbeat()
+    monkeypatch.undo()
+    assert st.path.read_bytes() == before
+
+
+def test_damaged_json_is_repaired_with_the_new_fields(tmp_path, caplog):
+    st = status.RunStatus(tmp_path)
+    tmp_path.mkdir(exist_ok=True)
+    st.path.write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        st.update(a=1)
+    assert st.read()["a"] == 1
+    assert "repair" in caplog.text
+    st.path.write_text("[1, 2]", encoding="utf-8")
+    st.update(b=2)
+    assert st.read()["b"] == 2
+
+
+def test_status_warnings_are_rate_limited(tmp_path, monkeypatch, caplog):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(status.time, "monotonic", lambda: clock["t"])
+
+    def broken(a, b):
+        raise PermissionError("held")
+
+    monkeypatch.setattr(os, "replace", broken)
+    st = status.RunStatus(tmp_path)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            st.update(a=1)
+        assert caplog.text.count("could not write") == 1
+        clock["t"] += 61
+        st.update(a=1)
+    assert caplog.text.count("could not write") == 2

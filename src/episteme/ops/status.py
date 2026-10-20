@@ -13,6 +13,11 @@ process. A heartbeat that interleaves with a bash ``set``, ``long-begin`` or
 before its write and changes only the ``heartbeat`` key, to keep the window
 small. A status write that fails (Windows: a reader holds the file) is retried
 a few times, then logged and dropped: a lost write never stops a stage.
+Because of that, ``set``, ``progress``, ``long-begin`` and ``long-end`` exit 0
+even when the write was dropped; the WARNING in the log (at most one per file
+per 60 s) is the only signal. ``update`` never writes from a failed read: it
+skips the write, so an existing record is not overwritten by a near-empty one.
+A damaged file is repaired from ``{}`` with a WARNING.
 """
 
 from __future__ import annotations
@@ -42,6 +47,21 @@ STATES = ("running", "done", "failed", "stopped", "refused")
 _TERMINAL = {"done", "failed", "stopped", "refused"}
 
 
+_WARN_EVERY_SEC = 60.0
+_LAST_WARN: dict[tuple[str, str], float] = {}
+
+
+def _warn(kind: str, path: Path, exc: BaseException) -> None:
+    """Log a status I/O failure, at most once per file and kind per 60 s."""
+    key = (kind, str(path))
+    now = time.monotonic()
+    last = _LAST_WARN.get(key)
+    if last is not None and now - last < _WARN_EVERY_SEC:
+        return
+    _LAST_WARN[key] = now
+    _LOG.warning("could not %s %s: %r", kind, path, exc)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -62,28 +82,40 @@ class RunStatus:
         self._mutex = threading.Lock()
         self._t0 = time.monotonic()
 
-    def read(self) -> dict[str, Any]:
+    def _load(self) -> tuple[dict[str, Any], bool]:
+        """(record, ok). ok is False only when the file exists but cannot be read."""
         try:
             rec = json.loads(retry_io(lambda: self.path.read_text(encoding="utf-8")))
-        except (FileNotFoundError, ValueError):
-            return {}
+        except FileNotFoundError:
+            return {}, True
+        except ValueError as exc:
+            _warn("repair", self.path, exc)  # damaged: the caller rewrites it
+            return {}, True
         except OSError as exc:
-            _LOG.warning("could not read %s: %r", self.path, exc)
-            return {}
-        return rec if isinstance(rec, dict) else {}
+            _warn("read", self.path, exc)
+            return {}, False
+        if not isinstance(rec, dict):
+            _warn("repair", self.path, ValueError("not a JSON object"))
+            return {}, True
+        return rec, True
+
+    def read(self) -> dict[str, Any]:
+        return self._load()[0]
 
     def update(self, **fields: Any) -> dict[str, Any]:
         with self._mutex:
-            rec = self.read()
+            rec, ok = self._load()
             rec.update(fields)
             rec["updated_at"] = _now()
+            if not ok:  # never overwrite an existing record from a failed read
+                return rec
             tmp = self.path.with_name(f".{FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 tmp.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
                 retry_io(os.replace, tmp, self.path)
             except OSError as exc:  # a lost status write must never stop a stage
-                _LOG.warning("could not write %s: %r", self.path, exc)
+                _warn("write", self.path, exc)
                 try:
                     tmp.unlink()
                 except OSError:
@@ -259,7 +291,12 @@ def _cmd_set(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m episteme.ops.status")
+    ap = argparse.ArgumentParser(
+        prog="python -m episteme.ops.status",
+        epilog="set, progress, long-begin and long-end exit 0 even when a status write "
+        "was dropped (a status write never stops a stage); the WARNING in the log is "
+        "the only signal.",
+    )
     ap.add_argument("--stalled", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("set")
