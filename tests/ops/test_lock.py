@@ -377,3 +377,32 @@ def test_heavy_wait_on_a_heavy_lock_names_the_holder(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="episteme.ops.lock"):
         assert lock.acquire("heavy", "h", "load", d=tmp_path, sleep=fake_sleep) == "acquired"
     assert "waiting for the heavy lock: held by run other" in caplog.text
+
+
+def test_pause_point_marks_the_run_status_paused_then_clears_it(tmp_path):
+    from episteme.ops import status
+
+    st = status.RunStatus(status.run_dir("dl"))
+    st.update(run_id="dl", state="running", last_progress="2000-01-01T00:00:00+00:00")
+    lock.acquire("download", "dl", "x", d=tmp_path)
+    _write(tmp_path / "heavy.request", run_id="h")
+    seen = []
+
+    def fake_sleep(_sec):
+        seen.append(st.read().get("paused"))
+        (tmp_path / "heavy.request").unlink()
+
+    assert lock.pause_point("dl", d=tmp_path, sleep=fake_sleep) is True
+    assert seen[0]["reason"] and seen[0]["since"]
+    rec = st.read()
+    assert rec["paused"] is None
+    assert rec["last_progress"] != "2000-01-01T00:00:00+00:00"
+
+
+def test_pause_point_writes_no_status_file_when_there_is_none(tmp_path):
+    from episteme.ops import status
+
+    lock.acquire("download", "dl2", "x", d=tmp_path)
+    _write(tmp_path / "heavy.request", run_id="h")
+    lock.pause_point("dl2", d=tmp_path, sleep=lambda _s: (tmp_path / "heavy.request").unlink())
+    assert not (status.run_dir("dl2") / "status.json").exists()

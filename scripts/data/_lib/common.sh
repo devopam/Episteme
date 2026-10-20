@@ -269,7 +269,9 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
     _HF_FAILED="$failed_file"; _HF_WARNED=""
 
     local batch="${EPISTEME_FETCH_BATCH:-64}"
-    case "$batch" in ''|*[!0-9]*|0) log WARN "EPISTEME_FETCH_BATCH not a positive number — using 64"; batch=64 ;; esac
+    case "$batch" in ''|*[!0-9]*) log WARN "EPISTEME_FETCH_BATCH not a positive number — using 64"; batch=64 ;; esac
+    batch=$((10#$batch))  # leading zeros are decimal ("08" is 8, not an octal error)
+    [ "$batch" -gt 0 ] || { log WARN "EPISTEME_FETCH_BATCH not a positive number — using 64"; batch=64; }
     local total="${#urls[@]}" nbatch i=0 start=0 rc=0 brc
     nbatch=$(( (total + batch - 1) / batch ))
     local pyx=""

@@ -276,6 +276,7 @@ def test_bulk_indexes_main_passes_keep_stage(monkeypatch):
         "db_lock": True,
         "keep_stage": True,
         "argv": ["drop", "--group", "pubmed_graph"],
+        "dsn": "x",
     }
 
 
@@ -283,3 +284,41 @@ def test_direct_run_writes_the_source():
     with stop.stage_guard(lambda: None, lock_stage="extract", source="pmc"):
         assert _rec()["source"] == "pmc"
     assert _rec()["source"] == "pmc"
+
+
+def test_guard_clears_the_old_stage_progress_on_a_stage_change():
+    status.RunStatus(status.run_dir("run-t4")).update(
+        stage="extract", state="done", started_at="x", unit="u1", units_done=3, rows_done=5
+    )
+    with stop.stage_guard(lambda: None, lock_stage="load"):
+        rec = _rec()
+    assert rec["stage"] == "load"
+    assert rec["unit"] is None and rec["units_done"] is None and rec["rows_done"] is None
+
+
+def test_advisory_lock_connects_with_the_given_dsn(monkeypatch):
+    import psycopg
+
+    from episteme.ops import lock
+
+    seen = []
+
+    class _Conn:
+        def execute(self, *a, **k):
+            class _R:
+                def fetchone(self):
+                    return (True,)
+
+            return _R()
+
+        def close(self):
+            pass
+
+    def fake_connect(dsn, **kw):
+        seen.append((dsn, kw.get("application_name")))
+        return _Conn()
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    with lock.advisory_lock(dsn="ADMIN-DSN"):
+        pass
+    assert seen[0][0] == "ADMIN-DSN" and seen[0][1].endswith(":lock")

@@ -350,14 +350,15 @@ def held(
 
 @contextmanager
 def advisory_lock(
-    *, wait: bool = True, sleep: Callable[[float], None] | None = None
+    *, wait: bool = True, sleep: Callable[[float], None] | None = None, dsn: str | None = None
 ) -> Iterator[None]:
     """Hold the PostgreSQL advisory lock ``HEAVY_ADVISORY_KEY`` for the block.
 
     It uses its own autocommit connection, tagged ``episteme:<run>:<pid>:lock``.
     That connection is idle between polls, so the orphan sweep (active
     backends only) never meets it; the server frees the lock when the process
-    dies. The lock is per database."""
+    dies. The lock is per database. ``dsn`` defaults to the normal login; a
+    stage that works as ``episteme_sys_admin`` passes its own."""
     sleep = sleep or time.sleep
     import psycopg
 
@@ -365,7 +366,7 @@ def advisory_lock(
     from episteme.data.db.connection import app_name, dsn_from_settings
 
     conn = psycopg.connect(
-        dsn_from_settings(),
+        dsn if dsn is not None else dsn_from_settings(),
         autocommit=True,
         application_name=app_name(get_settings(), suffix=":lock"),
     )
@@ -396,7 +397,11 @@ def advisory_lock(
 
 @contextmanager
 def stage_lock(
-    stage: str, *, db: bool = False, sleep: Callable[[float], None] | None = None
+    stage: str,
+    *,
+    db: bool = False,
+    sleep: Callable[[float], None] | None = None,
+    dsn: str | None = None,
 ) -> Iterator[str]:
     """The heavy lock for one stage; with ``db`` also the advisory lock. Yields
     the run id. A stage run by a wrapper script re-enters the wrapper's lock:
@@ -405,7 +410,7 @@ def stage_lock(
     raises ``LockBusy`` instead of a wait."""
     with heavy_stage_lock(stage, sleep=sleep) as run_id:
         if db:
-            with advisory_lock(wait=not no_wait(), sleep=sleep):
+            with advisory_lock(wait=not no_wait(), sleep=sleep, dsn=dsn):
                 yield run_id
         else:
             yield run_id
@@ -435,6 +440,28 @@ def _heavy_wanted(d: Path) -> bool:
     return _live(_path("heavy", d)) is not None or _live(_request_path(d)) is not None
 
 
+def _mark_run_paused(run_id: str, paused: bool) -> None:
+    """Mark the run's status paused (so a wait is not reported as a stall), only
+    when the status file exists. A status write never stops a download."""
+    try:
+        from episteme.ops import status
+
+        st = status.RunStatus(status.run_dir(run_id))
+        if not st.path.is_file():
+            return
+        if paused:
+            st.update(
+                paused={
+                    "reason": "a heavy job holds or wants the heavy lock",
+                    "since": status.now_iso(),
+                }
+            )
+        else:
+            st.update(paused=None, last_progress=status.now_iso())
+    except Exception as exc:  # noqa: BLE001 - a status write never stops a download
+        _LOG.warning("run status not updated for the pause (%r)", exc)
+
+
 def pause_point(
     run_id: str, *, d: Path | None = None, sleep: Callable[[float], None] = time.sleep
 ) -> bool:
@@ -455,12 +482,14 @@ def pause_point(
                 _LOG.error("could not set the download lock state to %s", state)
 
     _set("paused")
+    _mark_run_paused(run_id, True)
     _LOG.info("download paused: a heavy job holds or wants the heavy lock")
     try:
         while _heavy_wanted(d):
             sleep(POLL_SEC)
     finally:
         _set("running")
+        _mark_run_paused(run_id, False)
     _LOG.info("download resumed")
     return True
 

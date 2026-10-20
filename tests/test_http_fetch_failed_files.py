@@ -164,3 +164,21 @@ def test_bad_batch_size_warns_and_uses_64(tmp_path):
     proc, calls, _ = _run(tmp_path, URLS3[::2], batch="many", run_id="R1")
     assert "EPISTEME_FETCH_BATCH not a positive number" in proc.stderr
     assert sum("pause-point" in c for c in calls) == 1
+
+
+def test_batch_size_with_leading_zero_is_decimal(tmp_path):
+    proc, calls, _ = _run(tmp_path, URLS3[::2], batch="01", run_id="R1")
+    assert "not a positive number" not in proc.stderr
+    assert sum("pause-point" in c for c in calls) == 2  # 1 URL per batch
+
+
+def test_batch_size_08_is_not_an_octal_error(tmp_path):
+    proc, calls, _ = _run(tmp_path, URLS3[::2], batch="08", run_id="R1")
+    assert "not a positive number" not in proc.stderr and "value too great" not in proc.stderr
+    assert sum("pause-point" in c for c in calls) == 1  # both URLs in one batch of 8
+
+
+def test_zero_batch_size_warns_and_uses_64(tmp_path):
+    proc, calls, _ = _run(tmp_path, URLS3[::2], batch="00", run_id="R1")
+    assert "EPISTEME_FETCH_BATCH not a positive number" in proc.stderr
+    assert sum("pause-point" in c for c in calls) == 1

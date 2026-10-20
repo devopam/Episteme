@@ -231,6 +231,7 @@ def stage_guard(
     keep_stage: bool = False,
     argv: Sequence[str] | None = None,
     source: str | None = None,
+    dsn: str | None = None,
 ) -> Iterator[StageHandle]:
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
     stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
@@ -245,7 +246,8 @@ def stage_guard(
     ``bulk_indexes`` under ``--bulk graph``) an existing stage label is kept,
     and a ``done`` end does not replace the end state that stage wrote. The
     watchdog's ``os._exit(143)`` leaves ``heavy.lock`` behind; the next run
-    takes it over as stale. ``source`` is written with the status. A help
+    takes it over as stale. ``dsn`` is the login of the advisory lock (default: the normal login).
+    ``source`` is written with the status. A help
     request (``-h``/``--help`` in ``argv``, else in ``sys.argv[1:]``) takes no
     lock and writes no status: only the handlers apply."""
 
@@ -280,7 +282,7 @@ def stage_guard(
                 )
                 if db_lock:
                     with ops_status.current().long_statement("waiting for the advisory lock"):
-                        stack.enter_context(lock.advisory_lock(wait=not lock.no_wait()))
+                        stack.enter_context(lock.advisory_lock(wait=not lock.no_wait(), dsn=dsn))
                 yield handle
         end_state = _state_for_rc(handle.rc)
     except LockBusy as exc:
@@ -345,6 +347,8 @@ def _begin_status(
             kept = old.get("state") if old.get("state") in _ENDED else None
         else:
             fields["stage"] = stage
+            if old.get("stage") != stage:
+                fields.update(status.STAGE_PROGRESS_RESET)
             if old.get("stage") != stage or not old.get("started_at"):
                 fields["started_at"] = now
         st.update(**fields)

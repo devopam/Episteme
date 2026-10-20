@@ -407,3 +407,27 @@ def test_stalled_lock_wait_of_a_dead_runner_is_crashed():
         "pids": {"runner": {"pid": _dead_pid(), "create_time": 1.0}},
     }
     assert status.stalled(rec).startswith("crashed:")
+
+
+def test_stalled_ignores_a_paused_run_with_old_progress():
+    rec = {
+        "state": "running",
+        "last_progress": _iso(5000),
+        "paused": {"reason": "r", "since": _iso(4000)},
+    }
+    assert status.stalled(rec) is None
+
+
+def test_cli_set_clears_the_old_stage_progress_on_a_stage_change():
+    base = ["set", "--run-id", "RP", "--source", "s", "--state", "running"]
+    status.main([*base, "--stage", "extract"])
+    status.RunStatus(status.run_dir("RP")).update(
+        unit="u1", units_done=3, units_total=9, rows_done=50, rate_rows_per_s=2.0, eta_s=7
+    )
+    status.main([*base, "--stage", "extract", "--unit", "u2"])  # same stage: kept
+    rec = status.RunStatus(status.run_dir("RP")).read()
+    assert rec["units_done"] == 3 and rec["unit"] == "u2"
+    status.main([*base, "--stage", "load"])
+    rec = status.RunStatus(status.run_dir("RP")).read()
+    for key in ("unit", "units_done", "units_total", "rows_done", "rate_rows_per_s", "eta_s"):
+        assert rec[key] is None, key

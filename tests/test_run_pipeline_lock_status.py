@@ -33,8 +33,7 @@ case "$*" in
     *"-m episteme.ops."*)
         if [ -n "${CRLF:-}" ]; then  # a Windows Python can write CRLF to a pipe
             out="$("$REAL_PY" "$@")"; rc=$?
-            [ -z "$out" ] || printf '%s
-' "$out"
+            [ -z "$out" ] || printf '%s\\r\\n' "$out"
             exit "$rc"
         fi
         exec "$REAL_PY" "$@" ;;
@@ -535,8 +534,30 @@ def test_a_bulk_drop_refused_with_75_is_refused(tree):
 
 
 def test_crlf_cli_output_still_releases_the_lock(tree):
+    fake = (tree[1] / "fakepy").read_bytes()
+    assert b"printf '%s" + bytes([92]) + b"r" + bytes([92]) + b"n'" in fake  # the escape, not a CR
+    assert bytes([13]) not in fake  # no literal CR byte in the generated script
     proc, calls, _ = _run(tree, "load", CRLF="1")
     assert proc.returncode == 0, proc.stderr
     assert not (_locks(tree[1]) / "heavy.lock").exists()
     assert "rundir_cr" not in calls
     assert any(c.startswith("release ") for c in calls)
+
+
+def test_every_python_cli_capture_strips_a_trailing_cr():
+    """Git Bash drops the CR in a command substitution, so a run on this
+    machine cannot show the bug; this guards the strip in the scripts."""
+    cr = bytes([92]) + b"r"
+    checks = {
+        "scripts/data/run_pipeline.sh": ("RUN_DIR", "out", "detail", "unit"),
+        "scripts/data/db/bulk_load_indexes.sh": ("lock_out",),
+        "scripts/data/db/migrate_database.sh": ("lock_out",),
+    }
+    for rel, names in checks.items():
+        text = (REPO_ROOT / rel).read_bytes()
+        assert bytes([13]) not in text, f"{rel}: literal CR byte"
+        for name in names:
+            n = name.encode()
+            strip1 = b"${" + n + b"%$'" + cr + b"'}"
+            strip2 = b"${" + n + b"//$'" + cr + b"'/}"
+            assert strip1 in text or strip2 in text, f"{rel}: no CR strip for {name}"

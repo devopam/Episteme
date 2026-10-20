@@ -256,6 +256,8 @@ def stalled(rec: dict[str, Any], now: datetime | None = None) -> str | None:
         stage = pids.get("stage")
         if isinstance(stage, dict) and not owner_alive(stage):
             return "crashed: the stage process is gone"
+    if rec.get("paused"):  # a download paused for a heavy job: not a stall
+        return None
     # run_pipeline.sh waits for a stage lock: a wait is not a stall.
     if str(rec.get("unit") or "").startswith("waiting for the "):
         return None
@@ -298,17 +300,33 @@ def _line(run_id: str, rec: dict[str, Any], reason: str | None) -> str:
     return " ".join(parts)
 
 
+# A new stage starts without the old stage's progress.
+STAGE_PROGRESS_RESET: dict[str, Any] = {
+    "unit": None,
+    "units_done": None,
+    "units_total": None,
+    "rows_done": None,
+    "rate_rows_per_s": None,
+    "eta_s": None,
+}
+
+
 def _cmd_set(args: argparse.Namespace) -> int:
     st = RunStatus(run_dir(args.run_id))
     old = st.read()
-    fields: dict[str, Any] = {
-        "run_id": args.run_id,
-        "source": args.source,
-        "stage": args.stage,
-        "state": args.state,
-        "unit": args.unit,
-        "reason": args.reason,
-    }
+    fields: dict[str, Any] = {}
+    if old.get("stage") != args.stage:
+        fields.update(STAGE_PROGRESS_RESET)
+    fields.update(
+        {
+            "run_id": args.run_id,
+            "source": args.source,
+            "stage": args.stage,
+            "state": args.state,
+            "unit": args.unit,
+            "reason": args.reason,
+        }
+    )
     if args.state == "running":
         now = _now()
         if old.get("stage") != args.stage or not old.get("started_at"):
