@@ -101,3 +101,57 @@ def test_discover_input_files_skips_hidden_directories(tmp_path):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("[]", encoding="utf-8")
     assert discover_input_files(raw, ["*.json"]) == [data]
+
+
+def test_a_marker_write_that_fails_leaves_no_marker(tmp_path, monkeypatch):
+    """A disk error part way through must not leave a marker behind: the
+    presence checks would read it as success on the retry or the re-run."""
+    import os
+
+    import pytest
+
+    from episteme.data import checkpoint_markers as cm
+
+    def boom(src, dst):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(cm.os, "replace", boom)
+    with pytest.raises(OSError):
+        cm.mark_success(tmp_path, "src", "a.json")
+    assert not is_success(tmp_path, "src", "a.json")
+    assert os.listdir(cm.success_marker_path(tmp_path, "src", "a.json").parent) == []
+
+
+def test_mark_success_writes_the_payload_atomically(tmp_path):
+    from episteme.data import checkpoint_markers as cm
+
+    path = cm.mark_success(tmp_path, "src", "a.json", {"rows": 3})
+    assert json.loads(path.read_text(encoding="utf-8"))["stats"] == {"rows": 3}
+    assert sorted(p.name for p in path.parent.iterdir()) == ["a.json.ok"]
+
+
+def test_a_failed_directory_sync_keeps_the_marker_and_does_not_raise(tmp_path, monkeypatch, caplog):
+    """On POSIX the directory sync runs after the rename. If it fails, the
+    marker is already complete; raising would make a retry skip the unit and
+    miss its audit row."""
+    import logging
+
+    from episteme.data import checkpoint_markers as cm
+
+    real_fsync = cm.os.fsync
+    calls = {"n": 0}
+
+    def fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the directory sync
+            raise OSError(5, "I/O error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(cm, "_POSIX", True)
+    monkeypatch.setattr(cm.os, "fsync", fsync)
+    monkeypatch.setattr(cm.os, "open", lambda p, flags: 99)
+    monkeypatch.setattr(cm.os, "close", lambda fd: None)
+    with caplog.at_level(logging.WARNING, logger=cm._LOG.name):
+        path = cm.mark_success(tmp_path, "src", "a.json")
+    assert path.is_file() and is_success(tmp_path, "src", "a.json")
+    assert "directory fsync failed" in caplog.text

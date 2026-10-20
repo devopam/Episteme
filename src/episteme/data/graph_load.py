@@ -11,13 +11,17 @@ One raw input file (``source_file`` = its ``input_key``) is one transaction:
 5. derive that file's MeSH facets (``FACET_SQL``);
 6. audit (``force_override`` when forced, always ``graph_commit``), upsert lineage, commit.
 
-A failure rolls the file back alone; ``build_pubmed_graph`` reports it and moves on.
-The skip state lives in ``_graph_lineage``, in the same database the deletes act on.
+A failure rolls the file back alone. ``build_pubmed_graph`` retries a transient error
+on a connection from the pool (audit mirror deferred until the commit) and stops at
+the first permanent failure: later files are not touched and the failed file is
+reported in ``failed`` / ``stopped_at``. The skip state lives in
+``_graph_lineage``, in the same database the deletes act on.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +36,10 @@ from episteme.data.graph_files import (
     marker_graph_info,
 )
 from episteme.ops.profile import default_batch_rows
+from episteme.ops.retry import RETRY_WAITS, with_retries
 
 _BATCH_ROWS = default_batch_rows()
+_SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 
 class GraphLoadError(RuntimeError):
@@ -131,8 +137,9 @@ def load_one(
     force: bool = False,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Graph-load one source file in its own transaction. Commits on success; rolls
-    back and re-raises on any error."""
+    """Graph-load one source file in its own transaction. Commits on success (through
+    ``audit_trail.commit``, so a deferred audit mirror is written after the commit);
+    rolls back and re-raises on any error."""
     try:
         if force and not reason:
             raise GraphLoadError("--force requires --reason")
@@ -154,7 +161,7 @@ def load_one(
             )
             prev = cur.fetchone()
         if prev is not None and prev[0] == info["graph_sha256"] and not force:
-            conn.rollback()  # end the read-only transaction; nothing was written
+            audit_trail.rollback(conn)  # end the read-only transaction; nothing was written
             return {"source_file": source_file, "skipped": True, "rows": {}, "facets": 0}
 
         rows: dict[str, int] = {}
@@ -200,9 +207,18 @@ def load_one(
                 "run_id = EXCLUDED.run_id, graphed_at = now()",
                 (source, source_file, info["graph_sha256"], Jsonb(rows), run_id),
             )
-        conn.commit()
-    except BaseException:
-        conn.rollback()
+        audit_trail.commit(conn)
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            # A stop (KeyboardInterrupt/SystemExit): cancel the running statement first.
+            try:
+                conn.cancel_safe()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+        try:
+            audit_trail.rollback(conn)
+        except Exception:  # noqa: BLE001 - keep the original error (a stop must stay a stop)
+            pass
         raise
     return {"source_file": source_file, "skipped": False, "rows": rows, "facets": facets}
 
@@ -214,20 +230,44 @@ def build_pubmed_graph(
     run_id: str,
     force: bool = False,
     reason: str | None = None,
+    holder: list | None = None,
 ) -> dict[str, Any]:
-    """Graph-load every extracted pubmed file, one transaction each.
+    """Graph-load every extracted pubmed file, one transaction each; stop at the first
+    permanent failure.
 
-    Returns ``{files, loaded, skipped, failed, rows, facets}``; a failed file is rolled
-    back, printed to stderr and listed in ``failed`` while the loop continues.
+    ``conn`` serves only the start-up check; ``None`` runs it on its own short
+    connection that is released before the first file loads. Each attempt takes a
+    connection from the pool (possibly a reused idle one), loads the file inside
+    ``audit_trail.deferred_mirror`` and is retried on a transient error
+    (``with_retries``). ``holder`` (optional one-item list) receives the connection of
+    the attempt in progress so a caller's ``stage_guard`` can cancel it.
+
+    Returns ``{files, loaded, skipped, failed, rows, facets}``. The first permanent
+    failure (a file with a pre-1.6 or unreadable marker, or a load error) is printed to
+    stderr, ends the loop and is the only entry of ``failed``; ``stopped_at`` names it
+    and ``error`` holds its ``repr``. ``old`` / ``corrupt`` markers are checked first,
+    before any file loads. Later files are not touched.
     """
     source = "pubmed"
     processed_dir = Path(processed_dir)
     if force and not reason:
         raise GraphLoadError("--force requires --reason")
-    with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM episteme.mesh_tree LIMIT 1")
-        has_tree = cur.fetchone() is not None
-    conn.rollback()
+    # Lazy import: a module-level binding would freeze whatever `connection` was
+    # importable first (tests stub it).
+    from episteme.data.db.connection import connection
+
+    def _has_tree(c) -> bool:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM episteme.mesh_tree LIMIT 1")
+            found = cur.fetchone() is not None
+        c.rollback()
+        return found
+
+    if conn is not None:
+        has_tree = _has_tree(conn)
+    else:
+        with connection() as short:
+            has_tree = _has_tree(short)
     if not has_tree:
         raise GraphLoadError("mesh_tree is empty; run `run_pipeline.sh mesh graph` first")
 
@@ -240,31 +280,54 @@ def build_pubmed_graph(
         "rows": {rel: 0 for rel in RELATIONS},
         "facets": 0,
     }
+
+    def _stop(sf: str, exc: Exception) -> dict[str, Any]:
+        print(f"ERROR: graph load {sf}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        out["failed"] = [sf]
+        out["stopped_at"] = sf
+        out["error"] = repr(exc)
+        return out
+
     for sf in old:
-        print(f"ERROR: graph load {sf}: {_REEXTRACT}", file=sys.stderr)
-        out["failed"].append(sf)
+        return _stop(sf, GraphLoadError(f"{sf}: {_REEXTRACT}"))
     for sf in corrupt:
-        print(
-            f"ERROR: graph load {sf}: unreadable success marker; re-extract the file",
-            file=sys.stderr,
-        )
-        out["failed"].append(sf)
+        return _stop(sf, GraphLoadError(f"{sf}: unreadable success marker; re-extract the file"))
+
+    def _attempt(sf: str) -> dict[str, Any]:
+        """One attempt: a connection from the pool, one transaction, one commit."""
+        with connection() as uconn:
+            if holder is not None:
+                holder[0] = uconn
+            try:
+                with audit_trail.deferred_mirror(uconn):
+                    return load_one(
+                        uconn,
+                        source=source,
+                        source_file=sf,
+                        processed_dir=processed_dir,
+                        run_id=run_id,
+                        force=force,
+                        reason=reason,
+                    )
+            finally:
+                if holder is not None:
+                    holder[0] = None
+
+    def _on_retry(sf: str):
+        def _cb(attempt: int, exc: BaseException, wait: float) -> None:
+            print(f"retry {sf} ({attempt}/{len(RETRY_WAITS)}) in {wait}s: {exc!r}")
+
+        return _cb
+
     for sf in graphed:
         try:
-            res = load_one(
-                conn,
-                source=source,
-                source_file=sf,
-                processed_dir=processed_dir,
-                run_id=run_id,
-                force=force,
-                reason=reason,
+            res = with_retries(
+                lambda sf=sf: _attempt(sf),
+                sleep=lambda secs: _SLEEP(secs),
+                on_retry=_on_retry(sf),
             )
-        except Exception as e:  # noqa: BLE001 - one file's failure must not stop the run
-            conn.rollback()
-            print(f"ERROR: graph load {sf}: {type(e).__name__}: {e}", file=sys.stderr)
-            out["failed"].append(sf)
-            continue
+        except Exception as e:  # noqa: BLE001 - permanent: stop the run at this file
+            return _stop(sf, e)
         if res["skipped"]:
             out["skipped"] += 1
             continue
@@ -272,7 +335,6 @@ def build_pubmed_graph(
         for rel, n in res["rows"].items():
             out["rows"][rel] += n
         out["facets"] += res["facets"]
-    out["failed"].sort()
     return out
 
 

@@ -21,7 +21,7 @@ def _schema_columns() -> list[str]:
 
 def test_every_event_type_is_documented():
     text = doc("11-gxp-data-integrity.md")
-    assert len(EVENT_TYPES) == 15
+    assert len(EVENT_TYPES) == 17
     for ev in EVENT_TYPES:
         assert f"`{ev}`" in text, ev
 

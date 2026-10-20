@@ -27,8 +27,9 @@ Config comes from ``episteme.config`` -- this module never reads ``os.environ``.
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,14 @@ from episteme.config import get_settings
 from episteme.data import checkpoint_markers, postgres_loader
 from episteme.data.article_schema import SCHEMA_VERSION, utc_now_iso
 from episteme.data.db.connection import connection
+from episteme.ops import orphans
+from episteme.ops.failure import record_failure
+from episteme.ops.retry import RETRY_WAITS, with_retries
+from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
+from episteme.ops.stop import stage_guard
+
+_LOG = logging.getLogger(__name__)
+_SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
 
 def _write_load_success(processed_root: Path, source: str, basename: str, stats: dict) -> Path:
@@ -58,8 +67,7 @@ def _write_load_success(processed_root: Path, source: str, basename: str, stats:
         "completed_at": utc_now_iso(),
         "stats": stats or {},
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return checkpoint_markers.write_marker(path, payload)
 
 
 def _discover_shards(staging_dir: Path) -> list[Path]:
@@ -104,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
             "any other discovered shard is neither loaded nor reported as failed"
         ),
     )
+    add_skip_args(parser)  # --skip-unit; --reason is shared with --force
     args = parser.parse_args(argv)
+    check_skip_args(parser, args)
 
     source: str = args.source
     processed_dir = Path(args.processed_dir)
@@ -123,6 +133,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.skip_unit:
+        unknown = sorted(set(args.skip_unit) - {sh.name for sh in shards})
+        if unknown:
+            print(
+                f"error: --skip-unit name(s) {unknown!r} match no load unit of {source}",
+                file=sys.stderr,
+            )
+            return 2
+
     if not shards:
         print(f"no shards under {staging_dir}")
         return 0
@@ -139,53 +158,142 @@ def main(argv: list[str] | None = None) -> int:
         # SP1-β exit criteria only require correctness, so loading is sequential.
         print(f"note: --workers {args.workers} ignored; loading sequentially (SP1-β)")
 
-    failures = 0
-    with connection() as conn:
+    holder: list = [None]  # the connection of the attempt in progress, for stage_guard
+
+    def _bracket(event: str, reason: str | None = None) -> None:
+        with connection() as bconn:
+            audit_trail.record(event, conn=bconn, object=source, run_id=run_id, reason=reason)
+            bconn.commit()
+
+    def _load_one(shard: Path, name: str) -> dict:
+        """One attempt: a connection from the pool, one transaction, one commit."""
+        with connection() as conn:
+            holder[0] = conn
+            try:
+                with audit_trail.deferred_mirror(conn):
+                    try:
+                        if args.force and args.reason:
+                            audit_trail.record(
+                                "force_override",
+                                conn=conn,
+                                object=f"{source} {name}",
+                                reason=args.reason,
+                                run_id=run_id,
+                            )
+                        result = postgres_loader.load_source_file(
+                            conn, source=source, staging_path=shard, run_id=run_id
+                        )
+                        audit_trail.commit(conn)
+                        return result
+                    except BaseException as exc:
+                        if not isinstance(exc, Exception):
+                            # Stop (KeyboardInterrupt/SystemExit): cancel the running
+                            # statement explicitly. psycopg also interrupts it on
+                            # KeyboardInterrupt, but do not rely on that alone.
+                            try:
+                                conn.cancel_safe()
+                            except Exception:  # noqa: BLE001 - best effort
+                                pass
+                        try:
+                            audit_trail.rollback(conn)
+                        except Exception:  # noqa: BLE001 - keep the original error
+                            pass
+                        raise
+            finally:
+                holder[0] = None
+
+    def _on_retry(name: str):
+        def _cb(attempt: int, exc: BaseException, wait: float) -> None:
+            print(f"retry {name} ({attempt}/{len(RETRY_WAITS)}) in {wait}s: {exc!r}")
+
+        return _cb
+
+    run_ended = False
+
+    def _end_bracket(reason: str | None = None) -> None:
+        nonlocal run_ended
+        if not own_bracket or run_ended:
+            return
+        run_ended = True  # never two run_end rows, even if the write fails
+        _bracket("run_end", reason=reason)
+
+    failed_at: str | None = None
+    skipped_by_operator = 0
+    with stage_guard(lambda: holder[0]):
         if own_bracket:
-            audit_trail.record("run_start", conn=conn, object=source, run_id=run_id)
-            conn.commit()
+            _bracket("run_start")
+        try:
 
-        for shard in shards:
-            name = shard.name
-            marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
-            if marker.is_file() and not args.force:
-                print(f"skip {name}")
-                continue
+            def _sweep() -> None:
+                with connection() as sconn:
+                    orphans.sweep(sconn)
 
-            if args.force and args.reason:
-                audit_trail.record(
-                    "force_override",
-                    conn=conn,
-                    object=f"{source} {name}",
-                    reason=args.reason,
+            # The start-up connection gets the same retry schedule as a unit.
+            with_retries(_sweep, sleep=lambda secs: _SLEEP(secs), on_retry=_on_retry("sweep"))
+
+            keep = set(
+                apply_skips(
+                    source,
+                    "load",
+                    [s.name for s in shards],
+                    args.skip_unit,
+                    args.reason,
                     run_id=run_id,
                 )
-
-            try:
-                result = postgres_loader.load_source_file(
-                    conn, source=source, staging_path=shard, run_id=run_id
-                )
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001 - report + continue to next shard
-                conn.rollback()
-                failures += 1
-                print(f"FAIL {name}: {exc}")
-                continue
-
-            _write_load_success(processed_dir, source, name, result)
-            print(
-                f"ok {name} rows={result['rows']} deleted={result['deleted']} "
-                f"body_deleted={result['body_deleted']} event={result['event']} "
-                f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
-                f"rows_per_sec={result['rows_per_sec']}"
             )
+            skipped_by_operator = len(shards) - len(keep)
 
-        if own_bracket:
-            audit_trail.record("run_end", conn=conn, object=source, run_id=run_id)
-            conn.commit()
+            for shard in shards:
+                name = shard.name
+                if name not in keep:
+                    print(f"skip-unit {name}")
+                    continue
+                marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
+                if marker.is_file() and not args.force:
+                    print(f"skip {name}")
+                    continue
 
-    print(f"done shards={len(shards)} failed={failures}")
-    return 1 if failures else 0
+                try:
+                    result = with_retries(
+                        lambda shard=shard, name=name: _load_one(shard, name),
+                        sleep=lambda secs: _SLEEP(secs),
+                        on_retry=_on_retry(name),
+                    )
+                except Exception as exc:  # noqa: BLE001 - permanent: record, stop the run
+                    failed_at = name
+                    print(f"FAIL {name}: {exc}")
+                    record_failure(source, "load", name, repr(exc), run_id=run_id)
+                    _end_bracket(f"failed at shard {name}: {exc!r}"[:500])
+                    break
+
+                _write_load_success(processed_dir, source, name, result)
+                print(
+                    f"ok {name} rows={result['rows']} deleted={result['deleted']} "
+                    f"body_deleted={result['body_deleted']} event={result['event']} "
+                    f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
+                    f"rows_per_sec={result['rows_per_sec']}"
+                )
+            _end_bracket()
+        except BaseException as exc:
+            # Every other non-success exit (stop, sweep error, unexpected error)
+            # closes the bracket once; a failure here must not hide `exc`.
+            reason = (
+                f"stopped ({type(exc).__name__})"
+                if not isinstance(exc, Exception)
+                else f"failed: {exc!r}"[:500]
+            )
+            try:
+                _end_bracket(reason)
+            except Exception:  # noqa: BLE001 - keep the original exception
+                _LOG.exception("could not write run_end after %r", exc)
+            raise
+
+    if failed_at is not None:
+        print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
+        return 1
+    extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
+    print(f"done shards={len(shards)} failed=0{extra}")
+    return 0
 
 
 if __name__ == "__main__":

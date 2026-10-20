@@ -188,8 +188,16 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     write_run_manifest,
 )
 from episteme.data.gz import open_gz  # noqa: E402
-from episteme.data.parallel import default_workers, run_per_file  # noqa: E402
+from episteme.data.parallel import (  # noqa: E402
+    default_workers,
+    record_first_failure,
+    run_per_file,
+    skip_files,
+)
 from episteme.data.staging_writer import WRITE_BATCH_ROWS, write_rows  # noqa: E402
+from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
+from episteme.ops.skip import add_skip_args, check_skip_args  # noqa: E402
+from episteme.ops.stop import stage_guard  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
 
@@ -540,6 +548,8 @@ def process_one(
         _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
+        if is_transient(e):
+            raise TransientUnitError(basename, repr(e)) from None
         mark_failed(
             processed_dir,
             SOURCE,
@@ -577,6 +587,8 @@ def serialize_openalex(
     force: bool = False,
     workers: int = 1,
     verbose: bool = False,
+    skip_units: list[str] | None = None,
+    skip_reason: str | None = None,
 ) -> dict:
     """Importable core: parse real OpenAlex ``works_jsonl`` shard files under
     ``raw_dir`` into staging shards + ops markers under ``processed_dir``,
@@ -595,6 +607,7 @@ def serialize_openalex(
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     files = discover_openalex_files(raw_dir)
+    files = skip_files(SOURCE, "serialize", files, raw_dir, skip_units, skip_reason)
     if max_files and max_files > 0:
         files = files[:max_files]
 
@@ -610,6 +623,7 @@ def serialize_openalex(
         processed_dir=processed_dir,
         force=force,
     )
+    record_first_failure(SOURCE, "serialize", results)
 
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
@@ -730,7 +744,7 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
     p = argparse.ArgumentParser(
@@ -759,7 +773,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="parse only; print a field-shape table; write NO shard/marker/manifest/audit",
     )
+    add_skip_args(p)
     args = p.parse_args(argv)
+    check_skip_args(p, args)
+    if args.report and args.skip_unit:
+        p.error("--skip-unit cannot be used with --report")
     workers = default_workers() if args.workers is None else max(1, args.workers)
 
     raw_dir: Path = args.raw_dir
@@ -782,9 +800,12 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         workers=workers,
         verbose=args.verbose,
+        skip_units=args.skip_unit,
+        skip_reason=args.reason,
     )
 
-    if res["inputs"] == 0:
+    # inputs == 0 after --skip-unit dropped every file is a clean run (R8).
+    if res["inputs"] == 0 and not args.skip_unit:
         print(f"ERROR: no openalex works_jsonl files under {raw_dir}", file=sys.stderr)
         return 1
 
@@ -795,6 +816,13 @@ def main(argv: list[str] | None = None) -> int:
         f"rejected_non_biomedical={res['n_rejected_non_biomedical']}"
     )
     return 1 if res["failed"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Extract/serialize hold no long DB statement: only the stop handlers and
+    # the parent watchdog apply (conn_ref returns None).
+    with stage_guard(lambda: None):
+        return _main(argv)
 
 
 if __name__ == "__main__":

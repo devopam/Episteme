@@ -282,7 +282,10 @@ def test_mesh_graph_dispatches(tmp_path):
     # graph_builder.build() finds zero matching source_files and exits 0
     # cleanly (same "no data -> 0/1, never 3" idiom as
     # test_bookshelf_extract_dispatches above).
-    proc = _run(["mesh", "graph"], tmp_path, FAST_TIMEOUT)
+    # HEAVY_TIMEOUT: with no database reachable (no .env in a worktree), the
+    # graph stage's start-up orphan sweep retries like a unit: 4 pool waits of
+    # 30 s plus 30 + 60 + 120 s, about 5.5 min, before it exits 1.
+    proc = _run(["mesh", "graph"], tmp_path, HEAVY_TIMEOUT)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
     assert "stage: graph" in proc.stderr
 

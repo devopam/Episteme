@@ -32,6 +32,17 @@ def _configure(tmp_path, monkeypatch):
 
     importlib.reload(cfg)
     cfg.get_settings.cache_clear()
+    # audit_trail, ops.failure and the connection module bind get_settings at import;
+    # after the config reload they keep the old function, so clear its cache in place
+    # (a reload of those modules would rebind them and break tests that hold the old one).
+    import episteme.audit_trail as audit_trail
+    import episteme.data.db.connection as conn_mod
+    import episteme.ops.failure as failure
+
+    audit_trail.get_settings.cache_clear()
+    failure.get_settings.cache_clear()
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
 
 
 def _mesh(pmid, ui, name, sf):
@@ -314,7 +325,8 @@ def test_force_requires_reason_and_is_audited(env):
     assert len(_audit(conn, "graph_commit")) == 2
 
 
-def test_missing_relation_file_fails_that_file_only(env, capsys):
+def test_missing_relation_file_stops_the_run_at_that_file(env, capsys):
+    # FLIPPED: the loop used to list the failed file and load the files after it.
     from episteme.data import graph_load
 
     conn, processed = env
@@ -324,17 +336,84 @@ def test_missing_relation_file_fails_that_file_only(env, capsys):
     gf.graph_file_path(processed, "pubmed", "keywords", SF_A).unlink()
     res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
     assert res["failed"] == [SF_A]
+    assert res["stopped_at"] == SF_A
+    assert "graph file missing for relation 'keywords'" in res["error"]
     assert res["files"] == 2
-    assert res["loaded"] == 1
+    assert res["loaded"] == 0
     assert res["skipped"] == 0
-    assert res["rows"] == info_b["graph_rows"]
+    assert res["rows"] == {rel: 0 for rel in gf.RELATIONS}
     assert _counts(conn, SF_A) == {rel: 0 for rel in gf.RELATIONS}
     assert _facets(conn, SF_A) == []
-    assert _counts(conn, SF_B) == info_b["graph_rows"]
+    assert _counts(conn, SF_B) == {rel: 0 for rel in gf.RELATIONS}  # never touched
     assert "graph file missing for relation 'keywords'" in capsys.readouterr().err
     with conn.cursor() as cur:
         cur.execute("SELECT source_file FROM episteme._graph_lineage")
-        assert cur.fetchall() == [(SF_B,)]
+        assert cur.fetchall() == []
+
+
+def test_stops_at_the_first_failed_file_and_keeps_earlier_loads(env):
+    from episteme.data import graph_load
+
+    conn, processed = env
+    sf_c = "baseline__pubmed26n0003.xml.gz"
+    info_a = _write(processed, SF_A, pmid="100")
+    _write(processed, SF_B, pmid="101")
+    info_c = _write(processed, sf_c, pmid="102")
+    gf.graph_file_path(processed, "pubmed", "keywords", SF_B).unlink()
+    res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
+    assert res["failed"] == [SF_B] and res["stopped_at"] == SF_B
+    assert res["loaded"] == 1
+    assert _counts(conn, SF_A) == info_a["graph_rows"]  # committed before the failure
+    assert info_c
+    assert _counts(conn, sf_c) == {rel: 0 for rel in gf.RELATIONS}  # not reached
+
+
+def test_transient_error_then_success_commits_once(env, monkeypatch):
+    import psycopg
+
+    from episteme import audit_trail
+    from episteme.data import graph_load
+    from episteme.data.db import connection as conn_mod
+
+    conn, processed = env
+    info = _write(processed, SF_A)
+    monkeypatch.setattr(conn_mod, "_POOL", None)
+    monkeypatch.setattr(graph_load, "_SLEEP", lambda s: None)
+    real = graph_load._copy_relation
+
+    def _mirror_count():  # other tests also write to this mirror: compare deltas
+        return sum(
+            1
+            for f in audit_trail._mirror_dir().glob("audit-*.jsonl")
+            for ln in f.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        )
+
+    before = _mirror_count()
+    calls = []
+
+    def flaky(cur, rel, path, source_file):
+        calls.append(rel)
+        n = real(cur, rel, path, source_file)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("connection lost")  # after writing, before commit
+        return n
+
+    monkeypatch.setattr(graph_load, "_copy_relation", flaky)
+    try:
+        res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
+    finally:
+        if conn_mod._POOL is not None:
+            conn_mod._POOL.close()
+        conn_mod.get_settings.cache_clear()
+    assert res["failed"] == [] and res["loaded"] == 1
+    assert _counts(conn, SF_A) == info["graph_rows"]  # no duplicates from the failed attempt
+    conn.rollback()
+    assert len(_audit(conn, "graph_commit")) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme._audit")
+        db_rows = cur.fetchone()[0]
+    assert _mirror_count() - before == db_rows == 1  # the failed attempt left no mirror line
 
 
 def test_count_mismatch_rolls_back_the_file(env):
@@ -362,9 +441,12 @@ def test_old_marker_is_refused_with_reextract_message(env):
             conn, source="pubmed", source_file=SF_A, processed_dir=processed, run_id="r1"
         )
     _write(processed, SF_B)
+    # FLIPPED: the old-marker file used to be listed while SF_B still loaded.
     res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
     assert res["failed"] == [SF_A]
-    assert res["loaded"] == 1
+    assert res["stopped_at"] == SF_A
+    assert res["loaded"] == 0
+    assert _counts(conn, SF_B) == {rel: 0 for rel in gf.RELATIONS}
 
 
 def test_empty_mesh_tree_refuses_to_start(env):
@@ -380,10 +462,14 @@ def test_empty_mesh_tree_refuses_to_start(env):
     assert _counts(conn, SF_A) == {rel: 0 for rel in gf.RELATIONS}
 
 
-def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys):
+def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys, monkeypatch):
+    import json
+
+    import episteme.ops.failure as failure
     from episteme.data import graph_builder
 
     conn, processed = env
+    monkeypatch.setattr(graph_builder.orphans, "sweep", lambda c: [])
     info = _write(processed, SF_A)
     res = graph_builder.build(
         conn, source="pubmed", raw_dir=None, run_id="r1", processed_dir=processed
@@ -396,6 +482,8 @@ def test_graph_builder_routes_pubmed_and_main_exits_1_on_failure(env, capsys):
     out = capsys.readouterr()
     assert "failed=1" in out.out
     assert "re-extract" in out.err
+    rec = json.loads(failure._path("pubmed").read_text("utf-8"))
+    assert rec["stage"] == "graph" and rec["unit"] == SF_B
 
 
 def _add_rule_v2(conn):
@@ -479,7 +567,7 @@ def test_facets_cli_status_exit_code_and_rebuild(env, capsys):
     assert graph_builder.main(["facets", "--rebuild", "--force"]) == 2
 
 
-def test_truncated_marker_fails_that_file_and_the_run_continues(env, capsys):
+def test_truncated_marker_stops_the_run_at_that_file(env, capsys):
     from episteme.data import graph_load
     from episteme.data.checkpoint_markers import success_marker_path
 
@@ -487,9 +575,12 @@ def test_truncated_marker_fails_that_file_and_the_run_continues(env, capsys):
     info_b = _write(processed, SF_B, pmid="101")
     _write(processed, SF_A, pmid="100")
     success_marker_path(processed, "pubmed", SF_A).write_text('{"stats": {"graph_', "utf-8")
+    # FLIPPED: the run used to continue and load SF_B.
     res = graph_load.build_pubmed_graph(conn, processed_dir=processed, run_id="r1")
     assert res["failed"] == [SF_A]
+    assert res["stopped_at"] == SF_A
     assert res["files"] == 2
-    assert res["loaded"] == 1
-    assert _counts(conn, SF_B) == info_b["graph_rows"]
+    assert res["loaded"] == 0
+    assert info_b
+    assert _counts(conn, SF_B) == {rel: 0 for rel in gf.RELATIONS}
     assert "unreadable success marker" in capsys.readouterr().err

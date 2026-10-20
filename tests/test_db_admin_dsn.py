@@ -20,6 +20,7 @@ def _settings(**over):
         "pg_host": "localhost",
         "pg_port": 5433,
         "sys_admin_password": "p w'x",
+        "run_id": "rid",
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -32,6 +33,7 @@ def test_admin_dsn_uses_sys_admin_role_and_quotes_password():
     assert d["dbname"] == "episteme_test"
     assert d["host"] == "localhost"
     assert d["port"] == "5433"
+    assert d["application_name"].startswith("episteme:rid:")
 
 
 def test_admin_dsn_runs_the_guard_before_anything_else():

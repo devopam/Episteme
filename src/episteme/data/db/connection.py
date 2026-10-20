@@ -7,6 +7,7 @@ role (see scripts/data/db/init_database.sh).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -28,6 +29,26 @@ def dsn_from_settings() -> str:
 
 SYS_ADMIN_ROLE = "episteme_sys_admin"
 
+_APP_PREFIX = "episteme"
+_APP_NAME_MAX = 63  # PostgreSQL truncates application_name at NAMEDATALEN - 1 bytes
+
+
+def app_name(settings) -> str:
+    """``episteme:<run_id>:<pid>`` for ``application_name``, at most 63 bytes.
+    The run id is shortened first, so ``:<pid>`` always survives; the orphan
+    sweep reads the client PID from the last field. ``adhoc`` stands in for a
+    standalone CLI (no run id). The PID is read at call time."""
+    run = settings.run_id or "adhoc"
+    head, tail = f"{_APP_PREFIX}:", f":{os.getpid()}"
+    room = _APP_NAME_MAX - len(head.encode()) - len(tail.encode())
+    run = run.encode()[:room].decode("utf-8", errors="ignore")
+    return f"{head}{run}{tail}"
+
+
+def connect_kwargs(settings) -> dict[str, str]:
+    """``pool_kwargs`` plus the ``application_name`` tag."""
+    return {**pool_kwargs(settings), "application_name": app_name(settings)}
+
 
 def admin_dsn(settings) -> str:
     """DSN for the table owner, ``episteme_sys_admin``: dropping and creating
@@ -45,6 +66,7 @@ def admin_dsn(settings) -> str:
         dbname=settings.pg_database,
         user=SYS_ADMIN_ROLE,
         password=settings.sys_admin_password,
+        application_name=app_name(settings),
     )
 
 
@@ -55,9 +77,11 @@ def admin_dsn_from_settings() -> str:
 def get_pool() -> ConnectionPool:
     global _POOL
     if _POOL is None:
+        # create the pool in the process that uses it; a pool inherited through
+        # fork carries the parent's PID in application_name
         _POOL = ConnectionPool(
             dsn_from_settings(),
-            kwargs=pool_kwargs(get_settings()),
+            kwargs=connect_kwargs(get_settings()),
             min_size=1,
             max_size=8,
             open=True,

@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import traceback
 from pathlib import Path
 from typing import Any
 
 from episteme.data.article_schema import SCHEMA_VERSION, utc_now_iso
+
+_LOG = logging.getLogger(__name__)
+_POSIX = os.name == "posix"  # directories can be fsynced (a seam for tests)
 
 
 def ops_root(processed_root: Path, source: str) -> Path:
@@ -28,6 +33,39 @@ def load_success_marker_path(processed_root: Path, source: str, input_basename: 
 
 def graph_success_marker_path(processed_root: Path, source: str, input_basename: str) -> Path:
     return ops_root(processed_root, source) / "graph_success" / f"{input_basename}.ok"
+
+
+def write_marker(path: Path, payload: dict[str, Any]) -> Path:
+    """Write a marker atomically: a temp file in the same directory, then
+    ``os.replace``. A write that fails part way (a disk error) leaves no
+    marker, so a marker that exists is always complete; the presence checks
+    (``is_success``, the load and graph skips) rely on that. The temp file is
+    fsynced before the rename (and, on POSIX, the directory after it), so a
+    power loss leaves either no marker or a complete one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if _POSIX:
+        # The marker is complete and visible now. A failed directory sync must
+        # not raise: a retry would see the marker, skip the unit and miss its
+        # audit row. Only the rename's durability is at risk; log it.
+        try:
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError as exc:
+            _LOG.warning("marker %s written; directory fsync failed: %r", path, exc)
+    return path
 
 
 def is_success(processed_root: Path, source: str, input_basename: str) -> bool:
@@ -53,8 +91,7 @@ def mark_success(
         "completed_at": utc_now_iso(),
         "stats": stats or {},
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def mark_failed(
@@ -84,8 +121,7 @@ def mark_failed(
             payload["traceback"] = "".join(traceback.format_exception(type(exc), exc, tb))[-4000:]
         except Exception:
             payload["traceback"] = f"{type(exc).__name__}: {exc}"
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def write_run_manifest(
@@ -106,8 +142,7 @@ def write_run_manifest(
         "config": config,
         "totals": totals,
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:

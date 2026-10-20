@@ -42,6 +42,9 @@ echo "load" >> "$CALLS"
 case "${FAKE_LOAD:-ok}" in
     ok) exit 0 ;;
     fail) exit 1 ;;
+    rc130) exit 130 ;;
+    rc*) exit "${FAKE_LOAD#rc}" ;;
+    runner) echo "runner ${EPISTEME_RUNNER_PID:-unset}" >> "$CALLS"; exit 0 ;;
     term) kill -TERM "$PPID"; sleep 1; exit 0 ;;
 esac
 """
@@ -187,3 +190,64 @@ def test_graph_forwards_force_and_reason_only_when_forced(tree):
     assert proc.returncode == 0, proc.stderr
     assert "graph " in lines or "graph" in lines
     assert not any(ln.startswith("graph ") and "--force" in ln for ln in lines)
+
+
+FAKE_PY_FAILURE = """#!/usr/bin/env bash
+case "$*" in
+    *failure*show*) echo "file_7.xml: boom"; exit 0 ;;
+    *failure*clear*) echo "clear" >> "$CALLS"; exit 0 ;;
+    *run_end*) echo "run_end $*" >> "$CALLS" ;;
+esac
+exit 0
+"""
+
+
+def test_failed_stage_puts_the_recorded_unit_in_the_run_end_reason(tree):
+    _write(tree[2], FAKE_PY_FAILURE)
+    proc, calls = _run(tree, "load", FAKE_LOAD="fail")
+    assert proc.returncode == 1, proc.stderr
+    assert calls[0] == "clear"
+    end = [c for c in calls if c.startswith("run_end")]
+    assert len(end) == 1
+    assert "failed at stage load: file_7.xml: boom" in end[0]
+
+
+def test_stopped_stage_is_reported_as_stopped_and_keeps_its_exit_code(tree):
+    _write(tree[2], FAKE_PY_FAILURE)
+    proc, calls = _run(tree, "load", FAKE_LOAD="rc130")
+    assert proc.returncode == 130, proc.stderr
+    end = [c for c in calls if c.startswith("run_end")]
+    assert len(end) == 1
+    assert "stopped at stage load" in end[0]
+    assert "failed at stage" not in end[0]
+
+
+@pytest.mark.parametrize("stage_rc", ["2", "3", "7"])
+def test_any_other_stage_code_becomes_exit_1(tree, stage_rc):
+    """Exit 2 and 3 belong to the dispatcher's own checks before run_start."""
+    _write(tree[2], FAKE_PY_FAILURE)
+    proc, calls = _run(tree, "load", FAKE_LOAD=f"rc{stage_rc}")
+    assert proc.returncode == 1, proc.stderr
+    end = [c for c in calls if c.startswith("run_end")]
+    assert len(end) == 1 and "failed at stage load" in end[0]
+
+
+def test_sigterm_code_from_a_stage_passes_through(tree):
+    _write(tree[2], FAKE_PY_FAILURE)
+    proc, calls = _run(tree, "load", FAKE_LOAD="rc143")
+    assert proc.returncode == 143, proc.stderr
+    end = [c for c in calls if c.startswith("run_end")]
+    assert len(end) == 1 and "stopped at stage load" in end[0]
+
+
+def test_stage_sees_the_runner_pid(tree):
+    proc, calls = _run(tree, "load", FAKE_LOAD="runner")
+    assert proc.returncode == 0, proc.stderr
+    runner = [c for c in calls if c.startswith("runner ")]
+    assert len(runner) == 1 and runner[0].split()[1].isdigit(), runner
+
+
+def test_an_outer_runner_pid_is_kept(tree):
+    proc, calls = _run(tree, "load", FAKE_LOAD="runner", EPISTEME_RUNNER_PID="4242")
+    assert proc.returncode == 0, proc.stderr
+    assert "runner 4242" in calls

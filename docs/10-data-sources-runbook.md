@@ -75,7 +75,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint al
 
 Expected: `stage: download` then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>`, `stage: extract` then `done inputs=3 ok=3 failed=0 rows=<n>`, `stage: load` then one `ok <shard> ... event=load_commit` line and `done shards=1 failed=0`, `stage: graph` then `done source_files=...`, and `pipeline done: europepmc_preprint all` with exit code 0. A per-preprint 404, 429 or 503 counts in `errors` and is not fatal. If the id list itself cannot be fetched, the downloader aborts with a raw Python traceback (a `ConnectionError` naming `pprid.txt.gz`), exit code 1, `stage failed: download` and `resume with: ...`; nothing was written to the database. Check with `curl -I` against the base URL plus `/pprid.txt.gz`, retry later, or use the `openalex` path above. The `--dry-run` preview is not a reachability check: with the upstream unreachable it prints a WARN, `would harvest 0 ids`, and exits 0. Treat `0` there as an error, not as nothing to do.
 
-Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`). On Windows, Python stages may also print pool shutdown noise on stderr (`couldn't stop thread 'pool-1-...'` or a `hint: you can try to call 'close()'...` line; observed with `run_pipeline.sh`, `verify_audit_trail.sh` and `source_inventory.sh`, see section 0.3); they were not seen to affect the exit code.
+Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 130 or 143 a stage was stopped (Ctrl-C, SIGTERM, or the parent watchdog; section 4.7); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`): every non-zero stage code other than 130 and 143 becomes 1. On Windows, Python stages may also print pool shutdown noise on stderr (`couldn't stop thread 'pool-1-...'` or a `hint: you can try to call 'close()'...` line; observed with `run_pipeline.sh`, `verify_audit_trail.sh` and `source_inventory.sh`, see section 0.3); they were not seen to affect the exit code.
 
 If step 2 does not print `episteme_test|19beta3`, stop: you are talking to a different server or database.
 
@@ -346,13 +346,13 @@ Rules of use:
 ### 4.1 The dispatcher
 
 ```text
-bash scripts/data/run_pipeline.sh <source> <stage> [--dry-run] [--force] [--reason REASON] [--max-files N]
+bash scripts/data/run_pipeline.sh <source> <stage> [--dry-run] [--force] [--reason REASON] [--max-files N] [--skip-unit NAME]
 bash scripts/data/run_pipeline.sh corpus materialize
 ```
 
 Stages: `all`, `download`, `extract`, `load`, `graph`, `materialize`, `enrich`, `serialize`. Sources are the keys of the `WRAPPER` table in `scripts/data/run_pipeline.sh` (all listed in `docs/12-source-inventory.md`), plus the alias `corpus` (materialize only).
 
-Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from; a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
+Order of checks: usage (no source or stage: exit 2), then `EPISTEME_ACTOR` (exit 2), then argument validation (`--force` without `--reason`: exit 2; `--skip-unit` without `--reason`: exit 2; `--skip-unit` with any stage other than `extract`, `serialize` or `load` (for example `all` or `graph`), or with the `load` stage of `europepmc_id_mappings` or `cdisc_ct`: exit 2), then an unknown source (exit 3; these dispatcher checks are the only place rc 2 and 3 come from, except the `--bulk` index drop and rebuild (section 4.7); a wrapper's own failures, including a missing endpoint key, surface as rc 1), an unrecognised stage word (usage, exit 2) and an unwired combination (exit 3), then the audit bracket and the stage. All validation happens before any audit row, so a rejected command leaves no dangling `run_start`.
 
 Tokens the dispatcher does not recognise are not dropped: they are forwarded to the download wrapper as the MODE or repo argument (for example `parquet` for `openalex`, `all` for `chembl`, a repo id for `hf_corpus`) and to flags such as `--include-current` or `--since`. Only the download wrapper sees them.
 
@@ -385,15 +385,15 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
 
 ### 4.4 Audit bracket and resume
 
-Every non-dry run records `run_start` and, on completion, `run_end`, both with object = the source and a run id `<source>-<UTC timestamp>` shared by all stages of the invocation. On a stage failure the dispatcher records a `run_end` with reason `failed at stage <name>`, prints `resume with: run_pipeline.sh <source> <name>` and exits 1. A failed `run_start` or `run_end` (database down, refused by the guard) is only a `WARN`, so a run can complete without its bracket; verify (section 7). Extract and serialize stages keep a per-file success marker and skip finished files; `load` keeps a per-shard `load_success` marker. Re-running a stage is therefore the resume mechanism.
+Every non-dry run records `run_start` and, on completion, `run_end`, both with object = the source and a run id `<source>-<UTC timestamp>` shared by all stages of the invocation. On a stage failure the dispatcher records a `run_end` with reason `failed at stage <name>`, prints `resume with: run_pipeline.sh <source> <name>` and exits 1. A stopped stage (rc 130 or 143) gives the reason `stopped at stage <name>`, and the dispatcher exits with the same code. A failed `run_start` or `run_end` (database down, refused by the guard) is only a `WARN`, so a run can complete without its bracket; verify (section 7). Extract and serialize stages keep a per-file success marker and skip finished files; `load` keeps a per-shard `load_success` marker. Re-running a stage is therefore the resume mechanism.
 
 ### 4.5 Per-stage arguments (what the dispatcher forwards)
 
 | Stage | Receives |
 |---|---|
 | `download` | `--max-files N`, `--force --reason R`, tokens it does not recognise; `--dry-run` as `EPISTEME_DRY_RUN=1` |
-| `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
-| `load` | `--force --reason R` only |
+| `extract`, `serialize` | `--max-files N`, `--force`; with `--skip-unit`, also each `--skip-unit NAME` and `--reason R` |
+| `load` | `--force --reason R`; with `--skip-unit`, also each `--skip-unit NAME` (and `--reason R` once) |
 | `graph` | `--force --reason R` when forced (reloads files whose graph hash is unchanged; `pubmed` only acts on it) |
 | `enrich`, `materialize` | nothing |
 
@@ -439,6 +439,103 @@ bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 
 **Loader timing:** every `ok` line of a load ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
 
+### 4.7 Failure rules
+
+These rules apply to the `extract`, `serialize`, `load` and `graph` stages. Downloads keep their own rule: record the failure and continue.
+
+**Fail fast.** A stage stops at the first unit that fails. A unit is one input file (extract, serialize) or one shard (load). The stage does not start the next unit. With more than one worker, the units already running finish or fail. The exit code is 1.
+
+**Retries.** A transient error is retried 3 times. The waits are 30, 60 and 120 seconds. A load or graph unit takes its connection for each attempt from the pool. That connection can be a healthy idle one that the pool reuses. After a server restart, the pool can hand out dead idle connections, and each one uses up an attempt. If the third retry fails, the error is permanent and the stage stops.
+
+- Transient: a PostgreSQL connection error (SQLSTATE class `08`), serialization failure (`40001`), deadlock (`40P01`), lock not available (`55P03`), operator intervention (`57P01` to `57P05`) and too many connections (`53300`). Also transient: a connect error with no SQLSTATE, and OS errors such as I/O error, time-out, connection reset or refused, a broken pipe, and the Windows codes 21, 64, 121, 1117 and 1231.
+- Permanent: all other errors. A cancelled query (`57014`) is permanent. So are a missing file, a permission error and a bad row.
+- A wrong password is a connect error with no SQLSTATE. It is treated as transient. The stage waits about 3.5 minutes (30 + 60 + 120 s) before it fails. Fix the password first, or stop the stage and start it again.
+
+**`last_failure.json`.** A stage that stops on a unit writes `<processed root>/_ops/<source>/last_failure.json`. The file holds `run_id`, `stage`, `unit`, `error` and `at`. `run_pipeline.sh` puts the unit and the error in the `run_end` audit reason. To read the record:
+
+```bash
+python -m episteme.ops.failure show --source <source> --run-id <run_id>
+```
+
+The command prints `<unit>: <error>`. It prints nothing when the record belongs to another run. The unit name is what `--skip-unit` takes.
+
+**Resume.** Run the same stage again:
+
+```bash
+bash scripts/data/run_pipeline.sh <source> <stage>
+```
+
+Units that are done are skipped. Extract and serialize use the success markers. Load and graph use the load and graph markers. The failed unit runs again.
+
+**Skip a unit.** Use this only when a unit fails for a permanent reason and you accept to leave it out.
+
+```bash
+bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TEXT"
+```
+
+- `--skip-unit` can be repeated. `--reason` is required. Only one named stage is allowed: `extract`, `serialize` or `load`. `all` and `graph` exit 2. Exception: the `load` stage of `europepmc_id_mappings` and `cdisc_ct` does not take `--skip-unit` and exits 2 (their loaders are not yet under these rules).
+- The skip is for this run only. No marker stays. The next run tries the unit again.
+- Each skipped unit writes one audited `unit_skip` row with your reason.
+- NAME is the unit name from `last_failure.json`. For extract and serialize it is the `input_key` (the path under the raw directory). For load it is the shard file name.
+- A bare file name works when exactly one input has that name. If two inputs share the name, use the `input_key`.
+- A shard that already has a success marker is skipped as a `unit_skip` too, when you name it.
+- A name that matches no unit exits 2, and nothing is audited. Under `run_pipeline.sh` the runner then exits 1 (see the exit codes below).
+
+**Graph: a file that fails for a permanent reason.** The `graph` stage takes no `--skip-unit`. A failed file writes no `_graph_lineage` row, so every re-run tries it again. `--force --reason` does not help: the failing file fails again. What helps depends on the cause:
+
+- The success marker or the relation files on disk are bad (a pre-1.6 marker, an unreadable marker, a missing or broken relation file). Rebuild them:
+  1. Remove the file's extract success marker: `<processed root>/_ops/pubmed/success/<unit>.ok`.
+  2. Run `extract` again. It redoes only that file.
+  3. Run `graph` again.
+- The raw input file is bad. Download it again first, then do the three steps above.
+- In every other case, the graph stage stays blocked at that file. A graph `--skip-unit` is in the backlog.
+
+**Exit codes.**
+
+| Code | Meaning |
+|---|---|
+| 0 | The stage finished. |
+| 1 | A unit failed (permanent, or transient after 3 retries). |
+| 2 | Usage error, for example `--skip-unit` without `--reason`. |
+| 130 | Stopped with Ctrl-C. The audit `run_end` reason is `stopped at stage <name>`. |
+| 143 | Stopped with SIGTERM, or the parent runner died. |
+
+When a stage fails, `run_pipeline.sh` passes 130 and 143 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
+
+**Stop handling.** Ctrl-C and SIGTERM stop the stage at once. A load or graph stage first cancels the running SQL statement.
+
+- With 1 worker, the unit in progress gets no success marker, so a re-run does it again.
+- With more than 1 worker, a SIGTERM to the stage lets the units already in flight finish and write their success markers. The queued units do not start. A console Ctrl-C also reaches the pool workers, so units in flight can stop with no marker; a re-run redoes them.
+
+To stop a stage, stop the process (Ctrl-C or SIGTERM), or cancel its statement (`pg_cancel_backend`, SQLSTATE `57014`). Do not use `pg_terminate_backend`. It gives `57P01`, which is transient, so the stage waits 30 seconds and retries.
+
+**Parent watchdog.** Each stage runs a watchdog thread. It watches one process:
+
+1. The runner. `scripts/data/_lib/common.sh` exports `EPISTEME_RUNNER_PID`. The outermost script sets it: under `run_pipeline.sh` it is the PID of `run_pipeline.sh`; a wrapper run directly gives its own PID. Under Git Bash the value is the Windows PID (`/proc/$$/winpid`).
+2. If `EPISTEME_RUNNER_PID` is not set, is not an integer, or names a process that is not running when the stage starts, the stage logs a WARNING. It then watches its first ancestor that is not the venv launcher (`.venv/Scripts/python.exe` on Windows). On Linux that is the parent process. If no such process can be found, the stage logs a WARNING (`no process to watch`) and runs without a watchdog.
+
+The watchdog checks the process every 10 seconds. It compares the process start time too, so a reused PID counts as gone. When the process is gone, the watchdog cancels the running statement (it waits at most 10 seconds for the cancel) and exits with 143. So the stage notices a dead runner within about 10 seconds, and exits within about 20.
+
+On Windows, a hard kill of the runner (`taskkill /F`) leaves the stage's bash stub and the venv launcher alive. Only the runner PID lets the stage notice. Start stages through the wrapper scripts or `run_pipeline.sh`, so `common.sh` sets it.
+
+A load that is run directly (not under `run_pipeline.sh`) owns its audit bracket: it writes its own `run_start` and `run_end`. If the watchdog exits such a load with 143, the `run_end` is not written, because `os._exit` skips it. The audit trail then holds a `run_start` with no `run_end`. Under `run_pipeline.sh` the runner owns the bracket, not the load.
+
+**Orphan sweep.** Each connection sets `application_name` to `episteme:<run_id>:<pid>`. At the start of a load or graph stage, the sweep looks for backends that fit these rules:
+
+- the `application_name` starts with `episteme:`;
+- the backend belongs to the same database role;
+- the backend is `active`;
+- the client PID in the name no longer exists on this host.
+
+The sweep cancels the running statement of each such backend. Each cancel writes an audited `orphan_cancel` row.
+
+**Known limits.**
+
+- A PID that another process has reused makes an orphan look alive. The sweep leaves it alone.
+- The sweep checks PIDs on this host only. It assumes the clients run here.
+- The sweep does not touch an orphan that is `idle in transaction`. That backend ends only when the server notices the closed socket.
+- Downloads do not use these rules. Pause, lock and queue are planned (operating standard PR 3).
+
 ---
 
 ## 5. Sources
@@ -471,7 +568,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed extract
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubmed load
 ```
 
-**Graph and facets (schema 1.6).** `extract` writes the six relation files next to each shard (docs/09 section 4.5). `pubmed graph` loads them per raw file in one transaction: it deletes that file's earlier edge and facet rows, COPYs the six relations, derives the file's facets and writes one `graph_commit` audit row plus the `_graph_lineage` row. A failed file rolls back alone (an unreadable, e.g. truncated, success marker fails that file with `unreadable success marker`); the run goes on and exits non-zero with the failed count. If no pubmed graph files are found at all, it prints `WARNING: no pubmed graph files found under <processed_dir>` to stderr and exits 1. The wrapper `graph_pubmed.sh` passes no directory arguments: the processed root comes from `config.py` (`EPISTEME_PROCESSED_ROOT`, else `EPISTEME_DATA_ROOT/02_processed`), the same as extract; a direct `--processed-dir` after the wrapper still overrides it. A file whose `graph_sha256` in `_graph_lineage` is unchanged is skipped; `pubmed graph --force --reason "<why>"` reloads it and is audited (`force_override`); `run_pipeline.sh` forwards `--force --reason` to the graph wrapper. `pubmed graph` refuses to start when `mesh_tree` is empty (run `mesh graph` first), and refuses a shard with no graph info (`re-extract with schema >= 1.6`). `--force` is only acted on for `pubmed`; for any other graph source it prints `NOTE: --force has no effect for source <src> graph` to stderr and nothing is audited. `extract` redoes any file whose success marker lacks `graph_relations` even without `--force`; a file with a 1.6 marker is skipped. Add `--bulk` for a full-baseline load (section 4.6).
+**Graph and facets (schema 1.6).** `extract` writes the six relation files next to each shard (docs/09 section 4.5). `pubmed graph` loads them per raw file in one transaction: it deletes that file's earlier edge and facet rows, COPYs the six relations, derives the file's facets and writes one `graph_commit` audit row plus the `_graph_lineage` row. A failed file rolls back alone (an unreadable, e.g. truncated, success marker fails that file with `unreadable success marker`). The stage then stops at that file and exits 1 (section 4.7); later files are not touched. If no pubmed graph files are found at all, it prints `WARNING: no pubmed graph files found under <processed_dir>` to stderr and exits 1. The wrapper `graph_pubmed.sh` passes no directory arguments: the processed root comes from `config.py` (`EPISTEME_PROCESSED_ROOT`, else `EPISTEME_DATA_ROOT/02_processed`), the same as extract; a direct `--processed-dir` after the wrapper still overrides it. A file whose `graph_sha256` in `_graph_lineage` is unchanged is skipped; `pubmed graph --force --reason "<why>"` reloads it and is audited (`force_override`); `run_pipeline.sh` forwards `--force --reason` to the graph wrapper. `pubmed graph` refuses to start when `mesh_tree` is empty (run `mesh graph` first), and refuses a shard with no graph info (`re-extract with schema >= 1.6`). `--force` is only acted on for `pubmed`; for any other graph source it prints `NOTE: --force has no effect for source <src> graph` to stderr and nothing is audited. `extract` redoes any file whose success marker lacks `graph_relations` even without `--force`; a file with a 1.6 marker is skipped. Add `--bulk` for a full-baseline load (section 4.6).
 
 MeSH facets (`condition`, `test`, `demographic`, `special_population`, `drug`) live in `article_facets`, a plain table kept current per file (no materialized views). The rules are rows in `mesh_facet_rule` (rule_version 1 is seeded by migration 0006; edit them as `episteme_sys_admin` only, and bump `rule_version`). After a rule change or a new MeSH release:
 

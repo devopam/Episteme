@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--skip-unit NAME --reason REASON]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -33,6 +33,7 @@ FORCE=0
 BULK=0
 REASON=""
 MAX_FILES=""
+SKIP_UNITS=()
 # I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
 # hf_corpus `<repo_id>`, chembl `all`, …). Collect and forward them to the
 # table-driven wrapper rather than WARN-and-drop — the wrapper is the layer that
@@ -46,6 +47,11 @@ while [ $# -gt 0 ]; do
         # --reason/--max-files would make `shift 2` fail (count out of range),
         # leave $1 unchanged, and spin the while-loop forever.
         --reason) REASON="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        # extract, serialize or load stage only: skip the named unit in this run
+        # (repeatable; needs --reason). Per run: no marker survives it.
+        --skip-unit)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "--skip-unit requires a unit name" 2
+            SKIP_UNITS+=("$2"); shift 2 ;;
         # download_pmc.py's flag is --limit, extract_pmc.py's is --max-files --
         # one orchestrator flag, translated per downstream script below.
         --max-files) MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
@@ -62,6 +68,21 @@ done
 
 if [ "$FORCE" = "1" ] && [ -z "$REASON" ]; then
     die "--force requires --reason" 2
+fi
+if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
+    [ -n "$REASON" ] || die "--skip-unit requires --reason" 2
+    case "$STAGE" in
+        extract|serialize|load) ;;
+        all) die "--skip-unit needs one named stage, not 'all'" 2 ;;
+        *) die "--skip-unit is valid with the extract, serialize or load stage only (not $STAGE)" 2 ;;
+    esac
+    # These load wrappers reach a Python module that has no --skip-unit.
+    if [ "$STAGE" = "load" ]; then
+        case "$SOURCE" in
+            europepmc_id_mappings|cdisc_ct)
+                die "$SOURCE load does not support --skip-unit" 2 ;;
+        esac
+    fi
 fi
 if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
@@ -229,14 +250,34 @@ run_stage() {
     local name="$1"
     shift
     log INFO "stage: $name"
-    if ! "$@"; then
+    # Drop any stale failure record so a later read only sees this stage's.
+    "$PY" -m episteme.ops.failure clear --source "$SOURCE" >/dev/null 2>&1 || true
+    # `if ! cmd` would lose the exit code; capture it so it can be reused.
+    local rc=0
+    "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        local reason
+        case "$rc" in
+            130|143) reason="stopped at stage $name" ;;
+            *)
+                reason="failed at stage $name"
+                local unit
+                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || unit=""
+                [ -n "$unit" ] && reason="$reason: $unit"
+                ;;
+        esac
         log ERROR "stage failed: $name"
         log ERROR "resume with: $0 $SOURCE $name"
         # DR-1: a dry run touches no DB, so it also emits no failure-path run_end
         # (that would be a lone run_end with no matching run_start).
         [ "${EPISTEME_DRY_RUN:-0}" = "1" ] \
-            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $name" >/dev/null 2>&1 || true
-        exit 1
+            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "$reason" >/dev/null 2>&1 || true
+        # A stop passes through; every other stage failure is exit 1 (exit 2
+        # stays for the dispatcher's own rejections before run_start).
+        case "$rc" in
+            130|143) exit "$rc" ;;
+            *) exit 1 ;;
+        esac
     fi
 }
 
@@ -254,8 +295,20 @@ fi
 [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && download_args+=(--dry-run)
 [ "$FORCE" = "1" ] && extract_args+=(--force)
 
+# --skip-unit NAME ... --reason R: forwarded to the one named stage only
+# (extract, serialize or load; the validation above rejects every other use).
+skip_args=()
+for _u in "${SKIP_UNITS[@]+"${SKIP_UNITS[@]}"}"; do skip_args+=(--skip-unit "$_u"); done
+# --reason rides along once: load_args already holds it when --force is set.
+skip_reason=()
+[ "${#skip_args[@]}" -eq 0 ] || skip_reason=(--reason "$REASON")
+extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
+load_args+=("${skip_args[@]+"${skip_args[@]}"}")
+[ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
+
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
-# --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
+# --max-files N and --force (plus --skip-unit NAME --reason R when skipping);
+# NOT the SP3 wrapper_args superset.
 # `load` reuses load_args above; `graph` gets --force --reason R only when forced
 # (graph_builder.main takes --source/--raw-dir/--processed-dir/--force/--reason).
 graph_args=()
@@ -263,13 +316,15 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
+lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
-# SP4 structured `serialize` wrappers accept only --max-files N and --force --
-# NOT --reason, mirroring lit_extract_args' shape. `load` reuses load_args;
+# SP4 structured `serialize` wrappers accept --max-files N and --force (plus
+# --skip-unit NAME --reason R when skipping), mirroring lit_extract_args' shape. `load` reuses load_args;
 # `graph` (mesh only) gets no extra args, same as the lit graph arm.
 struct_serialize_args=()
 [ -n "$MAX_FILES" ] && struct_serialize_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && struct_serialize_args+=(--force)
+struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
 # Passthrough args for the table-driven bulk wrappers. Unlike download_args
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N
