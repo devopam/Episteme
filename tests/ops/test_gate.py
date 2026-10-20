@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -108,6 +109,10 @@ def test_a_missing_measure_fails():
     assert "min_rows" in lines[0]
 
 
+def test_a_null_column_absent_from_null_pct_counts_as_zero():
+    assert gate.evaluate({"null_pct": {}}, {"max_null_pct": {"title": 1.0}}) == []
+
+
 def test_a_status_absent_from_the_mix_counts_as_zero():
     assert gate.evaluate({"extract_status_pct": {}}, {"max_status_pct": {"dropped": 2.0}}) == []
 
@@ -191,14 +196,86 @@ def test_code_hash_changes_when_the_wrapper_changes(tmp_path):
     assert before != _hash(tmp_path / "src")
 
 
-def test_code_hash_ignores_modules_loaded_in_this_process(tmp_path):
-    """The test process has pkg-free modules loaded; a fresh interpreter must not
-    see them. Import the helper here, then change nothing: the hash is the same."""
-    _make_pkg(tmp_path / "src")
-    before = _hash(tmp_path / "src")
-    import episteme.ops.status  # noqa: F401 - loaded in this process, not by the stage
+def test_code_hash_uses_a_fresh_interpreter(tmp_path):
+    """A temp package named like the real one (already loaded in this process) is
+    read from the temp tree: a change to its config.py changes the hash."""
+    root = tmp_path / "src"
+    pkg = root / "episteme"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "config.py").write_text("X = 1\n", encoding="utf-8")
+    (pkg / "stage.py").write_text("from episteme import config\n", encoding="utf-8")
+    import episteme.config  # noqa: F401 - loaded here from the real tree
 
-    assert _hash(tmp_path / "src") == before
+    files = gate.stage_files("episteme.stage", root.resolve())
+    assert {f.name for f in files} == {"__init__.py", "config.py", "stage.py"}
+    assert all(f.is_relative_to(root.resolve()) for f in files)
+    before = gate.code_hash("s", "extract", module="episteme.stage", src_root=root)
+    (pkg / "config.py").write_text("X = 2\n", encoding="utf-8")
+    assert gate.code_hash("s", "extract", module="episteme.stage", src_root=root) != before
+
+
+def test_stage_files_with_no_output_raises_clearly(tmp_path):
+    root = tmp_path / "src"
+    pkg = root / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "quiet.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="no module list"):
+        gate.stage_files("pkg.quiet", root.resolve())
+
+
+def test_stage_module_accessor():
+    assert gate.stage_module("anything", "load") == (
+        "episteme.data.load_articles",
+        "anything/load_anything.sh",
+    )
+    assert gate.stage_module("apollo", "extract")[0].endswith("extract_apollo")
+    with pytest.raises(KeyError):
+        gate.stage_module("apollo", "graph")
+
+
+GATED = [
+    ("bookshelf", "extract"),
+    ("europepmc_manuscript", "extract"),
+    ("apollo", "extract"),
+    ("bookshelf", "load"),
+]
+
+
+def _lazy_episteme_imports(path: Path) -> set[str]:
+    """Dotted module names that code inside functions imports from episteme."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module.split(".")[0] == "episteme":
+                    found.add(node.module)
+                    found.update(f"{node.module}.{a.name}" for a in node.names)
+            elif isinstance(node, ast.Import):
+                found.update(a.name for a in node.names if a.name.split(".")[0] == "episteme")
+    return found
+
+
+@pytest.mark.parametrize(("source", "stage"), GATED)
+def test_lazy_imports_of_the_closure_are_already_hashed(source, stage):
+    """An import inside a function is invisible to the hash unless the module is
+    also imported at top level somewhere in the closure. Fail on a lazy-only one."""
+    module, _ = gate.stage_module(source, stage)
+    files = set(gate.stage_files(module, gate._SRC_ROOT.resolve()))
+    src = gate._SRC_ROOT.resolve()
+    missing = []
+    for f in sorted(files):
+        for dotted in _lazy_episteme_imports(f):
+            base = src.joinpath(*dotted.split("."))
+            candidates = [base.with_suffix(".py"), base / "__init__.py"]
+            for c in candidates:
+                if c.is_file() and c.resolve() not in files:
+                    missing.append(f"{f.name} imports {dotted} lazily; {c.name} is not hashed")
+    assert not missing, missing
 
 
 def test_code_hash_of_an_unimportable_module_raises(tmp_path):

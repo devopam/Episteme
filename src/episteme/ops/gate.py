@@ -16,12 +16,15 @@ whose measure is missing fails: a gate never passes on data it did not see.
 
 Limits: the code hash covers the ``episteme`` modules that the stage imports and
 the wrapper script. It does not cover third-party packages, data files or other
-scripts that the wrapper calls. A module that the stage imports only at run time
-(inside a function) is not in the import closure.
+scripts that the wrapper calls. A module that the stage imports inside a function
+is added to the closure by
+an ``ast`` scan of ``from episteme...`` / ``import episteme...`` statements; a
+dynamic import (``importlib``) is not found.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -63,6 +66,13 @@ class _StageModules(dict):
 STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
     {(source, "extract"): value for source, value in _EXTRACT_MODULES.items()}
 )
+
+
+def stage_module(source: str, stage: str) -> tuple[str, str]:
+    """(module, wrapper) of a stage; ``KeyError`` for an unknown pair. Use this,
+    not ``in`` or ``.get`` on ``STAGE_MODULES``, which miss the load entries."""
+    return STAGE_MODULES[(source, stage)]
+
 
 _KNOWN_KEYS = {
     "min_rows",
@@ -192,10 +202,11 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
 
 _HASH_SCRIPT = """
 import json, os, sys
-src_root, module = sys.argv[1], sys.argv[2]
+src_root, modules = sys.argv[1], sys.argv[2:]
 sys.path.insert(0, src_root)
-__import__(module)
-prefix = os.path.join(os.path.realpath(src_root), module.split(".")[0]) + os.sep
+for module in modules:
+    __import__(module)
+prefix = os.path.join(os.path.realpath(src_root), modules[0].split(".")[0]) + os.sep
 files = set()
 for mod in list(sys.modules.values()):
     f = getattr(mod, "__file__", None)
@@ -207,19 +218,67 @@ print(json.dumps(sorted(files)))
 """
 
 
-def stage_files(module: str, src_root: Path) -> list[Path]:
-    """The source files of every package module that importing ``module`` loads,
-    found in a fresh isolated interpreter (so this process's modules do not leak
-    in). Importing a stage module only imports; it does not connect to a database."""
+def _import_files(modules: list[str], src_root: Path) -> list[Path]:
     proc = subprocess.run(
-        [sys.executable, "-I", "-c", _HASH_SCRIPT, str(src_root), module],
+        [sys.executable, "-I", "-c", _HASH_SCRIPT, str(src_root), *modules],
         capture_output=True,
         text=True,
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"could not import {module} to hash it: {proc.stderr.strip()[-500:]}")
-    return [Path(p) for p in json.loads(proc.stdout.strip().splitlines()[-1])]
+        raise RuntimeError(
+            f"could not import {modules[0]} to hash it: {proc.stderr.strip()[-500:]}"
+        )
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        raise RuntimeError(
+            f"importing {modules[0]} printed no module list: {proc.stderr.strip()[-500:]}"
+        )
+    return [Path(p) for p in json.loads(lines[-1])]
+
+
+def _lazy_modules(path: Path, src_root: Path, top: str) -> set[str]:
+    """Modules of package ``top`` that code inside functions in ``path`` imports
+    (``from top.x import y`` gives ``top.x`` and, when it is a module, ``top.x.y``)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.add(node.module)
+                names.update(f"{node.module}.{a.name}" for a in node.names)
+            elif isinstance(node, ast.Import):
+                names.update(a.name for a in node.names)
+    out = set()
+    for name in names:
+        if name.split(".")[0] != top:
+            continue
+        base = src_root.joinpath(*name.split("."))
+        if base.with_suffix(".py").is_file() or (base / "__init__.py").is_file():
+            out.add(name)
+    return out
+
+
+def stage_files(module: str, src_root: Path) -> list[Path]:
+    """The source files of every package module that importing ``module`` loads,
+    found in a fresh isolated interpreter (so this process's modules do not leak
+    in). Importing a stage module only imports; it does not connect to a database.
+    A module that code imports inside a function is added too (found with ``ast``),
+    and the closure is rebuilt until nothing new appears. Each round starts an
+    interpreter (about 1 s): never call this in a loop."""
+    top = module.split(".")[0]
+    modules = [module]
+    while True:
+        files = _import_files(modules, src_root)
+        known = set(modules)
+        new = set()
+        for f in files:
+            new |= _lazy_modules(f, src_root, top) - known
+        if not new:
+            return files
+        modules += sorted(new)
 
 
 def code_hash(
@@ -236,7 +295,7 @@ def code_hash(
     a temp package."""
     src_root = (src_root or _SRC_ROOT).resolve()
     if module is None:
-        module, wrapper_rel = STAGE_MODULES[(source, stage)]
+        module, wrapper_rel = stage_module(source, stage)
         wrapper = wrapper or _SCRIPTS_DATA / wrapper_rel
     h = hashlib.sha256()
     for path in sorted(stage_files(module, src_root)):
