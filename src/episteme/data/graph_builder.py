@@ -77,6 +77,7 @@ from episteme.data.checkpoint_markers import find_input_by_key
 from episteme.data.gz import open_gz
 from episteme.data.pubmed.relations import normalize_orcid
 from episteme.ops import orphans
+from episteme.ops import status as ops_status
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.stop import stage_guard
@@ -841,7 +842,8 @@ def main(argv: list[str] | None = None) -> int:
 
     holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
-    with stage_guard(lambda: holder[0]):
+    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True, argv=argv) as g:
+        ops_status.current().update(source=args.source)  # a direct run: the source is an argument
 
         def _sweep() -> None:
             with connection() as sconn:
@@ -853,7 +855,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 - recorded, then exit 1
             print(f"FAIL start-up orphan sweep: {exc!r}", file=sys.stderr)
             record_failure(args.source, "graph", "startup", repr(exc), run_id=run_id)
-            return 1
+            return g.exit_code(1)
 
         if args.source == "pubmed":
             try:
@@ -869,17 +871,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except graph_load.GraphLoadError as e:
                 print(f"ERROR: {e}", file=sys.stderr)
-                return 2
+                return g.exit_code(2)
             except Exception as exc:  # noqa: BLE001 - e.g. the start-up check lost the database
                 print(f"FAIL pubmed: {exc}", file=sys.stderr)
                 record_failure("pubmed", "graph", "pubmed", repr(exc), run_id=run_id)
-                return 1
+                return g.exit_code(1)
             if res["files"] == 0:
                 print(
                     f"WARNING: no pubmed graph files found under {args.processed_dir}",
                     file=sys.stderr,
                 )
-                return 1
+                return g.exit_code(1)
             rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
             print(
                 f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
@@ -890,8 +892,8 @@ def main(argv: list[str] | None = None) -> int:
                 record_failure("pubmed", "graph", unit, res["error"], run_id=run_id)
                 print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
                 print(f"stopped_at={unit}", file=sys.stderr)
-                return 1
-            return 0
+                return g.exit_code(1)
+            return g.exit_code(0)
 
         if args.force:
             print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
@@ -901,7 +903,7 @@ def main(argv: list[str] | None = None) -> int:
                 raw_dir = settings.raw_root / "pmc" / "oa_comm" / "xml"
             else:
                 print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
-                return 2
+                return g.exit_code(2)
 
         def _build_once() -> dict[str, Any]:
             """One attempt: a connection from the pool, the whole build as one transaction."""
@@ -910,7 +912,12 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     with audit_trail.deferred_mirror(conn):
                         try:
-                            res = build(conn, source=args.source, raw_dir=raw_dir, run_id=run_id)
+                            # One transaction, no unit progress: a long statement
+                            # for the stall check.
+                            with ops_status.current().long_statement(f"graph build {args.source}"):
+                                res = build(
+                                    conn, source=args.source, raw_dir=raw_dir, run_id=run_id
+                                )
                             audit_trail.commit(conn)
                             return res
                         except BaseException as exc:
@@ -935,15 +942,15 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 - permanent: record, exit 1
             print(f"FAIL {args.source}: {exc}", file=sys.stderr)
             record_failure(args.source, "graph", args.source, repr(exc), run_id=run_id)
-            return 1
-    print(
-        f"done source_files={len(res['source_files'])} cites={res['cites']} "
-        f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
-        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
-        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
-        f"mesh_empty_parse={res['mesh_empty_parse']}"
-    )
-    return 0
+            return g.exit_code(1)
+        print(
+            f"done source_files={len(res['source_files'])} cites={res['cites']} "
+            f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
+            f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
+            f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
+            f"mesh_empty_parse={res['mesh_empty_parse']}"
+        )
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

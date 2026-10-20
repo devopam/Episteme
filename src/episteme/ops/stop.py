@@ -18,11 +18,13 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from typing import Any
 
 import psutil
+
+from episteme.ops.lock import EXIT_BUSY, LockBusy
 
 _LOG = logging.getLogger(__name__)
 
@@ -200,10 +202,54 @@ def start_parent_watchdog(
     return t
 
 
+class StageHandle:
+    """What ``stage_guard`` yields. A main reports its return code with
+    ``exit_code(rc)``; the end state follows from it."""
+
+    def __init__(self) -> None:
+        self.rc: int | None = None
+
+    def exit_code(self, rc: int) -> int:
+        self.rc = rc
+        return rc
+
+
+def _state_for_rc(rc: int | None) -> str:
+    if rc is None or rc == 0:
+        return "done"
+    if rc in (EXIT_INT, EXIT_TERM):
+        return "stopped"
+    return "failed"
+
+
 @contextmanager
-def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
+def stage_guard(
+    conn_ref: Callable[[], Any],
+    *,
+    lock_stage: str | None = None,
+    db_lock: bool = False,
+    keep_stage: bool = False,
+    argv: Sequence[str] | None = None,
+    source: str | None = None,
+    dsn: str | None = None,
+) -> Iterator[StageHandle]:
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
-    stop to ``SystemExit`` 130 (INT) or 143 (TERM)."""
+    stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
+    holds the heavy lock (and, with ``db_lock``, the advisory lock) for the
+    block, and writes the run status: ``running`` once the heavy lock is held,
+    and the end state (from ``exit_code``) at exit; ``run_pipeline.sh`` writes
+    after it, so its value wins. The advisory-lock wait is marked as a long
+    statement, so a long wait is not reported as a stall. A wait for a lock can
+    be stopped like any other step. Under ``run_pipeline.sh --no-wait`` a busy
+    lock maps to ``SystemExit(75)`` (state ``refused``). With ``keep_stage`` (a
+    helper that runs inside another stage of the same run, such as
+    ``bulk_indexes`` under ``--bulk graph``) an existing stage label is kept,
+    and a ``done`` end does not replace the end state that stage wrote. The
+    watchdog's ``os._exit(143)`` leaves ``heavy.lock`` behind; the next run
+    takes it over as stale. ``dsn`` is the login of the advisory lock (default: the normal login).
+    ``source`` is written with the status. A help
+    request (``-h``/``--help`` in ``argv``, else in ``sys.argv[1:]``) takes no
+    lock and writes no status: only the handlers apply."""
 
     def _cancel() -> None:
         c = conn_ref()
@@ -215,13 +261,121 @@ def stage_guard(conn_ref: Callable[[], Any]) -> Iterator[None]:
     install_stop_handlers()
     done = threading.Event()
     start_parent_watchdog(_cancel, stop=done)
+    handle = StageHandle()
+    st: Any = None
+    beat: threading.Thread | None = None
+    kept: str | None = None
+    end_state = "failed"
+    check = sys.argv[1:] if argv is None else argv
+    help_only = any(a in ("-h", "--help") for a in check)
     try:
-        yield
+        if lock_stage is None or help_only:
+            yield handle
+        else:
+            from episteme.ops import lock
+            from episteme.ops import status as ops_status
+
+            with ExitStack() as stack:
+                run_id = stack.enter_context(lock.heavy_stage_lock(lock_stage))
+                st, beat, kept = _begin_status(
+                    run_id, lock_stage, done, keep_stage=keep_stage, source=source
+                )
+                if db_lock:
+                    with ops_status.current().long_statement("waiting for the advisory lock"):
+                        stack.enter_context(lock.advisory_lock(wait=not lock.no_wait(), dsn=dsn))
+                yield handle
+        end_state = _state_for_rc(handle.rc)
+    except LockBusy as exc:
+        end_state = "refused"
+        print(f"refused: the lock is busy: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_BUSY) from None
     except KeyboardInterrupt:
+        end_state = "stopped"
         try:
             _cancel()
         except Exception:  # noqa: BLE001 - best effort; the exit follows
             _LOG.exception("cancel failed on stop")
         raise SystemExit(EXIT_TERM if _TERM_SEEN else EXIT_INT) from None
+    except SystemExit as exc:
+        if exc.code in (EXIT_INT, EXIT_TERM):
+            end_state = "stopped"
+        elif exc.code in (0, None):
+            end_state = "done"
+        raise
     finally:
         done.set()  # a finished stage must not leave a watchdog behind
+        if beat is not None:
+            beat.join(5.0)  # no heartbeat write after the end state
+        _end_status(st, kept if (kept and end_state == "done") else end_state)
+
+
+_ENDED = ("done", "failed", "stopped", "refused")
+
+
+def _begin_status(
+    run_id: str,
+    stage: str,
+    stop_beat: threading.Event,
+    *,
+    keep_stage: bool = False,
+    source: str | None = None,
+) -> tuple[Any, threading.Thread | None, str | None]:
+    """Create this run's status, record the stage process, start the heartbeat.
+    Returns (status, heartbeat thread, kept end state). With ``keep_stage`` and
+    a stage label already in the file, the label and ``started_at`` stay, and
+    an end state already written is returned, so a ``done`` end keeps it.
+    A status problem never fails the stage: it logs a WARNING and returns no status."""
+    try:
+        from episteme.ops import status
+        from episteme.ops.lock import create_time
+
+        st = status.RunStatus(status.run_dir(run_id))
+        old = st.read()
+        pids = dict(old.get("pids") or {})  # keep the runner entry
+        pids["stage"] = {"pid": os.getpid(), "create_time": create_time(os.getpid())}
+        now = status.now_iso()
+        fields: dict[str, Any] = {
+            "run_id": run_id,
+            "state": "running",
+            "pids": pids,
+            "last_progress": now,
+        }
+        if source is not None:
+            fields["source"] = source
+        kept: str | None = None
+        if keep_stage and old.get("stage"):
+            kept = old.get("state") if old.get("state") in _ENDED else None
+        else:
+            fields["stage"] = stage
+            if old.get("stage") != stage:
+                fields.update(status.STAGE_PROGRESS_RESET)
+            if old.get("stage") != stage or not old.get("started_at"):
+                fields["started_at"] = now
+        st.update(**fields)
+        status.set_current(st)
+        # reset the loader's row counter, only when that module is loaded
+        reset = getattr(
+            sys.modules.get("episteme.data.postgres_loader"), "reset_process_rows", None
+        )
+        if reset is not None:
+            reset()
+        return st, st.start_heartbeat(stop_beat), kept
+    except Exception as exc:  # noqa: BLE001 - a status problem must not fail the stage
+        _LOG.warning("run status unavailable (%r); the stage runs without it", exc)
+        try:
+            from episteme.ops import status
+
+            status.set_current(status.NullStatus())
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None, None
+
+
+def _end_status(st: Any, end_state: str) -> None:
+    """Write the end state and drop the process-wide status."""
+    if st is None:
+        return
+    from episteme.ops import status
+
+    st.update(state=end_state)
+    status.set_current(status.NullStatus())

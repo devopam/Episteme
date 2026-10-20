@@ -102,6 +102,8 @@ def _run(args: list[str], tmp_path: Path, timeout: int) -> subprocess.CompletedP
         "PGDATABASE": "episteme_test",
         "EPISTEME_DATA_ROOT": str(tmp_path),
         "EPISTEME_RAW_ROOT": str(tmp_path / "01_raw"),
+        "EPISTEME_PROCESSED_ROOT": str(tmp_path / "02_processed"),
+        "EPISTEME_LOCK_DIR": str(tmp_path / "_ops" / "locks"),
     }
     return subprocess.run(
         [BASH, str(SCRIPT), *args],
@@ -327,6 +329,8 @@ def _run_env(args: list[str], tmp_path: Path, timeout: int, **env_over: str):
         "EPISTEME_ACTOR": "episteme_sys_admin",
         "EPISTEME_DATA_ROOT": str(tmp_path),
         "EPISTEME_RAW_ROOT": str(tmp_path / "01_raw"),
+        "EPISTEME_PROCESSED_ROOT": str(tmp_path / "02_processed"),
+        "EPISTEME_LOCK_DIR": str(tmp_path / "_ops" / "locks"),
         **env_over,
     }
     return subprocess.run(

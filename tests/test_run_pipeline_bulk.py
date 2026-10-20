@@ -92,6 +92,11 @@ def _run(tree, stage: str, *args: str, **env_over: str):
         EPISTEME_DB_MODE="restricted",
         PGDATABASE="episteme_spawn_blocked",
         EPISTEME_PRODUCTION_DATABASE="episteme_spawn_blocked",
+        # Ruling R2: temp roots, though the fake PYTHON never runs real Python.
+        EPISTEME_DATA_ROOT=(calls.parent / "data").as_posix(),
+        EPISTEME_RAW_ROOT=(calls.parent / "data" / "01_raw").as_posix(),
+        EPISTEME_PROCESSED_ROOT=(calls.parent / "data" / "02_processed").as_posix(),
+        EPISTEME_LOCK_DIR=(calls.parent / "data" / "_ops" / "locks").as_posix(),
     )
     env.update(env_over)
     proc = subprocess.run(
@@ -121,7 +126,9 @@ def test_bulk_rebuilds_after_an_interrupted_load(tree):
     proc, calls = _run(tree, "load", "--bulk", FAKE_LOAD="term")
     assert proc.returncode == 143, proc.stderr
     assert calls.count("bulk rebuild") == 1
-    assert calls[-1] == "bulk rebuild"
+    # The TERM trap ends the runner; _on_exit rebuilds, then closes the audit bracket.
+    assert calls[-2:] == ["bulk rebuild", "run_end"]
+    assert calls.count("run_end") == 1
     assert "load" in calls
 
 

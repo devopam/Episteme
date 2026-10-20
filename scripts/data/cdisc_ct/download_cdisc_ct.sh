@@ -122,7 +122,7 @@ for pkg in "${packages[@]}"; do
     # Pipeline => subshell: a `die` inside http_fetch fails this package only.
     if ! printf '%s\t%s\n' "$url" "$fname.part" | http_fetch "$reldir" || [ ! -s "$part" ]; then
         log WARN "cdisc_ct: $pkg fetch failed ($url)"
-        rm -f "$part" "$part.aria2"
+        rm -f "$part" "$part.aria2" "$reldir/.failed_files.txt"
         rmdir "$reldir" "$dest/$pkg" 2>/dev/null || true   # only if left empty
         failed=1
         continue

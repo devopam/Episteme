@@ -37,6 +37,7 @@ from episteme.data.graph_files import (
 )
 from episteme.ops.profile import default_batch_rows
 from episteme.ops.retry import RETRY_WAITS, with_retries
+from episteme.ops.status import current
 
 _BATCH_ROWS = default_batch_rows()
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
@@ -167,8 +168,9 @@ def load_one(
         rows: dict[str, int] = {}
         with conn.cursor() as cur:
             if prev is not None:
-                for table in (*TABLE_FOR.values(), "episteme.article_facets"):
-                    cur.execute(f"DELETE FROM {table} WHERE source_file = %s", (source_file,))
+                with current().long_statement(f"DELETE previous rows of {source_file}"):
+                    for table in (*TABLE_FOR.values(), "episteme.article_facets"):
+                        cur.execute(f"DELETE FROM {table} WHERE source_file = %s", (source_file,))
             for rel in RELATIONS:
                 n = _copy_relation(cur, rel, paths[rel], source_file)
                 expected = info["graph_rows"].get(rel)
@@ -330,11 +332,14 @@ def build_pubmed_graph(
             return _stop(sf, e)
         if res["skipped"]:
             out["skipped"] += 1
-            continue
-        out["loaded"] += 1
-        for rel, n in res["rows"].items():
-            out["rows"][rel] += n
-        out["facets"] += res["facets"]
+        else:
+            out["loaded"] += 1
+            for rel, n in res["rows"].items():
+                out["rows"][rel] += n
+            out["facets"] += res["facets"]
+        current().progress(
+            unit=sf, units_done=out["loaded"] + out["skipped"], units_total=len(graphed)
+        )
     return out
 
 

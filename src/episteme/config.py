@@ -156,6 +156,7 @@ class Settings:
     raw_root: Path
     processed_root: Path
     corpus_root: Path
+    lock_dir: Path
     pg_host: str
     pg_port: int
     pg_database: str
@@ -206,6 +207,10 @@ class Settings:
     pg_work_mem: str | None = None
     sys_admin_password: str = ""
     runner_pid: int | None = None
+    # Folder of the current run's status file (the wrapper exports it).
+    run_dir: Path | None = None
+    # run_pipeline.sh --no-wait: a busy stage or advisory lock refuses (exit 75).
+    no_wait: bool = False
 
     def pg_dsn(self) -> str:
         return (
@@ -224,6 +229,7 @@ def get_settings() -> Settings:
     raw_root = Path(_get("EPISTEME_RAW_ROOT") or (data_root / "01_raw"))
     processed_root = Path(_get("EPISTEME_PROCESSED_ROOT") or (data_root / "02_processed"))
     corpus_root = Path(_get("EPISTEME_CORPUS_ROOT") or (data_root / "03_corpus"))
+    lock_dir = Path(_get("EPISTEME_LOCK_DIR") or (data_root / "_ops" / "locks"))
     db_mode = (_get("EPISTEME_DB_MODE") or "restricted").strip().lower()
     if db_mode not in DB_MODES:
         raise ConfigError(f"EPISTEME_DB_MODE must be one of {DB_MODES}, got {db_mode!r}")
@@ -239,6 +245,7 @@ def get_settings() -> Settings:
         raw_root=raw_root,
         processed_root=processed_root,
         corpus_root=corpus_root,
+        lock_dir=lock_dir,
         pg_host=_get("PGHOST", "localhost"),
         pg_port=_get_int("PGPORT", 5432),
         pg_database=pg_database,
@@ -306,6 +313,11 @@ def get_settings() -> Settings:
         # Windows PID of the outermost pipeline script (scripts/data/_lib/common.sh
         # exports it); the parent watchdog (episteme.ops.stop) watches it.
         runner_pid=_get_pid_or_none("EPISTEME_RUNNER_PID"),
+        run_dir=Path(_get("EPISTEME_RUN_DIR")).expanduser()
+        if (_get("EPISTEME_RUN_DIR") or "").strip()
+        else None,
+        # run_pipeline.sh --no-wait exports EPISTEME_NO_WAIT=1.
+        no_wait=(_get("EPISTEME_NO_WAIT") or "").strip() == "1",
     )
 
 

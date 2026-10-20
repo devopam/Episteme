@@ -32,4 +32,32 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-exec "$PY" -m episteme.data.db.bulk_indexes "$ACTION" "$@"
+# drop and rebuild take the heavy lock (status only reads). Under
+# run_pipeline.sh the call re-enters the runner's lock (same run id and runner
+# PID), so this script releases only a lock it acquired itself.
+if [ "$ACTION" != "status" ]; then
+    LOCK_RUN_ID="${EPISTEME_RUN_ID:-adhoc-$EPISTEME_RUNNER_PID}"
+    lock_rc=0
+    lock_out="$("$PY" -m episteme.ops.lock acquire heavy --run-id "$LOCK_RUN_ID" \
+        --stage bulk_load_indexes --owner-pid "$EPISTEME_RUNNER_PID")" || lock_rc=$?
+    [ "$lock_rc" -eq 0 ] || exit "$lock_rc"
+    lock_out="${lock_out%$'\r'}"  # a Windows Python can write CRLF to a pipe
+    log INFO "bulk_load_indexes: heavy lock: $lock_out"
+    # Under run_pipeline.sh the acquire re-enters the runner's lock, so no trap
+    # is set here: a Ctrl-C follows the runner's handling, and the runner
+    # releases its own lock.
+    if [ "$lock_out" = "acquired" ]; then
+        # shellcheck disable=SC2329 # called by the EXIT trap
+        _release_lock() {
+            "$PY" -m episteme.ops.lock release heavy --run-id "$LOCK_RUN_ID" \
+                --owner-pid "$EPISTEME_RUNNER_PID" >/dev/null 2>&1 \
+                || log WARN "bulk_load_indexes: could not release the heavy lock"
+        }
+        trap _release_lock EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+    fi
+fi
+
+"$PY" -m episteme.data.db.bulk_indexes "$ACTION" "$@"
+exit $?

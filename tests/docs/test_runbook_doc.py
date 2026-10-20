@@ -9,7 +9,7 @@ from ._repo import REPO, doc, lit_sources, structured_sources, wrapper_table
 
 RUNBOOK = "10-data-sources-runbook.md"
 STAGES = {"all", "download", "extract", "load", "graph", "materialize", "enrich", "serialize"}
-DISPATCHER_FLAGS = {"--dry-run", "--force", "--reason", "--max-files", "--bulk"}
+DISPATCHER_FLAGS = {"--dry-run", "--force", "--reason", "--max-files", "--bulk", "--no-wait"}
 # flags that consume the next token as their value
 VALUE_FLAGS = {"--reason", "--max-files", "--since", "--raw-dir", "--repo-type"}
 # stages that honour --max-files (extract/serialize/download) or forward it (all)

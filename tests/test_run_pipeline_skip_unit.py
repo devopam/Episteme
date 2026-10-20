@@ -46,6 +46,11 @@ def _run(tree, source: str, stage: str, *args: str):
         EPISTEME_DB_MODE="restricted",
         PGDATABASE="episteme_spawn_blocked",
         EPISTEME_PRODUCTION_DATABASE="episteme_spawn_blocked",
+        # Ruling R2: temp roots, though the fake PYTHON never runs real Python.
+        EPISTEME_DATA_ROOT=(calls.parent / "data").as_posix(),
+        EPISTEME_RAW_ROOT=(calls.parent / "data" / "01_raw").as_posix(),
+        EPISTEME_PROCESSED_ROOT=(calls.parent / "data" / "02_processed").as_posix(),
+        EPISTEME_LOCK_DIR=(calls.parent / "data" / "_ops" / "locks").as_posix(),
     )
     proc = subprocess.run(
         [BASH, str(script), source, stage, *args],

@@ -51,6 +51,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -60,7 +61,9 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
 from episteme.config import get_settings
+from episteme.ops import lock as ops_lock
 from episteme.ops import profile as ops_profile
+from episteme.ops import status as ops_status
 
 S3_HTTP = "https://pmc-oa-opendata.s3.amazonaws.com"
 
@@ -562,6 +565,11 @@ def read_noncommercial(path: Path) -> set[str]:
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
+def _one_line(text: str) -> str:
+    """One line for failed_files.txt: a tab or newline would split the record."""
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _ledger_entry(pmcid: str, err: str) -> str:
     return err.rsplit("highest=", 1)[1] if "highest=" in err else pmcid
 
@@ -705,8 +713,22 @@ def main() -> None:
     reasons: Counter[str] = Counter()
     samples: list[tuple[str, str]] = []
 
+    settings = get_settings()
+    if settings.run_dir:
+        settings.run_dir.mkdir(parents=True, exist_ok=True)
+        failed_path: Path | None = settings.run_dir / "failed_files.txt"
+    else:
+        failed_path = None
+    # Under run_pipeline.sh: one progress record per submit batch (the stall check).
+    run_status = (
+        ops_status.RunStatus(ops_status.run_dir(settings.run_id))
+        if settings.run_id
+        else ops_status.NullStatus()
+    )
+
     with (
         ThreadPoolExecutor(max_workers=args.threads) as ex,
+        failed_path.open("a", encoding="utf-8") if failed_path else nullcontext() as failed_fh,
         ledger_path.open("a", encoding="utf-8") as ledger_fh,
         tqdm(total=args.limit if args.limit > 0 else len(todo), desc="PMC commercial") as bar,
     ):
@@ -715,6 +737,8 @@ def main() -> None:
             size = SUBMIT_BATCH if args.limit <= 0 else max(1, min(SUBMIT_BATCH, args.limit - ok_n))
             batch = todo[start : start + size]
             start += size
+            if settings.run_id:  # wait here while a heavy job holds or wants the heavy lock
+                ops_lock.pause_point(settings.run_id)
             futs = []
             for item in batch:
                 if isinstance(item, int):
@@ -740,9 +764,14 @@ def main() -> None:
                 else:
                     fail_n += 1
                     reasons[err.split(":")[0]] += 1
+                    if failed_fh:
+                        failed_fh.write(f"{pid}\t{_one_line(err)}\n")
                     if len(samples) < 15:
                         samples.append((pid, err))
             ledger_fh.flush()
+            if failed_fh:
+                failed_fh.flush()
+            run_status.progress(units_done=min(start, len(todo)), units_total=len(todo))
 
     print(f"\nDone: {ok_n:,} ok, {nc_n:,} non-commercial, {fail_n:,} failed")
     if samples:

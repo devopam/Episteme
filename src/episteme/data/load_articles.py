@@ -42,6 +42,7 @@ from episteme.ops import orphans
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.skip import add_skip_args, apply_skips, check_skip_args
+from episteme.ops.status import current
 from episteme.ops.stop import stage_guard
 
 _LOG = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         """One attempt: a connection from the pool, one transaction, one commit."""
         with connection() as conn:
             holder[0] = conn
+            current().update(unit=name, backend_pid=conn.info.backend_pid)
             try:
                 with audit_trail.deferred_mirror(conn):
                     try:
@@ -219,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
 
     failed_at: str | None = None
     skipped_by_operator = 0
-    with stage_guard(lambda: holder[0]):
+    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True, argv=argv) as g:
+        current().update(source=source)  # a direct run: the source comes from the arguments
         if own_bracket:
             _bracket("run_start")
         try:
@@ -243,14 +246,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             skipped_by_operator = len(shards) - len(keep)
 
+            shards_done = 0
             for shard in shards:
                 name = shard.name
                 if name not in keep:
                     print(f"skip-unit {name}")
+                    shards_done += 1
+                    current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                     continue
                 marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
                 if marker.is_file() and not args.force:
                     print(f"skip {name}")
+                    shards_done += 1
+                    current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                     continue
 
                 try:
@@ -266,7 +274,10 @@ def main(argv: list[str] | None = None) -> int:
                     _end_bracket(f"failed at shard {name}: {exc!r}"[:500])
                     break
 
+                postgres_loader.add_committed_rows(result["rows"])  # committed by _load_one
                 _write_load_success(processed_dir, source, name, result)
+                shards_done += 1
+                current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                 print(
                     f"ok {name} rows={result['rows']} deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
@@ -288,12 +299,12 @@ def main(argv: list[str] | None = None) -> int:
                 _LOG.exception("could not write run_end after %r", exc)
             raise
 
-    if failed_at is not None:
-        print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
-        return 1
-    extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
-    print(f"done shards={len(shards)} failed=0{extra}")
-    return 0
+        if failed_at is not None:
+            print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
+            return g.exit_code(1)
+        extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
+        print(f"done shards={len(shards)} failed=0{extra}")
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

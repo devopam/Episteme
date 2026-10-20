@@ -60,6 +60,7 @@ from episteme.data.cdisc_ct.serialize_cdisc_ct import (
     release_date_of,
 )
 from episteme.data.db.connection import connection
+from episteme.ops.stop import stage_guard
 
 _SHARD_EXTS: tuple[str, ...] = (".parquet", ".jsonl")
 
@@ -224,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
             print(name)
         return 0
 
+    return _retire(raw_dir, processed_dir, settings.run_id)
+
+
+def _retire(raw_dir: Path, processed_dir: Path, run_id: str | None) -> int:
     files = discover_cdisc_ct_files(raw_dir)
     if not files:
         print(f"no CDISC CT release files under {raw_dir}; nothing to retire")
@@ -251,34 +256,35 @@ def main(argv: list[str] | None = None) -> int:
         print("no loaded CDISC CT release to retire against; nothing retired")
         return 0
 
-    run_id = settings.run_id
-    total = 0
-    with connection() as conn:
-        for entry in plan:
-            ok, reason = _verify_before_retire(
-                conn,
-                source=SOURCE,
-                package=entry["package"],
-                keep=entry["keep"],
-                keep_date=entry["keep_date"],
-                expected_rows=entry["expected_rows"],
-            )
-            if not ok:
-                print(f"{entry['package']}: skipped -- {reason}")
-                continue
-            deleted = postgres_loader.retire_source_files(
-                conn,
-                source=SOURCE,
-                keep_source_files=[entry["keep"]],
-                run_id=run_id,
-                scope_prefix=entry["prefix"],
-            )
-            print(f"{entry['package']}: retired {deleted} article(s); kept {entry['keep']}")
-            total += deleted
-        conn.commit()
+    # only a run with work to do takes the locks
+    with stage_guard(lambda: None, lock_stage="load", db_lock=True, source=SOURCE) as g:
+        total = 0
+        with connection() as conn:
+            for entry in plan:
+                ok, reason = _verify_before_retire(
+                    conn,
+                    source=SOURCE,
+                    package=entry["package"],
+                    keep=entry["keep"],
+                    keep_date=entry["keep_date"],
+                    expected_rows=entry["expected_rows"],
+                )
+                if not ok:
+                    print(f"{entry['package']}: skipped -- {reason}")
+                    continue
+                deleted = postgres_loader.retire_source_files(
+                    conn,
+                    source=SOURCE,
+                    keep_source_files=[entry["keep"]],
+                    run_id=run_id,
+                    scope_prefix=entry["prefix"],
+                )
+                print(f"{entry['package']}: retired {deleted} article(s); kept {entry['keep']}")
+                total += deleted
+            conn.commit()
 
-    print(f"retired {total} article(s) across {len(plan)} package(s)")
-    return 0
+        print(f"retired {total} article(s) across {len(plan)} package(s)")
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

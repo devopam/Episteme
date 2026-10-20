@@ -670,8 +670,10 @@ def _main(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     # Extract/serialize hold no long DB statement: only the stop handlers and
     # the parent watchdog apply (conn_ref returns None).
-    with stage_guard(lambda: None):
-        return _main(argv)
+    with stage_guard(lambda: None, lock_stage="serialize", argv=argv, source=SOURCE) as g:
+        rc = _main(argv)
+        g.exit_code(rc)
+        return rc
 
 
 if __name__ == "__main__":

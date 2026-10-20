@@ -211,6 +211,38 @@ def _redirect_failure_record(request, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(_failure, "_path", _path, raising=True)
 
 
+@pytest.fixture(autouse=True)
+def _redirect_ops_dirs(monkeypatch, tmp_path_factory):
+    """Keep the ops lock folder (and the run-status folder) off the real data root.
+
+    ``episteme.ops.lock.lock_dir()`` resolves against ``get_settings().lock_dir``,
+    which on a developer machine is the production ``<data root>/_ops/locks``.
+    A test that acquired a lock there would block, or be blocked by, a real
+    pipeline run. This patches ``lock_dir`` (and ``status.runs_root`` once
+    ``episteme.ops.status`` exists) to a per-test temp folder, and also sets
+    ``EPISTEME_LOCK_DIR`` so subprocesses started by a test inherit the same
+    folder. ``get_settings`` is cleared before and after, because it caches.
+    """
+    import importlib.util
+
+    import episteme.config as cfg
+    from episteme.ops import lock as _lock
+
+    base = tmp_path_factory.mktemp("ops_dirs")
+    locks = base / "_ops" / "locks"
+    monkeypatch.setattr(_lock, "lock_dir", lambda: locks, raising=True)
+    monkeypatch.setenv("EPISTEME_LOCK_DIR", str(locks))
+    if importlib.util.find_spec("episteme.ops.status") is not None:
+        from episteme.ops import status as _status
+
+        monkeypatch.setattr(_status, "runs_root", lambda: base / "_ops" / "runs", raising=True)
+    cfg.get_settings.cache_clear()
+    yield
+    clear = getattr(cfg.get_settings, "cache_clear", None)  # a test may have replaced it
+    if clear is not None:
+        clear()
+
+
 @pytest.fixture
 def spawn_child_env(monkeypatch, tmp_path):
     """Environment for a test that starts worker processes or subprocesses.

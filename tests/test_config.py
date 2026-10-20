@@ -274,3 +274,20 @@ def test_runner_pid_invalid_warns_and_gives_none(fresh_config, caplog, bad):
     with caplog.at_level(logging.WARNING, logger="episteme.config"):
         assert cfg.get_settings().runner_pid is None  # no ConfigError
     assert "EPISTEME_RUNNER_PID" in caplog.text
+
+
+def test_run_dir_default_is_none(fresh_config):
+    assert fresh_config("").get_settings().run_dir is None
+
+
+def test_run_dir_is_read(fresh_config, tmp_path):
+    cfg = fresh_config(f"EPISTEME_RUN_DIR={tmp_path}\n")
+    assert cfg.get_settings().run_dir == tmp_path
+
+
+def test_no_wait_default_is_false(fresh_config):
+    assert fresh_config("").get_settings().no_wait is False
+
+
+def test_no_wait_is_read(fresh_config):
+    assert fresh_config("EPISTEME_NO_WAIT=1\n").get_settings().no_wait is True

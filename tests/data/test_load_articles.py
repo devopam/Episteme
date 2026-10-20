@@ -9,6 +9,7 @@ Only the last test is ``pg``-marked; the rest never open a DB connection.
 from __future__ import annotations
 
 import importlib
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -172,6 +173,8 @@ def test_only_loads_the_newer_sdtm_shard_and_never_the_older(
 
 
 class _FakeConn:
+    info = type("Info", (), {"backend_pid": 4242})()
+
     def commit(self):
         pass
 
@@ -236,7 +239,13 @@ def ff(monkeypatch, tmp_path):
         monkeypatch.setattr(mod.audit_trail, "record", _record)
     monkeypatch.setattr(la.postgres_loader, "load_source_file", _load)
     monkeypatch.setattr(la.orphans, "sweep", lambda conn: [])
-    monkeypatch.setattr(la, "stage_guard", lambda ref: nullcontext())
+    monkeypatch.setattr(
+        la,
+        "stage_guard",
+        lambda ref, **kw: nullcontext(
+            __import__("episteme.ops.stop", fromlist=["x"]).StageHandle()
+        ),
+    )
     sleeps = []
     monkeypatch.setattr(la, "_SLEEP", sleeps.append)
 
@@ -321,6 +330,9 @@ def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
     monkeypatch.setattr(stop, "start_parent_watchdog", lambda cancel, **kw: None)
     monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
     monkeypatch.setattr(ff.la, "stage_guard", stop.stage_guard)
+    from episteme.ops import lock
+
+    monkeypatch.setattr(lock, "advisory_lock", lambda **kw: nullcontext())  # no real DB
     ff.state["behaviour"]["a.jsonl"] = KeyboardInterrupt()
     with pytest.raises(SystemExit) as e:
         ff.run()

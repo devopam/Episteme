@@ -27,6 +27,7 @@ nothing pending / 1 pending / 3 error (e.g. migration 0005 not applied).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
 from typing import Any
@@ -38,6 +39,8 @@ from episteme import audit_trail
 from episteme.config import ConfigError, get_settings, require_actor
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
+from episteme.ops.status import current
+from episteme.ops.stop import StageHandle, stage_guard
 
 SCHEMA = "episteme"
 # Parent indexes on the partitioned episteme.articles; dropping a parent index
@@ -131,7 +134,10 @@ def _index_validity(cur: psycopg.Cursor, name: str) -> bool | None:
 
 
 def _drop_index(cur: psycopg.Cursor, schema: str, name: str) -> None:
-    cur.execute(sql.SQL("DROP INDEX {}.{}").format(sql.Identifier(schema), sql.Identifier(name)))
+    with current().long_statement(f"DROP INDEX {name}"):
+        cur.execute(
+            sql.SQL("DROP INDEX {}.{}").format(sql.Identifier(schema), sql.Identifier(name))
+        )
 
 
 def drop(conn: psycopg.Connection, *, run_id: str | None, group: str = "articles") -> list[str]:
@@ -218,7 +224,8 @@ def rebuild(conn: psycopg.Connection, *, run_id: str | None) -> list[str]:
                 elif validity is False:
                     _drop_index(cur, schema, name)
                 if validity is not True:
-                    cur.execute(statement)
+                    with current().long_statement(f"CREATE INDEX {name}"):
+                        cur.execute(statement)
                 cur.execute(
                     "DELETE FROM episteme._bulk_index_state WHERE index_name = %s", (full_name,)
                 )
@@ -270,8 +277,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return failure
 
+    # status only reads: it must not wait behind a running load. keep_stage:
+    # under run_pipeline.sh --bulk the run's status keeps its stage (load or graph).
+    guard = (
+        contextlib.nullcontext(StageHandle())
+        if args.action == "status"
+        else stage_guard(
+            lambda: None, lock_stage="load", db_lock=True, keep_stage=True, argv=argv, dsn=dsn
+        )
+    )
     try:
-        with psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
+        with guard as g, psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:
             if args.action == "status":
                 rows = status(conn)
                 for r in rows:
@@ -286,16 +302,16 @@ def main(argv: list[str] | None = None) -> int:
                     names = drop(conn, run_id=settings.run_id, group=args.group)
                 except PendingRebuildError as exc:
                     print(f"error: {exc}", file=sys.stderr)
-                    return 2
+                    return g.exit_code(2)
                 print(f"dropped {len(names)}: {', '.join(names)}")
-                return 0
+                return g.exit_code(0)
             names = rebuild(conn, run_id=settings.run_id)
             print(
                 f"rebuilt {len(names)}: {', '.join(names)}"
                 if names
                 else "rebuilt 0 (nothing pending)"
             )
-            return 0
+            return g.exit_code(0)
     except (BulkIndexError, ConfigError, psycopg.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return failure

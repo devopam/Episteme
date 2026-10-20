@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -44,6 +45,7 @@ from typing import Any
 from episteme import audit_trail
 from episteme.data import article_schema
 from episteme.ops.profile import default_batch_rows
+from episteme.ops.status import current
 
 # The "hot" narrow-table columns = ARTICLE_COLUMNS minus the four text columns
 # that live in episteme.article_body. Derived (not hand-typed) so it cannot
@@ -226,6 +228,28 @@ def _iter_id_batches(
         yield [r["id"] for r in batch], [r["source_file"] for r in batch]
 
 
+# Rows COMMITTED by this process so far (the caller reports them with
+# ``add_committed_rows`` after its commit). The status shows this total plus the
+# rows of the shard in flight, so a rolled-back attempt leaves no residue.
+_PROCESS_ROWS = [0]
+_PROCESS_ROWS_LOCK = threading.Lock()
+
+
+def add_committed_rows(n: int) -> None:
+    with _PROCESS_ROWS_LOCK:
+        _PROCESS_ROWS[0] += n
+
+
+def reset_process_rows() -> None:
+    with _PROCESS_ROWS_LOCK:
+        _PROCESS_ROWS[0] = 0
+
+
+def _rows_committed() -> int:
+    with _PROCESS_ROWS_LOCK:
+        return _PROCESS_ROWS[0]
+
+
 def load_source_file(
     conn,
     *,
@@ -288,51 +312,52 @@ def load_source_file(
         # (c1) also requires b.source = source: the former OR-ed form did not on
         # its linkage arm, so it could delete another source's body row that
         # shared an id with a replaced article.
-        cur.execute(
-            """
-            DELETE FROM episteme.article_body b
-             USING episteme.articles a
-             WHERE a.source = %s AND a.source_file = ANY(%s)
-               AND b.article_id = a.id AND b.source = %s
-            """,
-            (source, source_files, source),
-        )
-        body_deleted = cur.rowcount
-        cur.execute(
-            "DELETE FROM episteme.article_body "
-            "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)",
-            (source,),
-        )
-        body_deleted += cur.rowcount
-
-        # (d0) id-collision guard: a periodic full-dump re-release (SP4's
-        # normal re-run shape) may reuse a native id under a DIFFERENT
-        # source_file than the one that first wrote it. Delete any such row
-        # here. The NOT(...) predicate keeps this delete disjoint from the
-        # per-source_file loop below (that loop's predicate is
-        # source_file = ANY([sf]) -- the exact complement of this one) --
-        # neither delete can ever match a row the other matches, so
-        # per_file_deleted[sf]'s accounting in the loop below stays exact
-        # with no double-counting. Scoped by source, same as every other
-        # delete here (source_file basenames are not globally unique across
-        # sources).
-        cur.execute(
-            "DELETE FROM episteme.articles "
-            "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
-            "AND NOT (source_file = ANY(%s))",
-            (source, source_files),
-        )
-        deleted += cur.rowcount
-
-        # (d) articles, per source_file, so _lineage gets per-file counts.
-        # scoped by source: source_file basenames are not globally unique across sources
-        for sf in source_files:
+        with current().long_statement(f"DELETE previous rows of {staging_path.name}"):
             cur.execute(
-                "DELETE FROM episteme.articles WHERE source_file = ANY(%s) AND source = %s",
-                ([sf], source),
+                """
+                DELETE FROM episteme.article_body b
+                 USING episteme.articles a
+                 WHERE a.source = %s AND a.source_file = ANY(%s)
+                   AND b.article_id = a.id AND b.source = %s
+                """,
+                (source, source_files, source),
             )
-            per_file_deleted[sf] = cur.rowcount
+            body_deleted = cur.rowcount
+            cur.execute(
+                "DELETE FROM episteme.article_body "
+                "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)",
+                (source,),
+            )
+            body_deleted += cur.rowcount
+
+            # (d0) id-collision guard: a periodic full-dump re-release (SP4's
+            # normal re-run shape) may reuse a native id under a DIFFERENT
+            # source_file than the one that first wrote it. Delete any such row
+            # here. The NOT(...) predicate keeps this delete disjoint from the
+            # per-source_file loop below (that loop's predicate is
+            # source_file = ANY([sf]) -- the exact complement of this one) --
+            # neither delete can ever match a row the other matches, so
+            # per_file_deleted[sf]'s accounting in the loop below stays exact
+            # with no double-counting. Scoped by source, same as every other
+            # delete here (source_file basenames are not globally unique across
+            # sources).
+            cur.execute(
+                "DELETE FROM episteme.articles "
+                "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
+                "AND NOT (source_file = ANY(%s))",
+                (source, source_files),
+            )
             deleted += cur.rowcount
+
+            # (d) articles, per source_file, so _lineage gets per-file counts.
+            # scoped by source: source_file basenames are not globally unique across sources
+            for sf in source_files:
+                cur.execute(
+                    "DELETE FROM episteme.articles WHERE source_file = ANY(%s) AND source = %s",
+                    ([sf], source),
+                )
+                per_file_deleted[sf] = cur.rowcount
+                deleted += cur.rowcount
 
         # (e)+(f) stream the rows: per batch, COPY the hot columns into
         # episteme.articles, then the text columns into episteme.article_body.
@@ -361,6 +386,7 @@ def load_source_file(
                 copy_sec += time.perf_counter() - t1
                 per_file_inserted.update(cols["source_file"])
                 total += len(cols["id"])
+                current().progress(rows_done=_rows_committed() + total)
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:

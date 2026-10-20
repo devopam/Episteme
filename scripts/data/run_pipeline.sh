@@ -15,7 +15,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--skip-unit NAME --reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -31,6 +31,7 @@ require_env EPISTEME_ACTOR
 
 FORCE=0
 BULK=0
+NO_WAIT=0
 REASON=""
 MAX_FILES=""
 SKIP_UNITS=()
@@ -62,6 +63,9 @@ while [ $# -gt 0 ]; do
         # (load: articles; graph: pubmed_graph), run the stage, always rebuild them
         # (scripts/data/db/bulk_load_indexes.sh).
         --bulk) BULK=1; shift ;;
+        # Do not wait for a busy stage lock: refuse with exit 75 instead. The
+        # Python stages see EPISTEME_NO_WAIT and refuse a busy advisory lock too.
+        --no-wait) NO_WAIT=1; export EPISTEME_NO_WAIT=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -246,39 +250,232 @@ RUN_ID="${SOURCE}-$(date -u +%Y%m%dT%H%M%SZ)"
 # invocation across N unrelated run_ids.
 export EPISTEME_RUN_ID="$RUN_ID"
 
+# Run status: <processed root>/_ops/runs/<run id>/status.json. Every stage
+# sees the folder as EPISTEME_RUN_DIR.
+RUN_DIR="$("$PY" -m episteme.ops.status run-dir --run-id "$RUN_ID" 2>/dev/null)" || RUN_DIR=""
+RUN_DIR="${RUN_DIR%$'\r'}"  # a Windows Python can write CRLF to a pipe
+[ -n "$RUN_DIR" ] || log WARN "status: could not resolve the run folder; EPISTEME_RUN_DIR is empty (no failed_files.txt in a run folder for this run)"
+export EPISTEME_RUN_DIR="$RUN_DIR"
+
+# The stage lock (operating standard spec 6.1): download -> the download lock;
+# every stage that writes the DB or 02_processed -> the heavy lock. A single
+# stage holds its lock from before run_start to the exit; `all` takes and
+# releases it per stage. The Python stage mains re-enter it (same run id, owner
+# $EPISTEME_RUNNER_PID). A dry run takes no lock and writes no status.
+_lock_kind() {
+    case "$1" in
+        download) echo download ;;
+        extract|serialize|load|graph|enrich|materialize) echo heavy ;;
+    esac
+}
+LOCK_KIND=""     # the lock this run holds now (acquired or re-entered)
+LOCK_OWNED=0     # 1 when this run acquired it, and so must release it
+LOCK_REFUSAL=""  # set by a busy --no-wait: "<kind> lock held by <run> (<stage>)"
+WAIT_KIND=""     # set while this run waits for a lock (the EXIT handler reads it)
+WAIT_STAGE=""
+_lock_take() { # KIND STAGE -> 0; 75 when busy under --no-wait; another code on error
+    local kind="$1" stage="$2" out="" err="" rc=0 errf
+    local args=(-m episteme.ops.lock acquire "$kind" --run-id "$RUN_ID" --stage "$stage" --owner-pid "$EPISTEME_RUNNER_PID")
+    # The status shows the wait, not the end state of the previous stage.
+    WAIT_KIND="$kind"
+    WAIT_STAGE="$stage"
+    _status_set "$stage" running --unit "waiting for the $kind lock" --runner-pid "$EPISTEME_RUNNER_PID"
+    if [ "$NO_WAIT" = "1" ]; then
+        errf="$(mktemp)"
+        out="$("$PY" "${args[@]}" --no-wait 2>"$errf")" || rc=$?
+        err="$(cat "$errf" 2>/dev/null)"
+        rm -f "$errf"
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+    else
+        # Waits while another run holds the lock; its log lines reach stderr.
+        out="$("$PY" "${args[@]}")" || rc=$?
+    fi
+    out="${out%$'\r'}"  # a Windows Python can write CRLF to a pipe
+    if [ "$rc" -eq 75 ]; then
+        WAIT_KIND=""
+        WAIT_STAGE=""
+        LOCK_REFUSAL="$kind lock busy"
+        if [[ "$err" =~ held\ by\ run\ ([^ ]+)\ \(([^,]+), ]]; then
+            LOCK_REFUSAL="$kind lock held by ${BASH_REMATCH[1]} (${BASH_REMATCH[2]})"
+        fi
+        return 75
+    fi
+    if [ "$rc" -ne 0 ]; then
+        WAIT_KIND=""
+        WAIT_STAGE=""
+        log ERROR "lock: could not take the $kind lock (rc=$rc)"
+        return "$rc"
+    fi
+    LOCK_KIND="$kind"
+    LOCK_OWNED=0
+    [ "$out" = "acquired" ] && LOCK_OWNED=1
+    # Cleared only now: a signal that lands between the acquire and this line
+    # still lets the EXIT handler release the lock.
+    WAIT_KIND=""
+    WAIT_STAGE=""
+    return 0
+}
+_lock_drop() {
+    [ -n "$LOCK_KIND" ] || return 0
+    if [ "$LOCK_OWNED" = "1" ]; then
+        "$PY" -m episteme.ops.lock release "$LOCK_KIND" --run-id "$RUN_ID" --owner-pid "$EPISTEME_RUNNER_PID" >/dev/null 2>&1 \
+            || log WARN "lock: could not release the $LOCK_KIND lock (the next run takes over a stale lock)"
+    fi
+    LOCK_KIND=""
+    LOCK_OWNED=0
+}
+_status_set() { # STAGE STATE [--unit U] [--reason R] [--runner-pid P]
+    [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && return 0
+    local stage="$1" state="$2"
+    shift 2
+    "$PY" -m episteme.ops.status set --run-id "$RUN_ID" --source "$SOURCE" --stage "$stage" --state "$state" "$@" >/dev/null 2>&1 \
+        || log WARN "status: could not write state $state for stage $stage"
+}
+STATUS_OPEN=""  # the stage that is "running", with no end state written yet
+LAST_STAGE=""   # the stage run_stage began last (`all`: a signal between stages)
+RUN_OPEN=0      # 1 from a successful run_start until a run_end is written
+BULK_DROPPING=0 # 1 while the --bulk index drop runs
+BULK_NOTE=""    # " (bulk index drop)" or " (bulk index rebuild)" while that step runs
+
+# The one EXIT handler (a second `trap ... EXIT` would replace it). Order: the
+# --bulk index rebuild (it needs the lock), the end state and run_end of a run
+# that a signal or an error stopped, then the lock release. A stage failure
+# keeps its exit code; else a failed rebuild is the exit code.
+BULK_PENDING=0
+_on_exit() {
+    local rc=$?
+    trap - EXIT
+    local rrc=0
+    # A signal during the drop: the drop may have finished. Rebuild what is
+    # pending (the rebuild covers every pending row).
+    if [ "$BULK_DROPPING" = "1" ]; then
+        BULK_DROPPING=0
+        BULK_PENDING=1
+    fi
+    if [ "$BULK_PENDING" = "1" ]; then
+        _bulk_rebuild
+        rrc=$?
+        if [ "$rrc" -ne 0 ]; then
+            log ERROR "bulk: index rebuild failed (rc=$rrc); the secondary indexes are still dropped — finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
+        fi
+    fi
+    # A signal during a lock wait: the acquire may have written the lock before
+    # _lock_take recorded it. Release it (release removes only this run's lock).
+    if [ -n "$WAIT_KIND" ]; then
+        LOCK_KIND="$WAIT_KIND"
+        LOCK_OWNED=1
+    fi
+    # Every path that ends on its own writes its end state (and run_end) and
+    # clears STATUS_OPEN, WAIT_STAGE and RUN_OPEN first. What is still set here
+    # belongs to a run that a signal (or an unplanned error) ended: close it once.
+    if [ "$rc" -ne 0 ]; then
+        local where="" at=""
+        if [ -n "$STATUS_OPEN" ]; then
+            at="$STATUS_OPEN"
+            where="at stage $at"
+        elif [ -n "$WAIT_STAGE" ]; then
+            at="$WAIT_STAGE"
+            where="while waiting for the $WAIT_KIND lock (stage $at)"
+        elif [ "$RUN_OPEN" = "1" ]; then
+            at="${LAST_STAGE:-$STAGE}"
+            where="at stage $at$BULK_NOTE"
+        fi
+        if [ -n "$where" ]; then
+            local why state
+            case "$rc" in
+                130|143) why="stopped $where"; state=stopped ;;
+                *) why="failed $where"; state=failed ;;
+            esac
+            log ERROR "$why"
+            _status_set "$at" "$state" --reason "$why"
+            STATUS_OPEN=""
+            WAIT_STAGE=""
+            [ "$RUN_OPEN" = "1" ] && _run_end "$why"
+        fi
+    fi
+    _lock_drop
+    [ "$rc" -ne 0 ] && exit "$rc"
+    exit "$rrc"
+}
+trap _on_exit EXIT
+# A signal ends the runner through the EXIT handler, after the stage (or the
+# lock acquire it waits on) exits.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+_run_end() { # REASON (empty: a clean end). DR-1: a dry run writes no run_end.
+    [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && return 0
+    local reason=()
+    [ -z "$1" ] || reason=(--reason "$1")
+    RUN_OPEN=0
+    "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" "${reason[@]+"${reason[@]}"}" >/dev/null 2>&1 || true
+}
+
 run_stage() {
     local name="$1"
     shift
     log INFO "stage: $name"
+    LAST_STAGE="$name"
+    local kind
+    kind="$(_lock_kind "$name")"
+    if [ "${EPISTEME_DRY_RUN:-0}" != "1" ] && [ -n "$kind" ] && [ "$LOCK_KIND" != "$kind" ]; then
+        _lock_drop
+        local lrc=0
+        _lock_take "$kind" "$name" || lrc=$?
+        if [ "$lrc" -ne 0 ]; then
+            local why="failed at stage $name (lock, rc=$lrc)" state=failed
+            if [ "$lrc" -eq 75 ]; then
+                why="refused: $LOCK_REFUSAL"
+                state=refused
+            fi
+            log ERROR "$why"
+            _run_end "$why"
+            _status_set "$name" "$state" --reason "$why"
+            [ "$lrc" -eq 75 ] && exit 75
+            exit 1
+        fi
+    fi
     # Drop any stale failure record so a later read only sees this stage's.
     "$PY" -m episteme.ops.failure clear --source "$SOURCE" >/dev/null 2>&1 || true
+    _status_set "$name" running --runner-pid "$EPISTEME_RUNNER_PID"
+    STATUS_OPEN="$name"
     # `if ! cmd` would lose the exit code; capture it so it can be reused.
     local rc=0
     "$@" || rc=$?
     if [ "$rc" -ne 0 ]; then
-        local reason
+        local reason state unit_args=()
         case "$rc" in
-            130|143) reason="stopped at stage $name" ;;
+            130|143) reason="stopped at stage $name"; state=stopped ;;
+            75) reason="refused at stage $name"; state=refused ;;
             *)
                 reason="failed at stage $name"
-                local unit
-                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || unit=""
-                [ -n "$unit" ] && reason="$reason: $unit"
+                state=failed
+                local detail unit
+                detail="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" 2>/dev/null)" || detail=""
+                detail="${detail//$'\r'/}"
+                [ -z "$detail" ] || reason="$reason: $detail"
+                # The unit alone (a name may hold ": "); an empty unit passes no --unit.
+                unit="$("$PY" -m episteme.ops.failure show --source "$SOURCE" --run-id "$RUN_ID" --field unit 2>/dev/null)" || unit=""
+                unit="${unit%$'\r'}"
+                [ -z "$unit" ] || unit_args=(--unit "$unit")
                 ;;
         esac
         log ERROR "stage failed: $name"
         log ERROR "resume with: $0 $SOURCE $name"
-        # DR-1: a dry run touches no DB, so it also emits no failure-path run_end
-        # (that would be a lone run_end with no matching run_start).
-        [ "${EPISTEME_DRY_RUN:-0}" = "1" ] \
-            || "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "$reason" >/dev/null 2>&1 || true
-        # A stop passes through; every other stage failure is exit 1 (exit 2
-        # stays for the dispatcher's own rejections before run_start).
+        _status_set "$name" "$state" "${unit_args[@]+"${unit_args[@]}"}" --reason "$reason"
+        STATUS_OPEN=""
+        _run_end "$reason"
+        # A stop and a lock refusal pass through; every other stage failure is
+        # exit 1 (exit 2 stays for the dispatcher's own rejections before run_start).
         case "$rc" in
-            130|143) exit "$rc" ;;
+            130|143|75) exit "$rc" ;;
             *) exit 1 ;;
         esac
     fi
+    _status_set "$name" "done"
+    STATUS_OPEN=""
+    # `all`: release the lock after each stage (the next stage takes its own).
+    [ "$STAGE" != "all" ] || _lock_drop
 }
 
 load_args=()
@@ -348,11 +545,35 @@ structw="${structw:-}"
 # usable without one -- but say so loudly rather than swallowing the failure.
 # DR-1: a --dry-run must be side-effect-free and DB-independent, so the whole
 # audit bracket (run_start here, run_end below) is skipped on a dry run.
+# A single stage takes its lock before run_start: a refusal writes no audit row.
+if [ "$STAGE" != "all" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+    first_kind="$(_lock_kind "$STAGE")"
+    if [ -n "$first_kind" ]; then
+        first_rc=0
+        _lock_take "$first_kind" "$STAGE" || first_rc=$?
+        if [ "$first_rc" -eq 75 ]; then
+            log ERROR "refused: $LOCK_REFUSAL"
+            _status_set "$STAGE" refused --reason "refused: $LOCK_REFUSAL"
+            exit 75
+        fi
+        if [ "$first_rc" -ne 0 ]; then
+            _status_set "$STAGE" failed --reason "failed at stage $STAGE (lock, rc=$first_rc)"
+            die "could not take the $first_kind lock for stage $STAGE (rc=$first_rc)" 1
+        fi
+        # The lock is held: the status no longer shows the wait.
+        _status_set "$STAGE" running --runner-pid "$EPISTEME_RUNNER_PID"
+    fi
+fi
+
 if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
     log INFO "dry-run: skipping run_start/run_end audit bracket"
 else
-    "$PY" -m episteme.audit_trail record run_start --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
-        || log WARN "run_start audit failed; proceeding unaudited (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
+    # RUN_OPEN: from here the EXIT handler closes the bracket on a signal.
+    if "$PY" -m episteme.audit_trail record run_start --object "$SOURCE" --run-id "$RUN_ID" > /dev/null; then
+        RUN_OPEN=1
+    else
+        log WARN "run_start audit failed; proceeding unaudited (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
+    fi
 fi
 
 # M4: tool report for EVERY source (was non-pmc only), once, before dispatch.
@@ -361,41 +582,40 @@ bash "$HERE/_lib/check_prereqs.sh" >&2 || true
 # --bulk: drop the secondary-index group of the stage (load: articles; graph:
 # pubmed_graph) before it and always rebuild them -- explicitly after a
 # successful stage (so the rebuild's audit row lands before run_end), and from
-# the EXIT trap after a failed or interrupted one. A hard kill skips the trap; the saved state then blocks
-# the next --bulk, and `bulk_load_indexes.sh rebuild` finishes the job.
-BULK_PENDING=0
+# the EXIT handler (_on_exit) after a failed or interrupted one. A hard kill skips the handler; the saved
+# state then blocks the next --bulk, and `bulk_load_indexes.sh rebuild` finishes the job.
 BULK_GROUP=articles
 [ "$STAGE" = "graph" ] && BULK_GROUP=pubmed_graph
 _bulk_rebuild() {
     [ "$BULK_PENDING" = "1" ] || return 0
     BULK_PENDING=0
     log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
-    bash "$HERE/db/bulk_load_indexes.sh" rebuild
-}
-_bulk_on_exit() {
-    local rc=$?
-    trap - EXIT
-    _bulk_rebuild
-    local rrc=$?
-    if [ "$rrc" -ne 0 ]; then
-        log ERROR "bulk: index rebuild failed (rc=$rrc); the secondary indexes are still dropped — finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
-    fi
-    [ "$rc" -ne 0 ] && exit "$rc"
-    exit "$rrc"
+    # The rebuild always waits, also under --no-wait: a refused rebuild would
+    # leave the secondary indexes dropped.
+    EPISTEME_NO_WAIT='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 if [ "$BULK" = "1" ]; then
     log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"
+    BULK_DROPPING=1
+    BULK_NOTE=" (bulk index drop)"
     bash "$HERE/db/bulk_load_indexes.sh" drop --group "$BULK_GROUP"
     drop_rc=$?
+    BULK_DROPPING=0
+    BULK_NOTE=""
     if [ "$drop_rc" -ne 0 ]; then
+        # 75: --no-wait and the advisory lock is busy; nothing was dropped.
+        drop_why="failed at stage $STAGE (bulk index drop)"
+        drop_state=failed
+        if [ "$drop_rc" -eq 75 ]; then
+            drop_why="refused at stage $STAGE (bulk index drop: the advisory lock is busy)"
+            drop_state=refused
+        fi
         log ERROR "bulk: index drop failed (rc=$drop_rc); the $STAGE was not started (check: bash scripts/data/db/bulk_load_indexes.sh status)"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index drop)" >/dev/null 2>&1 || true
+        _run_end "$drop_why"
+        _status_set "$STAGE" "$drop_state" --reason "$drop_why"
         exit "$drop_rc"
     fi
     BULK_PENDING=1
-    trap _bulk_on_exit EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
 fi
 
 if [ "$SOURCE" = "pmc" ]; then
@@ -469,11 +689,14 @@ else
 fi
 
 if [ "$BULK" = "1" ]; then
+    BULK_NOTE=" (bulk index rebuild)"
     _bulk_rebuild
     rebuild_rc=$?
+    BULK_NOTE=""
     if [ "$rebuild_rc" -ne 0 ]; then
         log ERROR "bulk: index rebuild failed (rc=$rebuild_rc); finish it with: bash scripts/data/db/bulk_load_indexes.sh rebuild"
-        "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" --reason "failed at stage $STAGE (bulk index rebuild)" >/dev/null 2>&1 || true
+        _run_end "failed at stage $STAGE (bulk index rebuild)"
+        _status_set "$STAGE" failed --reason "failed at stage $STAGE (bulk index rebuild)"
         exit "$rebuild_rc"
     fi
 fi
@@ -481,6 +704,7 @@ fi
 if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
     log INFO "dry-run: audit bracket skipped (no run_end)"
 else
+    RUN_OPEN=0
     "$PY" -m episteme.audit_trail record run_end --object "$SOURCE" --run-id "$RUN_ID" > /dev/null \
         || log WARN "run_end audit failed (DB unreachable, or refused by the DB-mode guard — see EPISTEME_DB_MODE)"
 fi

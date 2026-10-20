@@ -62,7 +62,13 @@ def stub(monkeypatch):
     monkeypatch.setattr(dbc, "connection", fake_connection)
     monkeypatch.setattr(graph_builder, "build", fake_build)
     monkeypatch.setattr(graph_builder.orphans, "sweep", lambda conn: [])
-    monkeypatch.setattr(graph_builder, "stage_guard", lambda ref: contextlib.nullcontext())
+    monkeypatch.setattr(
+        graph_builder,
+        "stage_guard",
+        lambda ref, **kw: contextlib.nullcontext(
+            __import__("episteme.ops.stop", fromlist=["x"]).StageHandle()
+        ),
+    )
     monkeypatch.setattr(graph_builder, "_SLEEP", lambda s: None)
     return calls, calls_files
 
@@ -188,9 +194,9 @@ def test_holder_reaches_stage_guard_conn_ref(stub, tmp_path, monkeypatch):
     refs = []
 
     @contextlib.contextmanager
-    def capture(ref):
+    def capture(ref, **kw):
         refs.append(ref)
-        yield
+        yield __import__("episteme.ops.stop", fromlist=["x"]).StageHandle()
 
     monkeypatch.setattr(graph_builder, "stage_guard", capture)
     assert graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)]) == 0
@@ -220,3 +226,36 @@ def test_pubmed_stop_propagates_to_stage_guard(stub, tmp_path, monkeypatch):
     monkeypatch.setattr(graph_builder, "build", stop)
     with pytest.raises(KeyboardInterrupt):
         graph_builder.main(["--source", "pubmed", "--processed-dir", str(tmp_path)])
+
+
+def test_one_transaction_build_runs_as_a_long_statement(stub, tmp_path, monkeypatch):
+    """I3: the non-pubmed graph build writes no unit progress; it is marked as
+    one long statement, so the stall check allows it more time."""
+    from episteme.ops import status
+
+    events = []
+
+    class _Status(status.NullStatus):
+        @contextlib.contextmanager
+        def long_statement(self, label):
+            events.append(("begin", label))
+            yield
+            events.append(("end", label))
+
+    real = graph_builder.build
+
+    def spy(conn, **kw):
+        events.append(("build", kw["source"]))
+        return real(conn, **kw)
+
+    monkeypatch.setattr(graph_builder, "build", spy)
+    status.set_current(_Status())
+    try:
+        assert graph_builder.main(["--source", "pmc", "--raw-dir", str(tmp_path)]) == 0
+    finally:
+        status.set_current(status.NullStatus())
+    assert events == [
+        ("begin", "graph build pmc"),
+        ("build", "pmc"),
+        ("end", "graph build pmc"),
+    ]
