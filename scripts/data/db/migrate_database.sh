@@ -35,7 +35,8 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-# A migration is a heavy job: take the heavy lock (exit 75 passes through).
+# A migration is a heavy job: take the heavy lock. The acquire waits (no
+# --no-wait), so it does not return 75; any error code passes through.
 # Under run_pipeline.sh the call re-enters the runner's lock; this script
 # releases only a lock it acquired itself.
 LOCK_RUN_ID="${EPISTEME_RUN_ID:-adhoc-$EPISTEME_RUNNER_PID}"

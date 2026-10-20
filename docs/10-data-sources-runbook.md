@@ -383,13 +383,13 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
   - `load`, `graph`, `enrich`, `materialize`: ignored.
   - `openalex` download, specifically: empty or `0` means unlimited (the whole `s3 sync`); a positive integer fetches the first N shard files in byte order (oldest `updated_date=` partitions first, `manifest.json` excluded); a non-integer such as `abc` or `-1` makes the wrapper die with its own exit code 2 when run directly; through `run_pipeline.sh` the observable rc is 1 (`stage failed: download`, `resume with: ...`).
   - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
-- **`--no-wait`** is for a stage that needs a lock. If the lock is busy, the run does not wait. It exits 75 (section 4.8).
+- **`--no-wait`** is for a stage that needs a lock. If the lock is busy, the run does not wait. It exits 75. The runner exports `EPISTEME_NO_WAIT=1`, so a Python stage also refuses a busy advisory lock with exit 75 (section 4.8).
 - **`--bulk`** is supported on `load` and `graph`: drop the secondary indexes of the stage's index group, run the stage, always rebuild them (section 4.6). `load` uses group `articles`; `graph` uses group `pubmed_graph` for every source. Any other stage exits with `--bulk is only valid with the load or graph stage`.
 - **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
 
 ### 4.4 Audit bracket and resume
 
-Every non-dry run records `run_start` and, on completion, `run_end`, both with object = the source and a run id `<source>-<UTC timestamp>` shared by all stages of the invocation. On a stage failure the dispatcher records a `run_end` with reason `failed at stage <name>`, prints `resume with: run_pipeline.sh <source> <name>` and exits 1. A stopped stage (rc 130 or 143) gives the reason `stopped at stage <name>`, and the dispatcher exits with the same code. A stage lock that is busy under `--no-wait` gives the reason `refused: <kind> lock held by <run> (<stage>)` and exit 75 (section 4.8). A failed `run_start` or `run_end` (database down, refused by the guard) is only a `WARN`, so a run can complete without its bracket; verify (section 7). Extract and serialize stages keep a per-file success marker and skip finished files; `load` keeps a per-shard `load_success` marker. Re-running a stage is therefore the resume mechanism.
+Every non-dry run records `run_start` and, on completion, `run_end`, both with object = the source and a run id `<source>-<UTC timestamp>` shared by all stages of the invocation. On a stage failure the dispatcher records a `run_end` with reason `failed at stage <name>`, prints `resume with: run_pipeline.sh <source> <name>` and exits 1. A stopped stage (rc 130 or 143) gives the reason `stopped at stage <name>`, and the dispatcher exits with the same code. A stage lock that is busy under `--no-wait` gives the reason `refused: <kind> lock held by <run> (<stage>)` and exit 75 (section 4.8). A signal (rc 130 or 143) while the run waits for a stage lock gives the reason `stopped while waiting for the <kind> lock (stage <name>)`. A signal during the `--bulk` index drop or rebuild gives `stopped at stage <name> (bulk index drop)` or `stopped at stage <name> (bulk index rebuild)`. Any other unplanned exit after `run_start` gives `failed ...` in the same form. Each path writes exactly one `run_end`; a dry run writes none. A failed `run_start` or `run_end` (database down, refused by the guard) is only a `WARN`, so a run can complete without its bracket; verify (section 7). Extract and serialize stages keep a per-file success marker and skip finished files; `load` keeps a per-shard `load_success` marker. Re-running a stage is therefore the resume mechanism.
 
 ### 4.5 Per-stage arguments (what the dispatcher forwards)
 
@@ -422,7 +422,7 @@ Index groups (`episteme.data.db.bulk_indexes.INDEX_GROUPS`):
 - **While the stage runs**, lookups on the affected tables are slow. Run nothing else against them.
 - **Rebuild:** after the stage, `rebuild` re-creates each saved index on every partition and writes one `bulk_index_rebuild` audit row per index, in the same transaction as that index's build. `rebuild` takes no group: it rebuilds every pending row, whatever its group. `ANALYZE` runs after the last index and has no audit row. Expect tens of minutes on a full table.
 - **Refusals:** `rebuild` refuses a saved definition that is not a parent index on an `episteme` table, contains `;`, or names a different index. It also refuses when an existing valid index of that name has a different definition. In each case it exits 1 and leaves that row pending. `drop` refuses (exit 2) while any rebuild is pending, whatever the group.
-- **When it rebuilds:** always, after a successful, failed or interrupted (Ctrl+C) stage. The exit code is the stage's if it failed, else the rebuild's. A failed drop never starts the stage.
+- **When it rebuilds:** always, after a successful, failed or interrupted (Ctrl+C) stage. The exit code is the stage's if it failed, else the rebuild's. A failed drop never starts the stage. A signal during the drop also rebuilds, because the drop may have finished.
 - **Audit strings.** `bulk_index_drop` writes one row with object `<group> <comma-separated index names>`, for example `pubmed_graph article_mesh_pmid_idx,...`; before the groups existed the `articles` drop read `episteme.articles <names>`. `bulk_index_rebuild` writes one row per index with object `episteme.<table> <index>`.
 - **Manual use.** `bash scripts/data/db/bulk_load_indexes.sh <action> [--group G]`: `drop` (default group `articles`; `--group articles|pubmed_graph`), `rebuild` (no group), `status` (exit 1 while a rebuild is pending, 3 on error). Use `rebuild` to finish after a failed rebuild.
 - **Prerequisites:** migration 0005 (section 2.3), plus 0006 for the `pubmed_graph` group; `EPISTEME_ACTOR` (`drop` and `rebuild` both require it before doing anything) and `EPISTEME_SYS_ADMIN_PASSWORD`. The index work runs as `episteme_sys_admin`, the table owner, and the database-mode guard applies.
@@ -503,7 +503,7 @@ bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TE
 | 2 | Usage error, for example `--skip-unit` without `--reason`. |
 | 130 | Stopped with Ctrl-C. The audit `run_end` reason is `stopped at stage <name>`. |
 | 143 | Stopped with SIGTERM, or the parent runner died. |
-| 75 | Refused: a stage lock is busy and `--no-wait` is set (section 4.8). Also passed on from `migrate_database.sh` and `bulk_load_indexes.sh`. |
+| 75 | Refused: a lock is busy and `--no-wait` is set (section 4.8). `migrate_database.sh` and `bulk_load_indexes.sh` run directly always wait, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop or rebuild exits 75 when the advisory lock is busy. |
 
 When a stage fails, `run_pipeline.sh` passes 130, 143 and 75 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
 
@@ -556,16 +556,23 @@ One heavy job runs at a time on this machine. A download may run beside a heavy 
 - A `--dry-run` takes no lock and writes no status.
 - A single stage takes its lock before `run_start` and holds it until the exit. With `all`, each stage takes its own lock and releases it at its end. A waiting job can run between two stages of an `all` chain.
 - The Python stage (extract, serialize, load, graph) re-enters the lock of its wrapper. The run id and the runner PID are the same, so it does not wait for itself. A stage run directly, without `run_pipeline.sh`, takes the heavy lock itself with the run id `adhoc-<runner pid>`.
-- `load`, `graph`, the `cdisc_ct` retire step and the `--bulk` index drop and rebuild also take a PostgreSQL advisory lock. Its key is `4994572608998821189`. It is per database. It is held on its own connection, and the server frees it when the process ends. A session that holds it makes this stage wait.
+- `load`, `graph`, the `cdisc_ct` retire step and the `--bulk` index drop and rebuild also take a PostgreSQL advisory lock. Its key is `4994572608998821189`. It is per database. It is held on its own connection, and the server frees it when the process ends. A session that holds it makes this stage wait. While the stage waits for it, the status shows `long_statement` with the label `waiting for the advisory lock`, so a long wait is not reported as a stall. Under `--no-wait`, a busy advisory lock makes the stage exit 75.
 
 **Waiting and refusing.**
 
-- Without a flag, a job waits while the lock is busy. It checks every 5 seconds. It logs `waiting for the heavy lock: held by ...` at the start and every 5 minutes. No order is promised between two waiting jobs.
+- Without a flag, a job waits while the lock is busy. It checks every 5 seconds. It logs `waiting for the heavy lock: held by ...` at the start and every 5 minutes. When a running download blocks it, the line is `waiting for the heavy lock: download <run> (<stage>) has no pause point or has not reached one`. No order is promised between two waiting jobs.
+- While `run_pipeline.sh` waits for a stage lock, the status shows `state` `running`, the stage that waits, and `unit` `waiting for the <kind> lock`.
 - A heavy job that waits writes `heavy.request`. A running download sees it and pauses.
 - A heavy job waits while a download is `running`. It does not wait for a download that is `paused`.
 - A second download waits for the first.
 - With `--no-wait`, a busy lock does not make the run wait. The run logs `refused: <kind> lock held by <run> (<stage>)`, sets the status `refused` and exits 75. A single stage writes no audit row. In an `all` chain, the earlier stages stay done, and the run writes `run_end` with the refusal as the reason.
-- `migrate_database.sh` and `bulk_load_indexes.sh` have no `--no-wait`. They wait. They pass on an exit 75 from the lock step.
+- `migrate_database.sh` and `bulk_load_indexes.sh` have no `--no-wait`. Run directly, they always wait for the heavy lock and the advisory lock, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop and rebuild see `EPISTEME_NO_WAIT=1` and exit 75 when the advisory lock is busy.
+
+To refuse instead of wait, add `--no-wait`:
+
+```bash
+bash scripts/data/run_pipeline.sh pubmed load --no-wait
+```
 
 **The lock files.** They are in `<data root>/_ops/locks/`. `EPISTEME_LOCK_DIR` overrides the folder.
 
@@ -589,7 +596,8 @@ The command prints one line per file. The line is `free`, or the holder (`run <i
 - A file that cannot be parsed is stale after 60 seconds.
 - A file that another process holds open (Windows) counts as live. The lock fails closed.
 - A job that finds a stale lock deletes it and takes it. Only one job at a time does this. It logs `WARNING took over a stale heavy.lock from run ...`. The same happens after a hard kill: the lock stays, and the next run takes it over.
-- Limit: a lock whose PID is alive but wrong is not detected as stale. This happens when the run took a wrong inherited `EPISTEME_RUNNER_PID`.
+- Limit: a lock whose PID is alive but wrong is not detected as stale. This happens when the run took a wrong inherited `EPISTEME_RUNNER_PID`. Two direct runs that inherited the same wrong `EPISTEME_RUNNER_PID` get the same `adhoc-<pid>` run id and owner. The locks do not keep them apart: the second run re-enters the lock of the first.
+- A process that this user may not inspect (access denied) counts as alive while its PID exists. The lock fails closed.
 
 **Clear a lock by hand.** Do this only when:
 
@@ -606,8 +614,9 @@ Then delete the lock file. Never delete the lock of a live job.
 | `pmc` (`download_pmc.py`) | before each submit batch of up to 2,000 articles |
 | `s5cmd` and `aws s3 sync` (S3 sources) | none |
 | `hf download` (Hugging Face sources) | none |
+| `europepmc_preprint` (the REST harvester) | none |
 
-For the downloads with no pause point, a waiting heavy job waits until the download ends. A pause point also needs a run id. A download run without one (the `pmc` downloader run directly) never pauses.
+For the downloads with no pause point, a waiting heavy job waits until the download ends. A pause point also needs a run id (`EPISTEME_RUN_ID`). Any download run outside `run_pipeline.sh` (a wrapper or the `pmc` downloader run directly) has no run id. It takes no download lock and never pauses.
 
 **`failed_files.txt`.** A download records a file that failed and goes on with the next one. At the end, the stage exits 1 if any file failed.
 
@@ -628,7 +637,19 @@ For the downloads with no pause point, a waiting heavy job waits until the downl
 | `pids` | The PID and create time of the runner and of the stage process. |
 | `reason` | Why the run is `failed`, `stopped` or `refused`. |
 
-A status write that fails is logged as a WARNING and dropped. It never stops a stage. The runner writes the end state after the stage, so its value wins. A stage that is run directly writes its own end state. The `enrich` stages take the lock but write no unit progress yet.
+A status write that fails is logged as a WARNING and dropped. It never stops a stage. The runner writes the end state after the stage, so its value wins. A stage that is run directly writes its own end state.
+
+**Which stages report progress.** These stages write `last_progress`:
+
+- `extract` and `serialize`, through `run_per_file` (one record per input file);
+- `load` (one record per shard);
+- the `pubmed` graph (one record per file);
+- the other graphs: the build is one transaction, marked as one long statement (`graph build <source>`);
+- `bulk_indexes` drop and rebuild (each index is one long statement);
+- `http_fetch` downloads (one record per batch);
+- the `pmc` downloader (one record per submit batch).
+
+These stages report no progress: the `s5cmd`, `aws` and `hf` downloads, the `europepmc_preprint` downloader, `materialize`, `enrich` and `europepmc_id_mappings load`. For them, a `--stalled` result after 10 minutes means only "no progress signal". Check the process before you act.
 
 Show the runs, one line each (run id, source, stage, state, unit, done/total, `last_progress`):
 
@@ -639,7 +660,7 @@ python -m episteme.ops.status --stalled
 
 `--stalled` prints only the runs that are not finished and look stuck. It exits 1 if it finds one, else 0. A run is stalled when:
 
-1. its runner process is gone (`crashed`), or
+1. its runner process is gone (`crashed`), or, for a run with no runner entry (a stage run directly), its stage process is gone, or
 2. it made no progress for 10 minutes, or
 3. it made no progress for 60 minutes while `long_statement` is set.
 
@@ -653,7 +674,7 @@ bash scripts/data/run_queue.sh "pubmed:extract,load,graph" "pmc:extract"
 
 - Each argument is `<source>:<stage>[,<stage>...]`. The steps run in the order given. The script checks every argument first. If one is wrong, nothing runs and the exit code is 2.
 - A step is done when `run_pipeline.sh` exits 0 and the step log holds the line `<time> [INFO] pipeline done: <source> <stage>` as a whole line. Any other result stops the queue with `STOPPED at <source> <stage> (rc=<n>)` and exit 1. The queue does not skip a step and does not retry it.
-- Before each step, the queue compares the code with the code at the start: the git `HEAD` and the changes in `scripts/data` and `src`. If it differs, the queue stops with `STOPPED at <source> <stage>: code changed since the queue started` and exit 1. Without git, the queue logs a WARNING and runs without this check.
+- Before each step, the queue compares the code with the code at the start: the git `HEAD`, the content of the changes in `scripts/data` and `src` (the diff against `HEAD`), and the names and content of the untracked files there. An edit to a file that was already changed at the start counts too. If it differs, the queue stops with `STOPPED at <source> <stage>: code changed since the queue started` and exit 1. Without git, the queue logs a WARNING and runs without this check.
 - The queue takes no lock and writes no status file. Each step does. Each step waits for a busy lock.
 - The logs are in `<processed root>/_ops/queue/queue-<UTC time>/`: `queue.log` and one `NN-<source>-<stage>.log` for each step. Print the folder with `python -m episteme.ops.status queue-dir --queue-id <id>`.
 - After a stop, find the cause in the log of the last step. Fix it, then start a new queue with the steps that remain. Units that are done are skipped.
