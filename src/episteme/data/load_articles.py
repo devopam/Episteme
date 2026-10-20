@@ -27,7 +27,6 @@ Config comes from ``episteme.config`` -- this module never reads ``os.environ``.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -68,8 +67,7 @@ def _write_load_success(processed_root: Path, source: str, basename: str, stats:
         "completed_at": utc_now_iso(),
         "stats": stats or {},
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return checkpoint_markers.write_marker(path, payload)
 
 
 def _discover_shards(staging_dir: Path) -> list[Path]:
@@ -135,10 +133,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    if not shards:
-        print(f"no shards under {staging_dir}")
-        return 0
-
     if args.skip_unit:
         unknown = sorted(set(args.skip_unit) - {sh.name for sh in shards})
         if unknown:
@@ -147,6 +141,10 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if not shards:
+        print(f"no shards under {staging_dir}")
+        return 0
 
     external_run_id = get_settings().run_id
     run_id = external_run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -225,8 +223,13 @@ def main(argv: list[str] | None = None) -> int:
         if own_bracket:
             _bracket("run_start")
         try:
-            with connection() as sconn:
-                orphans.sweep(sconn)
+
+            def _sweep() -> None:
+                with connection() as sconn:
+                    orphans.sweep(sconn)
+
+            # The start-up connection gets the same retry schedule as a unit.
+            with_retries(_sweep, sleep=lambda secs: _SLEEP(secs), on_retry=_on_retry("sweep"))
 
             keep = set(
                 apply_skips(

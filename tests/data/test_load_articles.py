@@ -330,6 +330,29 @@ def test_stop_writes_one_run_end_and_exits_130(ff, monkeypatch):
     assert ff.state["calls"] == ["a.jsonl"]
 
 
+def test_skip_unit_with_no_shards_exits_2(ff):
+    for f in (ff.root / "staging" / "src").iterdir():
+        f.unlink()
+    assert ff.run("--skip-unit", "a.jsonl", "--reason", "r") == 2
+    assert ff.rows == []
+
+
+def test_transient_sweep_error_is_retried(ff, monkeypatch, capsys):
+    import psycopg
+
+    errors = [psycopg.OperationalError("connection refused")]
+
+    def flaky(conn):
+        if errors:
+            raise errors.pop(0)
+        return []
+
+    monkeypatch.setattr(ff.la.orphans, "sweep", flaky)
+    assert ff.run() == 0
+    assert ff.sleeps == [30]
+    assert ff.state["calls"] == ["a.jsonl", "b.jsonl", "c.jsonl"]
+
+
 def test_sweep_error_writes_one_run_end(ff, monkeypatch):
     def boom(conn):
         raise RuntimeError("audit failed")

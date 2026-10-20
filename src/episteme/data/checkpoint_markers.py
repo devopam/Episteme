@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import traceback
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,22 @@ def graph_success_marker_path(processed_root: Path, source: str, input_basename:
     return ops_root(processed_root, source) / "graph_success" / f"{input_basename}.ok"
 
 
+def write_marker(path: Path, payload: dict[str, Any]) -> Path:
+    """Write a marker atomically: a temp file in the same directory, then
+    ``os.replace``. A write that fails part way (a disk error) leaves no
+    marker, so a marker that exists is always complete; the presence checks
+    (``is_success``, the load and graph skips) rely on that."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return path
+
+
 def is_success(processed_root: Path, source: str, input_basename: str) -> bool:
     return success_marker_path(processed_root, source, input_basename).is_file()
 
@@ -53,8 +70,7 @@ def mark_success(
         "completed_at": utc_now_iso(),
         "stats": stats or {},
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def mark_failed(
@@ -84,8 +100,7 @@ def mark_failed(
             payload["traceback"] = "".join(traceback.format_exception(type(exc), exc, tb))[-4000:]
         except Exception:
             payload["traceback"] = f"{type(exc).__name__}: {exc}"
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def write_run_manifest(
@@ -106,8 +121,7 @@ def write_run_manifest(
         "config": config,
         "totals": totals,
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return path
+    return write_marker(path, payload)
 
 
 def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:

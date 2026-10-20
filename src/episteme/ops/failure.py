@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from episteme.config import get_settings
@@ -35,7 +35,7 @@ def record_failure(
         "stage": stage,
         "unit": unit,
         "error": error[:_ERROR_MAX],
-        "at": datetime.now(UTC).isoformat(),
+        "at": datetime.now(timezone.utc).isoformat(),
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".last_failure.", suffix=".tmp")
     try:

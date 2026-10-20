@@ -842,8 +842,18 @@ def main(argv: list[str] | None = None) -> int:
     holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
     with stage_guard(lambda: holder[0]):
-        with connection() as sconn:
-            orphans.sweep(sconn)
+
+        def _sweep() -> None:
+            with connection() as sconn:
+                orphans.sweep(sconn)
+
+        # The start-up connection gets the same retry schedule as a unit.
+        try:
+            with_retries(_sweep, sleep=lambda secs: _SLEEP(secs))
+        except Exception as exc:  # noqa: BLE001 - recorded, then exit 1
+            print(f"FAIL start-up orphan sweep: {exc!r}", file=sys.stderr)
+            record_failure(args.source, "graph", "startup", repr(exc), run_id=run_id)
+            return 1
 
         if args.source == "pubmed":
             try:

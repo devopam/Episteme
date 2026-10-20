@@ -101,3 +101,30 @@ def test_discover_input_files_skips_hidden_directories(tmp_path):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("[]", encoding="utf-8")
     assert discover_input_files(raw, ["*.json"]) == [data]
+
+
+def test_a_marker_write_that_fails_leaves_no_marker(tmp_path, monkeypatch):
+    """A disk error part way through must not leave a marker behind: the
+    presence checks would read it as success on the retry or the re-run."""
+    import os
+
+    import pytest
+
+    from episteme.data import checkpoint_markers as cm
+
+    def boom(src, dst):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(cm.os, "replace", boom)
+    with pytest.raises(OSError):
+        cm.mark_success(tmp_path, "src", "a.json")
+    assert not is_success(tmp_path, "src", "a.json")
+    assert os.listdir(cm.success_marker_path(tmp_path, "src", "a.json").parent) == []
+
+
+def test_mark_success_writes_the_payload_atomically(tmp_path):
+    from episteme.data import checkpoint_markers as cm
+
+    path = cm.mark_success(tmp_path, "src", "a.json", {"rows": 3})
+    assert json.loads(path.read_text(encoding="utf-8"))["stats"] == {"rows": 3}
+    assert sorted(p.name for p in path.parent.iterdir()) == ["a.json.ok"]
