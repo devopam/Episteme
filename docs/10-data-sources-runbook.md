@@ -392,8 +392,8 @@ Every non-dry run records `run_start` and, on completion, `run_end`, both with o
 | Stage | Receives |
 |---|---|
 | `download` | `--max-files N`, `--force --reason R`, tokens it does not recognise; `--dry-run` as `EPISTEME_DRY_RUN=1` |
-| `extract`, `serialize` | `--max-files N`, `--force` only (never `--reason`) |
-| `load` | `--force --reason R` only |
+| `extract`, `serialize` | `--max-files N`, `--force`; with `--skip-unit`, also each `--skip-unit NAME` and `--reason R` |
+| `load` | `--force --reason R`; with `--skip-unit`, also each `--skip-unit NAME` (and `--reason R` once) |
 | `graph` | `--force --reason R` when forced (reloads files whose graph hash is unchanged; `pubmed` only acts on it) |
 | `enrich`, `materialize` | nothing |
 

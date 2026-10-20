@@ -307,7 +307,8 @@ load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
-# --max-files N and --force -- NOT --reason, NOT the SP3 wrapper_args superset.
+# --max-files N and --force (plus --skip-unit NAME --reason R when skipping);
+# NOT the SP3 wrapper_args superset.
 # `load` reuses load_args above; `graph` gets --force --reason R only when forced
 # (graph_builder.main takes --source/--raw-dir/--processed-dir/--force/--reason).
 graph_args=()
@@ -317,8 +318,8 @@ lit_extract_args=()
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
 lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
-# SP4 structured `serialize` wrappers accept only --max-files N and --force --
-# NOT --reason, mirroring lit_extract_args' shape. `load` reuses load_args;
+# SP4 structured `serialize` wrappers accept --max-files N and --force (plus
+# --skip-unit NAME --reason R when skipping), mirroring lit_extract_args' shape. `load` reuses load_args;
 # `graph` (mesh only) gets no extra args, same as the lit graph arm.
 struct_serialize_args=()
 [ -n "$MAX_FILES" ] && struct_serialize_args+=(--max-files "$MAX_FILES")
