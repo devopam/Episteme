@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from episteme.ops import gate
+from episteme.ops import gate, gate_migrations
 
 SRC = "bookshelf"
 RULES = {"extract": {"min_rows": 3, "max_duplicate_ids": 0}, "load": {"max_orphan_bodies": 0}}
@@ -320,30 +320,84 @@ def test_check_all_reasons(tmp_path, rules_dir, fake_hash, capsys):
 # --- migrations-check -------------------------------------------------------
 
 
-def test_migrations_check(tmp_path, monkeypatch, capsys):
+def test_every_migration_file_has_markers():
+    files = {p.name for p in gate._MIGRATIONS_DIR.glob("*.sql")}
+    assert files
+    assert set(gate_migrations.MIGRATION_MARKERS) == files
+    for markers in gate_migrations.MIGRATION_MARKERS.values():
+        assert 1 <= len(markers) <= 3
+        assert all(m.split(":")[0] in ("table", "column", "index") for m in markers)
+
+
+class _MarkerCur:
+    def __init__(self, present):
+        self.present = present
+        self._ans = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        kind = "table" if "to_regclass" in sql else "column" if "columns" in sql else "index"
+        self._ans = f"{kind}:{'.'.join(params)}" in self.present
+
+    def fetchone(self):
+        return (self._ans,)
+
+
+class _MarkerConn:
+    def __init__(self, present):
+        self.present = present
+
+    def cursor(self):
+        return _MarkerCur(self.present)
+
+
+def test_migrations_check_lists_missing_objects(tmp_path, monkeypatch, capsys):
     mig = tmp_path / "mig"
     mig.mkdir()
     for n in ("0001_a.sql", "0002_b.sql", "0003_c.sql"):
         (mig / n).write_text("select 1;")
     monkeypatch.setattr(gate, "_MIGRATIONS_DIR", mig)
-
-    _fake_connect(monkeypatch, _Conn(migrations=["0001_a.sql"]))
+    monkeypatch.setattr(
+        gate_migrations,
+        "MIGRATION_MARKERS",
+        {
+            "0001_a.sql": ["table:s.a"],
+            "0002_b.sql": ["table:s.b", "column:s.b.c", "index:s.b_idx"],
+        },
+    )
+    conn = _MarkerConn({"table:s.a", "table:s.b", "column:s.b.c"})
+    _fake_connect(monkeypatch, conn)
     assert gate.main(["migrations-check"]) == 1
-    assert capsys.readouterr().out.split() == ["0002_b.sql", "0003_c.sql"]
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "0002_b.sql: missing index:s.b_idx",
+        "0003_c.sql: missing no markers defined",
+    ]
 
-    _fake_connect(monkeypatch, _Conn(migrations=["0001_a.sql", "0002_b.sql", "0003_c.sql", "x"]))
+    conn.present |= {"index:s.b_idx"}
+    monkeypatch.setitem(gate_migrations.MIGRATION_MARKERS, "0003_c.sql", ["table:s.c"])
+    conn.present |= {"table:s.c"}
     assert gate.main(["migrations-check"]) == 0
     assert capsys.readouterr().out == ""
 
 
 @pytest.mark.pg
-def test_migrations_check_against_episteme_test():
+def test_migrations_check_against_episteme_test(capsys):
     from episteme.data.db.connection import connection
 
     with connection() as conn, conn.cursor() as cur:
         cur.execute("select current_database(), current_setting('server_version')")
         assert cur.fetchone() == ("episteme_test", "19beta3")
-    assert gate.main(["migrations-check"]) in (0, 1)
+    rc = gate.main(["migrations-check"])
+    out = capsys.readouterr().out
+    print(out)
+    assert rc == (1 if out else 0)
+    assert "0009_apollo_pubchem_partitions.sql" in out
 
 
 # --- module entry -----------------------------------------------------------
@@ -362,29 +416,22 @@ def test_module_entry_paths_prints_one_line(tmp_path):
     assert proc.stdout.strip() == str(tmp_path / "p")
 
 
-def test_migrations_check_without_tracking_table_lists_all(tmp_path, monkeypatch, capsys):
-    from psycopg import errors
+def test_run_stops_the_child_on_an_unexpected_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    started = []
+    real_popen = subprocess.Popen
 
-    mig = tmp_path / "mig"
-    mig.mkdir()
-    (mig / "0001_a.sql").write_text("select 1;")
-    monkeypatch.setattr(gate, "_MIGRATIONS_DIR", mig)
+    def popen(*a, **k):
+        p = real_popen(*a, **k)
+        started.append(p)
+        return p
 
-    class Cur(_Cur):
-        def execute(self, sql, params=None):
-            raise errors.UndefinedTable("no table")
+    def boom(_proc):
+        raise RuntimeError("poll failed")
 
-    class Conn(_Conn):
-        rolled_back = False
-
-        def cursor(self):
-            return Cur({})
-
-        def rollback(self):
-            self.rolled_back = True
-
-    conn = Conn()
-    _fake_connect(monkeypatch, conn)
-    assert gate.main(["migrations-check"]) == 1
-    assert capsys.readouterr().out.split() == ["0001_a.sql"]
-    assert conn.rolled_back
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(gate, "_tree_rss", boom)
+    code = "import time; time.sleep(60)"
+    with pytest.raises(RuntimeError):
+        gate.main(["run", "--record", str(tmp_path / "r.json"), "--", sys.executable, "-c", code])
+    assert started[0].poll() is not None

@@ -469,8 +469,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 continue
     except KeyboardInterrupt:
         interrupted = True
-        _stop_tree(proc, child)
         rc = 130
+    finally:
+        if child.poll() is None:
+            _stop_tree(proc, child)
     record = {
         "elapsed_s": round(time.monotonic() - t0, 3),
         "rc": rc,
@@ -564,21 +566,16 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
 
 def _cmd_migrations_check(_args: argparse.Namespace) -> int:
-    files = sorted(p.name for p in _MIGRATIONS_DIR.glob("*.sql"))
-    from psycopg import errors
+    """List migrations whose objects are missing on the configured database.
+    It checks the objects each migration creates (``gate_migrations``) and does
+    not use ``episteme._migrations``, which is not kept up to date."""
+    from episteme.ops import gate_migrations
 
-    applied: set[str] = set()
+    files = sorted(p.name for p in _MIGRATIONS_DIR.glob("*.sql"))
     with _connect() as conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT name FROM episteme._migrations")
-                applied = {row[0] for row in cur.fetchall()}
-        except errors.UndefinedTable:
-            # No tracking table: the migration script never ran, so none is applied.
-            conn.rollback()
-    missing = [name for name in files if name not in applied]
-    for name in missing:
-        print(name)
+        missing = gate_migrations.missing_markers(conn, files)
+    for name, objects in missing.items():
+        print(f"{name}: missing {', '.join(objects)}")
     return 1 if missing else 0
 
 
