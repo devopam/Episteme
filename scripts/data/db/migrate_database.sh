@@ -27,6 +27,35 @@ if [ -z "$PSQL" ]; then
 fi
 [ -n "$PSQL" ] || die "psql not found (set PSQL=/path/to/psql)"
 
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+    for c in "$HERE/../../../.venv/Scripts/python.exe" "$HERE/../../../.venv/bin/python" python; do
+        command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+    done
+fi
+[ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
+
+# A migration is a heavy job: take the heavy lock (exit 75 passes through).
+# Under run_pipeline.sh the call re-enters the runner's lock; this script
+# releases only a lock it acquired itself.
+LOCK_RUN_ID="${EPISTEME_RUN_ID:-adhoc-$EPISTEME_RUNNER_PID}"
+lock_rc=0
+lock_out="$("$PY" -m episteme.ops.lock acquire heavy --run-id "$LOCK_RUN_ID" \
+    --stage migrate_database --owner-pid "$EPISTEME_RUNNER_PID")" || lock_rc=$?
+[ "$lock_rc" -eq 0 ] || exit "$lock_rc"
+log INFO "migrate_database.sh: heavy lock: $lock_out"
+if [ "$lock_out" = "acquired" ]; then
+    # shellcheck disable=SC2329 # called by the EXIT trap
+    _release_lock() {
+        "$PY" -m episteme.ops.lock release heavy --run-id "$LOCK_RUN_ID" \
+            --owner-pid "$EPISTEME_RUNNER_PID" >/dev/null 2>&1 \
+            || log WARN "migrate_database.sh: could not release the heavy lock"
+    }
+    trap _release_lock EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+
 sa_psql() { PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "$PSQL" -X -v ON_ERROR_STOP=1 -q \
     -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$TARGET_DB" "$@"; }
 
