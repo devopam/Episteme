@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import traceback
 from pathlib import Path
 from typing import Any
 
 from episteme.data.article_schema import SCHEMA_VERSION, utc_now_iso
+
+_LOG = logging.getLogger(__name__)
+_POSIX = os.name == "posix"  # directories can be fsynced (a seam for tests)
 
 
 def ops_root(processed_root: Path, source: str) -> Path:
@@ -46,15 +50,21 @@ def write_marker(path: Path, payload: dict[str, Any]) -> Path:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
-        if os.name == "posix":
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if _POSIX:
+        # The marker is complete and visible now. A failed directory sync must
+        # not raise: a retry would see the marker, skip the unit and miss its
+        # audit row. Only the rename's durability is at risk; log it.
+        try:
             dfd = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(dfd)
             finally:
                 os.close(dfd)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        except OSError as exc:
+            _LOG.warning("marker %s written; directory fsync failed: %r", path, exc)
     return path
 
 
