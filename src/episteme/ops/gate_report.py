@@ -151,9 +151,15 @@ def measure_staging(
 ) -> dict:
     """The measures of the shards under ``staging_dir``. An empty folder gives
     ``rows = 0``, not an error. ``record`` is the run record of ``gate run``
-    (``elapsed_s``, ``rc``, ``peak_rss_mb``, optional ``failed_inputs``)."""
+    (``elapsed_s``, ``rc``, ``peak_rss_mb``, optional ``failed_inputs``).
+    ``text_length`` p50/p99/max are byte lengths (``strlen``), not characters.
+    A folder with both .parquet and .jsonl shards raises ``ValueError``."""
     staging_dir = Path(staging_dir)
     parquet, jsonl = _shards(staging_dir)
+    if parquet and jsonl:
+        raise ValueError(
+            f"{staging_dir}: mixes .parquet and .jsonl shards; the gate reads one format per folder"
+        )
     input_bytes = sum(_size(Path(p)) for p in inputs)
     measures: dict[str, Any] = {
         "staging_dir": str(staging_dir),
@@ -170,7 +176,7 @@ def measure_staging(
             columns = _open_view(con, parquet, jsonl)
             rows = int(con.execute("SELECT count(*) FROM t").fetchone()[0])
         measures["rows"] = rows
-        measures.update(_measure_shards(con, columns, rows) if columns else _empty_measures())
+        measures.update(_measure_shards(con, columns, rows))
     finally:
         con.close()
 
@@ -193,10 +199,6 @@ def measure_staging(
     return measures
 
 
-def _empty_measures() -> dict:
-    return _measure_shards(duckdb.connect(":memory:"), [], 0)
-
-
 def measure_load(
     conn: Any,
     source: str,
@@ -208,7 +210,9 @@ def measure_load(
 
     ``rows_loaded``: ``episteme.articles`` rows of ``source`` with a ``source_file``
     in ``source_files``. ``orphan_bodies``: ``episteme.article_body`` rows of
-    ``source`` with no ``episteme.articles`` row of the same id and source.
+    ``source`` with no ``episteme.articles`` row of the same id and source. It
+    covers the whole source (``article_body`` has no ``source_file``), so leftover
+    rows of earlier sample runs in the database count too.
     ``rows_loaded_equals_staging`` is None when ``staging_rows`` is not given."""
     with conn.cursor() as cur:
         cur.execute(

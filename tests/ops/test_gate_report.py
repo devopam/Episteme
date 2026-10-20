@@ -1,13 +1,12 @@
 import json
 
+import polars as pl
 import pytest
 
 from episteme.ops import gate, gate_report
 
 
 def _write(path, rows):
-    import polars as pl
-
     pl.DataFrame(rows).write_parquet(path)
 
 
@@ -97,15 +96,23 @@ def test_duplicates(staging):
     assert m["duplicate_content_hash"] == 1
 
 
-def test_jsonl_and_parquet_together(staging):
-    d, inputs = staging
+def test_jsonl_only(tmp_path):
+    d = tmp_path / "staging"
+    d.mkdir()
     (d / "s3.jsonl").write_text(
         json.dumps({"id": "e", "text": "q" * 10, "extract_status": "ok"}) + "\n",
         encoding="utf-8",
     )
-    m = gate_report.measure_staging(d, inputs=inputs)
-    assert m["rows"] == 5
-    assert m["text_bytes"] == 460
+    m = gate_report.measure_staging(d, inputs=[])
+    assert m["rows"] == 1
+    assert m["text_bytes"] == 10
+
+
+def test_mixed_formats_raise(staging):
+    d, inputs = staging
+    (d / "s3.jsonl").write_text('{"id": "e"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="mixes .parquet and .jsonl shards"):
+        gate_report.measure_staging(d, inputs=inputs)
 
 
 def test_empty_staging_is_zero_rows(tmp_path):
@@ -122,8 +129,6 @@ def test_empty_staging_is_zero_rows(tmp_path):
 def test_zero_row_shard(tmp_path):
     d = tmp_path / "staging"
     d.mkdir()
-    import polars as pl
-
     pl.DataFrame({"id": [], "text": []}, schema={"id": pl.Utf8, "text": pl.Utf8}).write_parquet(
         d / "s.parquet"
     )
@@ -187,12 +192,7 @@ def test_measure_load_orphans(pg_conn):
     with pg_conn.cursor() as cur:
         cur.execute("SELECT to_regclass('episteme.article_body')")
         if cur.fetchone()[0] is None:
-            with (
-                open("src/episteme/data/db/extensions.sql") as ext,
-                open("src/episteme/data/db/schema.sql") as sch,
-            ):
-                cur.execute(ext.read())
-                cur.execute(sch.read())
+            pytest.skip("episteme_test is not migrated")
         src = "gate_test_src"
         for i in ("1", "2"):
             cur.execute(
