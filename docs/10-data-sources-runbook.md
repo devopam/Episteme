@@ -115,6 +115,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `MCPG_ALTER_SYSTEM_ALLOWLIST` | Optional. Comma-separated settings the MCPg admin server may change (default: the section 2.4 settings plus `max_parallel_maintenance_workers`). `scripts/mcpg-episteme.sh` sets `MCPG_ALLOW_ALTER_SYSTEM` itself: on for `--admin`, off otherwise. |
 | `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
+| `EPISTEME_LOCK_DIR` | Folder of the heavy-job and download locks (default `<data root>/_ops/locks`). |
 | `EPISTEME_DB_MODE`, `EPISTEME_DB_TARGET`, `PGDATABASE_SECONDARY`, `EPISTEME_PRODUCTION_DATABASE` | The database-mode guard (section 3). |
 | `NCBI_API_KEY` | Optional. Raises NCBI rate limits for the PMC downloader. |
 | `EPISTEME_DOWNLOAD_THREADS` | Parallel aria2c jobs. Unset: 4 in the aria2c wrappers. The profile computes `download_threads` (16), but no wrapper reads it yet. |

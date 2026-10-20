@@ -156,6 +156,7 @@ class Settings:
     raw_root: Path
     processed_root: Path
     corpus_root: Path
+    lock_dir: Path
     pg_host: str
     pg_port: int
     pg_database: str
@@ -224,6 +225,7 @@ def get_settings() -> Settings:
     raw_root = Path(_get("EPISTEME_RAW_ROOT") or (data_root / "01_raw"))
     processed_root = Path(_get("EPISTEME_PROCESSED_ROOT") or (data_root / "02_processed"))
     corpus_root = Path(_get("EPISTEME_CORPUS_ROOT") or (data_root / "03_corpus"))
+    lock_dir = Path(_get("EPISTEME_LOCK_DIR") or (data_root / "_ops" / "locks"))
     db_mode = (_get("EPISTEME_DB_MODE") or "restricted").strip().lower()
     if db_mode not in DB_MODES:
         raise ConfigError(f"EPISTEME_DB_MODE must be one of {DB_MODES}, got {db_mode!r}")
@@ -239,6 +241,7 @@ def get_settings() -> Settings:
         raw_root=raw_root,
         processed_root=processed_root,
         corpus_root=corpus_root,
+        lock_dir=lock_dir,
         pg_host=_get("PGHOST", "localhost"),
         pg_port=_get_int("PGPORT", 5432),
         pg_database=pg_database,
