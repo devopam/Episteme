@@ -143,3 +143,47 @@ def test_first_member_when_no_toc_or_accession(tmp_path):
     ]
     _rows, book, _parts = _parse(tmp_path, "tr6_NBK82.tar.gz", members)
     assert book[0]["title"] == "First Title"
+
+
+def test_members_parse_one_tree_at_a_time(tmp_path, monkeypatch):
+    import gc
+    import weakref
+
+    from episteme.data.bookshelf import extract_bookshelf as mod
+
+    members = [
+        ("NBK90/ch1.nxml", _wrapper(_chapter("ch1", "C1"))),
+        ("NBK90/ch2.nxml", _wrapper(_chapter("ch2", "C2"))),
+        ("NBK90/TOC.nxml", _wrapper("<toc><toc-entry>t</toc-entry></toc>")),
+    ]
+    raw_dir = _write_pkg(tmp_path, "tr9_NBK90.tar.gz", members)
+
+    real_parse = mod.ET.parse
+    calls: list[str] = []
+    live: list[weakref.ref] = []
+    max_live = 0
+
+    class _Tree:
+        def __init__(self, tree):
+            self._tree = tree
+
+        def getroot(self):
+            nonlocal max_live
+            root = self._tree.getroot()
+            live.append(weakref.ref(root))
+            gc.collect()
+            max_live = max(max_live, sum(1 for r in live if r() is not None))
+            return root
+
+    def spy(fh, *a, **k):
+        tree = real_parse(fh, *a, **k)
+        calls.append(str(len(calls)))
+        return _Tree(tree)
+
+    monkeypatch.setattr(mod.ET, "parse", spy)
+    rows = mod.parse_book_archive(raw_dir / "tr9_NBK90.tar.gz", raw_dir)
+    assert len(calls) == 3
+    assert max_live == 1
+    # output order is still archive order
+    parts = [r for r in rows if r["container_id"] is not None]
+    assert [p["source_record_id"] for p in parts] == ["ch1", "ch2"]
