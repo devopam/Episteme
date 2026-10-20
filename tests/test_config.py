@@ -283,3 +283,11 @@ def test_run_dir_default_is_none(fresh_config):
 def test_run_dir_is_read(fresh_config, tmp_path):
     cfg = fresh_config(f"EPISTEME_RUN_DIR={tmp_path}\n")
     assert cfg.get_settings().run_dir == tmp_path
+
+
+def test_no_wait_default_is_false(fresh_config):
+    assert fresh_config("").get_settings().no_wait is False
+
+
+def test_no_wait_is_read(fresh_config):
+    assert fresh_config("EPISTEME_NO_WAIT=1\n").get_settings().no_wait is True

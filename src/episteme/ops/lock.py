@@ -82,11 +82,17 @@ def create_time(pid: int) -> float | None:
 
 
 def owner_alive(rec: dict) -> bool:
+    """True while the owner process (PID plus create time) runs. A process this
+    user may not inspect (AccessDenied) counts as alive while its PID exists:
+    the lock fails closed."""
     pid, ct = rec.get("pid"), rec.get("create_time")
     if not isinstance(pid, int):
         return False
-    now_ct = create_time(pid)
-    if now_ct is None:
+    try:
+        now_ct = psutil.Process(pid).create_time()
+    except psutil.AccessDenied:
+        return psutil.pid_exists(pid)
+    except (psutil.NoSuchProcess, ValueError):
         return False
     return ct is None or abs(now_ct - float(ct)) < 1.0
 
@@ -261,6 +267,17 @@ def _clear_request(run_id: str, d: Path) -> None:
             _LOG.error("could not remove %s", path.name)
 
 
+def _wait_reason(kind: str, blocker: dict | None) -> str:
+    """The wait log text. A running download blocks a heavy job until it reaches
+    a pause point; some downloads have none (docs/10 section 4.8)."""
+    if kind == "heavy" and blocker and blocker is not _LOCKED and blocker.get("kind") == "download":
+        return (
+            f"download {blocker.get('run_id')} ({blocker.get('stage')}) has no pause point "
+            "or has not reached one"
+        )
+    return f"held by {describe(blocker)}"
+
+
 def acquire(
     kind: str,
     run_id: str,
@@ -291,7 +308,7 @@ def acquire(
                 _post_request(run_id, stage, pid, d)  # re-posted if another waiter cleared it
                 requested = True
             if waited % WAIT_LOG_SEC == 0:
-                _LOG.info("waiting for the %s lock: held by %s", kind, describe(blocker))
+                _LOG.info("waiting for the %s lock: %s", kind, _wait_reason(kind, blocker))
             sleep(POLL_SEC)
             waited += POLL_SEC
     finally:
@@ -383,18 +400,35 @@ def stage_lock(
 ) -> Iterator[str]:
     """The heavy lock for one stage; with ``db`` also the advisory lock. Yields
     the run id. A stage run by a wrapper script re-enters the wrapper's lock:
-    the wrapper takes it as ``adhoc-<runner pid>`` owned by the runner PID."""
+    the wrapper takes it as ``adhoc-<runner pid>`` owned by the runner PID.
+    Under ``run_pipeline.sh --no-wait`` (``EPISTEME_NO_WAIT=1``) a busy lock
+    raises ``LockBusy`` instead of a wait."""
+    with heavy_stage_lock(stage, sleep=sleep) as run_id:
+        if db:
+            with advisory_lock(wait=not no_wait(), sleep=sleep):
+                yield run_id
+        else:
+            yield run_id
+
+
+def no_wait() -> bool:
+    """True under ``run_pipeline.sh --no-wait``: a busy lock refuses (exit 75)."""
+    from episteme.config import get_settings
+
+    return get_settings().no_wait
+
+
+@contextmanager
+def heavy_stage_lock(stage: str, *, sleep: Callable[[float], None] | None = None) -> Iterator[str]:
+    """The heavy file lock of one stage (no advisory lock). Yields the run id:
+    ``EPISTEME_RUN_ID``, else ``adhoc-<owner pid>``."""
     from episteme.config import get_settings
 
     settings = get_settings()
     owner = settings.runner_pid or os.getpid()
     run_id = settings.run_id or f"adhoc-{owner}"
-    with held("heavy", run_id, stage, owner_pid=owner, sleep=sleep):
-        if db:
-            with advisory_lock(sleep=sleep):
-                yield run_id
-        else:
-            yield run_id
+    with held("heavy", run_id, stage, owner_pid=owner, wait=not settings.no_wait, sleep=sleep):
+        yield run_id
 
 
 def _heavy_wanted(d: Path) -> bool:

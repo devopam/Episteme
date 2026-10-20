@@ -41,6 +41,7 @@ exit 0
 FAKE_STAGE = """#!/usr/bin/env bash
 name="$(basename "$0" .sh)"
 echo "stage $name" >> "$CALLS"
+[ -z "${EPISTEME_NO_WAIT:-}" ] || echo "no_wait $EPISTEME_NO_WAIT" >> "$CALLS"
 for k in heavy download; do
     f="$EPISTEME_LOCK_DIR/$k.lock"
     [ -f "$f" ] && echo "lock $k $(tr -d '\\r\\n' < "$f")" >> "$CALLS"
@@ -487,3 +488,14 @@ def test_a_single_stage_shows_the_wait_then_running(tree):
     assert proc.returncode == 0, proc.stderr
     during = _seen(calls, "status ")
     assert len(during) == 1 and during[0].get("unit") is None
+
+
+def test_no_wait_reaches_the_python_stages(tree):
+    """M1: --no-wait exports EPISTEME_NO_WAIT=1 (the advisory lock refuses too)."""
+    proc, calls, _ = _run(tree, "load", "--no-wait")
+    assert proc.returncode == 0, proc.stderr
+    assert "no_wait 1" in calls
+    (tree[1] / "calls.log").unlink()
+    proc, calls, _ = _run(tree, "graph")
+    assert proc.returncode == 0, proc.stderr
+    assert not any(c.startswith("no_wait") for c in calls)

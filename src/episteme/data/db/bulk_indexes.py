@@ -277,11 +277,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return failure
 
-    # status only reads: it must not wait behind a running load
+    # status only reads: it must not wait behind a running load. keep_stage:
+    # under run_pipeline.sh --bulk the run's status keeps its stage (load or graph).
     guard = (
         contextlib.nullcontext(StageHandle())
         if args.action == "status"
-        else stage_guard(lambda: None, lock_stage="load", db_lock=True)
+        else stage_guard(lambda: None, lock_stage="load", db_lock=True, keep_stage=True)
     )
     try:
         with guard as g, psycopg.connect(dsn, autocommit=False, **pool_kwargs(settings)) as conn:

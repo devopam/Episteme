@@ -247,9 +247,15 @@ def stalled(rec: dict[str, Any], now: datetime | None = None) -> str | None:
     from episteme.ops.lock import owner_alive
 
     now = now or datetime.now(timezone.utc)
-    runner = (rec.get("pids") or {}).get("runner")
-    if isinstance(runner, dict) and not owner_alive(runner):
-        return "crashed: the runner process is gone"
+    pids = rec.get("pids") or {}
+    runner = pids.get("runner")
+    if isinstance(runner, dict):
+        if not owner_alive(runner):
+            return "crashed: the runner process is gone"
+    else:  # a direct run (no run_pipeline.sh): the stage process is the owner
+        stage = pids.get("stage")
+        if isinstance(stage, dict) and not owner_alive(stage):
+            return "crashed: the stage process is gone"
     last = rec.get("last_progress") or rec.get("started_at")
     if not last:
         return None

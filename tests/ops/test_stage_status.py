@@ -236,3 +236,39 @@ def test_long_statement_shows_while_the_body_runs():
     with status.current().long_statement("CREATE INDEX x"):
         assert st.read()["long_statement"]["label"] == "CREATE INDEX x"
     assert st.read()["long_statement"] is None
+
+
+@pytest.mark.parametrize("ended", ["done", "failed"])
+def test_keep_stage_keeps_the_runner_stage_label(ended):
+    """M10: bulk_indexes under `--bulk graph` keeps stage=graph; a done end
+    keeps the end state the stage wrote."""
+    status.RunStatus(status.run_dir("run-t4")).update(stage="graph", state=ended)
+    with stop.stage_guard(lambda: None, lock_stage="load", keep_stage=True):
+        during = _rec()
+    assert during["stage"] == "graph" and during["state"] == "running"
+    after = _rec()
+    assert after["stage"] == "graph" and after["state"] == ended
+
+
+def test_keep_stage_without_a_label_writes_its_own():
+    with stop.stage_guard(lambda: None, lock_stage="load", keep_stage=True):
+        assert _rec()["stage"] == "load"
+
+
+def test_bulk_indexes_main_passes_keep_stage(monkeypatch):
+    from episteme.data.db import bulk_indexes
+
+    got = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_guard(ref, **kw):
+        got.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(bulk_indexes, "stage_guard", fake_guard)
+    monkeypatch.setattr(bulk_indexes.db_connection, "admin_dsn_from_settings", lambda: "x")
+    with pytest.raises(_Stop):
+        bulk_indexes.main(["drop", "--group", "pubmed_graph"])
+    assert got == {"lock_stage": "load", "db_lock": True, "keep_stage": True}

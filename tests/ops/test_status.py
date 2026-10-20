@@ -358,3 +358,30 @@ def test_status_warnings_are_rate_limited(tmp_path, monkeypatch, caplog):
         clock["t"] += 61
         st.update(a=1)
     assert caplog.text.count("could not write") == 2
+
+
+def test_stalled_direct_run_with_a_dead_stage_is_crashed():
+    """M3: with no runner entry the stage process is checked the same way."""
+    rec = {
+        "state": "running",
+        "last_progress": _iso(1),
+        "pids": {"stage": {"pid": _dead_pid(), "create_time": 1.0}},
+    }
+    assert status.stalled(rec) == "crashed: the stage process is gone"
+
+
+def test_stalled_direct_run_with_a_live_stage_is_none():
+    me = {"pid": os.getpid(), "create_time": lock.create_time(os.getpid())}
+    rec = {"state": "running", "last_progress": _iso(1), "pids": {"stage": me}}
+    assert status.stalled(rec) is None
+
+
+def test_stalled_runner_entry_wins_over_a_dead_stage():
+    """Under the runner a stage process ends between stages; only the runner counts."""
+    me = {"pid": os.getpid(), "create_time": lock.create_time(os.getpid())}
+    rec = {
+        "state": "running",
+        "last_progress": _iso(1),
+        "pids": {"runner": me, "stage": {"pid": _dead_pid(), "create_time": 1.0}},
+    }
+    assert status.stalled(rec) is None

@@ -209,6 +209,8 @@ class Settings:
     runner_pid: int | None = None
     # Folder of the current run's status file (the wrapper exports it).
     run_dir: Path | None = None
+    # run_pipeline.sh --no-wait: a busy stage or advisory lock refuses (exit 75).
+    no_wait: bool = False
 
     def pg_dsn(self) -> str:
         return (
@@ -314,6 +316,8 @@ def get_settings() -> Settings:
         run_dir=Path(_get("EPISTEME_RUN_DIR")).expanduser()
         if (_get("EPISTEME_RUN_DIR") or "").strip()
         else None,
+        # run_pipeline.sh --no-wait exports EPISTEME_NO_WAIT=1.
+        no_wait=(_get("EPISTEME_NO_WAIT") or "").strip() == "1",
     )
 
 

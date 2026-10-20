@@ -339,3 +339,41 @@ def test_stale_request_is_ignored(tmp_path):
     _write(tmp_path / "heavy.request", pid=_dead_pid(), create_time=1.0, run_id="h")
     assert lock.acquire("download", "dl", "x", wait=False, d=tmp_path) == "acquired"
     assert lock.pause_point("dl", d=tmp_path) is False
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_access_denied_owner_is_alive_while_its_pid_exists(monkeypatch, exists):
+    """M2: a process this user may not inspect fails closed."""
+
+    def denied(pid):
+        raise lock.psutil.AccessDenied(pid)
+
+    monkeypatch.setattr(lock.psutil, "Process", denied)
+    monkeypatch.setattr(lock.psutil, "pid_exists", lambda pid: exists)
+    assert lock.owner_alive({"pid": 4242, "create_time": 1.0}) is exists
+
+
+def test_heavy_wait_on_a_running_download_names_the_pause_point(tmp_path, caplog):
+    """M7: the wait log says the download has no pause point or has not reached one."""
+    lock.acquire("download", "dl-1", "download", d=tmp_path)
+
+    def fake_sleep(_sec):
+        lock.release("download", "dl-1", d=tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="episteme.ops.lock"):
+        assert lock.acquire("heavy", "h", "load", d=tmp_path, sleep=fake_sleep) == "acquired"
+    assert (
+        "waiting for the heavy lock: download dl-1 (download) has no pause point "
+        "or has not reached one"
+    ) in caplog.text
+
+
+def test_heavy_wait_on_a_heavy_lock_names_the_holder(tmp_path, caplog):
+    _write(tmp_path / "heavy.lock", run_id="other")
+
+    def fake_sleep(_sec):
+        (tmp_path / "heavy.lock").unlink()
+
+    with caplog.at_level(logging.INFO, logger="episteme.ops.lock"):
+        assert lock.acquire("heavy", "h", "load", d=tmp_path, sleep=fake_sleep) == "acquired"
+    assert "waiting for the heavy lock: held by run other" in caplog.text

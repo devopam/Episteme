@@ -288,3 +288,73 @@ def test_app_name_suffix_keeps_the_63_byte_limit(monkeypatch):
     name = dbc.app_name(SimpleNamespace(run_id="r" * 200), suffix=":lock")
     assert len(name.encode()) == 63
     assert name.endswith(f":{os.getpid()}:lock")
+
+
+def _quiet_guard(monkeypatch):
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+
+
+def test_stage_guard_marks_the_advisory_wait_as_a_long_statement(monkeypatch):
+    """M1: the status begins before the advisory-lock wait; the wait is a long
+    statement, so a long wait is not reported as a stall."""
+    from episteme.ops import status
+
+    _env(monkeypatch, run_id="r-adv", runner_pid=os.getpid())
+    _quiet_guard(monkeypatch)
+    seen = {}
+
+    @contextlib.contextmanager
+    def fake_advisory(**kw):
+        seen["wait"] = kw.get("wait")
+        seen["during"] = status.RunStatus(status.run_dir("r-adv")).read()
+        yield
+
+    monkeypatch.setattr(lock, "advisory_lock", fake_advisory)
+    with stop.stage_guard(lambda: None, lock_stage="load", db_lock=True):
+        seen["body"] = status.RunStatus(status.run_dir("r-adv")).read()
+    assert seen["wait"] is True
+    assert seen["during"]["state"] == "running" and seen["during"]["stage"] == "load"
+    assert seen["during"]["long_statement"]["label"] == "waiting for the advisory lock"
+    assert seen["body"]["long_statement"] is None
+
+
+def test_no_wait_busy_advisory_lock_exits_75_and_refused(monkeypatch):
+    """M1: EPISTEME_NO_WAIT=1 passes wait=False; a busy lock is SystemExit(75)."""
+    from episteme.ops import status
+
+    _env(monkeypatch, run_id="r-nw", runner_pid=os.getpid())
+    monkeypatch.setenv("EPISTEME_NO_WAIT", "1")
+    get_settings.cache_clear()
+    _quiet_guard(monkeypatch)
+    seen = {}
+
+    @contextlib.contextmanager
+    def busy_advisory(**kw):
+        seen["wait"] = kw.get("wait")
+        raise lock.LockBusy({"stage": "advisory lock", "run_id": "another session"})
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(lock, "advisory_lock", busy_advisory)
+    with pytest.raises(SystemExit) as exc:
+        with stop.stage_guard(lambda: None, lock_stage="load", db_lock=True):
+            pytest.fail("the body must not run when the advisory lock is busy")
+    assert exc.value.code == 75
+    assert seen["wait"] is False
+    assert status.RunStatus(status.run_dir("r-nw")).read()["state"] == "refused"
+    assert not _heavy().exists()  # the heavy lock this stage took is released
+
+
+def test_no_wait_busy_heavy_lock_exits_75(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setenv("EPISTEME_NO_WAIT", "1")
+    get_settings.cache_clear()
+    _quiet_guard(monkeypatch)
+    heavy = _heavy()
+    heavy.write_text(json.dumps(_rec(run_id="other")), encoding="utf-8")
+    monkeypatch.setattr(lock.time, "sleep", lambda s: pytest.fail("no-wait must not wait"))
+    with pytest.raises(SystemExit) as exc:
+        with stop.stage_guard(lambda: None, lock_stage="load"):
+            pytest.fail("the body must not run while another run holds the lock")
+    assert exc.value.code == 75
+    assert json.loads(heavy.read_text(encoding="utf-8"))["run_id"] == "other"
