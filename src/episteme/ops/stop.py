@@ -200,14 +200,36 @@ def start_parent_watchdog(
     return t
 
 
+class StageHandle:
+    """What ``stage_guard`` yields. A main reports its return code with
+    ``exit_code(rc)``; the end state follows from it."""
+
+    def __init__(self) -> None:
+        self.rc: int | None = None
+
+    def exit_code(self, rc: int) -> int:
+        self.rc = rc
+        return rc
+
+
+def _state_for_rc(rc: int | None) -> str:
+    if rc is None or rc == 0:
+        return "done"
+    if rc in (EXIT_INT, EXIT_TERM):
+        return "stopped"
+    return "failed"
+
+
 @contextmanager
 def stage_guard(
     conn_ref: Callable[[], Any], *, lock_stage: str | None = None, db_lock: bool = False
-) -> Iterator[None]:
+) -> Iterator[StageHandle]:
     """Stage-main wrapper: install the handlers, start the watchdog, and map a
     stop to ``SystemExit`` 130 (INT) or 143 (TERM). With ``lock_stage`` it also
     holds the heavy lock (and, with ``db_lock``, the advisory lock) for the
-    block; a wait for the lock can be stopped like any other step. The
+    block, and writes the run status: ``running`` at start and the end state
+    (from ``exit_code``) at exit; ``run_pipeline.sh`` writes after it, so its
+    value wins. A wait for the lock can be stopped like any other step. The
     watchdog's ``os._exit(143)`` leaves ``heavy.lock`` behind; the next run
     takes it over as stale."""
 
@@ -221,19 +243,20 @@ def stage_guard(
     install_stop_handlers()
     done = threading.Event()
     start_parent_watchdog(_cancel, stop=done)
+    handle = StageHandle()
     st: Any = None
     beat: threading.Thread | None = None
     end_state = "failed"
     try:
         if lock_stage is None:
-            yield
+            yield handle
         else:
             from episteme.ops import lock
 
             with lock.stage_lock(lock_stage, db=db_lock) as run_id:
                 st, beat = _begin_status(run_id, lock_stage, done)
-                yield
-        end_state = "done"
+                yield handle
+        end_state = _state_for_rc(handle.rc)
     except KeyboardInterrupt:
         end_state = "stopped"
         try:
@@ -256,26 +279,52 @@ def stage_guard(
 
 def _begin_status(
     run_id: str, stage: str, stop_beat: threading.Event
-) -> tuple[Any, threading.Thread]:
-    """Create this run's status, record the stage process, start the heartbeat."""
-    from episteme.ops import status
-    from episteme.ops.lock import create_time
+) -> tuple[Any, threading.Thread | None]:
+    """Create this run's status, record the stage process, start the heartbeat.
+    A status problem never fails the stage: it logs a WARNING and returns no status."""
+    try:
+        from episteme.ops import status
+        from episteme.ops.lock import create_time
 
-    st = status.RunStatus(status.run_dir(run_id))
-    pids = dict(st.read().get("pids") or {})  # keep the runner entry
-    pids["stage"] = {"pid": os.getpid(), "create_time": create_time(os.getpid())}
-    st.update(run_id=run_id, stage=stage, state="running", pids=pids)
-    status.set_current(st)
-    return st, st.start_heartbeat(stop_beat)
+        st = status.RunStatus(status.run_dir(run_id))
+        old = st.read()
+        pids = dict(old.get("pids") or {})  # keep the runner entry
+        pids["stage"] = {"pid": os.getpid(), "create_time": create_time(os.getpid())}
+        now = status.now_iso()
+        fields: dict[str, Any] = {
+            "run_id": run_id,
+            "stage": stage,
+            "state": "running",
+            "pids": pids,
+            "last_progress": now,
+        }
+        if old.get("stage") != stage or not old.get("started_at"):
+            fields["started_at"] = now
+        st.update(**fields)
+        status.set_current(st)
+        # reset the loader's row counter, only when that module is loaded
+        reset = getattr(
+            sys.modules.get("episteme.data.postgres_loader"), "reset_process_rows", None
+        )
+        if reset is not None:
+            reset()
+        return st, st.start_heartbeat(stop_beat)
+    except Exception as exc:  # noqa: BLE001 - a status problem must not fail the stage
+        _LOG.warning("run status unavailable (%r); the stage runs without it", exc)
+        try:
+            from episteme.ops import status
+
+            status.set_current(status.NullStatus())
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None
 
 
 def _end_status(st: Any, end_state: str) -> None:
-    """Write the end state of a direct run and drop the process-wide status."""
+    """Write the end state and drop the process-wide status."""
     if st is None:
         return
     from episteme.ops import status
 
-    # Under run_pipeline.sh the runner writes the final state; do not overwrite it.
-    if "runner" not in (st.read().get("pids") or {}):
-        st.update(state=end_state)
+    st.update(state=end_state)
     status.set_current(status.NullStatus())

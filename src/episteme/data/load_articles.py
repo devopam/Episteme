@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failed_at: str | None = None
     skipped_by_operator = 0
-    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True):
+    with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True) as g:
         if own_bracket:
             _bracket("run_start")
         try:
@@ -250,10 +250,14 @@ def main(argv: list[str] | None = None) -> int:
                 name = shard.name
                 if name not in keep:
                     print(f"skip-unit {name}")
+                    shards_done += 1
+                    current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                     continue
                 marker = checkpoint_markers.load_success_marker_path(processed_dir, source, name)
                 if marker.is_file() and not args.force:
                     print(f"skip {name}")
+                    shards_done += 1
+                    current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                     continue
 
                 try:
@@ -269,9 +273,10 @@ def main(argv: list[str] | None = None) -> int:
                     _end_bracket(f"failed at shard {name}: {exc!r}"[:500])
                     break
 
+                postgres_loader.add_committed_rows(result["rows"])  # committed by _load_one
                 _write_load_success(processed_dir, source, name, result)
                 shards_done += 1
-                current().progress(unit=name, units_done=shards_done, units_total=len(keep))
+                current().progress(unit=name, units_done=shards_done, units_total=len(shards))
                 print(
                     f"ok {name} rows={result['rows']} deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
@@ -293,12 +298,12 @@ def main(argv: list[str] | None = None) -> int:
                 _LOG.exception("could not write run_end after %r", exc)
             raise
 
-    if failed_at is not None:
-        print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
-        return 1
-    extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
-    print(f"done shards={len(shards)} failed=0{extra}")
-    return 0
+        if failed_at is not None:
+            print(f"done shards={len(shards)} failed=1 stopped_at={failed_at}")
+            return g.exit_code(1)
+        extra = f" skipped_by_operator={skipped_by_operator}" if skipped_by_operator else ""
+        print(f"done shards={len(shards)} failed=0{extra}")
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

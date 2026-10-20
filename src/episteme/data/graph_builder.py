@@ -841,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
 
     holder: list = [None]  # the connection of the attempt in progress, for stage_guard
 
-    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True):
+    with stage_guard(lambda: holder[0], lock_stage="graph", db_lock=True) as g:
 
         def _sweep() -> None:
             with connection() as sconn:
@@ -853,7 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 - recorded, then exit 1
             print(f"FAIL start-up orphan sweep: {exc!r}", file=sys.stderr)
             record_failure(args.source, "graph", "startup", repr(exc), run_id=run_id)
-            return 1
+            return g.exit_code(1)
 
         if args.source == "pubmed":
             try:
@@ -869,17 +869,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except graph_load.GraphLoadError as e:
                 print(f"ERROR: {e}", file=sys.stderr)
-                return 2
+                return g.exit_code(2)
             except Exception as exc:  # noqa: BLE001 - e.g. the start-up check lost the database
                 print(f"FAIL pubmed: {exc}", file=sys.stderr)
                 record_failure("pubmed", "graph", "pubmed", repr(exc), run_id=run_id)
-                return 1
+                return g.exit_code(1)
             if res["files"] == 0:
                 print(
                     f"WARNING: no pubmed graph files found under {args.processed_dir}",
                     file=sys.stderr,
                 )
-                return 1
+                return g.exit_code(1)
             rows = " ".join(f"{rel}={n}" for rel, n in res["rows"].items())
             print(
                 f"done files={res['files']} loaded={res['loaded']} skipped={res['skipped']} "
@@ -890,8 +890,8 @@ def main(argv: list[str] | None = None) -> int:
                 record_failure("pubmed", "graph", unit, res["error"], run_id=run_id)
                 print(f"FAILED source files: {', '.join(res['failed'])}", file=sys.stderr)
                 print(f"stopped_at={unit}", file=sys.stderr)
-                return 1
-            return 0
+                return g.exit_code(1)
+            return g.exit_code(0)
 
         if args.force:
             print(f"NOTE: --force has no effect for source {args.source} graph", file=sys.stderr)
@@ -901,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
                 raw_dir = settings.raw_root / "pmc" / "oa_comm" / "xml"
             else:
                 print(f"ERROR: --raw-dir required for source {args.source!r}", file=sys.stderr)
-                return 2
+                return g.exit_code(2)
 
         def _build_once() -> dict[str, Any]:
             """One attempt: a connection from the pool, the whole build as one transaction."""
@@ -935,15 +935,15 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 - permanent: record, exit 1
             print(f"FAIL {args.source}: {exc}", file=sys.stderr)
             record_failure(args.source, "graph", args.source, repr(exc), run_id=run_id)
-            return 1
-    print(
-        f"done source_files={len(res['source_files'])} cites={res['cites']} "
-        f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
-        f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
-        f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
-        f"mesh_empty_parse={res['mesh_empty_parse']}"
-    )
-    return 0
+            return g.exit_code(1)
+        print(
+            f"done source_files={len(res['source_files'])} cites={res['cites']} "
+            f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
+            f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
+            f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
+            f"mesh_empty_parse={res['mesh_empty_parse']}"
+        )
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

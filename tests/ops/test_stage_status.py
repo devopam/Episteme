@@ -53,13 +53,67 @@ def test_guard_keeps_the_runner_entry():
         pids = _rec()["pids"]
     assert pids["runner"] == {"pid": 1, "create_time": 2.0}
     assert "stage" in pids
-    assert _rec()["state"] == "running"  # the runner writes the end state
+    assert _rec()["state"] == "done"  # the guard always writes it; the runner writes after
 
 
 def test_direct_run_ends_done():
     with stop.stage_guard(lambda: None, lock_stage="extract"):
         pass
     assert _rec()["state"] == "done"
+
+
+def test_main_returning_1_ends_failed():
+    with stop.stage_guard(lambda: None, lock_stage="extract") as g:
+        g.exit_code(1)
+    assert _rec()["state"] == "failed"
+
+
+def test_main_returning_0_ends_done():
+    with stop.stage_guard(lambda: None, lock_stage="extract") as g:
+        assert g.exit_code(0) == 0
+    assert _rec()["state"] == "done"
+
+
+@pytest.mark.parametrize("rc", [130, 143])
+def test_main_returning_stop_code_ends_stopped(rc):
+    with stop.stage_guard(lambda: None, lock_stage="extract") as g:
+        g.exit_code(rc)
+    assert _rec()["state"] == "stopped"
+
+
+def test_every_stage_guard_call_site_reports_its_exit_code():
+    root = Path(stop.__file__).resolve().parents[1]
+    bad = []
+    for f in root.rglob("*.py"):
+        if f.name == "stop.py":
+            continue
+        text = f.read_text(encoding="utf-8")
+        calls = [
+            ln
+            for ln in text.splitlines()
+            if "stage_guard(" in ln and not ln.lstrip().startswith(("#", "def "))
+        ]
+        if calls and ".exit_code(" not in text:
+            bad.append(str(f))
+    assert bad == []
+
+
+def test_start_writes_started_at_and_last_progress():
+    with stop.stage_guard(lambda: None, lock_stage="extract"):
+        rec = _rec()
+    assert rec["started_at"] and rec["last_progress"]
+
+
+def test_status_failure_does_not_fail_the_stage(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("no status")
+
+    monkeypatch.setattr(status.RunStatus, "update", boom)
+    ran = []
+    with stop.stage_guard(lambda: None, lock_stage="extract"):
+        ran.append(1)
+    assert ran == [1]
+    assert isinstance(status.current(), status.NullStatus)
 
 
 def test_keyboard_interrupt_ends_stopped():
@@ -146,7 +200,34 @@ def test_load_source_file_reports_rows_per_batch(tmp_path, monkeypatch):
         _Conn(), source="chembl", staging_path=_shard(tmp_path, 7), run_id="r", batch_size=3
     )
     assert [c["rows_done"] - base for c in calls] == [3, 6, 7]  # one call per batch
+    st.heartbeat()  # flushes the progress held back by the throttle
     assert st.read()["rows_done"] == base + 7
+    assert postgres_loader._PROCESS_ROWS[0] == base  # counted only after the caller commits
+    postgres_loader.add_committed_rows(7)
+    postgres_loader.reset_process_rows()
+    assert postgres_loader._PROCESS_ROWS[0] == 0
+
+
+def test_progress_is_throttled(tmp_path):
+    st = status.RunStatus(tmp_path)
+    now = [100.0]
+    st._clock = lambda: now[0]
+    st._t0 = 100.0
+    st.progress(unit="a", units_done=1, units_total=10)  # first call writes
+    now[0] = 100.5
+    st.progress(unit="b", units_done=2, units_total=10)  # held
+    assert st.read()["unit"] == "a"
+    now[0] = 102.5
+    st.progress(unit="c", units_done=3, units_total=10)  # new unit after 2 s writes
+    assert st.read()["unit"] == "c"
+    now[0] = 102.6
+    st.progress(unit="d", units_done=4, units_total=10)  # held
+    assert st.read()["unit"] == "c"
+    st.update(state="done")  # an update flushes the held fields
+    assert st.read()["unit"] == "d"
+    now[0] = 102.7
+    st.progress(unit="z", units_done=10, units_total=10)  # last unit always writes
+    assert st.read()["units_done"] == 10
 
 
 def test_long_statement_shows_while_the_body_runs():

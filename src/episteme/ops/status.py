@@ -42,6 +42,7 @@ _LOG = logging.getLogger(__name__)
 FILE = "status.json"
 HEARTBEAT_SEC = 30.0
 STALL_SEC = 600.0
+PROGRESS_MIN_INTERVAL_SEC = 2.0
 LONG_STALL_SEC = 3600.0
 STATES = ("running", "done", "failed", "stopped", "refused")
 _TERMINAL = {"done", "failed", "stopped", "refused"}
@@ -66,6 +67,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+now_iso = _now  # public: the stage guard stamps ``started_at`` with it
+
+
 def runs_root() -> Path:
     from episteme.config import get_settings
 
@@ -81,6 +85,9 @@ class RunStatus:
         self.path = Path(run_dir) / FILE
         self._mutex = threading.Lock()
         self._t0 = time.monotonic()
+        self._clock = time.monotonic  # seam: tests patch this
+        self._last_write: float | None = None
+        self._held: dict[str, Any] = {}
 
     def _load(self) -> tuple[dict[str, Any], bool]:
         """(record, ok). ok is False only when the file exists but cannot be read."""
@@ -105,6 +112,8 @@ class RunStatus:
     def update(self, **fields: Any) -> dict[str, Any]:
         with self._mutex:
             rec, ok = self._load()
+            rec.update(self._held)  # progress held back by the throttle
+            self._held = {}
             rec.update(fields)
             rec["updated_at"] = _now()
             if not ok:  # never overwrite an existing record from a failed read
@@ -136,7 +145,7 @@ class RunStatus:
     ) -> dict[str, Any]:
         now = _now()
         fields: dict[str, Any] = {"last_progress": now, "heartbeat": now}
-        elapsed = time.monotonic() - self._t0
+        elapsed = self._clock() - self._t0
         if unit is not None:
             fields["unit"] = unit
         if units_done is not None:
@@ -148,7 +157,20 @@ class RunStatus:
         if rows_done is not None:
             fields["rows_done"] = rows_done
             fields["rate_rows_per_s"] = round(rows_done / elapsed, 1) if elapsed > 0 else None
-        return self.update(**fields)
+        # Throttle: at most one write per PROGRESS_MIN_INTERVAL_SEC. The latest
+        # fields wait in memory for the next allowed call. Always write the first
+        # call, the last unit (done == total) and a new unit after the interval.
+        mono = self._clock()
+        with self._mutex:
+            self._held.update(fields)
+            age = None if self._last_write is None else mono - self._last_write
+            final = units_done is not None and units_done == units_total
+            due = age is None or age >= PROGRESS_MIN_INTERVAL_SEC
+            if not (final or due):
+                return dict(self._held)
+            pending, self._held = self._held, {}
+            self._last_write = mono
+        return self.update(**pending)
 
     @contextmanager
     def long_statement(self, label: str) -> Iterator[None]:

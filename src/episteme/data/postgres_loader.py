@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -227,8 +228,26 @@ def _iter_id_batches(
         yield [r["id"] for r in batch], [r["source_file"] for r in batch]
 
 
-# Rows loaded by this process so far; the status shows the running total and rate.
+# Rows COMMITTED by this process so far (the caller reports them with
+# ``add_committed_rows`` after its commit). The status shows this total plus the
+# rows of the shard in flight, so a rolled-back attempt leaves no residue.
 _PROCESS_ROWS = [0]
+_PROCESS_ROWS_LOCK = threading.Lock()
+
+
+def add_committed_rows(n: int) -> None:
+    with _PROCESS_ROWS_LOCK:
+        _PROCESS_ROWS[0] += n
+
+
+def reset_process_rows() -> None:
+    with _PROCESS_ROWS_LOCK:
+        _PROCESS_ROWS[0] = 0
+
+
+def _rows_committed() -> int:
+    with _PROCESS_ROWS_LOCK:
+        return _PROCESS_ROWS[0]
 
 
 def load_source_file(
@@ -367,8 +386,7 @@ def load_source_file(
                 copy_sec += time.perf_counter() - t1
                 per_file_inserted.update(cols["source_file"])
                 total += len(cols["id"])
-                _PROCESS_ROWS[0] += len(cols["id"])
-                current().progress(rows_done=_PROCESS_ROWS[0])
+                current().progress(rows_done=_rows_committed() + total)
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:

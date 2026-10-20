@@ -257,7 +257,7 @@ def _retire(raw_dir: Path, processed_dir: Path, run_id: str | None) -> int:
         return 0
 
     # only a run with work to do takes the locks
-    with stage_guard(lambda: None, lock_stage="load", db_lock=True):
+    with stage_guard(lambda: None, lock_stage="load", db_lock=True) as g:
         total = 0
         with connection() as conn:
             for entry in plan:
@@ -283,8 +283,8 @@ def _retire(raw_dir: Path, processed_dir: Path, run_id: str | None) -> int:
                 total += deleted
             conn.commit()
 
-    print(f"retired {total} article(s) across {len(plan)} package(s)")
-    return 0
+        print(f"retired {total} article(s) across {len(plan)} package(s)")
+        return g.exit_code(0)
 
 
 if __name__ == "__main__":

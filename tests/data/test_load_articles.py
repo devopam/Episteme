@@ -239,7 +239,13 @@ def ff(monkeypatch, tmp_path):
         monkeypatch.setattr(mod.audit_trail, "record", _record)
     monkeypatch.setattr(la.postgres_loader, "load_source_file", _load)
     monkeypatch.setattr(la.orphans, "sweep", lambda conn: [])
-    monkeypatch.setattr(la, "stage_guard", lambda ref, **kw: nullcontext())
+    monkeypatch.setattr(
+        la,
+        "stage_guard",
+        lambda ref, **kw: nullcontext(
+            __import__("episteme.ops.stop", fromlist=["x"]).StageHandle()
+        ),
+    )
     sleeps = []
     monkeypatch.setattr(la, "_SLEEP", sleeps.append)
 
