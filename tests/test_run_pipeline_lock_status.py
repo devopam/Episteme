@@ -51,6 +51,22 @@ fi
 if [ -n "${FOREIGN_LOCK:-}" ] && [ "$name" = "${FOREIGN_AT:-}" ]; then
     printf '%s' "$FOREIGN_LOCK" > "$EPISTEME_LOCK_DIR/heavy.lock"
 fi
+# WAITKILL_SIG: once the runner waits for the heavy lock (the acquire posted
+# heavy.request), log the status, signal the runner, then free the lock so
+# the acquire child can exit (bash runs the trap after the child exits).
+if [ -n "${WAITKILL_SIG:-}" ] && [ "$name" = "${FOREIGN_AT:-}" ]; then
+    runner=$PPID
+    (
+        n=0
+        while [ ! -f "$EPISTEME_LOCK_DIR/heavy.request" ] && [ "$n" -lt 600 ]; do
+            sleep 0.2; n=$((n + 1))
+        done
+        echo "waitstatus $(tr -d '\\r\\n' < "$EPISTEME_RUN_DIR/status.json")" >> "$CALLS"
+        kill -"$WAITKILL_SIG" "$runner"
+        sleep 1
+        rm -f "$EPISTEME_LOCK_DIR/heavy.lock"
+    ) </dev/null >/dev/null 2>&1 &
+fi
 sig_var="SIG_${name}"
 [ -z "${!sig_var:-}" ] || kill -"${!sig_var}" "$PPID"
 rc_var="RC_${name}"
@@ -59,6 +75,7 @@ exit "${!rc_var:-0}"
 
 FAKE_BULK = """#!/usr/bin/env bash
 echo "bulk $1" >> "$CALLS"
+[ "$1" = drop ] && [ -n "${SIG_BULK_DROP:-}" ] && kill -"$SIG_BULK_DROP" "$PPID"
 exit 0
 """
 
@@ -420,3 +437,53 @@ def test_a_rerun_resumes_at_the_failed_unit(tree):
     proc, calls, _ = _run(tree, "extract")
     assert proc.returncode == 0, proc.stderr
     assert [c for c in calls if c.startswith("unit ")] == ["unit u2", "unit u3"]
+
+
+@pytest.mark.parametrize(("sig", "rc"), [("TERM", 143), ("INT", 130)])
+def test_a_signal_during_the_lock_wait_of_all_closes_the_bracket(tree, sig, rc):
+    """I1: stage 2 of `all` waits for a live foreign heavy.lock; a signal then
+    ends the run with exactly one run_end and leaves no lock of this run."""
+    proc, calls, audit = _run(
+        tree,
+        "all",
+        FOREIGN_LOCK=_foreign_lock(),
+        FOREIGN_AT="download_pubmed",
+        WAITKILL_SIG=sig,
+    )
+    assert proc.returncode == rc, proc.stderr
+    assert [c for c in calls if c.startswith("stage ")] == ["stage download_pubmed"]
+    waiting = _seen(calls, "waitstatus ")
+    assert len(waiting) == 1
+    assert waiting[0]["state"] == "running" and waiting[0]["stage"] == "extract"
+    assert waiting[0]["unit"] == "waiting for the heavy lock"
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1, audit
+    assert "stopped while waiting for the heavy lock (stage extract)" in ends[0]
+    st = _status(tree[1])
+    assert st["state"] == "stopped" and st["stage"] == "extract"
+    locks = _locks(tree[1])
+    assert not (locks / "heavy.lock").exists()
+    assert not (locks / "download.lock").exists()
+    assert not (locks / "heavy.request").exists()
+
+
+def test_a_signal_during_the_bulk_drop_closes_the_bracket(tree):
+    _write(tree[0] / "db" / "bulk_load_indexes.sh", FAKE_BULK)
+    proc, calls, audit = _run(tree, "load", "--bulk", SIG_BULK_DROP="TERM")
+    assert proc.returncode == 143, proc.stderr
+    assert "stage load_pubmed" not in calls
+    assert [c for c in calls if c.startswith("bulk ")] == ["bulk drop", "bulk rebuild"]
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1, audit
+    assert "stopped at stage load (bulk index drop)" in ends[0]
+    assert _status(tree[1])["state"] == "stopped"
+    assert not (_locks(tree[1]) / "heavy.lock").exists()
+
+
+def test_a_single_stage_shows_the_wait_then_running(tree):
+    """While a single stage waits for its lock the status says so; once held it
+    no longer shows the wait."""
+    proc, calls, _ = _run(tree, "load")
+    assert proc.returncode == 0, proc.stderr
+    during = _seen(calls, "status ")
+    assert len(during) == 1 and during[0].get("unit") is None
