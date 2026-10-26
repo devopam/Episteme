@@ -208,6 +208,10 @@ _PUBCHEM_LICENSE_RAW = (
     "permission concerning the use, copying, or distribution of the "
     "information contained in the molecular databases."
 )
+# The text is constant, so it goes through normalize_license once, here, not once
+# per row (the call cost ~186 us of ~289 us per row). pubchem_row uses
+# license_url / license_raw from it and applies the governance override.
+_PUBCHEM_LICENSE = normalize_license(_PUBCHEM_LICENSE_RAW)
 
 # Serializes the mirror_only file-append across this process's worker threads
 # (the DB-level advisory lock in audit_trail.record() does nothing for a plain
@@ -228,7 +232,8 @@ _CANDIDATE_EXTS = (".gz", ".tsv.gz", ".tsv")
 #   CID-IUPAC.gz  -- CID, tab, IUPAC name
 #   CID-Title.gz  -- CID, tab, compound-summary-page title
 #   CID-Mass.gz   -- CID, tab, formula, tab, monoisotopic mass, tab, exact mass
-# Column order is the file's field order; n_fields = len(columns) - 1.
+# Column order is the file's field order; n_fields = len(columns) - 1. The types
+# describe the data only: the reader keeps every field as the text it read.
 _SIBLING_DEFS: dict[str, dict[str, Any]] = {
     "iupac_name": {
         "stem": "CID-IUPAC",
@@ -329,9 +334,6 @@ def _iter_cid_lines(
         yield cid, fields
 
 
-_MASS_KEYS = ("monoisotopic_mass", "exact_mass")
-
-
 def iter_merged_records(
     primary_path: Path,
     sibling_paths: dict[str, Path],
@@ -343,20 +345,25 @@ def iter_merged_records(
     forward while its CID is lower than the primary CID. Memory is one line
     per file. A sibling CID absent from the primary is ignored; a primary CID
     absent from a sibling gets ``None`` for that sibling's fields.
+
+    The masses of CID-Mass stay the raw strings as read (or ``None``): the row
+    text does not use them.
     """
+    # The field names of each sibling, computed once (not once per record).
+    names: dict[str, list[str]] = {
+        key: list(spec["columns"])[1:] for key, spec in _SIBLING_DEFS.items()
+    }
     cursors: dict[str, Iterator[tuple[int, list[str | None]]]] = {}
     heads: dict[str, tuple[int, list[str | None]] | None] = {}
     primary = _iter_cid_lines(primary_path, 1, stats)
     try:
         for key, path in sibling_paths.items():
-            n_fields = len(_SIBLING_DEFS[key]["columns"]) - 1
-            cursors[key] = _iter_cid_lines(path, n_fields)
+            cursors[key] = _iter_cid_lines(path, len(names[key]))
             heads[key] = next(cursors[key], None)
         for cid, (smiles,) in primary:
             rec: dict[str, Any] = {"cid": cid, "smiles": smiles}
-            for key, spec in _SIBLING_DEFS.items():
-                names = list(spec["columns"])[1:]
-                values: list[str | None] = [None] * len(names)
+            for key, fields in names.items():
+                values: list[str | None] | None = None
                 if key in cursors:
                     head = heads[key]
                     while head is not None and head[0] < cid:
@@ -364,11 +371,11 @@ def iter_merged_records(
                     heads[key] = head
                     if head is not None and head[0] == cid:
                         values = head[1]
-                for name, value in zip(names, values, strict=True):
-                    if name in _MASS_KEYS and value is not None:
-                        rec[name] = float(value)
-                    else:
-                        rec[name] = value
+                if values is None:
+                    for name in fields:
+                        rec[name] = None
+                else:
+                    rec.update(zip(fields, values, strict=True))
             yield rec
     finally:
         for it in (primary, *cursors.values()):
@@ -432,7 +439,7 @@ def pubchem_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     native_id = str(cid) if cid is not None else None
     if not native_id:
         return None  # no native id: caller counts + skips (never synthesize an id)
-    lic, lic_url, lic_raw = normalize_license(_PUBCHEM_LICENSE_RAW)
+    _lic, lic_url, lic_raw = _PUBCHEM_LICENSE
     # GOVERNANCE OVERRIDE (SP4.1 spec 3.4, user decision 2026-09-19): this source's
     # own terms are treated as public domain -> commercial-eligible. Source-anchored
     # on purpose: normalize_license() never returns this for free text. PubChem and

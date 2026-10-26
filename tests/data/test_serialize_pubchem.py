@@ -314,16 +314,33 @@ def test_sibling_with_gaps_and_extra_cids(tmp_path):
     assert "IUPAC name propane" in rows["3"]["text"]
 
 
-def test_merged_records_have_float_masses(tmp_path):
+def test_merged_records_keep_raw_mass_strings(tmp_path):
+    """The masses are not in the row text: the record keeps them as read."""
     from episteme.data.pubchem.serialize_pubchem import iter_merged_records
 
     _write(tmp_path / "CID-SMILES.tsv", "1\tC\n2\tCC\n")
-    mass = _write(tmp_path / "CID-Mass.tsv", "1\tCH4\t16.03\t16.04\n")
+    mass = _write(tmp_path / "CID-Mass.tsv", "1\tCH4\t16.03\tnot-a-number\n")
     recs = list(iter_merged_records(tmp_path / "CID-SMILES.tsv", {"formula": mass}))
     assert recs[0]["formula"] == "CH4"
-    assert recs[0]["monoisotopic_mass"] == 16.03
-    assert recs[0]["exact_mass"] == 16.04
+    assert recs[0]["monoisotopic_mass"] == "16.03"
+    assert recs[0]["exact_mass"] == "not-a-number"
     assert recs[1]["formula"] is None and recs[1]["exact_mass"] is None
+
+
+def test_pubchem_row_does_not_normalize_the_licence_per_row(monkeypatch):
+    """The licence text is constant: it goes through normalize_license once, at
+    import, not once per row."""
+    from episteme.data.article_schema import normalize_license
+    from episteme.data.pubchem import serialize_pubchem as mod
+
+    calls = []
+    real = mod.normalize_license
+    monkeypatch.setattr(mod, "normalize_license", lambda raw: calls.append(raw) or real(raw))
+    row = mod.pubchem_row({"cid": 1, "smiles": "C"}, "f")
+    assert calls == []
+    _lic, lic_url, lic_raw = normalize_license(mod._PUBCHEM_LICENSE_RAW)
+    assert (row["license_url"], row["license_raw"]) == (lic_url, lic_raw)
+    assert row["license"] == "public_domain"
 
 
 def test_unsorted_primary_fails_fast(tmp_path):
