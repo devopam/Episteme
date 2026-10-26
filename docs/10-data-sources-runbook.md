@@ -130,6 +130,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_FETCH_BATCH` | URLs per batch in `http_fetch` (default 64). A download pauses between batches (section 4.8). A value that is not a positive number gives a WARNING and 64. |
 | `EPISTEME_RUN_DIR` | Set by `run_pipeline.sh`: the folder of the run (`<processed root>/_ops/runs/<run id>`). It holds `status.json` and `failed_files.txt`. Leave it blank. |
+| `EPISTEME_STOP_FILE` | Set by `run_pipeline.sh`: the stop-request file of the run (`<run folder>/stop.request`; without a run folder, a file in the temp folder). The runner writes it on Ctrl-C or SIGTERM, and the stage stops (section 4.7). Leave it blank. |
 | `EPISTEME_RUN_ID` | Set by `run_pipeline.sh` for each invocation so all stages share one run id. Leave it blank. |
 | `EPISTEME_INIT_FORCE` | `1` makes `init_database.sh` DROP and recreate the `episteme` schema. Destructive. |
 | `OM_HOST`, `OM_JWT` | Optional OpenMetadata ingest; blank means skip. |
@@ -452,6 +453,16 @@ These rules apply to the `extract`, `serialize`, `load` and `graph` stages. Down
 **Fail fast.** A stage stops at the first unit that fails. A unit is one input file (extract, serialize) or one shard (load). The stage does not start the next unit. With more than one worker, the units already running finish or fail. The exit code is 1.
 
 **Stop.** A stop (Ctrl-C, SIGTERM, the parent watchdog) is not a failure. The stage cancels the queued units and terminates the workers in flight, then exits 130 or 143. A terminated unit has no success marker, so the next run does it again. The stage does not wait for the units in flight to finish.
+
+How a stop reaches the stage:
+
+- To stop a run, send Ctrl-C or `kill -TERM <runner PID>` to `run_pipeline.sh`. Do not use `taskkill /T` on the stage tree.
+- `run_pipeline.sh` runs each stage in the background and waits for it. On INT or TERM it writes the signal name to the stop-request file (`EPISTEME_STOP_FILE`, `<run folder>/stop.request`). Bash cannot signal a native Windows Python, so the file carries the stop. The file also carries Ctrl-C: a background stage can ignore SIGINT.
+- The parent watchdog of the stage reads the file every second. When the file appears, the watchdog stops the stage as a SIGTERM does: the stage cancels its statement and exits 143. If the stage is in a long statement and still runs 5 seconds later, the watchdog cancels the statement again.
+- The runner waits for the stage to end. Then it writes the end state `stopped` and the `run_end` row, and releases the lock. The runner exits 130 (Ctrl-C) or 143 (SIGTERM). A second Ctrl-C does not make the runner exit early.
+- The runner removes an old stop-request file before each stage starts.
+- If the runner itself dies (a hard kill), the watchdog sees that the runner is gone within 10 seconds. It cancels the statement, terminates the child processes of the stage (the pool workers), and exits 143. The `heavy.lock` stays; the next run takes it over as stale.
+- A stage that hangs and does not stop: end it with `taskkill /T /F /PID <stage PID>` (the `stage` PID in `status.json`). The runner then ends as well.
 
 **Retries.** A transient error is retried 3 times. The waits are 30, 60 and 120 seconds. A load or graph unit takes its connection for each attempt from the pool. That connection can be a healthy idle one that the pool reuses. After a server restart, the pool can hand out dead idle connections, and each one uses up an attempt. If the third retry fails, the error is permanent and the stage stops.
 
