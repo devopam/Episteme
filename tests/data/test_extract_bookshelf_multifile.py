@@ -276,3 +276,16 @@ def test_a_package_with_no_book_document_fails(tmp_path):
     with pytest.raises(ValueError) as exc:
         parse_book_archive(raw_dir / "tr15_NBK96.tar.gz", raw_dir)
     assert str(exc.value) == "tr15_NBK96.tar.gz: no Bookshelf document in the package"
+
+
+def test_fallback_book_fields_come_from_the_first_member_with_book_meta(tmp_path):
+    # No NBK-named or TOC member, and the first book document is a bare
+    # <book-part> without <book-meta>: the book fields come from the later
+    # member that has <book-meta>, not from the bare part.
+    members = [
+        ("NBK97/aaa_part.nxml", _chapter("p1", "Bare Part")),
+        ("NBK97/ch1.nxml", _wrapper(_chapter("ch1", "C1"), "Real Book Title")),
+    ]
+    rows, book, parts = _parse(tmp_path, "tr16_NBK97.tar.gz", members)
+    assert book[0]["title"] == "Real Book Title"
+    assert book[0]["year"] == 2021

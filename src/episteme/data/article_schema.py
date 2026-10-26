@@ -41,6 +41,9 @@ SCHEMA_VERSION = "1.6"
 MIN_OK_TEXT_LEN = 200
 
 # Advisory key set for the episteme.articles.book_meta JSON blob (SP2 bookshelf rows).
+# Advisory: a new optional key (e.g. skipped_members, 2026-10-26, written only when
+# a package member was skipped) does not change SCHEMA_VERSION; a renamed or
+# removed key, or a changed value type, does.
 # book_meta values must be JSON strings when written to a row dict -- see
 # staging_writer.write_parquet_shard's catch-all branch.
 BOOK_META_KEYS = ("isbn", "editors", "publisher", "edition", "n_parts", "skipped_members")

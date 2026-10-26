@@ -7,7 +7,10 @@ one ``<book>`` NXML document, or one NXML file per chapter) into the unified
 Unit of work: one input ``.tar.gz`` archive. Per archive: open the tar, parse
 EVERY ``.nxml``/``.xml`` member (archive order) with ``defusedxml``, build the
 book row (``container_id=None``, ``book_meta`` set) from ONE preferred member
-(the one named after the accession, else ``TOC``, else the first) and one row
+(the one named after the accession, else ``TOC``, else the first book document
+with ``<book-meta>``, else the first book document; a member whose root is not a
+Bookshelf root is an attachment, skipped and listed in
+``book_meta.skipped_members``) and one row
 per kept ``<book-part>``/``<book-app>`` across all members
 (``container_id = <book row id>``, ``book_meta=None``; a part id that repeats
 inside the package is suffixed ``__<member stem>``), then
@@ -370,7 +373,8 @@ def _part_candidates(root: ET.Element) -> list[dict[str, Any]]:
 
 
 def _book_fields(root: ET.Element) -> dict[str, Any]:
-    """Book-level fields from the preferred member's tree."""
+    """Book-level fields from the book-level member's tree (see the module
+    docstring for how that member is chosen)."""
     book_meta_el = _find_child(root, "book-meta")
     title = _title_from(book_meta_el, "book-title", "book-title-group")
 
@@ -450,6 +454,7 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     stems: list[str] = []
     book: dict[str, Any] | None = None
     skipped_members: list[str] = []
+    book_has_meta = False  # only used when there is no preferred member
     with tarfile.open(path, "r:gz") as tar:
         members = _nxml_members(tar)
         preferred = _find_nxml_member(members, nbk)
@@ -467,8 +472,15 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
                 skipped_members.append(member.name)
                 del root
                 continue
-            if member is preferred or (preferred is None and book is None):
+            if member is preferred:
                 book = _book_fields(root)
+            elif preferred is None and not book_has_meta:
+                # No accession-named or TOC member: the first book document
+                # with <book-meta>, else the first book document.
+                has_meta = _find_child(root, "book-meta") is not None
+                if book is None or has_meta:
+                    book = _book_fields(root)
+                    book_has_meta = has_meta
             stems.append(Path(member.name).stem)
             cands_by_member.append(_part_candidates(root))
             del root
