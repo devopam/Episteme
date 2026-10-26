@@ -34,10 +34,7 @@ Not in scope: new pubchem properties (synonyms, MeSH, PMID, patents), the licenc
 
 ### 4.1 Streaming merge join
 
-- Read each file line by line through `open_gz`, in binary mode: split on `
-`, strip a trailing `
-` or `
-`, decode each line as UTF-8 (errors replaced). A lone `` inside a field is then not a line break (final review, 2026-10-26).
+- Read each file line by line through `open_gz`, in binary mode: split on LF, strip a trailing CRLF or LF, decode each line as UTF-8 (errors replaced). A lone CR inside a field is then not a line break (final review, 2026-10-26).
 - Walk the primary file. For each CID, move each sibling cursor forward while its CID is lower. Take the sibling value when the CIDs are equal; else the value is None.
 - Memory is one line per file plus one write batch.
 - Fail fast. The reader raises `PubchemInputError` (a permanent error, §6 of the standard) when a CID is not an integer, or when a CID is not strictly above the one before it. The error names the file and the line number. A line with an empty CID is counted as `skipped_no_id` and skipped, as today.
