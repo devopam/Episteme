@@ -46,7 +46,8 @@ _LOG = logging.getLogger(__name__)
 # Closed event-type set. The phase-0 data roadmap (Sec 4.8) fixed the first 13
 # names; bulk_index_drop / bulk_index_rebuild (bulk-load mode, 2026-10) make 15;
 # orphan_cancel (ops stop handling, 2026-10) makes 16; unit_skip (operator
-# --skip-unit, 2026-10) makes 17.
+# --skip-unit, 2026-10) makes 17; gate_override (operator --skip-gate, 2026-10)
+# makes 18.
 # record() rejects anything else with ValueError *before* any config or DB work.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -67,6 +68,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "bulk_index_rebuild",
         "orphan_cancel",
         "unit_skip",
+        "gate_override",
     }
 )
 

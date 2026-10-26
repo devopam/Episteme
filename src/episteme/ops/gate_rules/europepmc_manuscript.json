@@ -1,0 +1,15 @@
+{
+  "extract": {
+    "max_duplicate_ids": 2,
+    "max_duplicate_ids_in_shard": 0,
+    "max_failed_inputs": 0,
+    "max_empty_text_pct": 0,
+    "max_null_pct": {"abstract": 15.0, "language": 25.0},
+    "min_rows_per_input": 200,
+    "allowed_licenses": ["text_mining"]
+  },
+  "load": {
+    "max_orphan_bodies": 0,
+    "rows_loaded_equals_staging": true
+  }
+}
