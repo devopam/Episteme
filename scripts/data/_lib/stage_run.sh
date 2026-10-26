@@ -33,8 +33,11 @@
 STAGE_PID=""       # the stage that stage_exec waits for; empty between stages
 STAGE_STARTING=0   # 1 from just before the fork until STAGE_PID is set
 STAGE_FORWARDED=0  # 1 once the trap has signalled the stage (only once)
-# Forward the stop as a signal? Not on MSYS/Cygwin. _EPISTEME_STOP_FORWARD is
-# a test seam only (0 or 1).
+# Forward the stop as a SIGTERM to the stage tree? Yes on Linux and macOS (a
+# background job starts with SIGINT ignored, so only a signal or the stop file
+# reaches it). No on MSYS/Cygwin: there `kill` on a native Windows process is a
+# hard TerminateProcess, so the stop file is the only path. _EPISTEME_STOP_FORWARD
+# is a test seam only (0 or 1).
 case "${OSTYPE:-}" in
     msys*|cygwin*) _STAGE_FORWARD="${_EPISTEME_STOP_FORWARD:-0}" ;;
     *) _STAGE_FORWARD="${_EPISTEME_STOP_FORWARD:-1}" ;;
@@ -93,13 +96,18 @@ _stage_stop() {
     fi
     if [ -n "$STAGE_PID" ]; then
         local tree="" p
+        local -a pids=()
         if [ "$_STAGE_FORWARD" = "1" ] && [ "$STAGE_FORWARDED" = "0" ]; then
             # Once: a second SIGTERM could break the stage's own cleanup.
             STAGE_FORWARDED=1
             tree="$(_stage_tree "$STAGE_PID")"
-            [ -n "$tree" ] || tree="$STAGE_PID"
-            # shellcheck disable=SC2086 # a list of PIDs
-            kill -TERM $tree 2>/dev/null
+            # Only plain decimal PIDs reach kill; the stage itself at least.
+            for p in $tree; do
+                case "$p" in '' | *[!0-9]*) ;; *) pids+=("$p") ;; esac
+            done
+            [ "${#pids[@]}" -gt 0 ] || pids=("$STAGE_PID")
+            tree="${pids[*]}"
+            kill -TERM "${pids[@]}" 2>/dev/null
             log WARN "stop ($1): sent SIGTERM to the stage (PIDs $tree)"
         fi
         if [ -n "${EPISTEME_STOP_FILE:-}" ]; then

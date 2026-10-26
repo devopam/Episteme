@@ -435,3 +435,18 @@ def test_a_stop_from_another_thread_reaches_the_pool_wait(tmp_path, spawn_child_
     while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not any(psutil.pid_exists(p) for p in worker_pids)
+
+
+def test_the_pool_still_exposes_its_worker_processes(tmp_path, spawn_child_env):
+    # _terminate_workers reads the private ProcessPoolExecutor._processes; this
+    # pins it on every interpreter CI and production run (3.13, 3.14).
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    ) as pool:
+        pool.submit(os.getpid).result(timeout=60)
+        procs = pool._processes
+        assert isinstance(procs, dict) and procs
+        assert all(hasattr(p, "terminate") and hasattr(p, "join") for p in procs.values())

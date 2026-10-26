@@ -228,3 +228,18 @@ def test_a_row_over_the_byte_cap_is_a_batch_of_its_own(tmp_path, monkeypatch):
     pf = pq.ParquetFile(res["paths"][0])
     assert [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)] == [1, 1, 1]
     assert res["n_rows"] == 3
+
+
+def test_rows_without_string_data_never_make_an_empty_batch(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    from episteme.data import staging_writer
+
+    rows = [{"year": 2020 + i} for i in range(5)]
+    assert all(staging_writer._row_chars(r) == 0 for r in rows)
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 1)
+    batches = list(staging_writer._batches(rows, 2))
+    assert [len(b) for b in batches] == [2, 2, 1]  # the row cap binds; no empty batch
+    assert list(staging_writer._batches([], 2)) == []
+    res = write_rows(_text_rows(3, 0), tmp_path, source="pmc", source_file="f.xml", batch_size=2)
+    assert res["n_rows"] == 3 and pq.ParquetFile(res["paths"][0]).num_row_groups >= 1

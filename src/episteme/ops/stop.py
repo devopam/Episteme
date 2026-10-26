@@ -44,7 +44,9 @@ STOP_CANCEL_AFTER_S = 5.0
 _TERM_SEEN = False
 # True once a stop (SIGINT, SIGTERM, SIGBREAK, the stop file) reached this
 # stage: the watchdog then delivers no second stop from the stop file, which
-# could cut the cleanup of the first one short.
+# could cut the cleanup of the first one short. The double stop is real: on
+# Windows a console Ctrl-C reaches the stage directly AND the runner writes the
+# stop file; on POSIX the runner forwards SIGTERM AND writes the stop file.
 _STOPPING = False
 
 

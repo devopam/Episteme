@@ -179,8 +179,14 @@ def run_per_file(
 
 
 def _terminate_workers(pool: ProcessPoolExecutor) -> None:
-    """Terminate the pool's worker processes and wait briefly for them."""
-    procs = list((getattr(pool, "_processes", None) or {}).values())
+    """Terminate the pool's worker processes and wait briefly for them.
+
+    ``ProcessPoolExecutor`` has no public handle on its workers, so this reads
+    the private ``_processes`` (present on 3.13 and 3.14; a test pins it). If a
+    later Python drops it, every live ``multiprocessing`` child of this stage
+    is a pool worker (a stage runs one pool), so those are terminated."""
+    workers = getattr(pool, "_processes", None)
+    procs = list(workers.values()) if workers is not None else multiprocessing.active_children()
     for proc in procs:
         try:
             proc.terminate()
