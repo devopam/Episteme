@@ -16,8 +16,9 @@ from episteme.ops.profile import default_batch_rows
 WRITE_BATCH_ROWS = default_batch_rows()
 # A write batch also ends at this many characters of string values, whatever
 # its row count. The count is a proxy for bytes: it counts the characters of
-# str values only (not the UTF-8 bytes of a multi-byte character, not list
-# columns or other non-str values) (2026-10-26: europepmc full-text rows average ~58 KB, so a
+# str values and of the str elements of list values (not the UTF-8 bytes of a
+# multi-byte character, not other values). A batch never goes over it, except
+# a single row that is larger on its own (2026-10-26: europepmc full-text rows average ~58 KB, so a
 # 50,000-row batch held ~3 GB and three workers exhausted a 16 GB machine).
 # Peak memory per writer is a small multiple of it (Python strings, the column
 # lists and the Arrow arrays).
@@ -102,25 +103,37 @@ def _batch_to_table(rows: list[dict[str, Any]]):
 
 
 def _row_chars(row: dict[str, Any]) -> int:
-    """String size of one row: the number of characters of its str values, the
-    cheap proxy for bytes that the byte cap uses. Multi-byte UTF-8 characters
-    count once; list columns and other non-str values are not counted. No
+    """String size of one row: the number of characters of its str values and
+    of the str elements of its list values (``authors``, ``mesh``,
+    ``publication_types``), the cheap proxy for bytes that the byte cap uses.
+    Multi-byte UTF-8 characters count once; other values are not counted. No
     encode: it runs once per row."""
-    return sum(len(v) for v in row.values() if isinstance(v, str))
+    n = 0
+    for v in row.values():
+        if isinstance(v, str):
+            n += len(v)
+        elif isinstance(v, (list, tuple)):
+            n += sum(len(x) for x in v if isinstance(x, str))
+    return n
 
 
 def _batches(rows: Iterable[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
     """Batches of at most ``batch_size`` rows that also end once the characters
     of their string values (``_row_chars``, a proxy for bytes) reach
     ``WRITE_BATCH_BYTES`` (read at call time, so tests can shrink
-    it). A row over the cap is a batch of its own. Rows are never dropped or
-    reordered."""
+    it). A batch never goes over the cap: a row that would take it over ends
+    the batch first, so a row over the cap is a batch of its own. Rows are
+    never dropped or reordered."""
     cap = WRITE_BATCH_BYTES
     batch: list[dict[str, Any]] = []
     size = 0
     for row in rows:
+        n = _row_chars(row)
+        if batch and size + n > cap:
+            yield batch
+            batch, size = [], 0
         batch.append(row)
-        size += _row_chars(row)
+        size += n
         if len(batch) >= batch_size or size >= cap:
             yield batch
             batch, size = [], 0

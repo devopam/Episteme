@@ -207,12 +207,13 @@ def test_a_batch_also_ends_at_the_byte_cap(tmp_path, monkeypatch):
     rows = _text_rows(10, 400)
     one = staging_writer._row_chars(rows[0])  # every row has the same size
     assert all(staging_writer._row_chars(r) == one for r in rows)
-    # 2.5 rows of string data: a batch ends at its 3rd row; the row cap (1,000) never binds.
+    # 2.5 rows of string data: a 3rd row would go over, so a batch holds 2 rows
+    # (never over the cap); the row cap (1,000) never binds.
     monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", int(2.5 * one))
     capped = write_rows(rows, tmp_path / "c", source="pmc", source_file="f.xml", batch_size=1000)
     pf = pq.ParquetFile(capped["paths"][0])
     sizes = [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)]
-    assert sizes == [3, 3, 3, 1]
+    assert sizes == [2, 2, 2, 2, 2]
     monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 10**12)
     plain = write_rows(rows, tmp_path / "p", source="pmc", source_file="f.xml", batch_size=1000)
     assert pq.read_table(capped["paths"][0]).equals(pq.read_table(plain["paths"][0]))
@@ -243,3 +244,22 @@ def test_rows_without_string_data_never_make_an_empty_batch(tmp_path, monkeypatc
     assert list(staging_writer._batches([], 2)) == []
     res = write_rows(_text_rows(3, 0), tmp_path, source="pmc", source_file="f.xml", batch_size=2)
     assert res["n_rows"] == 3 and pq.ParquetFile(res["paths"][0]).num_row_groups >= 1
+
+
+def test_an_oversized_row_does_not_join_smaller_rows(monkeypatch):
+    # Review (Greptile): 63 Mi chars then a 65 Mi-char row made one 128 Mi batch.
+    from episteme.data import staging_writer
+
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 64)
+    rows = [{"text": "a" * 63}, {"text": "b" * 65}, {"text": "c" * 10}, {"text": "d" * 10}]
+    batches = list(staging_writer._batches(rows, 100))
+    assert [[r["text"][0] for r in b] for b in batches] == [["a"], ["b"], ["c", "d"]]
+    assert all(sum(staging_writer._row_chars(r) for r in b) <= 64 for b in batches if len(b) > 1)
+
+
+def test_list_strings_count_toward_the_byte_cap():
+    # Review (CodeRabbit): long author lists must count too.
+    from episteme.data import staging_writer
+
+    row = {"text": "abc", "authors": ["x" * 10, "y" * 5], "mesh": None, "year": 2020}
+    assert staging_writer._row_chars(row) == 3 + 10 + 5

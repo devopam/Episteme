@@ -73,6 +73,19 @@ _stage_pairs() {
     done
 }
 
+# _stage_zombie PID: true when PID is a zombie (ended, not yet reaped).
+_stage_zombie() {
+    local stat state
+    if stat="$(cat "/proc/$1/stat" 2>/dev/null)"; then
+        state="${stat##*) }"
+        state="${state%% *}"
+    else
+        state="$(ps -o stat= -p "$1" 2>/dev/null)"
+        state="${state#"${state%%[![:space:]]*}"}"
+    fi
+    case "$state" in Z*) return 0 ;; *) return 1 ;; esac
+}
+
 # _stage_tree PID: PID and all its descendants, space-separated.
 _stage_tree() {
     _stage_pairs | awk -v root="$1" '
@@ -126,8 +139,10 @@ _stage_stop() {
             wait "$STAGE_PID"
         done
         # A wrapper can end before the processes under it: wait for them too.
+        # A zombie counts as ended: under a PID 1 that does not reap orphans
+        # it would pass `kill -0` forever and the lock would never be released.
         for p in $tree; do
-            while kill -0 "$p" 2>/dev/null; do
+            while kill -0 "$p" 2>/dev/null && ! _stage_zombie "$p"; do
                 sleep 0.2
             done
         done
