@@ -123,3 +123,4 @@ The first values are confirmed on the first real sample, as was done for apollo 
 
 1. No speed limit in the gate rules: the run time depends on the compute capacity available (user, 2026-10-26).
 2. The full load uses `load --bulk` (user, 2026-10-26).
+3. Known cost of decision 2: `load --bulk` drops the parent indexes of `episteme.articles` (`bulk_indexes.COVERED_INDEXES`), and that drops them on every partition. The rebuild after the load then covers all sources, not only pubchem (several hours, as for pubmed). The plan decides whether a variant that drops and rebuilds only the `articles_pubchem` indexes is worth it; it is not in scope otherwise.
