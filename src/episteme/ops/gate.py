@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -440,6 +441,9 @@ def pass_valid(source: str, stage: str, processed_root: Path) -> tuple[bool, str
 # ("ok", "not gated", "no pass", "code changed", "rules changed") on stdout.
 
 POLL_S = 0.5
+# After a stop, `gate run` waits this long for the stage to end on its own (it
+# got the same stop) before it ends the stage's process tree.
+STOP_GRACE_S = 30.0
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "data" / "db" / "migrations"
 
 
@@ -524,6 +528,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     proc = psutil.Process(child.pid)
     peak = 0
     interrupted = False
+    term = {"seen": False}
+
+    def _on_term(signum: int, frame: Any) -> None:
+        # run_pipeline.sh forwards a stop as SIGTERM (POSIX): take the
+        # KeyboardInterrupt path, so the record is written (rc 143).
+        term["seen"] = True
+        raise KeyboardInterrupt
+
+    old_term: Any = None
+    with contextlib.suppress(ValueError):  # not the main thread: no handler
+        old_term = signal.signal(signal.SIGTERM, _on_term)
     try:
         while True:
             peak = max(peak, _tree_rss(proc))
@@ -534,10 +549,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 continue
     except KeyboardInterrupt:
         interrupted = True
-        rc = 130
+        rc = 143 if term["seen"] else 130
+        # The stage got the same stop: let it end (and clean up) on its own.
+        with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt):
+            child.wait(timeout=STOP_GRACE_S)
     finally:
         if child.poll() is None:
             _stop_tree(proc, child)
+        if old_term is not None:
+            with contextlib.suppress(ValueError):
+                signal.signal(signal.SIGTERM, old_term)
     record = {
         "elapsed_s": round(time.monotonic() - t0, 3),
         "rc": rc,

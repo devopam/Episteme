@@ -647,3 +647,64 @@ def test_report_without_start_hashes_fails_closed(tmp_path, rules_dir, fake_hash
     rec.write_text(json.dumps({"elapsed_s": 1.0, "rc": 0, "peak_rss_mb": 1.0}), encoding="utf-8")
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
     assert "no code hash" in capsys.readouterr().out
+
+
+def _sigterm_once_started(monkeypatch):
+    """Popen spy; a thread sends SIGTERM (as a Python-level signal) to this
+    process once the child runs, as the runner's forwarded stop does on POSIX."""
+    import _thread
+    import signal
+    import threading
+    import time
+
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*a, **k):
+        p = real_popen(*a, **k)
+        started.append(p)
+        return p
+
+    def send():
+        deadline = time.monotonic() + 30
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.3)
+        _thread.interrupt_main(signal.SIGTERM)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    threading.Thread(target=send, daemon=True).start()
+    return started
+
+
+def test_run_sigterm_records_143_and_lets_the_stage_end(tmp_path, monkeypatch):
+    # The stage got the same SIGTERM: gate run waits for it, then writes its record.
+    import signal
+
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 20.0)
+    stopped = []
+    monkeypatch.setattr(gate, "_stop_tree", lambda proc, child: stopped.append(1))
+    before = signal.getsignal(signal.SIGTERM)
+    started = _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    code = "import time; time.sleep(2.0)"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert data["rc"] == 143 and data["interrupted"] is True
+    assert started[0].returncode == 0  # it ended on its own
+    assert stopped == []
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_run_sigterm_ends_a_stage_that_does_not_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 0.5)
+    started = _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    code = "import time; time.sleep(60)"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    assert json.loads(rec.read_text(encoding="utf-8"))["rc"] == 143
+    assert started[0].poll() is not None
