@@ -707,19 +707,22 @@ bash scripts/data/run_pipeline.sh bookshelf load --sample
 ```
 
 - `--sample` needs one named stage (`extract`, `serialize` or `load`). It does not accept `all`, `--bulk`, `--force` or `--dry-run`.
+- `--sample` does not accept `--max-files` or `--skip-unit`. The slice is the file selection of a sample run. With one of these flags the run exits 2 with `--sample cannot be used with <flag>`.
 - `--sample` needs the key `PGDATABASE_SECONDARY` in the environment. Without it the run exits 2.
 - A sample `extract` builds the slice first. It deletes the earlier sample output of that source and starts clean.
 - A sample `load` loads every shard of the sample staging again. It needs the sample extract first. Without the sample staging it exits 2.
 - Before a sample `load`, the runner checks the secondary database (see "The migration check").
 - A sample run that fails a rule exits 1 with `sample gate: no pass for <source> <stage>`. The failed rules are printed above that line.
+- When a sample run fails its rules, the runner deletes the old pass of that source and stage.
 
 **Where the files are.** All sample files are in `<processed root>/_sample/<source>/`. The pass is in the production processed root.
 
 | File | Content |
 |---|---|
-| `<processed root>/_sample/<source>/slice.json` | The files of the slice, their total size, and how many were hard-linked or copied. |
+| `<processed root>/_sample/<source>/slice.json` | The files of the slice (`files`), the units of work of the stage (`inputs`), their total size, and how many were hard-linked or copied. For `europepmc_manuscript`, `inputs` holds the `.tar.gz` archives only, not the `.filelist` files. |
 | `<processed root>/_sample/<source>/01_raw/`, `02_processed/`, `03_corpus/` | The sample input and output. |
-| `<processed root>/_sample/<source>/run_record_<stage>.json` | The time, the exit code and the peak memory of the stage. |
+| `<processed root>/_sample/<source>/run_record_<stage>.json` | The time, the exit code and the peak memory of the stage, and the code hash and rules hash taken before the stage started. |
+| `<processed root>/_sample/<source>/02_processed/_ops/runs/<run id>/status.json` | The run status of the sample run. It is under the sample processed root, not under the production `_ops/runs/`. |
 | `<processed root>/_sample/<source>/gate_report.md` and `gate_report.json` | The report of the last sample run. |
 | `<processed root>/_ops/<source>/gate/<stage>.pass` | The pass. |
 
@@ -728,28 +731,33 @@ The slice uses a hard link to each raw file where the file system allows it. Oth
 **What a sample run changes.**
 
 - It sets `EPISTEME_DB_TARGET=secondary`. The `run_start` and `run_end` audit rows and the load go to `episteme_test`.
+- It sets `EPISTEME_DB_MODE=restricted`, whatever the shell or `.env` says (also `unrestricted` or `read-only`). The DB-mode guard then refuses the production database, also when `PGDATABASE_SECONDARY` names it by mistake. `episteme_test` is allowed in this mode.
 - It redirects only the raw, processed and corpus roots, to the sample folder. The data root and the lock folder stay as in production. A sample run and a production heavy job therefore never run at the same time.
 
 **The migration check.** Before a sample `load`, the runner checks that `episteme_test` has the objects of the migrations 0002 to 0009. It checks the objects, not `episteme._migrations`: production has an empty `_migrations` table, because the migrations were applied by hand (section 2.3). Migration 0001 is deferred: pgvector is not on the server. The check prints each migration that lacks an object. Then the run exits 2. If the check itself fails (for example, the database is not reachable), the run exits 1.
 
-To add the missing migrations, do this step once, and only with the go-ahead of the operator:
+To add the missing migrations, use the per-file procedure of section 2.3. Do it once, and only with the operator's go-ahead.
 
-```bash
-bash scripts/data/db/migrate_database.sh episteme_test
-```
+1. Apply 0002 to 0009 to `episteme_test` as `episteme_sys_admin`, with the loop in section 2.3.
+2. Apply 0004 with no load running: its `CREATE INDEX` blocks writes to every partition while it builds.
+3. Run the check query of section 2.3.
+
+Do not use `migrate_database.sh` on the local build: it stops at 0001 (pgvector) and applies nothing after it.
 
 Migration 0004 drops its indexes on purpose during a bulk load. The check can show 0004 as missing while a bulk load runs.
 
 **What the pass holds.** The pass file holds the package version, the git commit, the time, the path of the report, and two hashes:
 
-- The code hash covers every `episteme` module that the stage imports (also modules that a function imports inside its body) and the wrapper script of the stage. It does not cover third-party packages, data files or other scripts.
+- The code hash covers every `episteme` module that the stage imports (also modules that a function imports inside its body) and the wrapper script of the stage. It does not cover third-party packages, data files or other scripts. The runner itself (`scripts/data/run_pipeline.sh` and `scripts/data/_lib/common.sh`) is not covered.
 - The rules hash covers the rules file.
+
+The runner takes both hashes once, before the stage starts (`gate run`). The pass holds these hashes. If the code or the rules change before the report, the sample gets no pass, and the report shows `code_hash: the stage code changed during the sample run` or `rules_hash: the rules changed during the sample run`.
 
 A change in the code of the stage, in its wrapper, or in the rules file makes the pass invalid. The `load` stage of every source uses `episteme.data.load_articles` and the wrapper `load_<source>.sh`. A change to the loader therefore invalidates the load pass of every gated source.
 
-**What a refusal looks like.** A full run of a gated stage without a valid pass exits 2 before `run_start`. The log shows, for each such stage, `gate: no valid pass for <source> <stage>`. The last line is `gate: refused; run '<script> <source> <stage> --sample' until it passes, or use --skip-gate --reason REASON`. With `all`, the runner checks each stage of the chain. The reason for a missing pass is `no pass`, `code changed` or `rules changed`.
+**What a refusal looks like.** A full run of a gated stage without a valid pass exits 2 before `run_start`. The log shows, for each such stage, `gate: no valid pass for <source> <stage> (<reason>)` after the time stamp and `[ERROR]`. The last line is `gate: refused; run '<script> <source> <stage> --sample' until it passes, or use --skip-gate --reason REASON`. With `all`, the runner checks each stage of the chain. The reason for a missing pass is `no pass`, `code changed` or `rules changed`.
 
-A failed `gate report` deletes the old pass of that source and stage.
+When a sample run fails its rules, the runner deletes the old pass of that source and stage.
 
 **Skip the gate.** Use this only when a pass is not possible. A reason is mandatory.
 
@@ -759,6 +767,7 @@ bash scripts/data/run_pipeline.sh bookshelf extract --skip-gate --reason "<why>"
 
 - The runner writes one `gate_override` audit row for each gated stage that has no valid pass. The event is described in `docs/11-gxp-data-integrity.md`.
 - The runner writes the row before `run_start`. It needs the database for this. If the write fails, the run stops with exit 1.
+- The row goes to the production database. The write therefore needs the same DB mode as the full run itself: `EPISTEME_DB_MODE=unrestricted`. In `restricted` mode the guard refuses the write, and the run exits 1.
 - `--skip-gate` cannot be used with `--sample`.
 
 **Read `gate_report.md`.**
@@ -769,30 +778,42 @@ bash scripts/data/run_pipeline.sh bookshelf extract --skip-gate --reason "<why>"
 4. Read the table `Measures`. It shows every measure, also those that no rule reads.
 5. A line `<rule>: the measure is missing` means the gate could not compute the measure. A missing measure always fails.
 6. A line `run record: the command exited with rc N` means the stage itself failed.
+7. A line `code_hash: ...` or `rules_hash: ... changed during the sample run` means the code or the rules changed while the sample ran. Run the sample again.
+8. A line `run record: no code hash` means the run record does not come from `run_pipeline.sh --sample`. Run the sample with the runner.
 
 The main measures:
 
 | Measure | Meaning |
 |---|---|
-| `rows`, `rows_per_input` | Rows in the sample staging, and rows for each input file. |
+| `rows`, `rows_per_input` | Rows in the sample staging, and rows for each unit of work (the `inputs` of `slice.json`). |
 | `text_bytes_per_input_byte` | Bytes of `text` for each byte of input. |
-| `duplicate_ids` | Rows minus distinct `id` values. |
+| `duplicate_ids` | Rows minus distinct `id` values (`distinct_ids`). |
+| `duplicate_ids_in_shard` | Duplicate `id` values inside one staging shard. The loader cannot load these: the `article_body` key `(article_id, source)` stops the shard. A duplicate across two shards (an id that a later archive issues again) loads once. |
 | `empty_text_pct` | Percent of rows with no text in `text`, `body_text` or `abstract`. |
 | `extract_status_pct` | Percent of rows for each `extract_status` value. |
 | `null_pct` | Percent of rows with an empty value, for each article column. |
 | `license_counts` | Rows for each `license` value. |
 | `failed_inputs` | Inputs that failed. It is 0 when the stage exits 0. |
-| `rows_loaded`, `orphan_bodies`, `rows_loaded_equals_staging` | Load only. The loaded rows of the slice, the `article_body` rows of the source that have no `articles` row, and whether the loaded rows equal the staging rows. `orphan_bodies` covers the whole source, so leftover rows of earlier samples count. |
+| `rows_loaded`, `orphan_bodies`, `rows_loaded_equals_staging` | Load only. The loaded rows of the slice, the `article_body` rows of the source that have no `articles` row, and whether the loaded rows equal the distinct staging ids (`distinct_ids`). The loader keeps one row for each id: a re-issued id under another `source_file` replaces the older row. `orphan_bodies` covers the whole source, so leftover rows of earlier samples count. |
 | `elapsed_s`, `peak_rss_mb`, `rows_per_s` | The cost of the stage. No rule reads them. Use them to plan the full run. |
 
 **Change a threshold.** Edit the rules file. This invalidates the pass of the source (the rules hash changes), so run the sample again. Write the reason for the change in the drift log.
+
+The gate refuses a rules file that names something it does not know:
+
+- a stage that the gate cannot hash for the source (only `extract` and `load` for the three gated sources),
+- a rule key that is not in the list of rules,
+- a `max_null_pct` column that is not an article column (`ARTICLE_COLUMNS` in `src/episteme/data/article_schema.py`),
+- a `max_status_pct` status other than `ok`, `empty`, `partial` or `dropped`.
+
+`gate check` then exits 2. A full run and a sample run of that source then refuse with exit 2. The log names the file and the unknown name.
 
 **Exit codes.**
 
 | Exit | Case |
 |---|---|
-| 1 | An operational failure before `run_start`: a slice I/O error, a failed migration check, a failed `gate_override` write, or the processed root cannot be read. Also a sample run that fails its rules, after the stage ran. |
-| 2 | A refusal before `run_start`: no valid pass, a slice refusal, missing migrations, a `--sample` on a stage with no rules, a `--sample` load without sample staging, a bad flag combination (including `--sample` with `--dry-run`), or `--sample` without `PGDATABASE_SECONDARY`. |
+| 1 | An operational failure before `run_start`: a slice I/O error, a failed migration check, a failed `gate_override` write, the processed root cannot be read, or a `gate check` that crashes in a sample run (an answer that the runner does not know). Also a sample run that fails its rules or whose code or rules changed during the run, after the stage ran. |
+| 2 | A refusal before `run_start`: no valid pass, a slice refusal, missing migrations, a `--sample` on a stage with no rules, a `--sample` load without sample staging, a bad flag combination (including `--sample` with `--dry-run`, `--max-files` or `--skip-unit`), `--sample` without `PGDATABASE_SECONDARY`, or a rules file that the gate refuses (`gate check` exits 2). |
 | 3 | A `--dry-run` of a gated stage. It stops at the existing dry-run guard before any gate check. |
 
 ---
