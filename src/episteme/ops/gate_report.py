@@ -150,9 +150,11 @@ def _measure_shards(con: Any, columns: list[str], rows: int) -> dict:
         out["distinct_ids"] = 0 if not rows else None
         out["duplicate_ids_in_shard"] = 0 if not rows else None
 
-    def _group(col: str) -> dict[str, int]:
-        if col not in columns or not rows:
+    def _group(col: str) -> dict[str, int] | None:
+        if not rows:
             return {}
+        if col not in columns:
+            return None  # cannot be computed: the rule that reads it fails
         res = con.execute(
             f"SELECT coalesce(CAST({_q(col)} AS VARCHAR), 'null'), count(*) FROM t GROUP BY 1"
         ).fetchall()
@@ -160,7 +162,9 @@ def _measure_shards(con: Any, columns: list[str], rows: int) -> dict:
 
     status = _group("extract_status")
     out["extract_status"] = status
-    out["extract_status_pct"] = {k: _pct(v, rows) for k, v in status.items()}
+    out["extract_status_pct"] = (
+        None if status is None else {k: _pct(v, rows) for k, v in status.items()}
+    )
     out["license_counts"] = _group("license")
     out["subset_counts"] = _group("subset")
     return out

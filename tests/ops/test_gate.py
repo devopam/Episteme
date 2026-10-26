@@ -171,6 +171,15 @@ def test_load_rules_rejects_unknown_names(rules_dir, rules, words):
         assert w in str(err.value)
 
 
+@pytest.mark.parametrize("section", [[], "x", 1, None], ids=["list", "str", "int", "null"])
+def test_load_rules_rejects_a_stage_section_that_is_not_an_object(rules_dir, section):
+    """PR review: ``"extract": []`` must not leave the stage ungated."""
+    _write_rules(rules_dir, "apollo", {"extract": section})
+    with pytest.raises(ValueError) as err:
+        gate.load_rules("apollo")
+    assert "extract" in str(err.value)
+
+
 def test_load_rules_accepts_known_names(rules_dir):
     rules = {
         "extract": {

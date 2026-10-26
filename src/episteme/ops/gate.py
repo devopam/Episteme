@@ -102,7 +102,7 @@ def _check_names(path: Path, source: str, rules: dict) -> None:
     """Refuse a name that would silently disable a rule: a stage the gate cannot
     hash (not in ``STAGE_MODULES`` for this source), a ``max_null_pct`` column
     that is not an article column, a ``max_status_pct`` status that the
-    extractors never write."""
+    extractors never write, a stage section that is not an object."""
     from episteme.data import article_schema
 
     for stage, section in rules.items():
@@ -113,7 +113,7 @@ def _check_names(path: Path, source: str, rules: dict) -> None:
                 f"{path}: unknown stage '{stage}' for {source} (the gate has no code to hash)"
             ) from None
         if not isinstance(section, dict):
-            continue
+            raise ValueError(f"{path}: {stage}: the stage section must be an object")
         for rule, known in (
             ("max_null_pct", article_schema.ARTICLE_COLUMNS),
             ("max_status_pct", article_schema.EXTRACT_STATUSES),

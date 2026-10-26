@@ -110,6 +110,22 @@ def test_distinct_ids_and_duplicates_inside_one_shard(staging):
     assert m["duplicate_ids_in_shard"] == 1
 
 
+@pytest.mark.parametrize("column", ["license", "extract_status"])
+def test_a_missing_grouped_column_is_a_missing_measure(tmp_path, column):
+    """PR review: staging without ``license`` or ``extract_status`` must fail
+    the rule that reads it, not pass on an empty dict."""
+    d = tmp_path / "staging"
+    d.mkdir()
+    _write(d / "s1.parquet", [{k: v for k, v in r.items() if k != column} for r in _rows()])
+    inp = tmp_path / "f1.xml"
+    inp.write_bytes(b"a" * 400)
+    m = gate_report.measure_staging(d, inputs=[inp])
+    rules = {"allowed_licenses": ["CC BY", "unknown"], "max_status_pct": {"partial": 50.0}}
+    fails = gate.evaluate(m, rules)
+    rule = "allowed_licenses" if column == "license" else "max_status_pct"
+    assert any(f.startswith(rule) and "missing" in f for f in fails), fails
+
+
 def test_jsonl_only(tmp_path):
     d = tmp_path / "staging"
     d.mkdir()
