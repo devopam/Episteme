@@ -10,6 +10,7 @@ a temp path (controller ruling R2)."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -23,9 +24,10 @@ import pytest
 from test_run_pipeline_bulk import BASH, REPO_ROOT, _write
 from test_run_pipeline_lock_status import REAL_PY, _foreign_lock
 
-# CHECK_<stage>: the answer of `gate check` ("ok" exits 0, any other answer 1);
-# unset -> the real `gate check`. RC_REPORT: the exit code of `gate report`.
-# MISSING_MIG: a migration that `gate migrations-check` reports missing.
+# CHECK_<stage>: the answer of `gate check` ("ok" exits 0, any other answer
+# $RC_CHECK, default 1); unset -> the real `gate check`. RC_REPORT: the exit code
+# of `gate report`. MISSING_MIG: a migration that `gate migrations-check` reports
+# missing. SIG_PREPARE: a signal that `gate prepare` sends to the runner.
 FAKE_PY = """#!/usr/bin/env bash
 db="${EPISTEME_DB_TARGET:-primary}"
 case "$*" in
@@ -42,11 +44,12 @@ case "$*" in
         [ -n "${!var:-}" ] || exec "$REAL_PY" "${args[@]}"
         echo "${!var}"
         [ "${!var}" = ok ] && exit 0
-        exit 1 ;;
+        exit "${RC_CHECK:-1}" ;;
     *"episteme.ops.gate prepare"*)
         echo "prepare $db $*" >> "$CALLS"
         sr=""
         while [ $# -gt 0 ]; do [ "$1" = --sample-root ] && sr="$2"; shift; done
+        [ -z "${SIG_PREPARE:-}" ] || kill -"$SIG_PREPARE" "$PPID"
         [ -z "${RC_PREPARE:-}" ] || exit "$RC_PREPARE"
         mkdir -p "$sr/01_raw/bookshelf"
         echo '{"files": []}' > "$sr/slice.json"
@@ -83,7 +86,7 @@ FAKE_STAGE = """#!/usr/bin/env bash
 name="$(basename "$0" .sh)"
 echo "stage $name" >> "$CALLS"
 for k in EPISTEME_DATA_ROOT EPISTEME_RAW_ROOT EPISTEME_PROCESSED_ROOT EPISTEME_CORPUS_ROOT \\
-         EPISTEME_LOCK_DIR EPISTEME_DB_TARGET; do
+         EPISTEME_LOCK_DIR EPISTEME_DB_TARGET EPISTEME_DB_MODE; do
     echo "env $k ${!k:-}" >> "$CALLS"
 done
 f="$EPISTEME_LOCK_DIR/heavy.lock"
@@ -333,6 +336,8 @@ def test_a_dry_run_is_never_gated(tree):
         ("extract", "--sample", "--skip-gate", "--reason", "r"),
         ("extract", "--sample", "--force", "--reason", "r"),
         ("extract", "--sample", "--dry-run"),
+        ("extract", "--sample", "--max-files", "3"),
+        ("extract", "--sample", "--skip-unit", "u", "--reason", "r"),
     ],
 )
 def test_sample_misuse_is_a_usage_error(tree, args):
@@ -598,3 +603,95 @@ def test_a_sample_load_against_episteme_test_checks_the_real_migrations(tree):
     else:
         assert proc.returncode == 0, proc.stderr
         assert _stages(calls) == ["stage load_bookshelf"]
+
+
+# --- final fix wave: F3-F7 ------------------------------------------------------
+
+
+def _sample_status(tmp: Path) -> dict:
+    runs = list((_sample_root(tmp) / "02_processed" / "_ops" / "runs").glob("*/status.json"))
+    assert len(runs) == 1, runs
+    return json.loads(runs[0].read_text(encoding="utf-8"))
+
+
+def test_sample_forces_the_restricted_db_mode(tree):
+    """F3: the guard refuses production even when the shell says unrestricted."""
+    proc, calls, _ = _run(
+        tree,
+        "bookshelf",
+        "extract",
+        "--sample",
+        CHECK_extract="no pass",
+        EPISTEME_DB_MODE="unrestricted",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _env(calls)["EPISTEME_DB_MODE"] == "restricted"
+
+
+def test_a_full_run_keeps_the_db_mode_of_the_shell(tree):
+    proc, calls, _ = _run(
+        tree, "bookshelf", "extract", CHECK_extract="ok", EPISTEME_DB_MODE="unrestricted"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _env(calls)["EPISTEME_DB_MODE"] == "unrestricted"
+
+
+@pytest.mark.parametrize("flag", [("--max-files", "3"), ("--skip-unit", "u", "--reason", "r")])
+def test_sample_with_a_file_selection_flag_names_it(tree, flag):
+    """F4: the slice is the selection; --max-files and --skip-unit would change it."""
+    proc, calls, audit = _run(tree, "bookshelf", "extract", "--sample", *flag, CHECK_extract="x")
+    assert proc.returncode == 2, proc.stderr
+    assert f"--sample cannot be used with {flag[0]}" in proc.stderr
+    assert calls == [] and audit == []
+
+
+def test_a_signal_during_prepare_writes_a_stopped_state(tree):
+    """F5: Ctrl-C while the slice is built leaves an end state, not "running"."""
+    proc, calls, audit = _run(
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass", SIG_PREPARE="INT"
+    )
+    assert proc.returncode == 130, proc.stderr
+    st = _sample_status(tree[1])
+    assert st["state"] == "stopped"
+    assert _stages(calls) == [] and audit == []
+    assert not (_roots(tree[1])["EPISTEME_LOCK_DIR"] / "heavy.lock").exists()
+
+
+def test_a_failed_prepare_keeps_its_own_reason_in_the_status(tree):
+    proc, _, _ = _run(
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass", RC_PREPARE="1"
+    )
+    assert proc.returncode == 1, proc.stderr
+    st = _sample_status(tree[1])
+    assert st["state"] == "failed"
+    assert "could not build the raw slice" in json.dumps(st)
+
+
+def test_a_crashing_gate_check_in_a_sample_exits_1(tree):
+    """F6 (ruling R10): an answer the runner does not know is operational."""
+    proc, calls, audit = _run(
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="Traceback: boom"
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "gate check failed" in proc.stderr
+    assert _stages(calls) == [] and audit == []
+
+
+def test_a_refused_gate_check_in_a_sample_exits_2(tree):
+    """rc 2 of `gate check` is its own refusal (a damaged or invalid rules file)."""
+    proc, calls, audit = _run(
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="bad rules", RC_CHECK="2"
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert _stages(calls) == [] and audit == []
+
+
+def test_the_sample_run_record_holds_the_start_hashes(tree):
+    """F7: `gate run` hashes the stage code and the rules before the stage starts."""
+    proc, _, _ = _run(tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass")
+    assert proc.returncode == 0, proc.stderr
+    rec = json.loads(
+        (_sample_root(tree[1]) / "run_record_extract.json").read_text(encoding="utf-8")
+    )
+    assert len(rec["code_hash"]) == 64
+    assert len(rec["rules_hash"]) == 64

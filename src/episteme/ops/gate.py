@@ -9,7 +9,8 @@ the stage's code and a hash of the rules file, so a change to either one makes
 the pass invalid.
 
 Measure keys that the rules read: ``rows``, ``rows_per_input``,
-``text_bytes_per_input_byte``, ``duplicate_ids``, ``empty_text_pct``,
+``text_bytes_per_input_byte``, ``duplicate_ids``, ``duplicate_ids_in_shard``,
+``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
 ``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``. A rule
 whose measure is missing fails: a gate never passes on data it did not see.
@@ -82,6 +83,7 @@ _KNOWN_KEYS = {
     "min_rows_per_input",
     "min_text_bytes_per_input_byte",
     "max_duplicate_ids",
+    "max_duplicate_ids_in_shard",
     "max_empty_text_pct",
     "max_status_pct",
     "max_null_pct",
@@ -96,9 +98,38 @@ def _rules_path(source: str) -> Path:
     return RULES_DIR / f"{source}.json"
 
 
+def _check_names(path: Path, source: str, rules: dict) -> None:
+    """Refuse a name that would silently disable a rule: a stage the gate cannot
+    hash (not in ``STAGE_MODULES`` for this source), a ``max_null_pct`` column
+    that is not an article column, a ``max_status_pct`` status that the
+    extractors never write."""
+    from episteme.data import article_schema
+
+    for stage, section in rules.items():
+        try:
+            stage_module(source, stage)
+        except KeyError:
+            raise ValueError(
+                f"{path}: unknown stage '{stage}' for {source} (the gate has no code to hash)"
+            ) from None
+        if not isinstance(section, dict):
+            continue
+        for rule, known in (
+            ("max_null_pct", article_schema.ARTICLE_COLUMNS),
+            ("max_status_pct", article_schema.EXTRACT_STATUSES),
+        ):
+            limits = section.get(rule)
+            if not isinstance(limits, dict):
+                continue
+            bad = sorted(set(limits) - set(known))
+            if bad:
+                raise ValueError(f"{path}: {stage}.{rule}: unknown name(s): {', '.join(bad)}")
+
+
 def load_rules(source: str) -> dict | None:
     """The parsed rules file, or None when the source has none. A file that does
-    not parse raises ``ValueError``: a damaged rules file never means "no gate"."""
+    not parse, or that names an unknown stage, article column or extract status,
+    raises ``ValueError``: a damaged rules file never means "no gate"."""
     path = _rules_path(source)
     try:
         text = path.read_text(encoding="utf-8")
@@ -110,6 +141,7 @@ def load_rules(source: str) -> dict | None:
         raise ValueError(f"{path}: not valid JSON ({exc})") from exc
     if not isinstance(rules, dict):
         raise ValueError(f"{path}: the top level must be an object")
+    _check_names(path, source, rules)
     return rules
 
 
@@ -163,6 +195,7 @@ _SIMPLE = {
     "min_rows_per_input": (_min_rule, "rows_per_input"),
     "min_text_bytes_per_input_byte": (_min_rule, "text_bytes_per_input_byte"),
     "max_duplicate_ids": (_max_rule, "duplicate_ids"),
+    "max_duplicate_ids_in_shard": (_max_rule, "duplicate_ids_in_shard"),
     "max_empty_text_pct": (_max_rule, "empty_text_pct"),
     "max_failed_inputs": (_max_rule, "failed_inputs"),
     "max_orphan_bodies": (_max_rule, "orphan_bodies"),
@@ -347,15 +380,26 @@ def _git_head() -> str | None:
     return out if proc.returncode == 0 and out else None
 
 
-def write_pass(source: str, stage: str, processed_root: Path, report_path: Path) -> Path:
+def write_pass(
+    source: str,
+    stage: str,
+    processed_root: Path,
+    report_path: Path,
+    *,
+    code_hash_value: str | None = None,
+    rules_hash_value: str | None = None,
+) -> Path:
+    """Write the pass. ``code_hash_value`` and ``rules_hash_value`` are the hashes
+    taken at the start of the sample run (``gate run``); they default to the
+    hashes of now."""
     path = pass_path(source, stage, processed_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "source": source,
         "stage": stage,
         "package_version": _package_version(),
-        "code_hash": code_hash(source, stage),
-        "rules_hash": rules_hash(source),
+        "code_hash": code_hash_value or code_hash(source, stage),
+        "rules_hash": rules_hash_value or rules_hash(source),
         "report": str(report_path),
         "passed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_head": _git_head(),
@@ -450,6 +494,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if not cmd:
         _err("gate run: no command given (use: run --record F -- <command...>)")
         return 2
+    if bool(args.source) != bool(args.stage):
+        _err("gate run: give --source and --stage together")
+        return 2
+    hashes: dict[str, str] = {}
+    if args.source:
+        # Hash once, at the start: the pass certifies the code that ran, so a
+        # change during a long sample run cannot be certified (gate report).
+        try:
+            hashes = {
+                "code_hash": code_hash(args.source, args.stage),
+                "rules_hash": rules_hash(args.source),
+            }
+        except (KeyError, RuntimeError, OSError) as exc:
+            _err(f"gate run: could not hash {args.source} {args.stage}: {exc}")
+            return 1
     t0 = time.monotonic()
     try:
         child = subprocess.Popen(cmd)
@@ -477,6 +536,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "elapsed_s": round(time.monotonic() - t0, 3),
         "rc": rc,
         "peak_rss_mb": round(peak / (1024 * 1024), 1),
+        **hashes,
     }
     if interrupted:
         record["interrupted"] = True
@@ -522,6 +582,23 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _hash_failures(source: str, stage: str, record: dict) -> list[str]:
+    """The run record holds the hashes of the run start (``gate run --source
+    --stage``). A record without them, or a hash that differs now, fails: the
+    pass certifies only the code and the rules that ran."""
+    out = []
+    code_start, rules_start = record.get("code_hash"), record.get("rules_hash")
+    if not code_start:
+        out.append("run record: no code hash (start the sample with run_pipeline.sh --sample)")
+    elif code_start != code_hash(source, stage):
+        out.append("code_hash: the stage code changed during the sample run")
+    if not rules_start:
+        out.append("run record: no rules hash (start the sample with run_pipeline.sh --sample)")
+    elif rules_start != rules_hash(source):
+        out.append("rules_hash: the rules changed during the sample run")
+    return out
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     from episteme.data.checkpoint_markers import input_key
     from episteme.ops import gate_report, gate_slice
@@ -540,7 +617,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
         _err(f"gate report: {exc}")
         return 2
     raw_dir = sample_root / "01_raw" / gate_slice.SLICES[source].raw_subpath
-    inputs = [raw_dir / rel for rel in slice_meta["files"]]
+    # The units of work only (a sidecar file is no input of the stage); an old
+    # slice.json without "inputs" falls back to every file.
+    inputs = [raw_dir / rel for rel in slice_meta.get("inputs", slice_meta["files"])]
     staging_dir = (
         Path(args.staging_dir)
         if args.staging_dir
@@ -550,12 +629,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
     if stage == "load":
         source_files = [input_key(p, raw_dir) for p in inputs]
         with _connect() as conn:
+            # The loader keeps one row per id (a re-issued id under another
+            # source_file replaces the older row), so compare distinct ids.
             measures.update(
                 gate_report.measure_load(
-                    conn, source, source_files, staging_rows=measures.get("rows")
+                    conn, source, source_files, staging_rows=measures.get("distinct_ids")
                 )
             )
-    failures = evaluate(measures, stage_rules)
+    failures = _hash_failures(source, stage, record) + evaluate(measures, stage_rules)
     if record.get("rc") not in (0, None):
         failures.insert(0, f"run record: the command exited with rc {record['rc']}")
     report_path = gate_report.write_report(measures, failures, sample_root)
@@ -568,7 +649,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
             print(f"  {line}")
         print(f"report: {report_path}")
         return 1
-    pass_file = write_pass(source, stage, Path(args.pass_root), report_path)
+    pass_file = write_pass(
+        source,
+        stage,
+        Path(args.pass_root),
+        report_path,
+        code_hash_value=record["code_hash"],
+        rules_hash_value=record["rules_hash"],
+    )
     print(f"gate PASS for {source} {stage}: {pass_file}")
     return 0
 
@@ -605,6 +693,8 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="run a command; record time, exit code, peak RSS")
     p.add_argument("--record", required=True)
+    p.add_argument("--source", help="with --stage: record the code and rules hashes first")
+    p.add_argument("--stage")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(fn=_cmd_run)
 

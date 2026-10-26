@@ -75,6 +75,7 @@ def _europepmc(**over):
     base = {
         "rows_per_input": 1353.7,
         "duplicate_ids": 2,
+        "duplicate_ids_in_shard": 0,
         "empty_text_pct": 0.0,
         "null_pct": {"abstract": 7.24, "language": 15.32},
         "license_counts": {"text_mining": 4061},
@@ -93,6 +94,15 @@ def test_europepmc_low_yield_and_other_license_fail():
     assert gate.evaluate(_europepmc(rows_per_input=20.0), rules)
     assert gate.evaluate(_europepmc(license_counts={"CC BY": 5}), rules)
     assert gate.evaluate(_europepmc(null_pct={"abstract": 40.0, "language": 1.0}), rules)
+
+
+def test_europepmc_allows_cross_archive_reissues_but_not_one_inside_an_archive():
+    """F1: the 2 duplicate ids of the 2026-10-20 sample sit in two archives (the
+    loader keeps one row each); a duplicate inside one archive breaks the load."""
+    rules = gate.load_rules("europepmc_manuscript")["extract"]
+    assert rules["max_duplicate_ids_in_shard"] == 0
+    fails = gate.evaluate(_europepmc(duplicate_ids_in_shard=1), rules)
+    assert any("max_duplicate_ids_in_shard" in f for f in fails)
 
 
 def _apollo(**over):

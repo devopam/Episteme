@@ -96,6 +96,20 @@ def test_duplicates(staging):
     assert m["duplicate_content_hash"] == 1
 
 
+def test_distinct_ids_and_duplicates_inside_one_shard(staging):
+    """F1: id "b" is in s1 and s2 (a cross-shard re-issue, which the loader keeps
+    once); a second "a" inside s1 is a duplicate the loader cannot load."""
+    d, inputs = staging
+    m = gate_report.measure_staging(d, inputs=inputs)
+    assert m["distinct_ids"] == 3
+    assert m["duplicate_ids_in_shard"] == 0
+    _write(d / "s1.parquet", [*_rows()[:2], _rows()[0]])
+    m = gate_report.measure_staging(d, inputs=inputs)
+    assert m["duplicate_ids"] == 2
+    assert m["distinct_ids"] == 3
+    assert m["duplicate_ids_in_shard"] == 1
+
+
 def test_jsonl_only(tmp_path):
     d = tmp_path / "staging"
     d.mkdir()
@@ -121,6 +135,8 @@ def test_empty_staging_is_zero_rows(tmp_path):
     m = gate_report.measure_staging(d, inputs=[])
     assert m["rows"] == 0
     assert m["duplicate_ids"] == 0
+    assert m["distinct_ids"] == 0
+    assert m["duplicate_ids_in_shard"] == 0
     assert m["rows_per_input"] is None
     assert m["text_bytes_per_input_byte"] is None
     assert m["null_pct"]["id"] == 100.0

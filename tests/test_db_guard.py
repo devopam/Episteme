@@ -134,3 +134,20 @@ def test_read_only_mode_blocks_writes(pg_conn, monkeypatch):
         get_settings.cache_clear()
         _cfg.get_settings.cache_clear()
         conn_mod.get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(("secondary", "refused"), [("episteme", True), ("episteme_test", False)])
+def test_the_sample_run_environment(clean_settings, monkeypatch, secondary, refused):
+    """run_pipeline.sh --sample exports EPISTEME_DB_TARGET=secondary and
+    EPISTEME_DB_MODE=restricted: a PGDATABASE_SECONDARY that names production is
+    refused; episteme_test is allowed."""
+    monkeypatch.setenv("PGDATABASE", "episteme")
+    monkeypatch.setenv("PGDATABASE_SECONDARY", secondary)
+    monkeypatch.setenv("EPISTEME_DB_TARGET", "secondary")
+    monkeypatch.setenv("EPISTEME_DB_MODE", "restricted")
+    get_settings.cache_clear()
+    if refused:
+        with pytest.raises(ProductionDatabaseGuardError):
+            check_database_allowed(get_settings())
+    else:
+        check_database_allowed(get_settings())

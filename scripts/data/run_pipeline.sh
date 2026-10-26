@@ -114,6 +114,9 @@ if [ "$SAMPLE" = "1" ]; then
     [ "$BULK" = "0" ] || die "--sample cannot be used with --bulk" 2
     [ "$FORCE" = "0" ] || die "--sample cannot be used with --force" 2
     [ "${EPISTEME_DRY_RUN:-0}" != "1" ] || die "--sample cannot be used with --dry-run" 2
+    # The slice is the file selection of a sample run: these flags would change it.
+    [ -z "$MAX_FILES" ] || die "--sample cannot be used with --max-files" 2
+    [ "${#SKIP_UNITS[@]}" -eq 0 ] || die "--sample cannot be used with --skip-unit" 2
     # The sample writes to the secondary database (episteme_test).
     require_env PGDATABASE_SECONDARY
 fi
@@ -330,10 +333,13 @@ if [ "$SAMPLE" = "1" ]; then
     gate_rc=0
     gate_out="$("$PY" -m episteme.ops.gate check --source "$SOURCE" --stage "$STAGE" --pass-root "$PASS_ROOT")" || gate_rc=$?
     gate_out="${gate_out%$'\r'}"
-    case "$gate_out" in
-        "not gated") die "--sample: $SOURCE $STAGE has no gate rules (src/episteme/ops/gate_rules/$SOURCE.json)" 2 ;;
-        ok|"no pass"|"code changed"|"rules changed") ;;
-        *) die "--sample: gate check failed for $SOURCE $STAGE (rc=$gate_rc): $gate_out" 2 ;;
+    # Ruling R10: a known answer goes on; "not gated" and rc 2 (invalid rules)
+    # are refusals (2); any other answer is a crash, an operational failure (1).
+    case "$gate_rc:$gate_out" in
+        "0:not gated") die "--sample: $SOURCE $STAGE has no gate rules (src/episteme/ops/gate_rules/$SOURCE.json)" 2 ;;
+        "0:ok"|"1:no pass"|"1:code changed"|"1:rules changed") ;;
+        2:*) die "--sample: gate check refused $SOURCE $STAGE (rc=2): $gate_out" 2 ;;
+        *) die "--sample: gate check failed for $SOURCE $STAGE (rc=$gate_rc): $gate_out" 1 ;;
     esac
     SAMPLE_ROOT="$PASS_ROOT/_sample/$SOURCE"
     SAMPLE_RECORD="$SAMPLE_ROOT/run_record_$STAGE.json"
@@ -348,6 +354,9 @@ if [ "$SAMPLE" = "1" ]; then
     export EPISTEME_PROCESSED_ROOT="$SAMPLE_ROOT/02_processed"
     export EPISTEME_CORPUS_ROOT="$SAMPLE_ROOT/03_corpus"
     export EPISTEME_DB_TARGET=secondary
+    # The DB-mode guard then refuses the production database even when
+    # PGDATABASE_SECONDARY names it by mistake (episteme_test stays allowed).
+    export EPISTEME_DB_MODE=restricted
     if [ "$STAGE" = "load" ]; then
         # The secondary database must have every migration before a sample load.
         mig_rc=0
@@ -357,7 +366,7 @@ if [ "$SAMPLE" = "1" ]; then
         # (an unreachable database, an error) is operational (1).
         if [ "$mig_rc" -eq 1 ] && [ -n "$mig_out" ]; then
             printf '%s\n' "$mig_out" >&2
-            die "--sample load: the secondary database lacks the migrations above; apply them first (scripts/data/db/migrate_database.sh)" 2
+            die "--sample load: the secondary database lacks the migrations above; apply them first with the per-file procedure of docs/10-data-sources-runbook.md section 2.3 (not migrate_database.sh: it stops at 0001)" 2
         elif [ "$mig_rc" -ne 0 ]; then
             die "--sample load: migrations-check failed (rc=$mig_rc)" 1
         fi
@@ -568,9 +577,12 @@ run_stage() {
     # `if ! cmd` would lose the exit code; capture it so it can be reused.
     local rc=0
     if [ "$SAMPLE" = "1" ]; then
-        # The sample measures the stage: time, exit code and peak RSS.
+        # The sample measures the stage: time, exit code and peak RSS. It also
+        # hashes the stage code and the rules first: the pass carries these
+        # hashes, so a code change during the run cannot be certified.
         [ "$1" != "bash" ] || shift
-        "$PY" -m episteme.ops.gate run --record "$SAMPLE_RECORD" -- "$NATIVE_BASH" "$@" || rc=$?
+        "$PY" -m episteme.ops.gate run --record "$SAMPLE_RECORD" --source "$SOURCE" --stage "$name" \
+            -- "$NATIVE_BASH" "$@" || rc=$?
     else
         "$@" || rc=$?
     fi
@@ -711,6 +723,8 @@ if [ "$SAMPLE" = "1" ]; then
     else
         log INFO "sample: building the raw slice in $SAMPLE_ROOT"
         prep_rc=0
+        # A signal during the copy: the EXIT handler writes the end state.
+        STATUS_OPEN="$STAGE"
         "$PY" -m episteme.ops.gate prepare --source "$SOURCE" --raw-root "$PROD_RAW_ROOT" \
             --sample-root "$SAMPLE_ROOT" --processed-root "$PASS_ROOT" >&2 || prep_rc=$?
         if [ "$prep_rc" -ne 0 ]; then
@@ -719,8 +733,10 @@ if [ "$SAMPLE" = "1" ]; then
             prep_exit=1
             [ "$prep_rc" -ne 2 ] || prep_exit=2
             _status_set "$STAGE" failed --reason "sample: could not build the raw slice (rc=$prep_rc)"
+            STATUS_OPEN=""
             die "sample: could not build the raw slice for $SOURCE (rc=$prep_rc)" "$prep_exit"
         fi
+        STATUS_OPEN=""
         rm -rf "$SAMPLE_ROOT/02_processed/staging" "$SAMPLE_ROOT/02_processed/_ops/$SOURCE" \
             "$SAMPLE_ROOT/03_corpus"
     fi

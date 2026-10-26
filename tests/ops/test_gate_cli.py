@@ -166,8 +166,22 @@ def _sample(tmp_path: Path, rows: int, *, dup: bool = False) -> tuple[Path, Path
         json.dumps({"files": ["book1.tar.gz"], "bytes": 1000}), encoding="utf-8"
     )
     rec = tmp_path / "rec.json"
-    rec.write_text(json.dumps({"elapsed_s": 2.0, "rc": 0, "peak_rss_mb": 123.0}), encoding="utf-8")
+    rec.write_text(json.dumps(_record()), encoding="utf-8")
     return sample, rec
+
+
+def _record(**over) -> dict:
+    """A run record of `gate run --source --stage`: it holds the hashes taken at
+    the start of the run (F7). The tests use the ``fake_hash`` fixture."""
+    rec = {
+        "elapsed_s": 2.0,
+        "rc": 0,
+        "peak_rss_mb": 123.0,
+        "code_hash": gate.code_hash(SRC, "extract"),
+        "rules_hash": gate.rules_hash(SRC),
+    }
+    rec.update(over)
+    return rec
 
 
 def _report_args(sample: Path, rec: Path, pass_root: Path, stage: str = "extract") -> list[str]:
@@ -215,7 +229,7 @@ def test_report_fails_on_duplicate_ids(tmp_path, rules_dir, fake_hash):
 
 def test_report_fails_when_the_run_failed(tmp_path, rules_dir, fake_hash, capsys):
     sample, rec = _sample(tmp_path, rows=5)
-    rec.write_text(json.dumps({"elapsed_s": 1.0, "rc": 3, "peak_rss_mb": 1.0}), encoding="utf-8")
+    rec.write_text(json.dumps(_record(rc=3)), encoding="utf-8")
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
     assert "rc 3" in capsys.readouterr().out
 
@@ -509,3 +523,126 @@ def test_a_failed_report_deletes_the_old_pass(tmp_path, rules_dir, fake_hash):
     sample, rec = _sample(tmp_path / "again", rows=2)
     assert gate.main(_report_args(sample, rec, pass_root)) == 1
     assert not gate.pass_path(SRC, "extract", pass_root).exists()
+
+
+# --- final fix wave: F1 distinct ids, F2 yield units, F7 hash once ------------
+
+
+def _measures(sample: Path) -> dict:
+    return json.loads((sample / "gate_report.json").read_text(encoding="utf-8"))["measures"]
+
+
+def test_report_load_counts_a_cross_shard_duplicate_once(
+    tmp_path, rules_dir, fake_hash, monkeypatch
+):
+    """F1: an id re-issued in a second shard (another source_file) is loaded once:
+    the loader's id-collision guard deletes the older row. 6 staging rows, 5 ids."""
+    (rules_dir / f"{SRC}.json").write_text(
+        json.dumps({"load": {"max_orphan_bodies": 0, "rows_loaded_equals_staging": True}}),
+        encoding="utf-8",
+    )
+    sample, rec = _sample(tmp_path, rows=5)
+    rec.write_text(json.dumps(_record()), encoding="utf-8")
+    staging = sample / "02_processed" / "staging" / SRC
+    (staging / "book2.jsonl").write_text(
+        json.dumps({"id": "id0", "source": SRC, "text": "again " * 5, "license": "CC BY"}) + "\n",
+        encoding="utf-8",
+    )
+    _fake_connect(monkeypatch, _Conn(loaded=5, orphan=0))
+    pass_root = tmp_path / "prod"
+    assert gate.main(_report_args(sample, rec, pass_root, "load")) == 0
+    m = _measures(sample)
+    assert m["rows"] == 6 and m["distinct_ids"] == 5
+    assert m["rows_loaded_equals_staging"] is True
+    assert gate.pass_path(SRC, "load", pass_root).is_file()
+
+
+def _with_sidecar(sample: Path, *, units: bool) -> None:
+    raw = sample / "01_raw" / "bookshelf"
+    (raw / "book1.filelist.csv").write_bytes(b"y" * 500)
+    meta = {"files": ["book1.tar.gz", "book1.filelist.csv"], "bytes": 1500}
+    if units:
+        meta["inputs"] = ["book1.tar.gz"]
+    (sample / "slice.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_report_yield_counts_the_discovery_units_only(tmp_path, rules_dir, fake_hash):
+    """F2: a sidecar file (.filelist.csv) is in the slice but is no unit of work."""
+    sample, rec = _sample(tmp_path, rows=5)
+    _with_sidecar(sample, units=True)
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 0
+    m = _measures(sample)
+    assert m["inputs"] == 1 and m["input_bytes"] == 1000
+    assert m["rows_per_input"] == 5.0
+
+
+def test_report_yield_falls_back_to_all_files_for_an_old_slice_json(tmp_path, rules_dir, fake_hash):
+    sample, rec = _sample(tmp_path, rows=5)
+    _with_sidecar(sample, units=False)
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 0
+    m = _measures(sample)
+    assert m["inputs"] == 2 and m["input_bytes"] == 1500
+
+
+def test_run_records_the_hashes_at_its_start(tmp_path, rules_dir, fake_hash):
+    rec = tmp_path / "rec.json"
+    rc = gate.main(
+        [
+            "run",
+            "--record",
+            str(rec),
+            "--source",
+            SRC,
+            "--stage",
+            "extract",
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+    assert rc == 0
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert data["code_hash"] == "hash-1"
+    assert data["rules_hash"] == gate.rules_hash(SRC)
+
+
+def test_report_refuses_a_pass_when_the_code_changed_during_the_run(
+    tmp_path, rules_dir, fake_hash, capsys
+):
+    """F7: the stage code changes between `gate run` and `gate report`."""
+    sample, rec = _sample(tmp_path, rows=5)
+    pass_root = tmp_path / "prod"
+    assert gate.main(_report_args(sample, rec, pass_root)) == 0
+    fake_hash["h"] = "hash-2"
+    assert gate.main(_report_args(sample, rec, pass_root)) == 1
+    assert "changed during the sample run" in capsys.readouterr().out
+    assert not gate.pass_path(SRC, "extract", pass_root).exists()
+
+
+def test_report_refuses_a_pass_when_the_rules_changed_during_the_run(
+    tmp_path, rules_dir, fake_hash, capsys
+):
+    sample, rec = _sample(tmp_path, rows=5)
+    (rules_dir / f"{SRC}.json").write_text(
+        json.dumps({"extract": {"min_rows": 4}}), encoding="utf-8"
+    )
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
+    assert "rules changed during the sample run" in capsys.readouterr().out
+
+
+def test_the_pass_carries_the_hashes_of_the_run_start(tmp_path, rules_dir, fake_hash):
+    sample, rec = _sample(tmp_path, rows=5)
+    rec.write_text(json.dumps(_record(code_hash="hash-1")), encoding="utf-8")
+    pass_root = tmp_path / "prod"
+    assert gate.main(_report_args(sample, rec, pass_root)) == 0
+    data = json.loads(gate.pass_path(SRC, "extract", pass_root).read_text(encoding="utf-8"))
+    assert data["code_hash"] == "hash-1"
+    assert data["rules_hash"] == gate.rules_hash(SRC)
+
+
+def test_report_without_start_hashes_fails_closed(tmp_path, rules_dir, fake_hash, capsys):
+    sample, rec = _sample(tmp_path, rows=5)
+    rec.write_text(json.dumps({"elapsed_s": 1.0, "rc": 0, "peak_rss_mb": 1.0}), encoding="utf-8")
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
+    assert "no code hash" in capsys.readouterr().out

@@ -129,18 +129,35 @@ def _select_apollo(raw: Path) -> list[Path]:
     return out
 
 
+def _every_file(_p: Path) -> bool:
+    return True
+
+
+def _is_archive(p: Path) -> bool:
+    """A europepmc unit of work: ``discover`` globs ``*.tar.gz`` only."""
+    return p.name.endswith(".tar.gz")
+
+
 @dataclass(frozen=True)
 class SliceSpec:
     name: str
     max_bytes: int
     select: Callable[[Path], list[Path]]
     raw_subpath: Path
+    # A file the stage's discovery returns (a unit of work). A sidecar file
+    # (europepmc .filelist.csv/.txt) is in the slice but is no unit: the yield
+    # (rows per input) counts the units only.
+    is_unit: Callable[[Path], bool] = _every_file
 
 
 SLICES: dict[str, SliceSpec] = {
     "bookshelf": SliceSpec("bookshelf", 2 * GB, _select_bookshelf, Path("bookshelf")),
     "europepmc_manuscript": SliceSpec(
-        "europepmc_manuscript", 1 * GB, _select_europepmc_manuscript, Path("europepmc/manuscripts")
+        "europepmc_manuscript",
+        1 * GB,
+        _select_europepmc_manuscript,
+        Path("europepmc/manuscripts"),
+        _is_archive,
     ),
     "apollo": SliceSpec("apollo", 4 * GB, _select_apollo, Path("apollo")),
 }
@@ -188,6 +205,9 @@ def prepare(
 ) -> dict:
     """Build ``sample_root/01_raw/<raw subpath>/`` from the slice and write ``slice.json``.
 
+    ``slice.json`` lists every slice file under ``files`` and the units of work
+    (the files the stage's discovery returns) under ``inputs``.
+
     Nothing is deleted unless ``sample_root`` resolves inside
     ``<processed root>/_sample/``.
     """
@@ -214,6 +234,7 @@ def prepare(
     dest_root.mkdir(parents=True)
     linked = copied = 0
     rels: list[str] = []
+    units: list[str] = []
     for src in files:
         rel = src.relative_to(raw)
         dst = dest_root / rel
@@ -225,6 +246,8 @@ def prepare(
             shutil.copy2(src, dst)
             copied += 1
         rels.append(rel.as_posix())
-    result = {"files": rels, "bytes": total, "linked": linked, "copied": copied}
+        if spec.is_unit(src):
+            units.append(rel.as_posix())
+    result = {"files": rels, "inputs": units, "bytes": total, "linked": linked, "copied": copied}
     meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result

@@ -8,9 +8,10 @@ sample load. ``write_report`` writes ``gate_report.json`` and ``gate_report.md``
 
 The measure keys that ``gate.evaluate`` reads are fixed (see ``gate``):
 ``rows``, ``rows_per_input``, ``text_bytes_per_input_byte``, ``duplicate_ids``,
-``empty_text_pct``, ``extract_status_pct``, ``null_pct``, ``license_counts``,
-``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``.
-A measure that cannot be computed is None (or absent): its rule then fails.
+``duplicate_ids_in_shard``, ``empty_text_pct``, ``extract_status_pct``,
+``null_pct``, ``license_counts``, ``failed_inputs``, ``orphan_bodies``,
+``rows_loaded_equals_staging``. ``distinct_ids`` is the row count a sample load
+must reach. A measure that cannot be computed is None (or absent): its rule then fails.
 """
 
 from __future__ import annotations
@@ -26,6 +27,9 @@ from episteme.data import article_schema
 
 _TEXT_COLUMNS = ("title", "abstract", "body_text", "text")
 _BODY_COLUMNS = ("text", "body_text", "abstract")
+# The shard file of each row (DuckDB's ``filename`` option): the loader loads one
+# shard per transaction, so a duplicate id inside one shard breaks the load.
+_SHARD_COLUMN = "_gate_shard"
 
 
 def _q(name: str) -> str:
@@ -58,12 +62,15 @@ def _lit(paths: list[str]) -> str:
 def _open_view(con: Any, parquet: list[str], jsonl: list[str]) -> list[str]:
     """Create view ``t`` over all shards; return its column names."""
     selects = []
+    shard = f"filename = '{_SHARD_COLUMN}'"
     if parquet:
-        selects.append(f"SELECT * FROM read_parquet({_lit(parquet)}, union_by_name = true)")
+        selects.append(
+            f"SELECT * FROM read_parquet({_lit(parquet)}, union_by_name = true, {shard})"
+        )
     if jsonl:
         selects.append(
             f"SELECT * FROM read_json_auto({_lit(jsonl)}, union_by_name = true, "
-            "format = 'newline_delimited')"
+            f"format = 'newline_delimited', {shard})"
         )
     con.execute("CREATE VIEW t AS " + " UNION ALL BY NAME ".join(selects))
     return [r[0] for r in con.execute("DESCRIBE t").fetchall()]
@@ -126,6 +133,22 @@ def _measure_shards(con: Any, columns: list[str], rows: int) -> dict:
         else:
             # No such column: nothing to duplicate when empty; unknown otherwise.
             out[key] = 0 if not rows else None
+
+    # The loader keeps one row per id across shards (its id-collision guard
+    # deletes an older row of the same id under another source_file), so a
+    # sample load holds ``distinct_ids`` rows. Inside one shard both rows are
+    # copied in one transaction and the article_body key breaks the load.
+    if "id" in columns and rows:
+        distinct = con.execute(f"SELECT count(DISTINCT {_q('id')}) FROM t").fetchone()[0]
+        in_shard = con.execute(
+            f"SELECT coalesce(sum(n - 1), 0) FROM (SELECT count(*) AS n FROM t "
+            f"WHERE {_q('id')} IS NOT NULL GROUP BY {_q(_SHARD_COLUMN)}, {_q('id')})"
+        ).fetchone()[0]
+        out["distinct_ids"] = int(distinct)
+        out["duplicate_ids_in_shard"] = int(in_shard)
+    else:
+        out["distinct_ids"] = 0 if not rows else None
+        out["duplicate_ids_in_shard"] = 0 if not rows else None
 
     def _group(col: str) -> dict[str, int]:
         if col not in columns or not rows:

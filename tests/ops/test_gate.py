@@ -35,6 +35,7 @@ GOOD = {
     "rows_per_input": 5.0,
     "text_bytes_per_input_byte": 0.5,
     "duplicate_ids": 0,
+    "duplicate_ids_in_shard": 0,
     "empty_text_pct": 0.0,
     "extract_status_pct": {"dropped": 0.5, "partial": 1.0},
     "null_pct": {"title": 0.0},
@@ -55,6 +56,12 @@ CASES = [
         ["min_text_bytes_per_input_byte", "0.01", "0.006"],
     ),
     ("max_duplicate_ids", 0, {"duplicate_ids": 3}, ["max_duplicate_ids", "0", "3"]),
+    (
+        "max_duplicate_ids_in_shard",
+        0,
+        {"duplicate_ids_in_shard": 1},
+        ["max_duplicate_ids_in_shard", "0", "1"],
+    ),
     ("max_empty_text_pct", 0.0, {"empty_text_pct": 2.5}, ["max_empty_text_pct", "2.5"]),
     (
         "max_status_pct",
@@ -131,18 +138,49 @@ def test_unknown_rule_key_raises():
 
 
 def test_is_gated_follows_the_sections(rules_dir):
-    assert gate.load_rules("src1") is None
-    assert not gate.is_gated("src1", "extract")
-    _write_rules(rules_dir, "src1", {"extract": {"min_rows": 1}})
-    assert gate.load_rules("src1") == {"extract": {"min_rows": 1}}
-    assert gate.is_gated("src1", "extract")
-    assert not gate.is_gated("src1", "load")
+    assert gate.load_rules("apollo") is None
+    assert not gate.is_gated("apollo", "extract")
+    _write_rules(rules_dir, "apollo", {"extract": {"min_rows": 1}})
+    assert gate.load_rules("apollo") == {"extract": {"min_rows": 1}}
+    assert gate.is_gated("apollo", "extract")
+    assert not gate.is_gated("apollo", "load")
 
 
 def test_damaged_rules_file_raises(rules_dir):
     (rules_dir / "bad.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
         gate.load_rules("bad")
+
+
+@pytest.mark.parametrize(
+    ("rules", "words"),
+    [
+        ({"extarct": {"min_rows": 1}}, ["extarct"]),
+        ({"graph": {"min_rows": 1}}, ["graph"]),
+        ({"extract": {"max_null_pct": {"titel": 1.0}}}, ["max_null_pct", "titel"]),
+        ({"extract": {"max_status_pct": {"droped": 1.0}}}, ["max_status_pct", "droped"]),
+    ],
+    ids=["typo-stage", "unhashed-stage", "null-column", "status"],
+)
+def test_load_rules_rejects_unknown_names(rules_dir, rules, words):
+    """F8: a typo never disables a rule; a stage the gate cannot hash is refused."""
+    _write_rules(rules_dir, "apollo", rules)
+    with pytest.raises(ValueError) as err:
+        gate.load_rules("apollo")
+    for w in words:
+        assert w in str(err.value)
+
+
+def test_load_rules_accepts_known_names(rules_dir):
+    rules = {
+        "extract": {
+            "max_null_pct": {"abstract": 1.0, "language": 2.0},
+            "max_status_pct": {"ok": 100.0, "empty": 1.0, "partial": 1.0, "dropped": 1.0},
+        },
+        "load": {"max_orphan_bodies": 0},
+    }
+    _write_rules(rules_dir, "apollo", rules)
+    assert gate.load_rules("apollo") == rules
 
 
 def test_rules_dir_is_the_package_folder():
@@ -320,47 +358,47 @@ def fake_hash(monkeypatch):
 
 
 def test_no_pass(tmp_path, rules_dir, fake_hash):
-    assert gate.pass_valid("src1", "extract", tmp_path) == (False, "no pass")
+    assert gate.pass_valid("apollo", "extract", tmp_path) == (False, "no pass")
 
 
 def test_write_pass_then_valid(tmp_path, rules_dir, fake_hash):
-    _write_rules(rules_dir, "src1", RULES)
-    path = gate.write_pass("src1", "extract", tmp_path, tmp_path / "report.json")
-    assert path == tmp_path / "_ops" / "src1" / "gate" / "extract.pass"
+    _write_rules(rules_dir, "apollo", RULES)
+    path = gate.write_pass("apollo", "extract", tmp_path, tmp_path / "report.json")
+    assert path == tmp_path / "_ops" / "apollo" / "gate" / "extract.pass"
     rec = json.loads(path.read_text(encoding="utf-8"))
-    assert rec["source"] == "src1"
+    assert rec["source"] == "apollo"
     assert rec["stage"] == "extract"
     assert rec["code_hash"] == "hash-1"
-    assert rec["rules_hash"] == gate.rules_hash("src1")
+    assert rec["rules_hash"] == gate.rules_hash("apollo")
     assert rec["report"] == str(tmp_path / "report.json")
     assert rec["passed_at"].endswith("+00:00")
     assert "package_version" in rec
     assert "git_head" in rec
-    assert gate.pass_valid("src1", "extract", tmp_path) == (True, "ok")
+    assert gate.pass_valid("apollo", "extract", tmp_path) == (True, "ok")
 
 
 def test_changed_code_hash_invalidates(tmp_path, rules_dir, fake_hash):
-    _write_rules(rules_dir, "src1", RULES)
-    gate.write_pass("src1", "extract", tmp_path, tmp_path / "r.json")
+    _write_rules(rules_dir, "apollo", RULES)
+    gate.write_pass("apollo", "extract", tmp_path, tmp_path / "r.json")
     fake_hash["h"] = "hash-2"
-    assert gate.pass_valid("src1", "extract", tmp_path) == (False, "code changed")
+    assert gate.pass_valid("apollo", "extract", tmp_path) == (False, "code changed")
 
 
 def test_changed_rules_file_invalidates(tmp_path, rules_dir, fake_hash):
-    _write_rules(rules_dir, "src1", RULES)
-    gate.write_pass("src1", "extract", tmp_path, tmp_path / "r.json")
-    _write_rules(rules_dir, "src1", {"extract": {"min_rows": 5}})
-    assert gate.pass_valid("src1", "extract", tmp_path) == (False, "rules changed")
+    _write_rules(rules_dir, "apollo", RULES)
+    gate.write_pass("apollo", "extract", tmp_path, tmp_path / "r.json")
+    _write_rules(rules_dir, "apollo", {"extract": {"min_rows": 5}})
+    assert gate.pass_valid("apollo", "extract", tmp_path) == (False, "rules changed")
 
 
 def test_a_pass_is_per_stage(tmp_path, rules_dir, fake_hash):
-    _write_rules(rules_dir, "src1", RULES)
-    gate.write_pass("src1", "extract", tmp_path, tmp_path / "r.json")
-    assert gate.pass_valid("src1", "load", tmp_path) == (False, "no pass")
+    _write_rules(rules_dir, "apollo", RULES)
+    gate.write_pass("apollo", "extract", tmp_path, tmp_path / "r.json")
+    assert gate.pass_valid("apollo", "load", tmp_path) == (False, "no pass")
 
 
 def test_a_damaged_pass_file_reads_as_no_pass(tmp_path, rules_dir, fake_hash):
-    p = gate.pass_path("src1", "extract", tmp_path)
+    p = gate.pass_path("apollo", "extract", tmp_path)
     p.parent.mkdir(parents=True)
     p.write_text("{oops", encoding="utf-8")
-    assert gate.pass_valid("src1", "extract", tmp_path) == (False, "no pass")
+    assert gate.pass_valid("apollo", "extract", tmp_path) == (False, "no pass")

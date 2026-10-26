@@ -152,6 +152,19 @@ def test_europepmc_selection_with_siblings(roots):
     assert len(names) == 9
     res = gate_slice.prepare("europepmc_manuscript", raw, sample / "e", processed_root=processed)
     assert len(res["files"]) == 9
+    # F2: the units of work (what discover() returns) are listed apart from the
+    # .filelist sidecars, so the yield is per archive.
+    assert res["inputs"] == [f for f in res["files"] if f.endswith(".tar.gz")]
+    assert len(res["inputs"]) == 3
+    meta = json.loads((sample / "e" / "slice.json").read_text())
+    assert meta["inputs"] == res["inputs"] and meta["files"] == res["files"]
+
+
+def test_bookshelf_inputs_are_all_slice_files(roots):
+    raw, processed, sample = roots
+    _bookshelf(raw, 5)
+    res = gate_slice.prepare("bookshelf", raw, sample / "bookshelf", processed_root=processed)
+    assert res["inputs"] == res["files"]
 
 
 def test_europepmc_missing_incremental_raises(roots):
