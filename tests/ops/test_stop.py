@@ -447,6 +447,7 @@ def test_stop_file_runs_the_sigterm_handler_in_the_main_thread(monkeypatch, tmp_
 def test_stop_file_is_delivered_once(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
     codes = _no_exit(monkeypatch)
     monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
     request = tmp_path / "stop.request"
@@ -466,6 +467,7 @@ def test_stop_file_cancels_the_statement_after_a_grace_period(monkeypatch, tmp_p
     # A main thread inside a long statement sees the interrupt only when the
     # C call returns: the watchdog then cancels the statement.
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: None)
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
     _no_exit(monkeypatch)
     monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
     request = tmp_path / "stop.request"
@@ -492,6 +494,7 @@ def test_stop_file_cancels_the_statement_after_a_grace_period(monkeypatch, tmp_p
 def test_stop_file_is_polled_without_a_parent_to_watch(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
     _fake_psutil(monkeypatch, {})
     monkeypatch.setattr(stop, "_runner_pid", lambda: None)
     monkeypatch.setattr(stop, "_ancestor_to_watch", lambda: None)
@@ -565,3 +568,34 @@ def test_child_cleanup_errors_do_not_block_the_exit(monkeypatch):
     t = stop.start_parent_watchdog(lambda: None, interval=0.01, parent_pid=99)
     t.join(5)
     assert codes == [143]
+
+
+def test_stop_file_after_a_real_sigterm_is_not_delivered_again(monkeypatch, tmp_path, caplog):
+    # POSIX: the runner forwards a SIGTERM and writes the stop file. A second
+    # interrupt could break the cleanup of the first (the worker termination).
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", True)  # the real SIGTERM has run
+    _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("TERM\n", encoding="utf-8")
+    cancels = []
+    done = threading.Event()
+    with caplog.at_level("WARNING", logger=stop._LOG.name):
+        t = stop.start_parent_watchdog(
+            lambda: cancels.append(1),
+            interval=30.0,
+            stop=done,
+            stop_file=request,
+            stop_poll=0.01,
+            cancel_after=0.1,
+        )
+        deadline = time.monotonic() + 3
+        while not cancels and time.monotonic() < deadline:
+            time.sleep(0.01)
+    done.set()
+    t.join(5)
+    assert calls == []
+    assert cancels == [1]  # the grace-period cancel still applies
+    assert "already" in caplog.text

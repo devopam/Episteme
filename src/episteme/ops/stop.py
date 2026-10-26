@@ -271,8 +271,13 @@ def start_parent_watchdog(
                 why = request.read_text(encoding="utf-8").strip()
             except OSError:
                 return
-            _LOG.warning("stop requested (%s, %s): stopping the stage", why or "?", request)
             asked_at = time.monotonic()
+            if _TERM_SEEN:
+                # POSIX: the runner also forwards a real SIGTERM. A second
+                # interrupt could break the cleanup of the first.
+                _LOG.warning("stop requested (%s, %s): a SIGTERM already arrived", why, request)
+                return
+            _LOG.warning("stop requested (%s, %s): stopping the stage", why or "?", request)
             _thread.interrupt_main(signal.SIGTERM)
         elif not cancelled and time.monotonic() - asked_at >= cancel_after:
             cancelled = True
