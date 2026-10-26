@@ -446,3 +446,82 @@ def test_delete_parts_above_handles_six_digit_part_numbers(raw, out, monkeypatch
     assert not success_marker_path(out, "pubchem", psf).exists()
     assert not lm.exists()
     assert _shard(out, 3).is_file()  # parts 1..3 stay
+
+
+def test_primary_marker_records_parts_list_and_inputs(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    primary = _marker(out, KEY)["stats"]
+    assert primary["parts_list"] == [mod.part_source_file(KEY, n) for n in (1, 2, 3)]
+    assert primary["inputs"] == _part_marker(out, 1)["inputs"]
+
+
+def _write_title(raw: Path, label: str) -> None:
+    title = raw / "CID-Title.tsv"
+    st = title.stat()
+    title.write_bytes("".join(f"{c}\t{label}\n" for c in CIDS).encode())
+    os.utime(title, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+
+def test_changed_input_after_the_unit_completed_rebuilds_without_force(
+    raw, out, monkeypatch, audits, caplog
+):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    lms = [_load_marker(out, n) for n in (1, 2, 3)]
+    for p in lms:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}", encoding="utf-8")
+    _write_title(raw, "Ethanol (new)")
+
+    audits.clear()
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        res = mod.serialize_pubchem(raw, out)
+    assert res == {"inputs": 1, "ok": 1, "failed": 0, "rows": 10}
+    assert any("input" in r.getMessage() and "changed" in r.getMessage() for r in caplog.records)
+    assert not any(p.exists() for p in lms)
+    primary = _marker(out, KEY)["stats"]
+    assert (primary["parts_kept"], primary["parts_written"]) == (0, 3)
+    assert [a[0] for a in audits] == [mod.part_source_file(KEY, n) for n in (1, 2, 3)]
+    for n in (1, 2, 3):
+        assert all("(new)" in t for t in pl.read_parquet(_shard(out, n))["text"].to_list())
+    # The same inputs again: the unit is skipped.
+    r = mod.process_one(raw / KEY, processed_dir=out, raw_dir=raw, force=False)
+    assert r["skipped"] is True
+
+
+def test_changed_input_drops_parts_above_the_new_count(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    # The primary shrinks to CIDs 1..5: 2 parts, and part 3 must go.
+    (raw / "CID-SMILES.tsv").write_bytes("".join(f"{c}\tCCO\n" for c in range(1, 6)).encode())
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _shard_names(out) == [f"{KEY}__part0000{i}.parquet" for i in (1, 2)]
+    assert not success_marker_path(out, "pubchem", mod.part_source_file(KEY, 3)).exists()
+    assert _marker(out, KEY)["stats"]["parts_list"] == [
+        mod.part_source_file(KEY, n) for n in (1, 2)
+    ]
+    assert _all_cids(out) == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        pytest.param({"n_rows": 10}, id="pre-parts"),
+        pytest.param({"n_rows": 10, "parts": 3}, id="no-parts-list"),
+        pytest.param({"n_rows": 10, "parts": 3, "parts_list": ["a", "b", "c"]}, id="no-inputs"),
+    ],
+)
+def test_a_primary_marker_without_the_parts_format_does_not_skip(
+    raw, out, monkeypatch, audits, stats
+):
+    _caps(monkeypatch, 4)
+    m = success_marker_path(out, "pubchem", KEY)
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text(json.dumps({"source_file": KEY, "stats": stats}), encoding="utf-8")
+    r = mod.process_one(raw / KEY, processed_dir=out, raw_dir=raw, force=False)
+    assert r["skipped"] is False and r["ok"] is True
+    primary = _marker(out, KEY)["stats"]
+    assert primary["parts_list"] == [mod.part_source_file(KEY, n) for n in (1, 2, 3)]
+    assert "inputs" in primary
+    assert _all_cids(out) == CIDS

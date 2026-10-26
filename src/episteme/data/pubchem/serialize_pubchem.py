@@ -91,8 +91,13 @@ the boundary is a CID. Each part marker also records ``inputs``, the
 ``[name, size, mtime_ns]`` of the primary file and of each sibling used; when
 the kept parts' ``inputs`` differ from the current files (or a marker has
 none), the run logs a warning and drops every part of the unit, as
-``--force`` does. ``--force`` deletes the primary marker and all parts
-of the unit first.
+``--force`` does. The primary marker records ``inputs`` and ``parts_list``
+(the names of the unit's parts) too. A run honours it (skips the unit) only
+when it has this format and its ``inputs`` equal the current files; else the
+run logs a warning and writes the unit again from part 1, as ``--force``
+does (a marker from before parts, or a new download after the unit
+completed). ``--force`` deletes the primary marker and all parts of the unit
+first.
 
 PubChem compound-extras records carry no bibliographic shape: ``title`` /
 ``journal`` / ``year`` / ``authors`` are always ``None`` on the row (PubChem's
@@ -614,6 +619,25 @@ def _read_part_marker(processed_dir: Path, psf: str) -> dict[str, Any] | None:
     return stats if isinstance(stats, dict) else None
 
 
+def read_primary_marker(processed_dir: Path, key: str) -> dict[str, Any] | None:
+    """The stats of the primary success marker of unit ``key`` when it has the
+    parts format, else ``None`` (no marker, unreadable, or a marker written
+    before parts). The parts format: ``parts`` is an int, ``parts_list`` is a
+    list of ``parts`` part names, each ``part_source_file(key, n)`` for
+    n = 1..parts, and ``inputs`` is a list (the input fingerprint)."""
+    st = _read_part_marker(processed_dir, key)
+    if st is None:
+        return None
+    parts, names, inputs = st.get("parts"), st.get("parts_list"), st.get("inputs")
+    if not isinstance(parts, int) or isinstance(parts, bool) or parts < 0:
+        return None
+    if names != [part_source_file(key, n) for n in range(1, parts + 1)]:
+        return None
+    if not isinstance(inputs, list):
+        return None
+    return st
+
+
 def _kept_parts(processed_dir: Path, key: str) -> list[dict[str, Any]]:
     """The stats of parts 1..j: the longest prefix whose markers are readable,
     whose shard exists, and whose CID ranges follow each other."""
@@ -689,9 +713,6 @@ def process_one(
     longest chain of complete parts and resumes after its last CID.
     """
     basename = input_key(path, raw_dir)
-    if not force and is_success(processed_dir, SOURCE, basename):
-        return {"source_file": basename, "skipped": True, "reason": "success_marker"}
-
     t0 = time.time()
     cap_rows, cap_bytes = _part_caps()
     status_counts: Counter[str] = Counter()
@@ -700,11 +721,30 @@ def process_one(
     iter_stats: dict[str, int] = {}
     current_part: int | None = None
     try:
-        if force:
-            success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
         siblings = _find_siblings(path)
         fingerprint = _input_fingerprint(path, siblings)
-        kept = [] if force else _kept_parts(processed_dir, basename)
+        rebuild = force
+        if not force and is_success(processed_dir, SOURCE, basename):
+            primary = read_primary_marker(processed_dir, basename)
+            if primary is not None and primary["inputs"] == fingerprint:
+                return {"source_file": basename, "skipped": True, "reason": "success_marker"}
+            # A marker from before parts, or one whose inputs differ from the
+            # current files (a new download): the unit is not done. Write it
+            # again from part 1, as --force does.
+            _LOG.warning(
+                "%s: %s; dropping all parts and writing the unit again",
+                basename,
+                "the primary success marker has no parts format"
+                if primary is None
+                else "an input file changed since the unit completed "
+                "(name, size or mtime of the primary or a sibling)",
+            )
+            rebuild = True
+        if rebuild:
+            # The primary marker goes first: a stop during the rebuild leaves
+            # no marker with an old parts_list for the retire step to trust.
+            success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
+        kept = [] if rebuild else _kept_parts(processed_dir, basename)
         if any(st.get("inputs") != fingerprint for st in kept):
             # A kept part from other input files (a new download, a sibling
             # added or gone, or a marker without a fingerprint) cannot be
@@ -824,6 +864,8 @@ def process_one(
         stats: dict[str, Any] = {
             "n_rows": n_rows_total,
             "parts": n,
+            "parts_list": [part_source_file(basename, i) for i in range(1, n + 1)],
+            "inputs": fingerprint,
             "parts_written": n - j,
             "parts_kept": j,
             "part_rows": cap_rows,
