@@ -195,8 +195,16 @@ def test_bookshelf_extract_dry_run_dies_3(tmp_path: Path) -> None:
 def test_bookshelf_extract_dispatches(tmp_path: Path) -> None:
     # no data -> the (scaffold) extractor exits 0 (nothing to do) or 1 (no raw
     # dir); NOT 3 (a dispatch bug: wrapper missing / stage not wired).
+    # bookshelf extract is gated (gate_rules/bookshelf.json): a full run needs a
+    # valid sample pass. --skip-gate would write a gate_override audit row, which
+    # needs the database and stops the run without one. So the test writes a real
+    # pass under its own processed root and checks the dispatch, not the gate.
+    from episteme.ops import gate
+
+    gate.write_pass("bookshelf", "extract", tmp_path / "02_processed", tmp_path / "report.json")
     proc = _run(["bookshelf", "extract", "--max-files", "1"], tmp_path, FAST_TIMEOUT)
     assert proc.returncode in (0, 1), proc.stderr[-2000:]
+    assert "gate: refused" not in proc.stderr
 
 
 def test_corpus_materialize_dry_run_dies_3(tmp_path: Path) -> None:

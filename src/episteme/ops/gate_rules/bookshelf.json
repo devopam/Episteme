@@ -1,0 +1,15 @@
+{
+  "extract": {
+    "max_duplicate_ids": 0,
+    "max_empty_text_pct": 0,
+    "max_failed_inputs": 0,
+    "min_rows_per_input": 4.0,
+    "min_text_bytes_per_input_byte": 0.02,
+    "max_status_pct": {"partial": 15.0},
+    "allowed_licenses": ["CC0", "CC BY", "CC BY-SA", "CC BY-ND", "CC BY-NC", "CC BY-NC-SA", "CC BY-NC-ND", "unknown"]
+  },
+  "load": {
+    "max_orphan_bodies": 0,
+    "rows_loaded_equals_staging": true
+  }
+}

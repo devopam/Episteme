@@ -1,0 +1,15 @@
+{
+  "extract": {
+    "max_duplicate_ids": 0,
+    "max_empty_text_pct": 0,
+    "max_failed_inputs": 0,
+    "min_rows_per_input": 500,
+    "min_text_bytes_per_input_byte": 0.3,
+    "max_status_pct": {"dropped": 10.0},
+    "allowed_licenses": ["permissive"]
+  },
+  "load": {
+    "max_orphan_bodies": 0,
+    "rows_loaded_equals_staging": true
+  }
+}
