@@ -209,6 +209,9 @@ class Settings:
     runner_pid: int | None = None
     # Folder of the current run's status file (the wrapper exports it).
     run_dir: Path | None = None
+    # The stop-request file of the current run (run_pipeline.sh writes it on
+    # INT/TERM; the parent watchdog in episteme.ops.stop polls it).
+    stop_file: Path | None = None
     # run_pipeline.sh --no-wait: a busy stage or advisory lock refuses (exit 75).
     no_wait: bool = False
 
@@ -315,6 +318,9 @@ def get_settings() -> Settings:
         runner_pid=_get_pid_or_none("EPISTEME_RUNNER_PID"),
         run_dir=Path(_get("EPISTEME_RUN_DIR")).expanduser()
         if (_get("EPISTEME_RUN_DIR") or "").strip()
+        else None,
+        stop_file=Path(_get("EPISTEME_STOP_FILE")).expanduser()
+        if (_get("EPISTEME_STOP_FILE") or "").strip()
         else None,
         # run_pipeline.sh --no-wait exports EPISTEME_NO_WAIT=1.
         no_wait=(_get("EPISTEME_NO_WAIT") or "").strip() == "1",

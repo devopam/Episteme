@@ -1,5 +1,6 @@
-"""Stop handling: turn SIGTERM/SIGBREAK into KeyboardInterrupt and cancel the
-running statement when the parent process dies.
+"""Stop handling: turn SIGTERM/SIGBREAK (and the runner's stop-request file)
+into KeyboardInterrupt, and cancel the running statement when the parent
+process dies.
 
 A hard kill of the runner on Windows once left a 3-hour orphan DELETE running
 in PostgreSQL. A stage wraps its main in ``stage_guard`` so a stop or a dead
@@ -12,6 +13,7 @@ launcher.
 
 from __future__ import annotations
 
+import _thread
 import logging
 import os
 import signal
@@ -19,7 +21,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -30,6 +33,13 @@ _LOG = logging.getLogger(__name__)
 
 EXIT_INT = 130
 EXIT_TERM = 143
+
+# The stop-request file is polled this often (seconds); the parent check keeps
+# its own ``interval``.
+STOP_POLL_S = 1.0
+# After a stop request, the watchdog cancels the statement if the stage still
+# runs this many seconds later (its main thread is inside a long C call).
+STOP_CANCEL_AFTER_S = 5.0
 
 _TERM_SEEN = False
 
@@ -142,6 +152,64 @@ def _watch_target(parent_pid: int | None) -> tuple[psutil.Process | None, int | 
     return proc, (proc.pid if proc is not None else None)
 
 
+def _stop_file() -> Path | None:
+    """The stop-request file of this run (``EPISTEME_STOP_FILE``), or None."""
+    try:
+        from episteme.config import get_settings
+
+        return get_settings().stop_file
+    except Exception as exc:  # noqa: BLE001 - no settings: no stop file
+        _LOG.warning("stop file unavailable (%s); only a signal stops this stage", exc)
+        return None
+
+
+def _self_process() -> psutil.Process:
+    return psutil.Process(os.getpid())
+
+
+def _end_children(timeout: float = 5.0) -> None:
+    """Terminate this process's descendants (the pool workers), then kill the
+    ones left after ``timeout``. Best effort: the process exits next."""
+    try:
+        kids = _self_process().children(recursive=True)
+        if not kids:
+            return
+        for p in kids:
+            with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                p.terminate()
+        _gone, alive = psutil.wait_procs(kids, timeout=timeout)
+        for p in alive:
+            with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                p.kill()
+        if alive:
+            psutil.wait_procs(alive, timeout=timeout)
+        _LOG.error(
+            "terminated %d child process(es) before exiting (%d killed)", len(kids), len(alive)
+        )
+    except Exception:  # noqa: BLE001 - the process exits next
+        _LOG.exception("could not end the child processes")
+
+
+def _bounded(fn: Callable[[], None], timeout: float, what: str) -> None:
+    """Run ``fn`` in a helper thread and wait at most ``timeout`` seconds (a
+    cancel can hang when the DB is unreachable)."""
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - best effort
+            _LOG.exception("%s failed", what)
+
+    helper = threading.Thread(target=_run, name="watchdog-cancel", daemon=True)
+    helper.start()
+    helper.join(timeout)
+    if helper.is_alive():
+        _LOG.error("%s did not finish within %ss; going on", what, timeout)
+
+
+_UNSET: Any = object()
+
+
 def start_parent_watchdog(
     cancel: Callable[[], None],
     *,
@@ -149,52 +217,97 @@ def start_parent_watchdog(
     parent_pid: int | None = None,
     cancel_timeout: float = 10.0,
     stop: threading.Event | None = None,
+    stop_file: Path | None = _UNSET,
+    stop_poll: float = STOP_POLL_S,
+    cancel_after: float = STOP_CANCEL_AFTER_S,
 ) -> threading.Thread:
-    """Start a daemon thread that cancels the running statement and exits the
-    process (code 143) when the watched process is gone (see ``_watch_target``).
-    Setting ``stop`` ends the thread without that exit (the guarded stage
+    """Start a daemon thread that watches two things.
+
+    * The watched process (see ``_watch_target``), every ``interval`` seconds.
+      When it is gone: cancel the running statement, end this process's child
+      processes (the pool workers), and exit the process (code 143).
+    * The stop-request file (``stop_file``; default ``EPISTEME_STOP_FILE``),
+      every ``stop_poll`` seconds. ``run_pipeline.sh`` writes it on INT/TERM:
+      on Windows bash cannot signal a native Python. When the file appears, the
+      SIGTERM handler runs in the main thread (``_thread.interrupt_main``),
+      once, as a real SIGTERM would; ``stage_guard`` then cancels the statement
+      and exits 143. No ``os._exit`` on this path. The main thread sees the
+      stop at its next Python instruction: if the process still runs
+      ``cancel_after`` seconds later (a long statement), the watchdog cancels
+      the statement too.
+
+    Setting ``stop`` ends the thread without an exit (the guarded stage
     finished)."""
     # Limits: a zombie parent on POSIX counts as running.
     proc, ppid = _watch_target(parent_pid)
+    request = _stop_file() if stop_file is _UNSET else stop_file
+    watch_parent = proc is not None or parent_pid is not None
 
-    if proc is None and parent_pid is None:
+    if not watch_parent:
         # Nothing to watch (no runner, no usable ancestor): a stage must never
-        # stop itself for that. Run without a watchdog; the thread only waits.
+        # stop itself for that. Run without a parent watchdog.
         _LOG.warning("no process to watch; running without a parent watchdog")
+        if request is None:
 
-        def _idle() -> None:
-            if stop is not None:
-                stop.wait()
+            def _idle() -> None:
+                if stop is not None:
+                    stop.wait()
 
-        t = threading.Thread(target=_idle, name="parent-watchdog", daemon=True)
-        t.start()
-        return t
+            t = threading.Thread(target=_idle, name="parent-watchdog", daemon=True)
+            t.start()
+            return t
+
+    asked_at: float | None = None
+    cancelled = False
+
+    def _check_request() -> None:
+        nonlocal asked_at, cancelled
+        if request is None:
+            return
+        if asked_at is None:
+            try:
+                if not request.exists():
+                    return
+                why = request.read_text(encoding="utf-8").strip()
+            except OSError:
+                return
+            _LOG.warning("stop requested (%s, %s): stopping the stage", why or "?", request)
+            asked_at = time.monotonic()
+            _thread.interrupt_main(signal.SIGTERM)
+        elif not cancelled and time.monotonic() - asked_at >= cancel_after:
+            cancelled = True
+            _LOG.warning(
+                "the stage still runs %ss after the stop; cancelling the statement", cancel_after
+            )
+            _bounded(cancel, cancel_timeout, "cancel after the stop request")
+
+    def _rest(secs: float) -> bool:
+        """Sleep; True when ``stop`` is set (the stage finished)."""
+        if stop is not None:
+            return stop.wait(secs)
+        time.sleep(secs)
+        return False
+
+    tick = interval if request is None else min(stop_poll, interval)
 
     def _watch() -> None:
-        while proc is not None and _is_running(proc):
-            if stop is not None:
-                if stop.wait(interval):
-                    return
-            else:
-                time.sleep(interval)
+        due = time.monotonic()
+        while True:
+            if watch_parent and time.monotonic() >= due:
+                if proc is None or not _is_running(proc):
+                    break
+                due = time.monotonic() + interval
+            _check_request()
+            if _rest(tick):
+                return
 
         # A clean finish at the same instant as the parent's death must not exit 143.
         if stop is not None and stop.is_set():
             return
-
-        def _run_cancel() -> None:
-            try:
-                cancel()
-            except Exception:  # noqa: BLE001 - the process exits next
-                _LOG.exception("cancel failed after parent %s exited", ppid)
-
-        # A cancel can hang when the DB is unreachable: bound the wait.
-        helper = threading.Thread(target=_run_cancel, name="watchdog-cancel", daemon=True)
-        helper.start()
-        helper.join(cancel_timeout)
-        if helper.is_alive():
-            _LOG.error("cancel did not finish within %ss; exiting anyway", cancel_timeout)
+        _bounded(cancel, cancel_timeout, f"cancel after parent {ppid} exited")
         _LOG.error("parent process %s is gone; exiting", ppid)
+        # The pool workers would outlive an os._exit of this process.
+        _end_children()
         os._exit(EXIT_TERM)
 
     t = threading.Thread(target=_watch, name="parent-watchdog", daemon=True)
