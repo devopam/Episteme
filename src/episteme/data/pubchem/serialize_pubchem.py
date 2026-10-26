@@ -25,7 +25,7 @@ PRIMARY unit of work -- one row per CID present in that file, one
 success/failure marker per primary file (matching Sec 4.11's "unit of work =
 one input file"). ``CID-IUPAC.gz`` / ``CID-Title.gz`` / ``CID-Mass.gz``, if
 present as SIBLING files in the same directory as the primary file, are
-joined in via DuckDB LEFT JOINs (best-effort, NOT required -- a primary file
+joined in by a streaming merge join (best-effort, NOT required -- a primary file
 with no siblings present still serializes successfully, just with sparser
 text). Sibling files are NOT independent units of work: they carry no
 marker of their own and are silently skipped if absent.
@@ -125,10 +125,7 @@ if str(_SRC) not in sys.path:
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
-from episteme.data import (  # noqa: E402
-    duckdb_conn,
-    staging_writer,
-)
+from episteme.data import staging_writer  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     LICENSE_PUBLIC_DOMAIN,
@@ -146,6 +143,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     mark_success,
     write_run_manifest,
 )
+from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import record_first_failure, run_per_file, skip_files  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
@@ -156,8 +154,7 @@ _LOG = logging.getLogger(__name__)
 
 SOURCE = "pubchem"
 
-# Batch sizes are module-level (read at call time) so tests can shrink them.
-_FETCH_BATCH_ROWS = duckdb_conn.FETCH_BATCH_ROWS
+# Batch size is module-level (read at call time) so tests can shrink it.
 _WRITE_BATCH_ROWS = staging_writer.WRITE_BATCH_ROWS
 
 # PubChem's real Compound/Extras/README-Extras "Fair Use Disclaimer" section,
@@ -193,7 +190,6 @@ _AUDIT_LOCK = threading.Lock()
 # real download shape (bare ``.gz``, no ``.tsv`` in the name) and the
 # unit-test fixture / a manually-supplied ``.tsv`` or ``.tsv.gz`` shape.
 _PRIMARY_STEM = "CID-SMILES"
-_PRIMARY_COLUMNS = {"cid": "BIGINT", "smiles": "VARCHAR"}
 _CANDIDATE_EXTS = (".gz", ".tsv.gz", ".tsv")
 
 # SIBLING files: best-effort enrichment, looked up by exact stem in the same
@@ -203,22 +199,18 @@ _CANDIDATE_EXTS = (".gz", ".tsv.gz", ".tsv")
 #   CID-IUPAC.gz  -- CID, tab, IUPAC name
 #   CID-Title.gz  -- CID, tab, compound-summary-page title
 #   CID-Mass.gz   -- CID, tab, formula, tab, monoisotopic mass, tab, exact mass
-# Dict order also fixes SQL param order in _build_query -- do not reorder
-# without checking that function.
+# Column order is the file's field order; n_fields = len(columns) - 1.
 _SIBLING_DEFS: dict[str, dict[str, Any]] = {
     "iupac_name": {
         "stem": "CID-IUPAC",
-        "alias": "i",
         "columns": {"cid": "BIGINT", "iupac_name": "VARCHAR"},
     },
     "title": {
         "stem": "CID-Title",
-        "alias": "t",
         "columns": {"cid": "BIGINT", "title": "VARCHAR"},
     },
     "formula": {
         "stem": "CID-Mass",
-        "alias": "m",
         "columns": {
             "cid": "BIGINT",
             "formula": "VARCHAR",
@@ -227,13 +219,6 @@ _SIBLING_DEFS: dict[str, dict[str, Any]] = {
         },
     },
 }
-
-
-def _columns_literal(columns: dict[str, str]) -> str:
-    """``{'cid': 'BIGINT', 'smiles': 'VARCHAR'}`` -- DuckDB struct-literal
-    syntax for ``read_csv(..., columns=...)``. Built from a plain dict so
-    the schema is declared once, in Python, not duplicated as raw SQL text."""
-    return "{" + ", ".join(f"'{k}': '{v}'" for k, v in columns.items()) + "}"
 
 
 def _find_siblings(primary_path: Path) -> dict[str, Path]:
@@ -255,39 +240,98 @@ def _find_siblings(primary_path: Path) -> dict[str, Path]:
     return found
 
 
-def _build_query(primary_path: Path, sibling_paths: dict[str, Path]) -> tuple[str, list[str]]:
-    """Build the DuckDB SQL (with ``?`` positional params) that LEFT JOINs
-    whichever sibling files were actually found onto the primary CID-SMILES
-    read. A missing sibling contributes a literal ``NULL`` column instead of
-    a join -- the row shape (``cid``, ``smiles``, ``iupac_name``, ``title``,
-    ``formula``) is always the same five columns regardless of which
-    siblings are present."""
-    primary_literal = _columns_literal(_PRIMARY_COLUMNS)
-    select_cols = ["p.cid AS cid", "p.smiles AS smiles"]
-    join_parts: list[str] = []
-    params: list[str] = [str(primary_path)]
+class PubchemInputError(ValueError):
+    """A permanent input error: a PubChem property file is not what the
+    streaming merge join needs (integer CIDs, sorted, one row per CID)."""
 
-    for key, spec in _SIBLING_DEFS.items():
-        path = sibling_paths.get(key)
-        if path is None:
-            select_cols.append(f"CAST(NULL AS VARCHAR) AS {key}")
-            continue
-        alias = spec["alias"]
-        cols_literal = _columns_literal(spec["columns"])
-        join_parts.append(
-            f"LEFT JOIN read_csv(?, delim='\\t', header=false, "
-            f"columns={cols_literal}) {alias} ON {alias}.cid = p.cid"
-        )
-        params.append(str(path))
-        select_cols.append(f"{alias}.{key} AS {key}")
 
-    sql = (
-        "SELECT " + ", ".join(select_cols) + " "
-        f"FROM read_csv(?, delim='\\t', header=false, columns={primary_literal}) p "
-        + " ".join(join_parts)
-        + " ORDER BY p.cid"
-    )
-    return sql, params
+def _open_text(path: Path):
+    if path.suffix == ".gz":
+        return open_gz(path, "rt", encoding="utf-8", errors="replace", newline="")
+    return open(path, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
+
+
+def _iter_cid_lines(
+    path: Path, n_fields: int, stats: dict[str, int] | None = None
+) -> Iterator[tuple[int, list[str | None]]]:
+    """Yield ``(cid, fields)`` for each line of one CID-sorted property file.
+
+    ``fields`` has exactly ``n_fields`` items (padded or truncated); an empty
+    field is ``None``. A line with an empty CID is counted in
+    ``stats["skipped_no_id"]`` and skipped. A CID that is not an integer, or
+    that is not strictly greater than the one before, raises
+    ``PubchemInputError``.
+    """
+    prev: int | None = None
+    with _open_text(path) as fh:
+        for lineno, line in enumerate(fh, start=1):
+            parts = line.rstrip("\r\n").split("\t")
+            raw = parts[0]
+            if not raw:
+                if stats is not None:
+                    stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                continue
+            try:
+                cid = int(raw)
+            except ValueError:
+                raise PubchemInputError(
+                    f"{path.name} line {lineno}: CID {raw!r} is not an integer"
+                ) from None
+            if prev is not None and cid <= prev:
+                raise PubchemInputError(
+                    f"{path.name} line {lineno}: CID {cid} after {prev}: "
+                    "the file is not sorted by CID with one row per CID"
+                )
+            prev = cid
+            fields: list[str | None] = [(f or None) for f in parts[1 : 1 + n_fields]]
+            fields.extend([None] * (n_fields - len(fields)))
+            yield cid, fields
+
+
+_MASS_KEYS = ("monoisotopic_mass", "exact_mass")
+
+
+def iter_merged_records(
+    primary_path: Path,
+    sibling_paths: dict[str, Path],
+    stats: dict[str, int] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Merge-join the primary CID file with the sibling files, one pass.
+
+    All files are sorted by CID, so each sibling keeps one cursor that moves
+    forward while its CID is lower than the primary CID. Memory is one line
+    per file. A sibling CID absent from the primary is ignored; a primary CID
+    absent from a sibling gets ``None`` for that sibling's fields.
+    """
+    cursors: dict[str, Iterator[tuple[int, list[str | None]]]] = {}
+    heads: dict[str, tuple[int, list[str | None]] | None] = {}
+    for key, path in sibling_paths.items():
+        n_fields = len(_SIBLING_DEFS[key]["columns"]) - 1
+        cursors[key] = _iter_cid_lines(path, n_fields)
+        heads[key] = next(cursors[key], None)
+    try:
+        for cid, (smiles,) in _iter_cid_lines(primary_path, 1, stats):
+            rec: dict[str, Any] = {"cid": cid, "smiles": smiles}
+            for key, spec in _SIBLING_DEFS.items():
+                names = list(spec["columns"])[1:]
+                values: list[str | None] = [None] * len(names)
+                if key in cursors:
+                    head = heads[key]
+                    while head is not None and head[0] < cid:
+                        head = next(cursors[key], None)
+                    heads[key] = head
+                    if head is not None and head[0] == cid:
+                        values = head[1]
+                for name, value in zip(names, values, strict=True):
+                    if name in _MASS_KEYS and value is not None:
+                        rec[name] = float(value)
+                    else:
+                        rec[name] = value
+            yield rec
+    finally:
+        for it in cursors.values():
+            with contextlib.suppress(Exception):
+                it.close()  # type: ignore[attr-defined]
 
 
 def _build_text(rec: dict[str, Any]) -> str:
@@ -399,29 +443,18 @@ def iter_rows_from_file(
     ``.gz`` download shape), best-effort-enriched from ``CID-IUPAC`` /
     ``CID-Title`` / ``CID-Mass`` sibling files if present alongside it.
 
-    A streaming read: the connection is memory-bounded (``duckdb_conn.connect``)
-    and rows are fetched in ``_FETCH_BATCH_ROWS`` batches, so peak memory is
-    one batch, not the whole result. The connection stays open until the
-    generator finishes.
+    A streaming merge join: one line per file is in memory at a time.
     """
     source_file = source_file or path.name
     siblings = _find_siblings(path)
-    sql, params = _build_query(path, siblings)
-    con = duckdb_conn.connect()
-    try:
-        con.execute(sql, params)
-        cols = [d[0] for d in con.description]
-        for batch in duckdb_conn.fetch_batches(con, batch_size=_FETCH_BATCH_ROWS):
-            for raw in batch:
-                rec = dict(zip(cols, raw, strict=True))
-                row = pubchem_row(rec, source_file)
-                if row is None:
-                    if stats is not None:
-                        stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
-                    continue
-                yield row
-    finally:
-        con.close()
+    with contextlib.closing(iter_merged_records(path, siblings, stats)) as records:
+        for rec in records:
+            row = pubchem_row(rec, source_file)
+            if row is None:
+                if stats is not None:
+                    stats["skipped_no_id"] = stats.get("skipped_no_id", 0) + 1
+                continue
+            yield row
 
 
 def discover_pubchem_files(raw_dir: Path) -> list[Path]:

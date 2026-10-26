@@ -32,12 +32,16 @@ All `not pg` -- no DB.
 
 from __future__ import annotations
 
+import gzip
+import json
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from episteme.data import article_schema
 from episteme.data.pubchem.serialize_pubchem import (
+    PubchemInputError,
     iter_rows_from_file,
     main,
     serialize_pubchem,
@@ -247,29 +251,18 @@ def test_pubchem_record_without_cid_is_counted_and_skipped(tmp_path):
 
 
 def test_pubchem_tiny_batches_match_default_shard(tmp_path, monkeypatch):
-    """Serializing with 1-row fetch and write batches yields the same shard."""
-    from episteme.data import duckdb_conn, staging_writer
+    """Serializing with 1-row write batches yields the same shard."""
+    from episteme.data import staging_writer
     from episteme.data.pubchem import serialize_pubchem as mod
 
     default_dir = tmp_path / "default"
     tiny_dir = tmp_path / "tiny"
     assert serialize_pubchem(FX, default_dir)["ok"] == 1
 
-    calls = {"batches": 0}
-    real_fetch_batches = duckdb_conn.fetch_batches
-
-    def _counting_fetch_batches(con, batch_size=duckdb_conn.FETCH_BATCH_ROWS):
-        for batch in real_fetch_batches(con, batch_size=batch_size):
-            calls["batches"] += 1
-            yield batch
-
-    monkeypatch.setattr(mod, "_FETCH_BATCH_ROWS", 1)
     monkeypatch.setattr(mod, "_WRITE_BATCH_ROWS", 1)
-    monkeypatch.setattr(duckdb_conn, "fetch_batches", _counting_fetch_batches)
     res = serialize_pubchem(FX, tiny_dir)
     assert res["ok"] == 1
     assert staging_writer.WRITE_BATCH_ROWS != 1  # the patch above is module-local
-    assert calls["batches"] > 1
 
     def _rows(root):
         df = _read_shard(root / "staging" / "pubchem") if "_read_shard" in globals() else None
@@ -284,3 +277,109 @@ def test_pubchem_tiny_batches_match_default_shard(tmp_path, monkeypatch):
 
     assert _rows(tiny_dir) == _rows(default_dir)
     assert _rows(tiny_dir)
+
+
+# --------------------------------------------------------------------------- #
+# Streaming merge join (replaces the DuckDB LEFT JOIN)
+# --------------------------------------------------------------------------- #
+
+GOLDEN = Path(__file__).resolve().parent / "fixtures" / "pubchem_golden_rows.json"
+
+
+def _canon(rows):
+    """Rows without the volatile ``retrieved_at``, as deterministic JSON."""
+    kept = [{k: v for k, v in r.items() if k != "retrieved_at"} for r in rows]
+    return json.dumps(kept, sort_keys=True, default=str, indent=1) + "\n"
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+def _write_gz(path: Path, data: bytes) -> Path:
+    with gzip.open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def test_merge_join_matches_golden_rows():
+    rows = list(iter_rows_from_file(FX / "CID-SMILES.tsv"))
+    assert _canon(rows) == GOLDEN.read_bytes().decode("utf-8")
+
+
+def test_sibling_with_gaps_and_extra_cids(tmp_path):
+    _write(tmp_path / "CID-SMILES.tsv", "1\tC\n2\tCC\n3\tCCC\n")
+    _write(tmp_path / "CID-IUPAC.tsv", "1\tmethane\n3\tpropane\n99\textra\n")
+    rows = {r["source_record_id"]: r for r in iter_rows_from_file(tmp_path / "CID-SMILES.tsv")}
+    assert set(rows) == {"1", "2", "3"}
+    assert "IUPAC name methane" in rows["1"]["text"]
+    assert "IUPAC name" not in rows["2"]["text"]
+    assert "IUPAC name propane" in rows["3"]["text"]
+
+
+def test_merged_records_have_float_masses(tmp_path):
+    from episteme.data.pubchem.serialize_pubchem import iter_merged_records
+
+    _write(tmp_path / "CID-SMILES.tsv", "1\tC\n2\tCC\n")
+    mass = _write(tmp_path / "CID-Mass.tsv", "1\tCH4\t16.03\t16.04\n")
+    recs = list(iter_merged_records(tmp_path / "CID-SMILES.tsv", {"formula": mass}))
+    assert recs[0]["formula"] == "CH4"
+    assert recs[0]["monoisotopic_mass"] == 16.03
+    assert recs[0]["exact_mass"] == 16.04
+    assert recs[1]["formula"] is None and recs[1]["exact_mass"] is None
+
+
+def test_unsorted_primary_fails_fast(tmp_path):
+    p = _write(tmp_path / "CID-SMILES.tsv", "1\tC\n3\tC\n2\tC\n")
+    with pytest.raises(PubchemInputError, match="CID-SMILES.tsv line 3: CID 2 after 3"):
+        list(iter_rows_from_file(p))
+
+
+def test_duplicate_cid_fails_fast(tmp_path):
+    p = _write(tmp_path / "CID-SMILES.tsv", "1\tC\n1\tC\n")
+    with pytest.raises(PubchemInputError):
+        list(iter_rows_from_file(p))
+
+
+def test_non_integer_cid_fails_fast(tmp_path):
+    p = _write(tmp_path / "CID-SMILES.tsv", "abc\tC\n")
+    with pytest.raises(PubchemInputError, match="CID 'abc' is not an integer"):
+        list(iter_rows_from_file(p))
+
+
+def test_unsorted_sibling_late_in_file_fails_fast(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write(raw / "CID-SMILES.tsv", "".join(f"{i}\tC\n" for i in range(1, 1003)))
+    lines = [f"{i}\tname{i}\n" for i in range(1, 1001)] + ["500\tback\n"]
+    _write(raw / "CID-IUPAC.tsv", "".join(lines))
+    with pytest.raises(PubchemInputError, match=r"CID-IUPAC.tsv line 1001"):
+        list(iter_rows_from_file(raw / "CID-SMILES.tsv"))
+
+    from episteme.data.pubchem.serialize_pubchem import process_one
+
+    processed = tmp_path / "processed"
+    res = process_one(raw / "CID-SMILES.tsv", processed_dir=processed, raw_dir=raw, force=False)
+    assert res["ok"] is False
+    assert "CID-IUPAC.tsv line 1001" in res["error"]
+    assert list((processed / "_ops" / "pubchem" / "failed").glob("*"))
+
+
+def test_crlf_and_trailing_tab_lines(tmp_path):
+    p = _write_gz(tmp_path / "CID-SMILES.gz", b"1\tC\r\n2\tCC\t\r\n")
+    rows = list(iter_rows_from_file(p))
+    assert [r["source_record_id"] for r in rows] == ["1", "2"]
+    assert "canonical SMILES C," in rows[0]["text"]
+    assert "canonical SMILES CC," in rows[1]["text"]
+
+
+def test_memory_is_streaming(tmp_path, monkeypatch):
+    from episteme.data import duckdb_conn
+
+    def _boom(*a, **k):
+        raise AssertionError("DuckDB must not be used")
+
+    monkeypatch.setattr(duckdb_conn, "connect", _boom)
+    res = serialize_pubchem(FX, tmp_path)
+    assert res["ok"] == 1 and res["rows"] == 3
