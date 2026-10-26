@@ -71,7 +71,7 @@ case "$*" in
     *"episteme.ops.gate migrations-check"*)
         echo "migcheck $db" >> "$CALLS"
         if [ -n "${MISSING_MIG:-}" ]; then echo "$MISSING_MIG: missing episteme.x"; exit 1; fi
-        exit 0 ;;
+        exit "${RC_MIG:-0}" ;;
     *"-m episteme.ops."*) exec "$REAL_PY" "$@" ;;
 esac
 exit 0
@@ -421,11 +421,13 @@ def test_sample_extract_starts_from_an_empty_sample_output(tree):
     assert not any(p.exists() for p in old)
 
 
-def test_a_failed_prepare_refuses_with_2_and_no_audit_row(tree):
+@pytest.mark.parametrize(("prep_rc", "rc"), [("2", 2), ("1", 1)])
+def test_a_failed_prepare_exits_2_for_a_refusal_and_1_otherwise(tree, prep_rc, rc):
+    """Ruling R10: a slice refusal is exit 2, an I/O failure exit 1."""
     proc, calls, audit = _run(
-        tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass", RC_PREPARE="2"
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass", RC_PREPARE=prep_rc
     )
-    assert proc.returncode == 2, proc.stderr
+    assert proc.returncode == rc, proc.stderr
     assert _stages(calls) == [] and audit == []
     assert not (_roots(tree[1])["EPISTEME_LOCK_DIR"] / "heavy.lock").exists()
 
@@ -497,6 +499,53 @@ def test_sample_load_with_a_missing_migration_refuses_with_2_and_names_it(tree):
     assert _stages(calls) == [] and audit == []
 
 
+def test_a_failed_migrations_check_exits_1(tree):
+    """Ruling R10: an unreachable DB or an error is not a refusal."""
+    _sample_staging(tree[1])
+    proc, calls, audit = _run(
+        tree, "bookshelf", "load", "--sample", CHECK_load="no pass", RC_MIG="3"
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "migrations-check failed (rc=3)" in proc.stderr
+    assert _stages(calls) == [] and audit == []
+
+
+def test_sample_without_a_secondary_database_is_a_usage_error(tree):
+    proc, calls, audit = _run(
+        tree, "bookshelf", "extract", "--sample", CHECK_extract="no pass", PGDATABASE_SECONDARY=""
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "PGDATABASE_SECONDARY" in proc.stderr
+    assert _stages(calls) == [] and audit == []
+
+
+def test_sample_load_clears_load_success_but_keeps_the_staging_and_slice(tree):
+    tmp = tree[1]
+    _sample_staging(tmp)
+    sample = _sample_root(tmp)
+    (sample / "slice.json").write_text('{"files": []}', encoding="utf-8")
+    marker = sample / "02_processed" / "_ops" / "bookshelf" / "load_success" / "a.ok"
+    extract_marker = sample / "02_processed" / "_ops" / "bookshelf" / "success" / "a.ok"
+    for p in (marker, extract_marker):
+        p.parent.mkdir(parents=True)
+        p.write_text("x", encoding="utf-8")
+    proc, _, _ = _run(tree, "bookshelf", "load", "--sample", CHECK_load="no pass")
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists()
+    assert extract_marker.is_file()
+    assert (sample / "slice.json").is_file()
+    assert (sample / "02_processed" / "staging" / "bookshelf" / "part-0.parquet").is_file()
+
+
+def test_a_dry_run_of_a_gated_extract_is_not_gated(tree):
+    """The dry-run guard refuses a DB-writing stage with exit 3, before any gate check."""
+    proc, calls, audit = _run(tree, "bookshelf", "extract", "--dry-run", CHECK_extract="no pass")
+    assert proc.returncode == 3, proc.stderr
+    assert "no pass" not in proc.stderr
+    assert not any(c.startswith("check ") for c in calls)
+    assert audit == []
+
+
 def test_sample_load_runs_on_the_sample_staging(tree):
     tmp = tree[1]
     _sample_staging(tmp)
@@ -526,7 +575,11 @@ def test_a_sample_load_against_episteme_test_checks_the_real_migrations(tree):
             '*"episteme.ops.gate migrations-check-fake"*)',
         ),
     )
-    keep = {k: v for k, v in os.environ.items() if k.startswith("PG") and k != "PGDATABASE"}
+    keep = {
+        k: v
+        for k, v in os.environ.items()
+        if k.startswith("PG") and k not in ("PGDATABASE", "PGDATABASE_SECONDARY")
+    }
     if not keep.get("PGPASSWORD") and not keep.get("PGHOST"):
         pytest.skip("source .env first: no PG connection settings in the environment")
     proc, calls, audit = _run(
@@ -544,3 +597,4 @@ def test_a_sample_load_against_episteme_test_checks_the_real_migrations(tree):
         assert _stages(calls) == [] and audit == []
     else:
         assert proc.returncode == 0, proc.stderr
+        assert _stages(calls) == ["stage load_bookshelf"]

@@ -462,3 +462,50 @@ def test_deferred_migration_is_skipped_and_reported_on_stderr(tmp_path, monkeypa
     _fake_connect(monkeypatch, _MarkerConn(set()))
     assert gate.main(["migrations-check"]) == 1
     assert capsys.readouterr().out.splitlines() == ["0002_b.sql: missing table:s.b"]
+
+
+# --- fix round: R10 exit codes, a failed report drops the old pass -----------
+
+
+def _prepare_raising(monkeypatch, tmp_path, exc: Exception) -> int:
+    from episteme.ops import gate_slice
+
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(gate_slice, "prepare", boom)
+    return gate.main(
+        [
+            "prepare",
+            "--source",
+            SRC,
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--sample-root",
+            str(tmp_path / "proc" / "_sample" / SRC),
+            "--processed-root",
+            str(tmp_path / "proc"),
+        ]
+    )
+
+
+def test_prepare_exits_2_for_a_slice_refusal(tmp_path, monkeypatch):
+    from episteme.ops import gate_slice
+
+    assert _prepare_raising(monkeypatch, tmp_path, gate_slice.SliceError("over the cap")) == 2
+    assert _prepare_raising(monkeypatch, tmp_path, FileNotFoundError("missing")) == 2
+
+
+def test_prepare_exits_1_for_an_io_error(tmp_path, monkeypatch, capsys):
+    assert _prepare_raising(monkeypatch, tmp_path, PermissionError("denied")) == 1
+    assert "denied" in capsys.readouterr().err
+
+
+def test_a_failed_report_deletes_the_old_pass(tmp_path, rules_dir, fake_hash):
+    sample, rec = _sample(tmp_path, rows=5)
+    pass_root = tmp_path / "prod"
+    assert gate.main(_report_args(sample, rec, pass_root)) == 0
+    assert gate.pass_path(SRC, "extract", pass_root).is_file()
+    sample, rec = _sample(tmp_path / "again", rows=2)
+    assert gate.main(_report_args(sample, rec, pass_root)) == 1
+    assert not gate.pass_path(SRC, "extract", pass_root).exists()

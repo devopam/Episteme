@@ -495,8 +495,13 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
             args.source, Path(args.raw_root), Path(args.sample_root), processed_root=processed
         )
     except (gate_slice.SliceError, FileNotFoundError) as exc:
+        # A refusal: no slice can be built (a group or file is missing, the cap).
         _err(f"gate prepare: {exc}")
         return 2
+    except OSError as exc:
+        # An operational failure (a copy or a link failed).
+        _err(f"gate prepare: I/O error: {exc}")
+        return 1
     print(Path(args.sample_root))
     return 0
 
@@ -555,6 +560,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
         failures.insert(0, f"run record: the command exited with rc {record['rc']}")
     report_path = gate_report.write_report(measures, failures, sample_root)
     if failures:
+        # An older pass with the same hashes must not let a full run through.
+        old = pass_path(source, stage, Path(args.pass_root))
+        old.unlink(missing_ok=True)
         print(f"gate FAIL for {source} {stage}:")
         for line in failures:
             print(f"  {line}")

@@ -353,10 +353,13 @@ if [ "$SAMPLE" = "1" ]; then
         mig_rc=0
         mig_out="$("$PY" -m episteme.ops.gate migrations-check)" || mig_rc=$?
         mig_out="${mig_out//$'\r'/}"
-        if [ "$mig_rc" -ne 0 ]; then
-            [ -n "$mig_out" ] || die "--sample load: could not check the migrations of the secondary database (rc=$mig_rc)" 2
+        # Ruling R10: exit 1 with names is a refusal (2); any other failure
+        # (an unreachable database, an error) is operational (1).
+        if [ "$mig_rc" -eq 1 ] && [ -n "$mig_out" ]; then
             printf '%s\n' "$mig_out" >&2
             die "--sample load: the secondary database lacks the migrations above; apply them first (scripts/data/db/migrate_database.sh)" 2
+        elif [ "$mig_rc" -ne 0 ]; then
+            die "--sample load: migrations-check failed (rc=$mig_rc)" 1
         fi
     fi
     # `gate run` starts the stage from Python: on Windows it needs the path of
@@ -698,6 +701,11 @@ fi
 # and an empty sample output (old staging or markers would skip the slice); a
 # load re-loads every sample shard.
 if [ "$SAMPLE" = "1" ]; then
+    # Never delete outside <production processed root>/_sample/<source>.
+    case "$SAMPLE_ROOT" in
+        "$PASS_ROOT"/_sample/?*) ;;
+        *) die "sample: the sample root $SAMPLE_ROOT is not inside $PASS_ROOT/_sample" 1 ;;
+    esac
     if [ "$STAGE" = "load" ]; then
         rm -rf "$SAMPLE_ROOT/02_processed/_ops/$SOURCE/load_success"
     else
@@ -706,8 +714,12 @@ if [ "$SAMPLE" = "1" ]; then
         "$PY" -m episteme.ops.gate prepare --source "$SOURCE" --raw-root "$PROD_RAW_ROOT" \
             --sample-root "$SAMPLE_ROOT" --processed-root "$PASS_ROOT" >&2 || prep_rc=$?
         if [ "$prep_rc" -ne 0 ]; then
+            # Ruling R10: prepare exits 2 for a slice refusal (a missing group
+            # or file, the cap) and 1 for an I/O error or any other failure.
+            prep_exit=1
+            [ "$prep_rc" -ne 2 ] || prep_exit=2
             _status_set "$STAGE" failed --reason "sample: could not build the raw slice (rc=$prep_rc)"
-            die "sample: could not build the raw slice for $SOURCE (rc=$prep_rc)" 2
+            die "sample: could not build the raw slice for $SOURCE (rc=$prep_rc)" "$prep_exit"
         fi
         rm -rf "$SAMPLE_ROOT/02_processed/staging" "$SAMPLE_ROOT/02_processed/_ops/$SOURCE" \
             "$SAMPLE_ROOT/03_corpus"
