@@ -1,9 +1,12 @@
-"""PR 89 review fix A: retire the rows of deleted pubchem parts.
+"""PR 89 review fix A (round 2): retire the rows of deleted pubchem parts.
 
-The ``not pg`` tests cover ``retire.retire_plan`` (the keep-set and the prefix
-per unit, and every skip case) and the CLI wiring with the database calls
-patched. The ``pg`` test runs serialize -> load -> re-serialize to fewer parts
--> load -> retire against ``episteme_test``.
+Serialize records each deleted part that has a load_success marker in
+``_ops/pubchem/retire_pending.json``. The retire step after a good load
+deletes exactly those ``source_file`` values (``= ANY``, index-only) and
+empties the file. The ``not pg`` tests cover the pending file on the
+serialize side and the retire step with the database calls patched. The
+``pg`` test runs serialize -> load -> re-serialize to fewer parts -> load ->
+retire against ``episteme_test``.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from episteme.data.checkpoint_markers import load_success_marker_path, success_marker_path
+from episteme.data.checkpoint_markers import load_success_marker_path
 from episteme.data.pubchem import retire
 from episteme.data.pubchem import serialize_pubchem as mod
 
@@ -37,6 +40,14 @@ def _serialize(monkeypatch, raw: Path, out: Path, rows: int = 4) -> None:
     assert mod.serialize_pubchem(raw, out)["ok"] == 1
 
 
+def _serialize_shrunk(raw: Path, out: Path, monkeypatch, cids=range(1, 6)) -> None:
+    p = raw / "CID-SMILES.tsv"
+    st = p.stat()
+    p.write_bytes("".join(f"{c}\tCCO\n" for c in cids).encode())
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _serialize(monkeypatch, raw, out)
+
+
 def _mark_loaded(out: Path, key: str, n: int, ext: str = ".parquet") -> None:
     p = load_success_marker_path(out, "pubchem", f"{mod.part_source_file(key, n)}{ext}")
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -47,127 +58,96 @@ def _parts(key: str, ns) -> list[str]:
     return [mod.part_source_file(key, n) for n in ns]
 
 
-def test_plan_keeps_the_current_parts_and_scopes_to_the_unit(tmp_path, monkeypatch):
+def _pending_file(out: Path) -> Path:
+    return out / "_ops" / "pubchem" / "retire_pending.json"
+
+
+# --------------------------------------------------------------------------- #
+# serialize side: the pending file
+# --------------------------------------------------------------------------- #
+
+
+def test_a_deleted_loaded_part_is_recorded(tmp_path, monkeypatch):
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
     for n in (1, 2, 3):
         _mark_loaded(out, KEY, n)
-    plan, skipped = retire.retire_plan(out)
-    assert plan == [{"key": KEY, "prefix": f"{KEY}__part", "keep": _parts(KEY, (1, 2, 3))}]
-    assert skipped == []
+    _serialize_shrunk(raw, out, monkeypatch)  # a rebuild deletes all 3 parts
+    assert json.loads(_pending_file(out).read_text(encoding="utf-8")) == _parts(KEY, (1, 2, 3))
+    assert mod.read_retire_pending(out) == _parts(KEY, (1, 2, 3))
 
 
-def test_plan_after_a_rebuild_to_fewer_parts(tmp_path, monkeypatch):
+def test_a_deleted_part_without_a_load_marker_is_not_recorded(tmp_path, monkeypatch):
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
-    for n in (1, 2, 3):
-        _mark_loaded(out, KEY, n)
+    _mark_loaded(out, KEY, 3)  # parts 1 and 2 were never loaded
     _serialize_shrunk(raw, out, monkeypatch)
-    # The rebuild dropped every load marker: not loaded yet.
-    plan, skipped = retire.retire_plan(out)
-    assert plan == [] and len(skipped) == 1 and "not loaded" in skipped[0]
-    for n in (1, 2):
-        _mark_loaded(out, KEY, n)
-    plan, _ = retire.retire_plan(out)
-    assert plan == [{"key": KEY, "prefix": f"{KEY}__part", "keep": _parts(KEY, (1, 2))}]
+    assert mod.read_retire_pending(out) == _parts(KEY, (3,))
 
 
-def _serialize_shrunk(raw: Path, out: Path, monkeypatch) -> None:
-    p = raw / "CID-SMILES.tsv"
-    st = p.stat()
-    p.write_bytes("".join(f"{c}\tCCO\n" for c in range(1, 6)).encode())
-    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
-    _serialize(monkeypatch, raw, out)
-
-
-def test_plan_skips_a_unit_with_a_part_not_loaded(tmp_path, monkeypatch):
+def test_a_jsonl_load_marker_counts_as_loaded(tmp_path, monkeypatch):
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
-    _mark_loaded(out, KEY, 1)
+    _mark_loaded(out, KEY, 3, ext=".jsonl")
+    _serialize_shrunk(raw, out, monkeypatch)
+    assert mod.read_retire_pending(out) == _parts(KEY, (3,))
+
+
+def test_the_pending_file_is_deduplicated(tmp_path, monkeypatch):
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
     _mark_loaded(out, KEY, 3)
-    plan, skipped = retire.retire_plan(out)
-    assert plan == []
-    assert skipped == [f"{KEY}: 1 of 3 parts not loaded (first: {KEY}__part00002) -- skipped"]
+    mod.write_retire_pending(out, _parts(KEY, (3,)))
+    _serialize_shrunk(raw, out, monkeypatch)
+    assert mod.read_retire_pending(out) == _parts(KEY, (3,))
 
 
-def test_plan_accepts_a_jsonl_load_marker(tmp_path, monkeypatch):
-    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
-    _serialize(monkeypatch, raw, out)
-    for n in (1, 2, 3):
-        _mark_loaded(out, KEY, n, ext=".jsonl")
-    plan, _ = retire.retire_plan(out)
-    assert [e["key"] for e in plan] == [KEY]
-
-
-def test_plan_skips_a_unit_without_a_primary_marker(tmp_path, monkeypatch):
+def test_nothing_deleted_writes_no_pending_file(tmp_path, monkeypatch):
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
     for n in (1, 2, 3):
         _mark_loaded(out, KEY, n)
-    success_marker_path(out, "pubchem", KEY).unlink()  # a serialize in progress
-    plan, skipped = retire.retire_plan(out)
-    assert plan == [] and skipped == []  # part markers are not units
+    res = mod.serialize_pubchem(raw, out)  # same inputs: the unit is skipped
+    assert (res["ok"], res["failed"]) == (0, 0)
+    assert not _pending_file(out).exists()
+    assert mod.read_retire_pending(out) == []
 
 
-def test_plan_skips_a_primary_marker_without_the_parts_format(tmp_path):
-    out = tmp_path / "out"
-    m = success_marker_path(out, "pubchem", KEY)
-    m.parent.mkdir(parents=True)
-    m.write_text(json.dumps({"source_file": KEY, "stats": {"n_rows": 10}}), encoding="utf-8")
-    plan, skipped = retire.retire_plan(out)
-    assert plan == [] and skipped == [
-        f"{KEY}: the primary success marker has no parts format -- skipped"
-    ]
-
-
-def test_plan_skips_a_unit_with_zero_parts(tmp_path, monkeypatch):
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    (raw / "CID-SMILES.tsv").write_bytes(b"")
-    out = tmp_path / "out"
-    _serialize(monkeypatch, raw, out)
-    plan, skipped = retire.retire_plan(out)
-    assert plan == [] and skipped == [f"{KEY}: the unit has 0 parts -- skipped (no keep-set)"]
-
-
-def test_plan_with_no_markers_is_empty(tmp_path):
-    assert retire.retire_plan(tmp_path / "out") == ([], [])
-
-
-def test_plan_gives_each_unit_its_own_prefix(tmp_path, monkeypatch):
-    raw = tmp_path / "raw"
-    _make_raw(raw / "a", list(range(1, 11)))
-    _make_raw(raw / "b", list(range(1, 11)))
-    out = tmp_path / "out"
-    monkeypatch.setattr(mod, "_part_caps", lambda: (4, 10**9))
-    monkeypatch.setattr(mod, "_best_effort_audit", lambda name, n: None)
-    assert mod.serialize_pubchem(raw, out)["ok"] == 2
-    for key in ("a__" + KEY, "b__" + KEY):
-        for n in (1, 2, 3):
-            _mark_loaded(out, key, n)
-    plan, _ = retire.retire_plan(out)
-    assert [(e["key"], e["prefix"]) for e in plan] == [
-        ("a__" + KEY, f"a__{KEY}__part"),
-        ("b__" + KEY, f"b__{KEY}__part"),
-    ]
-    # Neither prefix covers the other unit's parts.
-    assert not plan[1]["keep"][0].startswith(plan[0]["prefix"])
-    assert not plan[0]["keep"][0].startswith(plan[1]["prefix"])
-
-
-def test_retire_calls_retire_source_files_per_unit(tmp_path, monkeypatch):
+def test_six_digit_loaded_part_is_recorded(tmp_path, monkeypatch):
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
-    for n in (1, 2, 3):
-        _mark_loaded(out, KEY, n)
+    psf = mod.part_source_file(KEY, 100000)
+    (out / "staging" / "pubchem" / f"{psf}.parquet").write_bytes(b"x")
+    _mark_loaded(out, KEY, 100000)
+    mod._delete_parts_above(out, KEY, 3)
+    assert mod.read_retire_pending(out) == [psf]
+
+
+# --------------------------------------------------------------------------- #
+# retire side
+# --------------------------------------------------------------------------- #
+
+
+def _boom(*a, **k):
+    raise AssertionError("no lock and no connection expected")
+
+
+@pytest.fixture
+def no_db(monkeypatch):
+    monkeypatch.setattr("episteme.ops.stop.stage_guard", _boom)
+    monkeypatch.setattr("episteme.data.db.connection.connection", _boom)
+    monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _boom)
+
+
+@pytest.fixture
+def fake_db(monkeypatch):
+    """Patched lock, connection and delete; returns the delete calls."""
     calls: list[dict] = []
-    guards: list[dict] = []
+    state = {"committed": 0, "guards": []}
 
     class _Conn:
-        committed = False
-
         def commit(self):
-            _Conn.committed = True
+            state["committed"] += 1
 
     class _G:
         def exit_code(self, rc):
@@ -175,44 +155,104 @@ def test_retire_calls_retire_source_files_per_unit(tmp_path, monkeypatch):
 
     @contextlib.contextmanager
     def _guard(conn_ref, **kw):
-        guards.append(kw)
+        state["guards"].append(kw)
         yield _G()
 
     @contextlib.contextmanager
     def _connection():
         yield _Conn()
 
+    def _delete(conn, **kw):
+        calls.append(kw)
+        return 2
+
     monkeypatch.setattr("episteme.ops.stop.stage_guard", _guard)
     monkeypatch.setattr("episteme.data.db.connection.connection", _connection)
-    monkeypatch.setattr(
-        retire.postgres_loader,
-        "retire_source_files",
-        lambda conn, **kw: calls.append(kw) or 7,
-    )
-    assert retire.main(["--processed-dir", str(out), "--force", "--reason", "r"]) == 0
-    assert calls == [
-        {
-            "source": "pubchem",
-            "keep_source_files": _parts(KEY, (1, 2, 3)),
-            "run_id": calls[0]["run_id"],
-            "scope_prefix": f"{KEY}__part",
-        }
-    ]
-    assert _Conn.committed
-    assert guards == [{"lock_stage": "load", "db_lock": True, "source": "pubchem"}]
+    monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _delete)
+    return calls, state
 
 
-def test_retire_with_nothing_to_do_takes_no_lock_and_no_connection(tmp_path, monkeypatch):
-    def _boom(*a, **k):
-        raise AssertionError("no lock and no connection when the plan is empty")
+def test_no_pending_file_makes_no_db_call(tmp_path, no_db):
+    assert retire.main(["--processed-dir", str(tmp_path / "out")]) == 0
 
-    monkeypatch.setattr("episteme.ops.stop.stage_guard", _boom)
-    monkeypatch.setattr("episteme.data.db.connection.connection", _boom)
-    monkeypatch.setattr(retire.postgres_loader, "retire_source_files", _boom)
-    rc = retire.main(
-        ["--processed-dir", str(tmp_path / "out"), "--skip-unit", "x.parquet", "--reason", "r"]
-    )
+
+def test_an_empty_pending_file_makes_no_db_call(tmp_path, no_db):
+    out = tmp_path / "out"
+    mod.write_retire_pending(out, [])
+    rc = retire.main(["--processed-dir", str(out), "--skip-unit", "x.parquet", "--reason", "r"])
     assert rc == 0
+
+
+def test_pending_names_are_deleted_and_the_file_emptied(tmp_path, monkeypatch, fake_db):
+    calls, state = fake_db
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    _serialize_shrunk(raw, out, monkeypatch)  # 2 parts now; part 3 is gone
+    assert retire.main(["--processed-dir", str(out), "--force", "--reason", "r"]) == 0
+    # Parts 1 and 2 were written again (current success markers): not deleted.
+    assert calls == [
+        {"source": "pubchem", "source_files": _parts(KEY, (3,)), "run_id": calls[0]["run_id"]}
+    ]
+    assert state["committed"] == 1
+    assert state["guards"] == [{"lock_stage": "load", "db_lock": True, "source": "pubchem"}]
+    assert mod.read_retire_pending(out) == []
+
+
+def test_a_unit_that_shrinks_to_zero_rows_retires_all_its_parts(tmp_path, monkeypatch, fake_db):
+    calls, _state = fake_db
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    _serialize_shrunk(raw, out, monkeypatch, cids=[])  # 0 rows: no part is written
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert [c["source_files"] for c in calls] == [_parts(KEY, (1, 2, 3))]
+    assert mod.read_retire_pending(out) == []
+
+
+def test_a_name_written_again_is_not_deleted(tmp_path, monkeypatch, no_db):
+    # A part deleted (loaded), then written again with the same number and
+    # loaded: its rows are current. Retire must not touch the database.
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    _serialize_shrunk(raw, out, monkeypatch, cids=range(1, 12))  # 3 parts again
+    assert mod.read_retire_pending(out) == _parts(KEY, (1, 2, 3))
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert mod.read_retire_pending(out) == []  # moot names are dropped
+
+
+def test_a_crash_between_delete_and_file_update_is_idempotent(tmp_path, monkeypatch, fake_db):
+    calls, _state = fake_db
+    out = tmp_path / "out"
+    stale = _parts(KEY, (7,))
+    mod.write_retire_pending(out, stale)
+    real = retire.write_retire_pending
+
+    def _crash(*a, **k):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(retire, "write_retire_pending", _crash)
+    with pytest.raises(OSError):
+        retire.main(["--processed-dir", str(out)])
+    assert mod.read_retire_pending(out) == stale  # the file survived
+    monkeypatch.setattr(retire, "write_retire_pending", real)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert [c["source_files"] for c in calls] == [stale, stale]  # same delete, again
+    assert mod.read_retire_pending(out) == []
+
+
+def test_a_bad_pending_file_fails_without_a_db_call(tmp_path, no_db):
+    out = tmp_path / "out"
+    p = _pending_file(out)
+    p.parent.mkdir(parents=True)
+    p.write_text('{"not": "a list"}', encoding="utf-8")
+    assert retire.main(["--processed-dir", str(out)]) == 1
 
 
 def test_load_wrapper_runs_retire_only_after_a_good_load():
@@ -293,16 +333,26 @@ def test_retire_deletes_the_rows_of_a_deleted_part(pg_conn, monkeypatch, tmp_pat
     _setup_schema(pg_conn)
     raw = _make_raw(tmp_path / "raw" / "pubchem", list(range(1, 11)))
     processed = tmp_path / "processed"
+    stale = f"{KEY}__part00003"
+    # Another source's row with the same source_file name must stay.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file) VALUES (%s, %s, %s)",
+            ("mesh:D1", "mesh", stale),
+        )
+    pg_conn.commit()
 
-    # 10 CIDs in 3 parts (1-4, 5-8, 9-10), loaded.
+    # 10 CIDs in 3 parts (1-4, 5-8, 9-10), loaded. No pending file: no retire.
     _serialize(monkeypatch, raw, processed)
     assert _load(monkeypatch, processed) == 0
-    assert _retire(monkeypatch, processed) == 0  # nothing stale yet
+    assert _retire(monkeypatch, processed) == 0
     pg_conn.rollback()
     assert _ids(pg_conn, "articles") == set(range(1, 11))
 
-    # The input shrinks to CIDs 1-5: a plain serialize rebuilds 2 parts (1-4, 5).
+    # The input shrinks to CIDs 1-5: a plain serialize rebuilds 2 parts (1-4, 5)
+    # and records the 3 deleted, loaded parts as pending.
     _serialize_shrunk(raw, processed, monkeypatch)
+    assert mod.read_retire_pending(processed) == _parts(KEY, (1, 2, 3))
     assert _load(monkeypatch, processed) == 0
     pg_conn.rollback()
     # The plain load replaced parts 1 and 2 only: part 3 (CIDs 9, 10) is still there.
@@ -310,6 +360,7 @@ def test_retire_deletes_the_rows_of_a_deleted_part(pg_conn, monkeypatch, tmp_pat
 
     assert _retire(monkeypatch, processed) == 0
     pg_conn.rollback()
+    assert mod.read_retire_pending(processed) == []
     assert _ids(pg_conn, "articles") == {1, 2, 3, 4, 5}
     assert _ids(pg_conn, "article_body") == {1, 2, 3, 4, 5}
     with pg_conn.cursor() as cur:
@@ -318,9 +369,16 @@ def test_retire_deletes_the_rows_of_a_deleted_part(pg_conn, monkeypatch, tmp_pat
             "WHERE source = 'pubchem' GROUP BY 1 ORDER BY 1"
         )
         assert cur.fetchall() == [(f"{KEY}__part00001", 4), (f"{KEY}__part00002", 1)]
+        cur.execute("SELECT count(*) FROM episteme.articles WHERE id = 'mesh:D1'")
+        assert cur.fetchone()[0] == 1
         cur.execute(
             "SELECT object, rows_affected FROM episteme._audit "
             "WHERE event_type = 'load_replace' AND object LIKE 'pubchem retire%' "
             "ORDER BY seq DESC LIMIT 1"
         )
-        assert cur.fetchone() == (f"pubchem retire {KEY}__part", 2)
+        assert cur.fetchone() == ("pubchem retire 1 source_file(s)", 2)
+
+    # A second retire has nothing pending: no change.
+    assert _retire(monkeypatch, processed) == 0
+    pg_conn.rollback()
+    assert _ids(pg_conn, "articles") == {1, 2, 3, 4, 5}

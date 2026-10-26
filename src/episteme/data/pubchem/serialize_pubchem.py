@@ -178,7 +178,9 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     load_success_marker_path,
     mark_failed,
     mark_success,
+    ops_root,
     success_marker_path,
+    write_marker,
     write_run_manifest,
 )
 from episteme.data.gz import open_gz  # noqa: E402
@@ -683,6 +685,44 @@ def _input_fingerprint(path: Path, siblings: dict[str, Path]) -> list[list[Any]]
     return out
 
 
+# The retire pending file: the part names (source_file values) whose parts
+# serialize deleted after they were loaded. A JSON list, sorted, no duplicates,
+# written atomically. retire.py reads it after a good load.
+_PENDING_LOCK = threading.Lock()
+
+
+def retire_pending_path(processed_dir: Path) -> Path:
+    return ops_root(processed_dir, SOURCE) / "retire_pending.json"
+
+
+def read_retire_pending(processed_dir: Path) -> list[str]:
+    """The pending part names; ``[]`` when the file does not exist. A file
+    that is not a JSON list of strings raises ``ValueError`` (never guess
+    which rows to delete)."""
+    p = retire_pending_path(processed_dir)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    data = json.loads(text)
+    if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+        raise ValueError(f"{p}: not a JSON list of part names")
+    return data
+
+
+def write_retire_pending(processed_dir: Path, names: list[str]) -> None:
+    """Replace the pending file (atomic: temp file, fsync, rename)."""
+    write_marker(retire_pending_path(processed_dir), sorted(set(names)))  # type: ignore[arg-type]
+
+
+def add_retire_pending(processed_dir: Path, names: list[str]) -> None:
+    """Add ``names`` to the pending file. Serialized across this process's
+    worker threads (a read-modify-write); processes are serialized by the
+    heavy lock."""
+    with _PENDING_LOCK:
+        write_retire_pending(processed_dir, [*read_retire_pending(processed_dir), *names])
+
+
 def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
     """Delete the markers, then the shards, of every part of ``key`` above
     ``j``. Markers go first: a stop between the two steps leaves a shard
@@ -691,15 +731,29 @@ def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
     The load-success markers of those parts go too. The loader names them by
     shard file name (``load_success/<psf>.parquet.ok``) and skips a shard
     whose marker exists, so a part rewritten with a new CID range must lose
-    its load marker or its new rows never reach the database."""
+    its load marker or its new rows never reach the database.
+
+    A deleted part that has a load marker was loaded: its rows are in the
+    database. Its name goes into the retire pending file FIRST, before any
+    delete, so a stop at any point here loses no name (``retire.py`` deletes
+    the rows of the pending names after the next good load)."""
     # 5 digits or more: part_source_file pads to 5 and writes 6+ from 100000.
     pattern = re.compile(re.escape(key) + r"__part(\d{5,})\.")
     prefix = glob.escape(f"{key}__part") + "*"
+    load_dir = load_success_marker_path(processed_dir, SOURCE, "x").parent
     dirs = [
         success_marker_path(processed_dir, SOURCE, "x").parent,
         failed_marker_path(processed_dir, SOURCE, "x").parent,
-        load_success_marker_path(processed_dir, SOURCE, "x").parent,
+        load_dir,
     ]
+    loaded: list[str] = []
+    if load_dir.is_dir():
+        for p in load_dir.glob(prefix):
+            m = pattern.match(p.name)
+            if m and int(m.group(1)) > j:
+                loaded.append(f"{key}__part{m.group(1)}")
+    if loaded:
+        add_retire_pending(processed_dir, loaded)
     for group in (dirs, [_staging_dir(processed_dir)]):
         for d in group:
             if not d.is_dir():

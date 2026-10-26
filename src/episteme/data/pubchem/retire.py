@@ -1,126 +1,97 @@
 """CLI: retire the rows of deleted pubchem parts from episteme.articles /
-episteme.article_body once every current part of a unit has loaded.
+episteme.article_body after a good load.
 
     python -m episteme.data.pubchem.retire [--processed-dir ...]
 
 Why: ``serialize`` writes one unit (a ``CID-SMILES`` primary file) as parts
-``<input_key>__partNNNNN``. A rebuild (``--force``, or a changed input) can
-write fewer parts than before: it deletes the shards and markers of the
-parts above the new count, but their rows stay in the database, because a
-plain ``load`` replaces only the ``source_file`` values it loads.
+``<input_key>__partNNNNN``. A rebuild (``--force``, a changed input) or a
+resume can delete parts. Their shards and markers go, but their rows stay in
+the database, because a plain ``load`` replaces only the ``source_file``
+values it loads.
 
-What: for each unit whose primary success marker has the parts format
-(``serialize_pubchem.read_primary_marker``: ``parts``, ``parts_list`` and
-``inputs``), and whose current parts ALL have a ``load_success`` marker, one
-``postgres_loader.retire_source_files`` call deletes the ``pubchem`` rows
-whose ``source_file`` starts with ``f"{key}__part"`` and is not in
-``parts_list``. The prefix scopes the delete to that unit; the keep-set is
-the unit's current parts. ``retire_source_files`` records one audited
-``load_replace`` event per call. A unit is skipped (a line is printed, no
-row is deleted) when:
+How: when ``serialize`` deletes a part that has a ``load_success`` marker (it
+was loaded), it first adds the part name to
+``_ops/pubchem/retire_pending.json`` (``serialize_pubchem._delete_parts_above``).
+A part deleted without a load marker was never loaded and is not recorded.
+This step reads that file:
 
-- it has no primary success marker (a serialize is not complete), or the
-  marker has no parts format;
-- its ``parts_list`` is empty (``retire_source_files`` refuses an empty
-  keep-set);
-- a current part has no ``load_success`` marker (not loaded yet, or its
-  load failed).
+1. No file, or an empty list: nothing to do. No lock, no database query.
+2. A pending name that has a part success marker again is current: a later
+   serialize wrote that part again (same part number). Its rows are current
+   (or the next load replaces them), so it is never deleted; it is dropped
+   from the file.
+3. The other names: one ``postgres_loader.delete_source_files`` call deletes
+   exactly their ``pubchem`` rows (``source_file = ANY(...)``, index-only),
+   with one ``load_replace`` audit row, and commits. Then the names leave the
+   file.
 
-``load_pubchem.sh`` runs this only after ``load_articles`` exited 0. A load
-marker of a current part always belongs to the current content: serialize
-deletes the load marker of every part it deletes or writes again.
+A stop between the commit and the file update leaves the names in the file;
+the next run deletes them again (0 rows, one more audit row): idempotent.
+A file that is not a JSON list of strings exits 1 before any database call.
 
+``load_pubchem.sh`` runs this only after ``load_articles`` exited 0.
 ``--force``, ``--reason`` and ``--skip-unit`` are accepted and ignored:
-``load_pubchem.sh`` forwards run_pipeline.sh's ``load_args`` to this script
-too. A skipped part has no load marker, so its unit is skipped here.
+``load_pubchem.sh`` forwards run_pipeline.sh's ``load_args`` to this script.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
+import sys
 from pathlib import Path
-from typing import Any
 
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers, postgres_loader
-from episteme.data.pubchem.serialize_pubchem import SOURCE, read_primary_marker
-
-_SHARD_EXTS: tuple[str, ...] = (".parquet", ".jsonl")
-_PART_NAME = re.compile(r".*__part\d{5,}$")
-
-
-def _is_loaded(processed_dir: Path, part: str) -> bool:
-    """True when the shard of ``part`` has a load_success marker. The loader
-    names the marker by shard file name (``<part>.parquet`` or ``.jsonl``)."""
-    return any(
-        checkpoint_markers.load_success_marker_path(processed_dir, SOURCE, f"{part}{ext}").is_file()
-        for ext in _SHARD_EXTS
-    )
+from episteme.data.pubchem.serialize_pubchem import (
+    SOURCE,
+    read_retire_pending,
+    write_retire_pending,
+)
 
 
-def retire_plan(processed_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """The units to retire and the skip lines. Touches no database.
-
-    Each plan entry is ``{"key", "prefix", "keep"}``: the unit's input key, the
-    scope prefix ``f"{key}__part"`` and the keep-set (its ``parts_list``)."""
-    success_dir = checkpoint_markers.success_marker_path(processed_dir, SOURCE, "x").parent
-    plan: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    if not success_dir.is_dir():
-        return plan, skipped
-    for marker in sorted(success_dir.glob("*.ok")):
-        key = marker.name[: -len(".ok")]
-        if _PART_NAME.match(key):
-            continue  # a part marker, not a unit
-        st = read_primary_marker(processed_dir, key)
-        if st is None:
-            skipped.append(f"{key}: the primary success marker has no parts format -- skipped")
-            continue
-        keep = list(st["parts_list"])
-        if not keep:
-            skipped.append(f"{key}: the unit has 0 parts -- skipped (no keep-set)")
-            continue
-        missing = [p for p in keep if not _is_loaded(processed_dir, p)]
-        if missing:
-            skipped.append(
-                f"{key}: {len(missing)} of {len(keep)} parts not loaded "
-                f"(first: {missing[0]}) -- skipped"
-            )
-            continue
-        plan.append({"key": key, "prefix": f"{key}__part", "keep": keep})
-    return plan, skipped
+def split_pending(processed_dir: Path, pending: list[str]) -> tuple[list[str], list[str]]:
+    """``(to_delete, current)``: a pending name with a part success marker is
+    current (written again by a later serialize) and is never deleted."""
+    to_delete: list[str] = []
+    current: list[str] = []
+    for name in pending:
+        if checkpoint_markers.success_marker_path(processed_dir, SOURCE, name).is_file():
+            current.append(name)
+        else:
+            to_delete.append(name)
+    return to_delete, current
 
 
 def _retire(processed_dir: Path, run_id: str | None) -> int:
+    try:
+        pending = read_retire_pending(processed_dir)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not pending:
+        print("pubchem: no deleted part pending; nothing retired")
+        return 0
+    to_delete, current = split_pending(processed_dir, pending)
+    for name in current:
+        print(f"{name}: written again by a later serialize -- not retired")
+    if not to_delete:
+        write_retire_pending(processed_dir, [])
+        print("pubchem: every pending part is current again; nothing retired")
+        return 0
+
     from episteme.data.db.connection import connection
     from episteme.ops.stop import stage_guard
 
-    plan, skipped = retire_plan(processed_dir)
-    for line in skipped:
-        print(line)
-    if not plan:
-        print("pubchem: no loaded unit to retire against; nothing retired")
-        return 0
-
-    # Only a run with work to do takes the locks (as cdisc_ct.retire does).
     with stage_guard(lambda: None, lock_stage="load", db_lock=True, source=SOURCE) as g:
-        total = 0
         with connection() as conn:
-            for entry in plan:
-                deleted = postgres_loader.retire_source_files(
-                    conn,
-                    source=SOURCE,
-                    keep_source_files=entry["keep"],
-                    run_id=run_id,
-                    scope_prefix=entry["prefix"],
-                )
-                print(
-                    f"{entry['key']}: retired {deleted} article(s); kept {len(entry['keep'])} parts"
-                )
-                total += deleted
+            deleted = postgres_loader.delete_source_files(
+                conn, source=SOURCE, source_files=to_delete, run_id=run_id
+            )
             conn.commit()
-        print(f"pubchem: retired {total} article(s) across {len(plan)} unit(s)")
+        # After the commit: a stop before this line leaves the names pending,
+        # and the next run deletes them again (0 rows).
+        write_retire_pending(processed_dir, [])
+        print(f"pubchem: retired {deleted} article(s) of {len(to_delete)} deleted part(s)")
         return g.exit_code(0)
 
 
