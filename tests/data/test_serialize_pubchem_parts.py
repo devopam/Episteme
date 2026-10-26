@@ -427,3 +427,22 @@ def test_a_kept_part_without_a_fingerprint_is_dropped(raw, out, monkeypatch, aud
     assert mod.serialize_pubchem(raw, out)["ok"] == 1
     assert _marker(out, KEY)["stats"]["parts_kept"] == 0
     assert _all_cids(out) == CIDS
+
+
+def test_delete_parts_above_handles_six_digit_part_numbers(raw, out, monkeypatch, audits):
+    # part_source_file writes 6+ digits from part 100000 on; the delete must see them.
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    psf = mod.part_source_file(KEY, 100000)
+    assert psf.endswith("__part100000")
+    shard = _staging(out) / f"{psf}.parquet"
+    shard.write_bytes(b"x")
+    success_marker_path(out, "pubchem", psf).write_text("{}", encoding="utf-8")
+    lm = load_success_marker_path(out, "pubchem", shard.name)
+    lm.parent.mkdir(parents=True, exist_ok=True)
+    lm.write_text("{}", encoding="utf-8")
+    mod._delete_parts_above(out, KEY, 3)
+    assert not shard.exists()
+    assert not success_marker_path(out, "pubchem", psf).exists()
+    assert not lm.exists()
+    assert _shard(out, 3).is_file()  # parts 1..3 stay

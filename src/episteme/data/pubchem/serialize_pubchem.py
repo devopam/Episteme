@@ -78,7 +78,7 @@ larger than ``part_bytes`` goes alone in its own part, which is then over the
 byte cap (a row cannot be split; ``gate_report`` leaves single-row parts out
 of its byte maximum). The caps come from the runtime profile (``_part_caps``).
 Part ``n`` has the ``source_file``, shard stem and success marker
-``<input_key>__partNNNNN`` (``part_source_file``); its marker records
+``<input_key>__partNNNNN`` (``part_source_file``; at least 5 digits); its marker records
 ``first_cid`` / ``last_cid`` and the caps, and it gets one
 ``serialize_commit`` audit row. After the last part the primary file gets its
 own success marker (``parts``, total ``n_rows``); it has no shard and no audit
@@ -657,7 +657,8 @@ def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
     shard file name (``load_success/<psf>.parquet.ok``) and skips a shard
     whose marker exists, so a part rewritten with a new CID range must lose
     its load marker or its new rows never reach the database."""
-    pattern = re.compile(re.escape(key) + r"__part(\d{5})\.")
+    # 5 digits or more: part_source_file pads to 5 and writes 6+ from 100000.
+    pattern = re.compile(re.escape(key) + r"__part(\d{5,})\.")
     prefix = glob.escape(f"{key}__part") + "*"
     dirs = [
         success_marker_path(processed_dir, SOURCE, "x").parent,
