@@ -276,13 +276,13 @@ def _open_text(path: Path):
     return open(path, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
 
 
-def _iter_cid_lines(
-    path: Path, n_fields: int, stats: dict[str, int] | None = None
-) -> Iterator[tuple[int, list[str | None]]]:
-    """Yield ``(cid, fields)`` for each line of one CID-sorted property file.
+def _iter_cid_raw(
+    path: Path, stats: dict[str, int] | None = None
+) -> Iterator[tuple[int, str, list[str]]]:
+    """Yield ``(cid, line, parts)`` for each line of one CID-sorted file.
 
-    ``fields`` has exactly ``n_fields`` items (padded or truncated); an empty
-    field is ``None``. A line with an empty CID is counted in
+    ``line`` is the line text as read (line ending kept); ``parts`` is the line
+    split on tab. A line with an empty CID is counted in
     ``stats["skipped_no_id"]`` and skipped. A CID that is not an integer, or
     that is not strictly greater than the one before, raises
     ``PubchemInputError``.
@@ -308,9 +308,21 @@ def _iter_cid_lines(
                     "the file is not sorted by CID with one row per CID"
                 )
             prev = cid
-            fields: list[str | None] = [(f or None) for f in parts[1 : 1 + n_fields]]
-            fields.extend([None] * (n_fields - len(fields)))
-            yield cid, fields
+            yield cid, line, parts
+
+
+def _iter_cid_lines(
+    path: Path, n_fields: int, stats: dict[str, int] | None = None
+) -> Iterator[tuple[int, list[str | None]]]:
+    """Yield ``(cid, fields)`` for each line of one CID-sorted property file.
+
+    ``fields`` has exactly ``n_fields`` items (padded or truncated); an empty
+    field is ``None``. Empty and invalid CIDs follow ``_iter_cid_raw``.
+    """
+    for cid, _line, parts in _iter_cid_raw(path, stats):
+        fields: list[str | None] = [(f or None) for f in parts[1 : 1 + n_fields]]
+        fields.extend([None] * (n_fields - len(fields)))
+        yield cid, fields
 
 
 _MASS_KEYS = ("monoisotopic_mass", "exact_mass")

@@ -285,3 +285,108 @@ def test_refuses_symlinked_dest(roots, tmp_path):
         pytest.skip("symlinks not permitted")
     with pytest.raises(gate_slice.SliceError, match="symlink"):
         gate_slice.prepare("bookshelf", raw, sample / "b", processed_root=processed)
+
+
+# --- pubchem: the slice is cut to CID ranges, not linked -------------------
+
+_PC_DIR = Path("Compound") / "Extras"
+
+
+def _gz_lines(path: Path, lines: list[str]) -> Path:
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as fh:
+        fh.write("".join(lines))
+    return path
+
+
+def _read_gz(path: Path) -> list[str]:
+    import gzip
+
+    with gzip.open(path, "rt", encoding="utf-8", newline="") as fh:
+        return fh.readlines()
+
+
+def _pubchem(raw: Path, n: int = 100) -> Path:
+    d = raw / "pubchem" / _PC_DIR
+    _gz_lines(d / "CID-SMILES.gz", [f"{c}\tC{c}\n" for c in range(1, n + 1)])
+    _gz_lines(d / "CID-Title.gz", [f"{c}\tT{c}\n" for c in range(1, n + 1) if c % 3])
+    _gz_lines(d / "CID-IUPAC.gz", [f"{c}\tI{c}\n" for c in range(1, n + 1) if c % 2])
+    _gz_lines(d / "CID-Mass.gz", [f"{c}\tF{c}\t1.0\t2.0\n" for c in range(5, n + 1, 5)])
+    return d
+
+
+def _pc_prepare(roots, part_rows=10):
+    raw, processed, sample = roots
+    spec = gate_slice.SLICES["pubchem"]
+    return gate_slice.prepare("pubchem", raw, sample / "pubchem", processed_root=processed), spec
+
+
+def test_pubchem_slice_ranges(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    _pubchem(roots[0])
+    res, _ = _pc_prepare(roots)
+    assert res["ranges"] == [[1, 20], [51, 60]]
+    assert res["n_lines"] == 100
+    assert res["inputs"] == ["Compound/Extras/CID-SMILES.gz"]
+    assert res["copied"] == len(res["files"]) == 4
+    assert res["linked"] == 0
+    assert (roots[2] / "pubchem" / "slice.json").is_file()
+
+
+def test_pubchem_slice_cuts_siblings_to_the_same_cids(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    d = _pubchem(roots[0])
+    res, _ = _pc_prepare(roots)
+    out = roots[2] / "pubchem" / "01_raw" / "pubchem" / _PC_DIR
+    keep = set(range(1, 21)) | set(range(51, 61))
+    for name in ("CID-SMILES", "CID-Title", "CID-IUPAC", "CID-Mass"):
+        orig = _read_gz(d / f"{name}.gz")
+        want = [ln for ln in orig if int(ln.split("\t")[0]) in keep]
+        assert _read_gz(out / f"{name}.gz") == want
+    assert res["bytes"] == sum(
+        (out / f"{n}.gz").stat().st_size
+        for n in ("CID-SMILES", "CID-Title", "CID-IUPAC", "CID-Mass")
+    )
+
+
+def test_pubchem_slice_unsorted_line_fails(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    d = _pubchem(roots[0])
+    lines = [f"{c}\tT{c}\n" for c in range(1, 101)]
+    lines[10], lines[11] = lines[11], lines[10]
+    _gz_lines(d / "CID-Title.gz", lines)
+    with pytest.raises(gate_slice.SliceError, match="CID-Title"):
+        _pc_prepare(roots)
+    assert not (roots[2] / "pubchem" / "slice.json").exists()
+
+
+def test_pubchem_slice_missing_primary_refuses(roots):
+    d = roots[0] / "pubchem" / _PC_DIR
+    _gz_lines(d / "CID-Title.gz", ["1\tT\n"])
+    with pytest.raises(gate_slice.SliceError):
+        _pc_prepare(roots)
+    assert not (roots[2] / "pubchem" / "slice.json").exists()
+
+
+def test_pubchem_slice_small_file_is_whole(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    _pubchem(roots[0], n=15)
+    res, _ = _pc_prepare(roots)
+    assert res["ranges"] == [[1, 15]]
+    assert res["n_lines"] == 15
+
+
+def test_pubchem_slice_round_trip(roots, monkeypatch, tmp_path):
+    from episteme.data.pubchem import serialize_pubchem as sp
+
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    monkeypatch.setattr(sp, "_part_caps", lambda: (10, 10**9))
+    _pubchem(roots[0])
+    _pc_prepare(roots)
+    out_raw = roots[2] / "pubchem" / "01_raw" / "pubchem"
+    stats = sp.serialize_pubchem(out_raw, tmp_path / "proc")
+    assert stats["rows"] == 30 and stats["failed"] == 0
+    shards = list((tmp_path / "proc" / "staging" / "pubchem").glob("*__part*.*"))
+    assert len({re.search(r"__part(\d+)", p.name).group(1) for p in shards}) == 3
