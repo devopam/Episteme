@@ -300,6 +300,7 @@ GATED = [
     ("europepmc_manuscript", "extract"),
     ("apollo", "extract"),
     ("bookshelf", "load"),
+    ("pubchem", "load"),
 ]
 
 
@@ -324,8 +325,7 @@ def _lazy_episteme_imports(path: Path) -> set[str]:
 def test_lazy_imports_of_the_closure_are_already_hashed(source, stage):
     """An import inside a function is invisible to the hash unless the module is
     also imported at top level somewhere in the closure. Fail on a lazy-only one."""
-    module, _ = gate.stage_module(source, stage)
-    files = set(gate.stage_files(module, gate._SRC_ROOT.resolve()))
+    files = set(gate.stage_files(gate.hash_modules(source, stage), gate._SRC_ROOT.resolve()))
     src = gate._SRC_ROOT.resolve()
     missing = []
     for f in sorted(files):
@@ -465,3 +465,31 @@ def test_pubchem_serialize_stage_is_known():
     module, _ = gate.stage_module("pubchem", "serialize")
     files = {p.name for p in gate.stage_files(module, gate._SRC_ROOT.resolve())}
     assert "serialize_pubchem.py" in files
+
+
+def test_pubchem_load_hash_covers_the_retire_step():
+    """load_pubchem.sh runs the retire step after the load: its code is part of
+    the pubchem load stage, so a change to it voids a pubchem load pass."""
+    assert gate.hash_modules("pubchem", "load") == [
+        "episteme.data.load_articles",
+        "episteme.data.pubchem.retire",
+    ]
+    assert gate.hash_modules("apollo", "load") == ["episteme.data.load_articles"]
+    src = gate._SRC_ROOT.resolve()
+    files = {
+        p.relative_to(src).as_posix()
+        for p in gate.stage_files(gate.hash_modules("pubchem", "load"), src)
+    }
+    assert "episteme/data/pubchem/retire.py" in files
+    assert "episteme/data/load_articles.py" in files
+
+
+def test_code_hash_covers_every_hash_module(tmp_path):
+    root = tmp_path / "src"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "pkg" / "a.py").write_text("A = 1", encoding="utf-8")
+    (root / "pkg" / "b.py").write_text("B = 1", encoding="utf-8")
+    before = gate.code_hash("s", "load", module=["pkg.a", "pkg.b"], src_root=root)
+    (root / "pkg" / "b.py").write_text("B = 2", encoding="utf-8")
+    assert gate.code_hash("s", "load", module=["pkg.a", "pkg.b"], src_root=root) != before

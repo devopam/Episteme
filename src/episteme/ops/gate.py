@@ -88,6 +88,21 @@ def stage_module(source: str, stage: str) -> tuple[str, str]:
     return STAGE_MODULES[(source, stage)]
 
 
+# Modules a stage's wrapper runs after its main module: their import closures are
+# hashed too, so a change to them voids the pass. load_pubchem.sh runs the retire
+# step after load_articles.
+EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("pubchem", "load"): ("episteme.data.pubchem.retire",),
+}
+
+
+def hash_modules(source: str, stage: str) -> list[str]:
+    """The modules whose import closures make up the code hash of a stage: the
+    stage module, then any module its wrapper also runs (``EXTRA_HASH_MODULES``)."""
+    module, _ = stage_module(source, stage)
+    return [module, *EXTRA_HASH_MODULES.get((source, stage), ())]
+
+
 _KNOWN_KEYS = {
     "min_rows",
     "min_rows_per_input",
@@ -330,15 +345,16 @@ def _lazy_modules(path: Path, src_root: Path, top: str) -> set[str]:
     return out
 
 
-def stage_files(module: str, src_root: Path) -> list[Path]:
-    """The source files of every package module that importing ``module`` loads,
-    found in a fresh isolated interpreter (so this process's modules do not leak
-    in). Importing a stage module only imports; it does not connect to a database.
-    A module that code imports inside a function is added too (found with ``ast``),
-    and the closure is rebuilt until nothing new appears. Each round starts an
-    interpreter (about 1 s): never call this in a loop."""
-    top = module.split(".")[0]
-    modules = [module]
+def stage_files(module: str | list[str], src_root: Path) -> list[Path]:
+    """The source files of every package module that importing ``module`` (one
+    name, or a list such as ``hash_modules``) loads, found in a fresh isolated
+    interpreter (so this process's modules do not leak in). Importing a stage
+    module only imports; it does not connect to a database. A module that code
+    imports inside a function is added too (found with ``ast``), and the closure
+    is rebuilt until nothing new appears. Each round starts an interpreter
+    (about 1 s): never call this in a loop."""
+    modules = [module] if isinstance(module, str) else list(module)
+    top = modules[0].split(".")[0]
     while True:
         files = _import_files(modules, src_root)
         known = set(modules)
@@ -354,17 +370,20 @@ def code_hash(
     source: str,
     stage: str,
     *,
-    module: str | None = None,
+    module: str | list[str] | None = None,
     src_root: Path | None = None,
     wrapper: Path | None = None,
 ) -> str:
     """SHA-256 over the stage's import closure (each file's bytes with its path
-    relative to ``src_root``) plus the wrapper script. ``module``, ``src_root``
-    and ``wrapper`` default to the stage's entry in ``STAGE_MODULES``; tests pass
-    a temp package."""
+    relative to ``src_root``) plus the wrapper script. The closure is that of
+    ``hash_modules`` (the stage module and any module its wrapper also runs); a
+    stage with one module hashes as before. ``module``, ``src_root`` and
+    ``wrapper`` default to the stage's entry in ``STAGE_MODULES``; tests pass a
+    temp package."""
     src_root = (src_root or _SRC_ROOT).resolve()
     if module is None:
-        module, wrapper_rel = stage_module(source, stage)
+        _, wrapper_rel = stage_module(source, stage)
+        module = hash_modules(source, stage)
         wrapper = wrapper or _SCRIPTS_DATA / wrapper_rel
     h = hashlib.sha256()
     for path in sorted(stage_files(module, src_root)):
