@@ -426,6 +426,59 @@ def load_source_file(
     }
 
 
+def delete_source_files(
+    conn,
+    *,
+    source: str,
+    source_files: list[str],
+    run_id: str | None = None,
+) -> int:
+    """Delete exactly the rows of ``source`` whose ``source_file`` is in
+    ``source_files``: ``episteme.article_body`` (by the linked
+    ``articles.id``) THEN ``episteme.articles``. Both deletes filter
+    ``source = %s AND source_file = ANY(%s)``, so they use the
+    ``(source, source_file)`` index and read only the named rows (no keep-set,
+    no ``EXCEPT``). The caller names the source_files and must make sure none
+    of them is current. ``episteme._lineage`` is history and is not touched
+    (``retire_source_files`` does not touch it either).
+
+    One transaction; the caller commits. Records one ``load_replace`` audit
+    event (object ``"<source> retire <n> source_file(s)"``, ``old_value``
+    ``{"source_files": [the sorted names]}``) and returns the
+    count of deleted ``episteme.articles`` rows. Raises ``ValueError`` on an
+    empty ``source_files`` before it touches the connection."""
+    if not source_files:
+        raise ValueError("source_files must not be empty")
+    names = sorted(set(source_files))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM episteme.article_body b
+             USING episteme.articles a
+             WHERE a.source = %s AND a.source_file = ANY(%s)
+               AND b.article_id = a.id AND b.source = %s
+            """,
+            (source, names, source),
+        )
+        cur.execute(
+            "DELETE FROM episteme.articles WHERE source = %s AND source_file = ANY(%s)",
+            (source, names),
+        )
+        deleted = cur.rowcount
+
+    audit_trail.record(
+        "load_replace",
+        conn=conn,
+        object=f"{source} retire {len(names)} source_file(s)",
+        rows_affected=deleted,
+        # GxP: the row names what was deleted (the prior value), as strings only
+        # (hash-safe over the jsonb round trip, docs/11 section 3).
+        old_value={"source_files": names},
+        run_id=run_id,
+    )
+    return deleted
+
+
 def retire_source_files(
     conn,
     *,

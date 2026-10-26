@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from episteme.ops import gate, gate_migrations
+from episteme.ops import gate, gate_migrations, gate_report
 
 SRC = "bookshelf"
 RULES = {"extract": {"min_rows": 3, "max_duplicate_ids": 0}, "load": {"max_orphan_bodies": 0}}
@@ -647,3 +647,94 @@ def test_report_without_start_hashes_fails_closed(tmp_path, rules_dir, fake_hash
     rec.write_text(json.dumps({"elapsed_s": 1.0, "rc": 0, "peak_rss_mb": 1.0}), encoding="utf-8")
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
     assert "no code hash" in capsys.readouterr().out
+
+
+def test_load_measures_use_staging_source_files(tmp_path, rules_dir, fake_hash, monkeypatch):
+    import polars as pl
+
+    sample, rec = _sample(tmp_path, rows=5)
+    staging = sample / "02_processed" / "staging" / SRC
+    (staging / "book1.jsonl").unlink()
+    for n in (1, 2):
+        pl.DataFrame(
+            [{"id": f"id{n}", "text": "t", "source_file": f"book1.tar.gz__part0000{n}"}]
+        ).write_parquet(staging / f"p{n}.parquet")
+    seen = {}
+
+    def fake_load(conn, source, source_files, *, staging_rows=None):
+        seen["source_files"] = source_files
+        return {"rows_loaded": 2, "orphan_bodies": 0, "rows_loaded_equals_staging": True}
+
+    monkeypatch.setattr(gate_report, "measure_load", fake_load)
+    _fake_connect(monkeypatch, object())
+    gate.main(_report_args(sample, rec, tmp_path / "prod", "load"))
+    assert seen["source_files"] == ["book1.tar.gz__part00001", "book1.tar.gz__part00002"]
+
+
+# --- final fix: the caps come from the part markers that wrote the parts ------
+
+
+class _Prof:
+    part_rows = 2
+    part_bytes = 10**9
+
+
+def _parts_sample(tmp_path: Path, caps: list[tuple[int | None, int | None]]) -> tuple[Path, Path]:
+    """A sample whose staging holds parts of 3 rows, written with ``caps``."""
+    from episteme.data.checkpoint_markers import mark_success
+
+    sample, rec = _sample(tmp_path, rows=0)
+    staging = sample / "02_processed" / "staging" / SRC
+    (staging / "book1.jsonl").unlink()
+    for n, (rows, nbytes) in enumerate(caps, start=1):
+        psf = f"book1.tar.gz__part{n:05d}"
+        lines = [
+            json.dumps({"id": f"p{n}-{i}", "source": SRC, "text": "t" * 50, "source_file": psf})
+            for i in range(3)
+        ]
+        (staging / f"{psf}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        mark_success(
+            sample / "02_processed", SRC, psf, stats={"part_rows": rows, "part_bytes": nbytes}
+        )
+    return sample, rec
+
+
+@pytest.fixture
+def parts_rules(rules_dir, monkeypatch):
+    from episteme.ops import profile
+
+    (rules_dir / f"{SRC}.json").write_text(
+        json.dumps({"extract": {"parts_within_caps": True}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(profile, "get_profile", lambda: _Prof())
+    return rules_dir
+
+
+def test_report_takes_the_caps_from_the_part_markers(tmp_path, parts_rules, fake_hash):
+    # The parts were written with part_rows=3; the profile now says 2.
+    sample, rec = _parts_sample(tmp_path, [(3, 10**6), (3, 10**6)])
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 0
+    m = _measures(sample)
+    assert (m["part_rows"], m["part_bytes"]) == (3, 10**6)
+
+
+def test_report_fails_when_the_part_markers_disagree_on_the_caps(
+    tmp_path, parts_rules, fake_hash, capsys
+):
+    sample, rec = _parts_sample(tmp_path, [(3, 10**6), (4, 10**6)])
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
+    assert "disagree" in capsys.readouterr().out
+
+
+def test_report_fails_when_a_part_marker_has_no_caps(tmp_path, parts_rules, fake_hash, capsys):
+    sample, rec = _parts_sample(tmp_path, [(3, 10**6), (None, None)])
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
+    assert "part_rows" in capsys.readouterr().out
+
+
+def test_report_without_part_markers_uses_the_profile(tmp_path, parts_rules, fake_hash):
+    sample, rec = _parts_sample(tmp_path, [(3, 10**6)])
+    for p in (sample / "02_processed" / "_ops" / SRC / "success").glob("*.ok"):
+        p.unlink()
+    assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1  # 3 rows > 2
+    assert _measures(sample)["part_rows"] == 2

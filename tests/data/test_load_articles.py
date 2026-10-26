@@ -493,3 +493,89 @@ def test_transient_error_then_success_writes_one_load_commit(pg_conn, monkeypatc
             (key,),
         )
         assert cur.fetchone()[0] > 0
+
+
+def _write_pubchem_part(processed: Path, key: str, n: int, cids: list[int]) -> str:
+    """Write one pubchem part shard, as ``serialize`` does; returns its shard name."""
+    from episteme.data.pubchem.serialize_pubchem import part_source_file, pubchem_row
+    from episteme.data.staging_writer import write_rows
+
+    psf = part_source_file(key, n)
+    rows = [pubchem_row({"cid": c, "smiles": f"C{c}", "title": f"Compound {c}"}, psf) for c in cids]
+    write_rows(rows, processed, source="pubchem", source_file=psf, prefer_parquet=True)
+    return next(p.name for p in (processed / "staging" / "pubchem").glob(f"{psf}.*") if p.is_file())
+
+
+def _load_pubchem(monkeypatch, processed: Path, *extra: str) -> int:
+    import episteme.data.db.connection as conn_mod
+    from episteme.data import load_articles
+
+    importlib.reload(load_articles)
+    conn_mod.get_settings.cache_clear()
+    monkeypatch.setattr(conn_mod, "_POOL", None)
+    try:
+        return load_articles.main(
+            ["--source", "pubchem", "--processed-dir", str(processed), *extra]
+        )
+    finally:
+        if conn_mod._POOL is not None:
+            conn_mod._POOL.close()
+        conn_mod.get_settings.cache_clear()
+
+
+@pytest.mark.pg
+def test_load_multi_part_staging(pg_conn, monkeypatch, tmp_path):
+    """Two parts of one input load 5 rows and write two load_success markers."""
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    processed = tmp_path / "processed"
+    key = "Compound__Extras__CID-SMILES.gz"
+    _write_pubchem_part(processed, key, 1, [1, 2, 3])
+    _write_pubchem_part(processed, key, 2, [4, 5])
+
+    assert _load_pubchem(monkeypatch, processed) == 0
+
+    pg_conn.rollback()
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), count(DISTINCT id) FROM episteme.articles WHERE source='pubchem'"
+        )
+        assert cur.fetchone() == (5, 5)
+        cur.execute(
+            "SELECT source_file, count(*) FROM episteme.articles "
+            "WHERE source='pubchem' GROUP BY 1 ORDER BY 1"
+        )
+        assert [n for _sf, n in cur.fetchall()] == [3, 2]
+    markers = list((processed / "_ops" / "pubchem" / "load_success").glob("*.ok"))
+    assert len(markers) == 2
+
+
+@pytest.mark.pg
+def test_reload_rewritten_part(pg_conn, monkeypatch, tmp_path):
+    """A part rewritten with a CID moved into the part before it, then a forced
+    reload, leaves 5 rows and CID 4 once (the id-collision guard of the loader)."""
+    _prep(monkeypatch, tmp_path)
+    _setup_schema(pg_conn)
+    processed = tmp_path / "processed"
+    key = "Compound__Extras__CID-SMILES.gz"
+    _write_pubchem_part(processed, key, 1, [1, 2, 3])
+    _write_pubchem_part(processed, key, 2, [4, 5])
+    assert _load_pubchem(monkeypatch, processed) == 0
+
+    # CID 4 moves from part 2 to part 1; both shards are rewritten.
+    _write_pubchem_part(processed, key, 1, [1, 2, 3, 4])
+    _write_pubchem_part(processed, key, 2, [5])
+    assert _load_pubchem(monkeypatch, processed, "--force", "--reason", "rewritten part") == 0
+
+    pg_conn.rollback()
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), count(DISTINCT id) FROM episteme.articles WHERE source='pubchem'"
+        )
+        assert cur.fetchone() == (5, 5)
+        cur.execute("SELECT count(*) FROM episteme.articles WHERE id = 'pubchem:4'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT source_file FROM episteme.articles WHERE id = 'pubchem:4'")
+        assert cur.fetchone()[0].endswith("__part00001")
+        cur.execute("SELECT count(*) FROM episteme.article_body WHERE source='pubchem'")
+        assert cur.fetchone()[0] == 5

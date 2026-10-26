@@ -9,6 +9,7 @@ raw source folder. The ``input_key`` and the row ids then match production.
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
@@ -129,6 +130,125 @@ def _select_apollo(raw: Path) -> list[Path]:
     return out
 
 
+def _select_pubchem(raw: Path) -> list[Path]:
+    """The primary files. The slice of pubchem is cut by ``_build_pubchem``."""
+    from episteme.data.pubchem.serialize_pubchem import discover_pubchem_files
+
+    return discover_pubchem_files(raw)
+
+
+def _pubchem_part_rows() -> int:
+    from episteme.ops.profile import get_profile
+
+    return get_profile().part_rows
+
+
+def _gz_or_plain_writer(dest: Path):
+    """A binary writer: the cut writes each kept line's bytes unchanged."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.suffix == ".gz":
+        return gzip.open(dest, "wb")
+    return open(dest, "wb")  # noqa: SIM115
+
+
+def _cut_file(src: Path, dest: Path, keep: Callable[[int, int], bool | None]) -> int:
+    """Write the lines of ``src`` (bytes as read) for which ``keep(index, cid)`` is true.
+
+    ``keep`` returns ``None`` to stop the read. The CID order check of
+    ``_iter_cid_raw`` runs on every line read.
+    """
+    from episteme.data.pubchem.serialize_pubchem import _iter_cid_raw
+
+    n = 0
+    with _gz_or_plain_writer(dest) as out:
+        for i, (cid, line, _parts) in enumerate(_iter_cid_raw(src)):
+            verdict = keep(i, cid)
+            if verdict is None:
+                break
+            if verdict:
+                out.write(line)
+                n += 1
+    return n
+
+
+def _build_pubchem(raw: Path, dest: Path, part_rows: int | None = None) -> dict:
+    """Cut the four pubchem files to the same CID ranges (spec 4.4).
+
+    R1 is the first ``2 * part_rows`` CIDs of CID-SMILES and R2 is ``part_rows``
+    CIDs from line floor(N/2). Each sibling file keeps the CIDs of R1 and R2.
+    """
+    from episteme.data.pubchem.serialize_pubchem import (
+        PubchemInputError,
+        _find_siblings,
+        _iter_cid_raw,
+        discover_pubchem_files,
+    )
+
+    if part_rows is None:
+        part_rows = _pubchem_part_rows()
+    primaries = discover_pubchem_files(raw)
+    if not primaries:
+        raise SliceError(f"pubchem: no CID-SMILES file under {raw}")
+    primary = primaries[0]
+    if part_rows < 1:
+        raise SliceError(f"pubchem: part_rows must be at least 1 (got {part_rows})")
+    try:
+        n_lines = sum(1 for _ in _iter_cid_raw(primary))
+        if n_lines < 1:
+            raise SliceError("pubchem: the primary file has no CID lines")
+        r1_end = min(2 * part_rows, n_lines)
+        r2_start = max(n_lines // 2, r1_end)
+        r2_end = min(r2_start + part_rows, n_lines)
+        has_r2 = r2_start < r2_end
+        last = r2_end if has_r2 else r1_end
+        bounds: dict[str, int] = {}
+
+        def keep_primary(i: int, cid: int) -> bool | None:
+            if i >= last:
+                return None
+            if i == 0:
+                bounds["lo1"] = cid
+            if i == r1_end - 1:
+                bounds["hi1"] = cid
+            if has_r2 and i == r2_start:
+                bounds["lo2"] = cid
+            if has_r2 and i == r2_end - 1:
+                bounds["hi2"] = cid
+            return i < r1_end or r2_start <= i < r2_end
+
+        written: list[Path] = []
+        rels: list[str] = []
+        pri_dest = dest / primary.relative_to(raw)
+        _cut_file(primary, pri_dest, keep_primary)
+        written.append(pri_dest)
+        rels.append(primary.relative_to(raw).as_posix())
+        ranges = [[bounds["lo1"], bounds["hi1"]]]
+        if has_r2:
+            ranges.append([bounds["lo2"], bounds["hi2"]])
+        stop = ranges[-1][1]
+
+        def keep_sibling(_i: int, cid: int) -> bool | None:
+            if cid > stop:
+                return None
+            return any(lo <= cid <= hi for lo, hi in ranges)
+
+        for sib in _find_siblings(primary).values():
+            sib_dest = dest / sib.relative_to(raw)
+            _cut_file(sib, sib_dest, keep_sibling)
+            written.append(sib_dest)
+            rels.append(sib.relative_to(raw).as_posix())
+    except PubchemInputError as exc:
+        raise SliceError(f"pubchem: {exc}") from exc
+    return {
+        "files": rels,
+        "inputs": [primary.relative_to(raw).as_posix()],
+        "bytes": sum(_size(p) for p in written),
+        "n_lines": n_lines,
+        "part_rows": part_rows,
+        "ranges": ranges,
+    }
+
+
 def _every_file(_p: Path) -> bool:
     return True
 
@@ -148,6 +268,11 @@ class SliceSpec:
     # (europepmc .filelist.csv/.txt) is in the slice but is no unit: the yield
     # (rows per input) counts the units only.
     is_unit: Callable[[Path], bool] = _every_file
+    # A source whose files are too large to link is cut instead:
+    # ``build(raw_dir, dest_dir)`` writes the slice files and returns
+    # ``{"files", "inputs", "bytes", **extra}``. ``select`` is then not used by
+    # ``prepare``.
+    build: Callable[[Path, Path], dict] | None = None
 
 
 SLICES: dict[str, SliceSpec] = {
@@ -160,6 +285,7 @@ SLICES: dict[str, SliceSpec] = {
         _is_archive,
     ),
     "apollo": SliceSpec("apollo", 4 * GB, _select_apollo, Path("apollo")),
+    "pubchem": SliceSpec("pubchem", 1 * GB, _select_pubchem, Path("pubchem"), build=_build_pubchem),
 }
 
 
@@ -219,6 +345,20 @@ def prepare(
     raw = Path(raw_root).resolve() / spec.raw_subpath
     dest_root = Path(sample_root).absolute() / "01_raw" / spec.raw_subpath
     _reject_links(Path(sample_root).absolute(), dest_root)
+    meta_path = target_root / "slice.json"
+    if spec.build is not None:
+        meta_path.unlink(missing_ok=True)
+        if dest_root.exists():
+            shutil.rmtree(dest_root)
+        dest_root.mkdir(parents=True)
+        built = spec.build(raw, dest_root)
+        if built["bytes"] > spec.max_bytes:
+            raise SliceError(
+                f"{source}: slice is {built['bytes']} bytes, over the cap of {spec.max_bytes}"
+            )
+        result = {**built, "linked": 0, "copied": len(built["files"])}
+        meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
     files = select(source, raw_root)
     missing = [p for p in files if not p.is_file()]
     if missing:
@@ -227,7 +367,6 @@ def prepare(
     if total > spec.max_bytes:
         raise SliceError(f"{source}: slice is {total} bytes, over the cap of {spec.max_bytes}")
 
-    meta_path = target_root / "slice.json"
     meta_path.unlink(missing_ok=True)
     if dest_root.exists():
         shutil.rmtree(dest_root)
