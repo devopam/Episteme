@@ -218,7 +218,7 @@ def measure_staging(
         elapsed = record.get("elapsed_s")
         measures["elapsed_s"] = elapsed
         measures["peak_rss_mb"] = record.get("peak_rss_mb")
-        measures["rows_per_s"] = round(rows / elapsed, 3) if elapsed else None
+        measures["rows_per_s"] = rows / elapsed if elapsed else None
         if record.get("failed_inputs") is not None:
             measures["failed_inputs"] = record["failed_inputs"]
         elif record.get("rc") == 0:

@@ -151,8 +151,8 @@ def is_gated(source: str, stage: str) -> bool:
 
 
 def _num(value: Any) -> str:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f"{value:g}"
+    # Exact (shortest round-trip repr): a failure line must show why the
+    # value failed, e.g. 0.01999998 against 0.02, never two equal numbers.
     return str(value)
 
 

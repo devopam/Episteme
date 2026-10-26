@@ -279,6 +279,8 @@ def test_a_yield_just_below_the_floor_is_not_rounded_up(tmp_path):
     assert m["text_bytes_per_input_byte"] < 0.02
     fails = gate.evaluate(m, {"min_text_bytes_per_input_byte": 0.02})
     assert any(f.startswith("min_text_bytes_per_input_byte") for f in fails), fails
+    # The failure line shows the exact value, not one that rounds to the limit.
+    assert any(str(m["text_bytes_per_input_byte"]) in f for f in fails), fails
 
 
 def test_the_markdown_report_rounds_for_display(tmp_path):
