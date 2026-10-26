@@ -304,6 +304,32 @@ def test_measure_staging_lists_source_files_and_part_maxima(tmp_path):
     assert m["max_est_bytes_per_source_file"] == 3 * 10 + 3 * profile.PART_ROW_OVERHEAD_BYTES
 
 
+def test_part_byte_maximum_leaves_out_single_row_parts(tmp_path):
+    """A single row larger than the byte cap goes alone in its part (it cannot be
+    split), so the byte maximum covers only parts with 2 or more rows."""
+    _write(
+        tmp_path / "s1.parquet",
+        [{"id": f"a{i}", "text": "x" * 10, "source_file": "k__part00001"} for i in range(2)],
+    )
+    _write(
+        tmp_path / "s2.parquet",
+        [{"id": "b0", "text": "y" * 5000, "source_file": "k__part00002"}],
+    )
+    m = gate_report.measure_staging(tmp_path, inputs=[])
+    assert m["max_rows_per_source_file"] == 2
+    assert m["max_est_bytes_per_source_file"] == 2 * 10 + 2 * profile.PART_ROW_OVERHEAD_BYTES
+
+
+def test_part_byte_maximum_is_zero_when_every_part_has_one_row(tmp_path):
+    _write(
+        tmp_path / "s1.parquet",
+        [{"id": "a0", "text": "y" * 5000, "source_file": "k__part00001"}],
+    )
+    m = gate_report.measure_staging(tmp_path, inputs=[])
+    assert m["max_rows_per_source_file"] == 1
+    assert m["max_est_bytes_per_source_file"] == 0
+
+
 def test_measure_staging_part_maxima_none_without_rows(tmp_path):
     m = gate_report.measure_staging(tmp_path, inputs=[])
     assert m["source_files"] == []

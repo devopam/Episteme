@@ -219,8 +219,10 @@ _PER_KEY = {
 
 
 def _parts_within_caps(measures: dict, rule: str) -> list[str]:
-    """Every part is within the profile's row and byte caps (measured on the
-    staging shards by ``gate_report``; the caps come from the profile)."""
+    """Every part is within the row and byte caps (measured on the staging
+    shards by ``gate_report``). The byte measure covers parts with 2 or more
+    rows only: a single row over the byte cap goes alone in its own part, the
+    one case the serializer allows over ``part_bytes``."""
     fails = []
     for key, cap_key, what in (
         ("max_rows_per_source_file", "part_rows", "rows"),

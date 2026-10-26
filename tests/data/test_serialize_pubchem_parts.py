@@ -17,6 +17,7 @@ import pytest
 
 from episteme.data.checkpoint_markers import load_success_marker_path, success_marker_path
 from episteme.data.pubchem import serialize_pubchem as mod
+from episteme.ops import gate, gate_report
 from episteme.ops.profile import PART_ROW_OVERHEAD_BYTES
 
 KEY = "CID-SMILES.tsv"
@@ -113,15 +114,52 @@ def test_parts_by_row_cap(raw, out, monkeypatch, audits):
 
 
 def test_parts_by_byte_cap(raw, out, monkeypatch, audits):
-    rows = list(mod.iter_rows_from_file(raw / KEY))
-    one = min(len(r["text"].encode("utf-8")) for r in rows)
-    _caps(monkeypatch, 10**6, 2 * (PART_ROW_OVERHEAD_BYTES + one))
+    # Two of the longest rows fit exactly; a third row never fits.
+    _caps(monkeypatch, 10**6, 2 * _row_est(raw, max))
     assert mod.serialize_pubchem(raw, out)["ok"] == 1
     assert _marker(out, KEY)["stats"]["parts"] == 5
     for n in range(1, 6):
         st = _part_marker(out, n)
         assert st["n_rows"] == 2
-        assert st["est_bytes"] >= st["part_bytes"]
+        assert st["est_bytes"] <= st["part_bytes"]
+    assert _all_cids(out) == CIDS
+
+
+def _row_est(raw: Path, pick=min) -> int:
+    """The estimated staging bytes of the shortest (or longest) fixture row."""
+    rows = list(mod.iter_rows_from_file(raw / KEY))
+    return pick(len(r["text"].encode("utf-8")) for r in rows) + PART_ROW_OVERHEAD_BYTES
+
+
+def _gate_parts(out: Path, raw: Path, caps: tuple[int, int]) -> tuple[dict, list[str]]:
+    m = gate_report.measure_staging(_staging(out), inputs=[raw / KEY])
+    m["part_rows"], m["part_bytes"] = caps
+    return m, gate.evaluate(m, {"parts_within_caps": True})
+
+
+@pytest.mark.parametrize("binding", ["bytes", "rows"])
+def test_serializer_output_passes_parts_within_caps(raw, out, monkeypatch, audits, binding):
+    # A byte cap of 2.5 rows: the old rule took a third row and ended over the cap.
+    caps = (10**6, int(2.5 * _row_est(raw))) if binding == "bytes" else (3, BIG)
+    _caps(monkeypatch, *caps)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    m, fails = _gate_parts(out, raw, caps)
+    assert fails == []
+    assert m["max_rows_per_source_file"] == (2 if binding == "bytes" else 3)
+    assert m["max_est_bytes_per_source_file"] <= caps[1]
+    assert _all_cids(out) == CIDS
+
+
+def test_a_row_over_the_byte_cap_goes_alone_in_its_part(raw, out, monkeypatch, audits):
+    caps = (10**6, _row_est(raw) - 1)
+    _caps(monkeypatch, *caps)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _marker(out, KEY)["stats"]["parts"] == 10
+    for n in range(1, 11):
+        st = _part_marker(out, n)
+        assert st["n_rows"] == 1 and st["est_bytes"] > st["part_bytes"]
+    _m, fails = _gate_parts(out, raw, caps)
+    assert fails == []
     assert _all_cids(out) == CIDS
 
 

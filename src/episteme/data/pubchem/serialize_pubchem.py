@@ -70,12 +70,16 @@ cut).
 
 Bounded units of work (pubchem sub-project 2, spec 2026-10-26 Sec 4.2-4.3):
 one primary file is still one unit of work, but its output is a sequence of
-parts numbered from 1. A part ends at ``part_rows`` rows or at an estimated
-``part_bytes`` (sum of each row's UTF-8 ``text`` length plus
-``PART_ROW_OVERHEAD_BYTES``), whichever comes first; the caps come from the
-runtime profile (``_part_caps``). Part ``n`` has the ``source_file``, shard
-stem and success marker ``<input_key>__partNNNNN`` (``part_source_file``);
-its marker records ``first_cid`` / ``last_cid`` and the caps, and it gets one
+parts numbered from 1. A part holds at most ``part_rows`` rows and at most
+``part_bytes`` estimated bytes (sum of each row's UTF-8 ``text`` length plus
+``PART_ROW_OVERHEAD_BYTES``): a row that would take the part over the byte
+cap ends the part and starts the next one. The one exception: a single row
+larger than ``part_bytes`` goes alone in its own part, which is then over the
+byte cap (a row cannot be split; ``gate_report`` leaves single-row parts out
+of its byte maximum). The caps come from the runtime profile (``_part_caps``).
+Part ``n`` has the ``source_file``, shard stem and success marker
+``<input_key>__partNNNNN`` (``part_source_file``); its marker records
+``first_cid`` / ``last_cid`` and the caps, and it gets one
 ``serialize_commit`` audit row. After the last part the primary file gets its
 own success marker (``parts``, total ``n_rows``); it has no shard and no audit
 row of its own. A restart does not count rows: it keeps the longest prefix of
@@ -703,25 +707,33 @@ def process_one(
                 def _part_rows(psf: str = psf, part: dict[str, Any] = part):
                     nonlocal pending
                     while pending is not None:
-                        rec, pending = pending, None
+                        rec = pending
                         row = pubchem_row(rec, psf)
                         if row is None:
                             iter_stats["skipped_no_id"] = iter_stats.get("skipped_no_id", 0) + 1
                             pending = next(pending_src, None)
                             continue
                         text = row.get("text")
-                        part["rows"] += 1
-                        part["est_bytes"] += (
+                        row_est = (
                             len(text.encode("utf-8")) if text else 0
                         ) + PART_ROW_OVERHEAD_BYTES
+                        # A part holds at most part_bytes: a row that does not
+                        # fit ends the part and stays pending for the next part
+                        # (rebuilt there with that part's source_file). A single
+                        # row over the cap goes alone in its own part.
+                        if part["rows"] and part["est_bytes"] + row_est > cap_bytes:
+                            return
+                        pending = None
+                        part["rows"] += 1
+                        part["est_bytes"] += row_est
                         if part["first_cid"] is None:
                             part["first_cid"] = rec["cid"]
                         part["last_cid"] = rec["cid"]
                         part["counts"][str(row.get("extract_status"))] += 1
                         yield row
-                        # The cap check comes before the next pull, so a part
-                        # never takes a record it does not keep.
-                        if part["rows"] >= cap_rows or part["est_bytes"] >= cap_bytes:
+                        # The row cap check comes before the next pull, so a
+                        # part never reads a record past its last row.
+                        if part["rows"] >= cap_rows:
                             return
                         pending = next(pending_src, None)
 
@@ -756,7 +768,8 @@ def process_one(
                 n_rows_total += part["rows"]
                 status_counts.update(part["counts"])
                 current_part = n + 1
-                pending = next(pending_src, None)
+                if pending is None:  # else a record that did not fit waits
+                    pending = next(pending_src, None)
 
         stats: dict[str, Any] = {
             "n_rows": n_rows_total,

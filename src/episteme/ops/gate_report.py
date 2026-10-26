@@ -176,7 +176,12 @@ def _measure_shards(con: Any, columns: list[str], rows: int) -> dict:
 def _measure_parts(con: Any, columns: list[str], rows: int) -> dict:
     """Per ``source_file`` (one part of an input): the distinct names and the
     largest part by rows and by estimated bytes (``strlen`` of ``text`` plus
-    ``PART_ROW_OVERHEAD_BYTES`` per row; a NULL text counts 0 bytes)."""
+    ``PART_ROW_OVERHEAD_BYTES`` per row; a NULL text counts 0 bytes).
+
+    The byte maximum covers only parts with 2 or more rows: a single row
+    larger than ``part_bytes`` goes alone in its own part (the serializer
+    cannot split a row), and that part is the one case allowed over the byte
+    cap. When every part has one row, the byte maximum is 0."""
     out: dict[str, Any] = {
         "source_files": [],
         "max_rows_per_source_file": None,
@@ -193,7 +198,10 @@ def _measure_parts(con: Any, columns: list[str], rows: int) -> dict:
         out["source_files"] = [str(r[0]) for r in res]
         out["max_rows_per_source_file"] = int(max(r[1] for r in res))
         out["max_est_bytes_per_source_file"] = int(
-            max(int(r[2]) + int(r[1]) * PART_ROW_OVERHEAD_BYTES for r in res)
+            max(
+                (int(r[2]) + int(r[1]) * PART_ROW_OVERHEAD_BYTES for r in res if int(r[1]) > 1),
+                default=0,
+            )
         )
     return out
 
