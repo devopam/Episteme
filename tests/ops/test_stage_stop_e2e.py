@@ -71,11 +71,27 @@ if __name__ == "__main__":
         raise
 """
 
+# After the stop, run_pipeline.sh's EXIT handler can start more Python under
+# stage_guard (the --bulk index rebuild). The stop request must not stop it.
+AFTER = """\
+import sys
+import time
+from pathlib import Path
+
+from episteme.ops.stop import stage_guard
+
+with stage_guard(lambda: None, argv=[]):
+    for _ in range(30):
+        time.sleep(0.1)
+Path(sys.argv[1], "after.ok").write_text("ok", encoding="utf-8")
+"""
+
 # The runner: the same trap and run code as run_pipeline.sh.
 RUNNER = """\
 . "$SR_LIB/common.sh"
 . "$SR_LIB/stage_run.sh"
 export EPISTEME_STOP_FILE="$SR_STOP"
+trap '"$SR_PY" "$SR_AFTER" "$SR_OUT"' EXIT
 stage_install_stop_traps
 echo "$$" > "$SR_OUT/runner.pid"
 rc=0
@@ -126,6 +142,8 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
     out.mkdir()
     stage = tmp_path / "stage.py"
     stage.write_text(STAGE, encoding="utf-8")
+    after = tmp_path / "after.py"
+    after.write_text(AFTER, encoding="utf-8")
     stop_file = tmp_path / "run" / "stop.request"  # the folder does not exist yet
 
     env = {k: v for k, v in os.environ.items() if k not in ("EPISTEME_RUNNER_PID",)}
@@ -133,6 +151,7 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
         SR_LIB=_posix(LIB),
         SR_PY=_posix(Path(sys.executable)),
         SR_STAGE=_posix(stage),
+        SR_AFTER=_posix(after),
         SR_OUT=_posix(out),
         SR_STOP=_posix(stop_file),
     )
@@ -175,6 +194,8 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
         assert stop_file.read_text(encoding="utf-8").strip() == "TERM"
         assert (out / "stage.rc").read_text().strip() == "143"
         assert not (out / "runner.rc").exists()  # the trap exits; the script does not go on
+        # The EXIT handler's Python ran to its end: the request was for the stage only.
+        assert (out / "after.ok").read_text(encoding="utf-8") == "ok", err
     finally:
         for p in reversed(spawned):
             try:

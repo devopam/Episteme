@@ -796,8 +796,9 @@ _bulk_rebuild() {
     BULK_PENDING=0
     log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
     # The rebuild always waits, also under --no-wait: a refused rebuild would
-    # leave the secondary indexes dropped.
-    EPISTEME_NO_WAIT='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
+    # leave the secondary indexes dropped. A stop request of the stage must not
+    # stop the rebuild that runs after it (from the EXIT handler).
+    EPISTEME_NO_WAIT='' EPISTEME_STOP_FILE='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 if [ "$BULK" = "1" ]; then
     log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"

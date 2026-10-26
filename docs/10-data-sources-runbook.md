@@ -460,7 +460,7 @@ How a stop reaches the stage:
 - `run_pipeline.sh` runs each stage in the background and waits for it. On INT or TERM it writes the signal name to the stop-request file (`EPISTEME_STOP_FILE`, `<run folder>/stop.request`). Bash cannot signal a native Windows Python, so the file carries the stop. The file also carries Ctrl-C: a background stage can ignore SIGINT.
 - The parent watchdog of the stage reads the file every second. When the file appears, the watchdog stops the stage as a SIGTERM does: the stage cancels its statement and exits 143. If the stage is in a long statement and still runs 5 seconds later, the watchdog cancels the statement again.
 - The runner waits for the stage to end. Then it writes the end state `stopped` and the `run_end` row, and releases the lock. The runner exits 130 (Ctrl-C) or 143 (SIGTERM). A second Ctrl-C does not make the runner exit early.
-- The runner removes an old stop-request file before each stage starts.
+- A stop request is for the stage that runs now only. The runner removes an old stop-request file before each stage starts. After a stop, the Python steps of the EXIT handler (the `--bulk` index rebuild) do not see the request, so they run to their end.
 - If the runner itself dies (a hard kill), the watchdog sees that the runner is gone within 10 seconds. It cancels the statement, terminates the child processes of the stage (the pool workers), and exits 143. The `heavy.lock` stays; the next run takes it over as stale.
 - A stage that hangs and does not stop: end it with `taskkill /T /F /PID <stage PID>` (the `stage` PID in `status.json`). The runner then ends as well.
 

@@ -57,6 +57,10 @@ _stage_stop() {
             wait "$STAGE_PID"
         done
         STAGE_PID=""
+        # The request was for that stage only: the EXIT handler's own Python
+        # (the --bulk index rebuild) must not see it. The file stays as a record.
+        EPISTEME_STOP_FILE=""
+        export EPISTEME_STOP_FILE
     fi
     exit "$2"
 }
