@@ -18,11 +18,11 @@ This step reads that file:
 1. No file, or an empty list: nothing to do. No lock, no database query.
 2. Else it takes the heavy lock of the ``load`` stage (serialize writes the
    file under the same lock), reads the file again, and classifies each name
-   (``classify_pending``): no part success marker -> delete its rows; a
-   success marker and a load_success marker (a later serialize wrote the part
-   again and it was loaded) -> drop the name; a success marker only (written
+   (``classify_pending``, the load marker first): a load_success marker (a
+   load replaced the rows of the name after it was recorded, with or without
+   a part success marker) -> drop the name; a success marker only (written
    again, not loaded yet, e.g. ``--skip-unit``) -> keep the name pending and
-   delete nothing.
+   delete nothing; neither -> delete its rows.
 3. With names to delete it also takes the advisory lock, and one
    ``postgres_loader.delete_source_files`` call deletes exactly their
    ``pubchem`` rows (``source_file = ANY(...)``, index-only), with one
@@ -70,25 +70,32 @@ def _is_loaded(processed_dir: Path, name: str) -> bool:
 def classify_pending(
     processed_dir: Path, pending: list[str]
 ) -> tuple[list[str], list[str], list[str]]:
-    """``(to_delete, done, waiting)`` for the pending part names:
+    """``(to_delete, done, waiting)`` for the pending part names. The load
+    marker is checked FIRST:
 
-    - no part success marker: the part is gone; delete its rows;
-    - a success marker AND a load_success marker: a later serialize wrote the
-      part again and it was loaded (the loader replaced its rows by
-      source_file); drop the name;
+    - a load_success marker (``.parquet.ok`` or ``.jsonl.ok``): a load
+      replaced the rows of this name by source_file after the name was
+      recorded, because serialize records the name before it unlinks the load
+      marker of the part. Drop the name, with or without a success marker:
+      ``load_articles`` loads every staged shard, also one that a stopped
+      serialize left without a success marker. (A crash between the record and
+      the unlink leaves the OLD load marker; the name is dropped here, and the
+      next serialize that deletes the part sees the marker and records the
+      name again.)
     - a success marker only: the part was written again but not loaded yet
       (for example ``--skip-unit``). Its old rows may hold CIDs that the new
-      part does not, so keep the name pending and delete nothing."""
+      part does not, so keep the name pending and delete nothing.
+    - neither: the part is gone; delete its rows."""
     to_delete: list[str] = []
     done: list[str] = []
     waiting: list[str] = []
     for name in pending:
-        if not checkpoint_markers.success_marker_path(processed_dir, SOURCE, name).is_file():
-            to_delete.append(name)
-        elif _is_loaded(processed_dir, name):
+        if _is_loaded(processed_dir, name):
             done.append(name)
-        else:
+        elif checkpoint_markers.success_marker_path(processed_dir, SOURCE, name).is_file():
             waiting.append(name)
+        else:
+            to_delete.append(name)
     return to_delete, done, waiting
 
 

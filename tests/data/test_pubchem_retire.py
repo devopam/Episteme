@@ -270,6 +270,38 @@ def test_a_name_written_again_and_loaded_is_dropped(tmp_path, monkeypatch, lock_
     assert mod.read_retire_pending(out) == []
 
 
+def test_a_loaded_shard_without_a_success_marker_is_dropped_not_deleted(tmp_path, lock_only):
+    # N loaded -> recorded and deleted -> N's shard written again, but serialize
+    # stops before mark_success -> the loader loads every staged shard (marked
+    # or not) and writes N's load marker -> retire must not delete those rows.
+    out = tmp_path / "out"
+    n = f"{KEY}__part00002"
+    mod.write_retire_pending(out, [n])
+    shard = out / "staging" / "pubchem" / f"{n}.parquet"
+    shard.parent.mkdir(parents=True)
+    shard.write_bytes(b"x")
+    lm = load_success_marker_path(out, "pubchem", shard.name)
+    lm.parent.mkdir(parents=True)
+    lm.write_text("{}", encoding="utf-8")
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert mod.read_retire_pending(out) == []
+    assert retire.classify_pending(out, [n]) == ([], [n], [])
+
+
+def test_classify_pending_rules(tmp_path):
+    out = tmp_path / "out"
+    gone, loaded, waiting, loaded_only = (f"{KEY}__part0000{i}" for i in (1, 2, 3, 4))
+    _mark_current(out, loaded, loaded=True)
+    _mark_current(out, waiting, loaded=False)
+    lm = load_success_marker_path(out, "pubchem", f"{loaded_only}.jsonl")
+    lm.write_text("{}", encoding="utf-8")
+    assert retire.classify_pending(out, [gone, loaded, waiting, loaded_only]) == (
+        [gone],
+        [loaded, loaded_only],
+        [waiting],
+    )
+
+
 def test_a_rewritten_part_not_loaded_stays_pending(tmp_path, monkeypatch, lock_only):
     # Part 3 loaded -> a rebuild records it and writes it again -> a load with
     # --skip-unit for part 3 exits 0. Part 3 has a success marker but no load
