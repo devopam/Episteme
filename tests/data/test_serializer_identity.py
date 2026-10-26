@@ -30,6 +30,8 @@ def test_same_named_inputs_in_two_directories_are_both_processed(source, tmp_pat
     assert res["inputs"] == 2, res
     assert res["ok"] == 2 and res["failed"] == 0, res
     success = tmp_path / "processed" / "_ops" / source / "success"
-    markers = sorted(p.name for p in success.glob("*.ok"))
+    # A unit's own marker only: pubchem also writes one marker per part
+    # (``<key>__partNNNNN.ok``), which is not a unit of work.
+    markers = sorted(p.name for p in success.glob("*.ok") if "__part" not in p.name)
     assert len(markers) == 2 and markers[0] != markers[1], markers
     assert all(m.startswith(("a__", "b__")) for m in markers), markers

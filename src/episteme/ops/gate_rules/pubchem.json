@@ -1,0 +1,15 @@
+{
+  "serialize": {
+    "max_failed_inputs": 0,
+    "max_duplicate_ids": 0,
+    "max_empty_text_pct": 0,
+    "allowed_licenses": ["public_domain"],
+    "max_status_pct": {"partial": 20.0},
+    "max_peak_rss_mb": 1024,
+    "parts_within_caps": true
+  },
+  "load": {
+    "max_orphan_bodies": 0,
+    "rows_loaded_equals_staging": true
+  }
+}

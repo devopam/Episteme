@@ -36,6 +36,10 @@ _BYTES_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*$")
 PIPELINE_FLOOR = GB
 DUCKDB_FLOOR = 512 * MB
 WORKER_BYTES = int(1.5 * GB)
+# Part caps (part_rows / part_bytes, rule in compute_profile): a writer that
+# cuts its output into parts estimates a row's staging size as the UTF-8 length
+# of its ``text`` plus this fixed overhead for the other columns.
+PART_ROW_OVERHEAD_BYTES = 256
 
 
 def parse_bytes(text: str) -> int | None:

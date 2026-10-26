@@ -12,7 +12,11 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``text_bytes_per_input_byte``, ``duplicate_ids``, ``duplicate_ids_in_shard``,
 ``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
-``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``. A rule
+``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
+``peak_rss_mb``, and for ``parts_within_caps`` ``max_rows_per_source_file``,
+``max_est_bytes_per_source_file`` (staging) with ``part_rows``, ``part_bytes``
+(the caps recorded in the sample's part markers; the profile's caps when the
+sample has no part marker). A rule
 whose measure is missing fails: a gate never passes on data it did not see.
 
 Limits: the code hash covers the ``episteme`` modules that the stage imports and
@@ -69,7 +73,13 @@ class _StageModules(dict):
 
 
 STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
-    {(source, "extract"): value for source, value in _EXTRACT_MODULES.items()}
+    {
+        **{(source, "extract"): value for source, value in _EXTRACT_MODULES.items()},
+        ("pubchem", "serialize"): (
+            "episteme.data.pubchem.serialize_pubchem",
+            "pubchem/serialize_pubchem.sh",
+        ),
+    }
 )
 
 
@@ -77,6 +87,21 @@ def stage_module(source: str, stage: str) -> tuple[str, str]:
     """(module, wrapper) of a stage; ``KeyError`` for an unknown pair. Use this,
     not ``in`` or ``.get`` on ``STAGE_MODULES``, which miss the load entries."""
     return STAGE_MODULES[(source, stage)]
+
+
+# Modules a stage's wrapper runs after its main module: their import closures are
+# hashed too, so a change to them voids the pass. load_pubchem.sh runs the retire
+# step after load_articles.
+EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("pubchem", "load"): ("episteme.data.pubchem.retire",),
+}
+
+
+def hash_modules(source: str, stage: str) -> list[str]:
+    """The modules whose import closures make up the code hash of a stage: the
+    stage module, then any module its wrapper also runs (``EXTRA_HASH_MODULES``)."""
+    module, _ = stage_module(source, stage)
+    return [module, *EXTRA_HASH_MODULES.get((source, stage), ())]
 
 
 _KNOWN_KEYS = {
@@ -92,6 +117,8 @@ _KNOWN_KEYS = {
     "max_failed_inputs",
     "max_orphan_bodies",
     "rows_loaded_equals_staging",
+    "max_peak_rss_mb",
+    "parts_within_caps",
 }
 
 
@@ -200,11 +227,30 @@ _SIMPLE = {
     "max_empty_text_pct": (_max_rule, "empty_text_pct"),
     "max_failed_inputs": (_max_rule, "failed_inputs"),
     "max_orphan_bodies": (_max_rule, "orphan_bodies"),
+    "max_peak_rss_mb": (_max_rule, "peak_rss_mb"),
 }
 _PER_KEY = {
     "max_status_pct": "extract_status_pct",
     "max_null_pct": "null_pct",
 }
+
+
+def _parts_within_caps(measures: dict, rule: str) -> list[str]:
+    """Every part is within the row and byte caps (measured on the staging
+    shards by ``gate_report``). The byte measure covers parts with 2 or more
+    rows only: a single row over the byte cap goes alone in its own part, the
+    one case the serializer allows over ``part_bytes``."""
+    fails = []
+    for key, cap_key, what in (
+        ("max_rows_per_source_file", "part_rows", "rows"),
+        ("max_est_bytes_per_source_file", "part_bytes", "estimated bytes"),
+    ):
+        value, cap = measures.get(key), measures.get(cap_key)
+        if value is None or cap is None:
+            fails.append(_missing(rule))
+        elif value > cap:
+            fails.append(f"{rule}: a part has {_num(value)} {what}, over the cap of {_num(cap)}")
+    return fails
 
 
 def evaluate(measures: dict, stage_rules: dict) -> list[str]:
@@ -234,6 +280,8 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(_missing(rule))
             elif not value:
                 fails.append(f"{rule}: the loaded rows differ from the staging rows")
+        elif rule == "parts_within_caps" and limit:
+            fails += _parts_within_caps(measures, rule)
     return fails
 
 
@@ -298,15 +346,16 @@ def _lazy_modules(path: Path, src_root: Path, top: str) -> set[str]:
     return out
 
 
-def stage_files(module: str, src_root: Path) -> list[Path]:
-    """The source files of every package module that importing ``module`` loads,
-    found in a fresh isolated interpreter (so this process's modules do not leak
-    in). Importing a stage module only imports; it does not connect to a database.
-    A module that code imports inside a function is added too (found with ``ast``),
-    and the closure is rebuilt until nothing new appears. Each round starts an
-    interpreter (about 1 s): never call this in a loop."""
-    top = module.split(".")[0]
-    modules = [module]
+def stage_files(module: str | list[str], src_root: Path) -> list[Path]:
+    """The source files of every package module that importing ``module`` (one
+    name, or a list such as ``hash_modules``) loads, found in a fresh isolated
+    interpreter (so this process's modules do not leak in). Importing a stage
+    module only imports; it does not connect to a database. A module that code
+    imports inside a function is added too (found with ``ast``), and the closure
+    is rebuilt until nothing new appears. Each round starts an interpreter
+    (about 1 s): never call this in a loop."""
+    modules = [module] if isinstance(module, str) else list(module)
+    top = modules[0].split(".")[0]
     while True:
         files = _import_files(modules, src_root)
         known = set(modules)
@@ -322,17 +371,20 @@ def code_hash(
     source: str,
     stage: str,
     *,
-    module: str | None = None,
+    module: str | list[str] | None = None,
     src_root: Path | None = None,
     wrapper: Path | None = None,
 ) -> str:
     """SHA-256 over the stage's import closure (each file's bytes with its path
-    relative to ``src_root``) plus the wrapper script. ``module``, ``src_root``
-    and ``wrapper`` default to the stage's entry in ``STAGE_MODULES``; tests pass
-    a temp package."""
+    relative to ``src_root``) plus the wrapper script. The closure is that of
+    ``hash_modules`` (the stage module and any module its wrapper also runs); a
+    stage with one module hashes as before. ``module``, ``src_root`` and
+    ``wrapper`` default to the stage's entry in ``STAGE_MODULES``; tests pass a
+    temp package."""
     src_root = (src_root or _SRC_ROOT).resolve()
     if module is None:
-        module, wrapper_rel = stage_module(source, stage)
+        _, wrapper_rel = stage_module(source, stage)
+        module = hash_modules(source, stage)
         wrapper = wrapper or _SCRIPTS_DATA / wrapper_rel
     h = hashlib.sha256()
     for path in sorted(stage_files(module, src_root)):
@@ -626,9 +678,39 @@ def _hash_failures(source: str, stage: str, record: dict) -> list[str]:
     return out
 
 
+def _sample_part_caps(source: str, sample_root: Path) -> tuple[tuple[int, int] | None, list[str]]:
+    """The ``(part_rows, part_bytes)`` that wrote the sample's parts, read from
+    the part success markers (``<sample_root>/02_processed/_ops/<source>/
+    success/*__part*.ok``), and the failure lines. ``None`` when no part marker
+    exists (the caller then uses the profile). Every marker must record both
+    caps and all must agree; else the caps are ``None`` and a line fails."""
+    from episteme.data.checkpoint_markers import success_marker_path
+
+    success_dir = success_marker_path(sample_root / "02_processed", source, "x").parent
+    seen: set[tuple[Any, Any]] = set()
+    fails: list[str] = []
+    for p in sorted(success_dir.glob("*__part*.ok")):
+        try:
+            stats = json.loads(p.read_text(encoding="utf-8")).get("stats") or {}
+        except (OSError, ValueError, AttributeError):
+            fails.append(f"parts_within_caps: part marker {p.name} is not readable")
+            continue
+        caps = (stats.get("part_rows"), stats.get("part_bytes"))
+        if not all(isinstance(c, int) and not isinstance(c, bool) for c in caps):
+            fails.append(f"parts_within_caps: part marker {p.name} has no part_rows/part_bytes")
+            continue
+        seen.add(caps)
+    if len(seen) > 1:
+        listed = ", ".join(f"{r}/{b}" for r, b in sorted(seen))
+        fails.append(f"parts_within_caps: the part markers disagree on the caps ({listed})")
+    if fails or not seen:
+        return None, fails
+    return seen.pop(), []
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     from episteme.data.checkpoint_markers import input_key
-    from episteme.ops import gate_report, gate_slice
+    from episteme.ops import gate_report, gate_slice, profile
 
     source, stage = args.source, args.stage
     rules = load_rules(source)
@@ -653,8 +735,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
         else sample_root / "02_processed" / "staging" / source
     )
     measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+    # The caps that wrote the parts, not the caps of the profile now.
+    caps, cap_failures = _sample_part_caps(source, sample_root)
+    if caps is None:
+        prof = profile.get_profile()
+        caps = (prof.part_rows, prof.part_bytes)
+    measures["part_rows"], measures["part_bytes"] = caps
     if stage == "load":
-        source_files = [input_key(p, raw_dir) for p in inputs]
+        # Part shards carry their own source_file (<input_key>__partNNNNN).
+        source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
         with _connect() as conn:
             # The loader keeps one row per id (a re-issued id under another
             # source_file replaces the older row), so compare distinct ids.
@@ -663,7 +752,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
                     conn, source, source_files, staging_rows=measures.get("distinct_ids")
                 )
             )
-    failures = _hash_failures(source, stage, record) + evaluate(measures, stage_rules)
+    failures = (
+        _hash_failures(source, stage, record) + cap_failures + evaluate(measures, stage_rules)
+    )
     if record.get("rc") not in (0, None):
         failures.insert(0, f"run record: the command exited with rc {record['rc']}")
     report_path = gate_report.write_report(measures, failures, sample_root)
