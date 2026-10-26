@@ -248,3 +248,40 @@ def test_measure_load_orphans(pg_conn):
         assert m["rows_loaded_equals_staging"] is False
     finally:
         pg_conn.rollback()
+
+
+def test_a_rare_empty_text_is_not_rounded_away(tmp_path):
+    """PR #86 review: one empty text in 25,000 rows is 0.004 %; rounding to two
+    decimals made it 0.0, so ``max_empty_text_pct: 0`` passed."""
+    d = tmp_path / "staging"
+    d.mkdir()
+    rows = [{"id": str(i), "text": "x", "extract_status": "ok"} for i in range(24_999)]
+    rows.append({"id": "last", "text": "", "extract_status": "partial"})
+    _write(d / "s1.parquet", rows)
+    inp = tmp_path / "f1.xml"
+    inp.write_bytes(b"a" * 30_000)
+    m = gate_report.measure_staging(d, inputs=[inp])
+    assert m["empty_text_pct"] > 0
+    assert m["extract_status_pct"]["partial"] > 0
+    fails = gate.evaluate(m, {"max_empty_text_pct": 0, "max_status_pct": {"partial": 0}})
+    assert any(f.startswith("max_empty_text_pct") for f in fails), fails
+    assert any(f.startswith("max_status_pct") for f in fails), fails
+
+
+def test_a_yield_just_below_the_floor_is_not_rounded_up(tmp_path):
+    """A minimum rule compares the exact ratio, not a rounded one."""
+    d = tmp_path / "staging"
+    d.mkdir()
+    _write(d / "s1.parquet", [{"id": "a", "text": "x" * 1_999_999}])
+    inp = tmp_path / "f1.xml"
+    inp.write_bytes(b"a" * 100_000_000)
+    m = gate_report.measure_staging(d, inputs=[inp])
+    assert m["text_bytes_per_input_byte"] < 0.02
+    fails = gate.evaluate(m, {"min_text_bytes_per_input_byte": 0.02})
+    assert any(f.startswith("min_text_bytes_per_input_byte") for f in fails), fails
+
+
+def test_the_markdown_report_rounds_for_display(tmp_path):
+    gate_report.write_report({"empty_text_pct": 100 / 3, "rows": 3}, [], tmp_path)
+    md = (tmp_path / "gate_report.md").read_text(encoding="utf-8")
+    assert "| empty_text_pct | 33.3333 |" in md
