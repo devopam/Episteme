@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from episteme.ops import gate, gate_migrations
+from episteme.ops import gate, gate_migrations, gate_report
 
 SRC = "bookshelf"
 RULES = {"extract": {"min_rows": 3, "max_duplicate_ids": 0}, "load": {"max_orphan_bodies": 0}}
@@ -647,3 +647,25 @@ def test_report_without_start_hashes_fails_closed(tmp_path, rules_dir, fake_hash
     rec.write_text(json.dumps({"elapsed_s": 1.0, "rc": 0, "peak_rss_mb": 1.0}), encoding="utf-8")
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1
     assert "no code hash" in capsys.readouterr().out
+
+
+def test_load_measures_use_staging_source_files(tmp_path, rules_dir, fake_hash, monkeypatch):
+    import polars as pl
+
+    sample, rec = _sample(tmp_path, rows=5)
+    staging = sample / "02_processed" / "staging" / SRC
+    (staging / "book1.jsonl").unlink()
+    for n in (1, 2):
+        pl.DataFrame(
+            [{"id": f"id{n}", "text": "t", "source_file": f"book1.tar.gz__part0000{n}"}]
+        ).write_parquet(staging / f"p{n}.parquet")
+    seen = {}
+
+    def fake_load(conn, source, source_files, *, staging_rows=None):
+        seen["source_files"] = source_files
+        return {"rows_loaded": 2, "orphan_bodies": 0, "rows_loaded_equals_staging": True}
+
+    monkeypatch.setattr(gate_report, "measure_load", fake_load)
+    _fake_connect(monkeypatch, object())
+    gate.main(_report_args(sample, rec, tmp_path / "prod", "load"))
+    assert seen["source_files"] == ["book1.tar.gz__part00001", "book1.tar.gz__part00002"]

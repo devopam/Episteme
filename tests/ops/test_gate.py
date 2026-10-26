@@ -424,3 +424,44 @@ def test_a_damaged_pass_file_reads_as_no_pass(tmp_path, rules_dir, fake_hash):
     p.parent.mkdir(parents=True)
     p.write_text("{oops", encoding="utf-8")
     assert gate.pass_valid("apollo", "extract", tmp_path) == (False, "no pass")
+
+
+# --- parts (pubchem serialize) ------------------------------------------------
+
+
+def test_parts_within_caps_pass_and_fail():
+    m = {
+        "max_rows_per_source_file": 5,
+        "max_est_bytes_per_source_file": 10,
+        "part_rows": 4,
+        "part_bytes": 100,
+    }
+    fails = gate.evaluate(m, {"parts_within_caps": True})
+    assert len(fails) == 1
+    assert "5" in fails[0] and "4" in fails[0]
+    assert gate.evaluate({**m, "part_rows": 5}, {"parts_within_caps": True}) == []
+    bytes_fail = gate.evaluate({**m, "part_rows": 5, "part_bytes": 9}, {"parts_within_caps": True})
+    assert len(bytes_fail) == 1 and "10" in bytes_fail[0] and "9" in bytes_fail[0]
+
+
+def test_parts_within_caps_missing_measure_fails():
+    fails = gate.evaluate({"part_rows": 4, "part_bytes": 100}, {"parts_within_caps": True})
+    assert fails and "missing" in fails[0]
+    assert gate.evaluate({}, {"parts_within_caps": False}) == []
+
+
+def test_max_peak_rss_mb_rule():
+    assert len(gate.evaluate({"peak_rss_mb": 1100}, {"max_peak_rss_mb": 1024})) == 1
+    assert gate.evaluate({"peak_rss_mb": 1000}, {"max_peak_rss_mb": 1024}) == []
+    assert "missing" in gate.evaluate({}, {"max_peak_rss_mb": 1024})[0]
+
+
+def test_pubchem_serialize_stage_is_known():
+    assert gate.stage_module("pubchem", "serialize") == (
+        "episteme.data.pubchem.serialize_pubchem",
+        "pubchem/serialize_pubchem.sh",
+    )
+    assert (gate._SCRIPTS_DATA / "pubchem/serialize_pubchem.sh").is_file()
+    module, _ = gate.stage_module("pubchem", "serialize")
+    files = {p.name for p in gate.stage_files(module, gate._SRC_ROOT.resolve())}
+    assert "serialize_pubchem.py" in files

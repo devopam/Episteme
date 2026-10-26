@@ -24,6 +24,7 @@ from typing import Any
 import duckdb
 
 from episteme.data import article_schema
+from episteme.ops.profile import PART_ROW_OVERHEAD_BYTES
 
 _TEXT_COLUMNS = ("title", "abstract", "body_text", "text")
 _BODY_COLUMNS = ("text", "body_text", "abstract")
@@ -172,6 +173,31 @@ def _measure_shards(con: Any, columns: list[str], rows: int) -> dict:
     return out
 
 
+def _measure_parts(con: Any, columns: list[str], rows: int) -> dict:
+    """Per ``source_file`` (one part of an input): the distinct names and the
+    largest part by rows and by estimated bytes (``strlen`` of ``text`` plus
+    ``PART_ROW_OVERHEAD_BYTES`` per row; a NULL text counts 0 bytes)."""
+    out: dict[str, Any] = {
+        "source_files": [],
+        "max_rows_per_source_file": None,
+        "max_est_bytes_per_source_file": None,
+    }
+    if not rows or "source_file" not in columns:
+        return out
+    text = f"coalesce(strlen(CAST({_q('text')} AS VARCHAR)), 0)" if "text" in columns else "0"
+    res = con.execute(
+        f"SELECT {_q('source_file')}, count(*), sum({text}) FROM t "
+        f"WHERE {_q('source_file')} IS NOT NULL GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    if res:
+        out["source_files"] = [str(r[0]) for r in res]
+        out["max_rows_per_source_file"] = int(max(r[1] for r in res))
+        out["max_est_bytes_per_source_file"] = int(
+            max(int(r[2]) + int(r[1]) * PART_ROW_OVERHEAD_BYTES for r in res)
+        )
+    return out
+
+
 def measure_staging(
     staging_dir: Path,
     *,
@@ -206,6 +232,7 @@ def measure_staging(
             rows = int(con.execute("SELECT count(*) FROM t").fetchone()[0])
         measures["rows"] = rows
         measures.update(_measure_shards(con, columns, rows))
+        measures.update(_measure_parts(con, columns, rows))
     finally:
         con.close()
 

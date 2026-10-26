@@ -12,7 +12,10 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``text_bytes_per_input_byte``, ``duplicate_ids``, ``duplicate_ids_in_shard``,
 ``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
-``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``. A rule
+``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
+``peak_rss_mb``, and for ``parts_within_caps`` ``max_rows_per_source_file``,
+``max_est_bytes_per_source_file`` (staging) with ``part_rows``, ``part_bytes``
+(the profile's caps). A rule
 whose measure is missing fails: a gate never passes on data it did not see.
 
 Limits: the code hash covers the ``episteme`` modules that the stage imports and
@@ -68,7 +71,13 @@ class _StageModules(dict):
 
 
 STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
-    {(source, "extract"): value for source, value in _EXTRACT_MODULES.items()}
+    {
+        **{(source, "extract"): value for source, value in _EXTRACT_MODULES.items()},
+        ("pubchem", "serialize"): (
+            "episteme.data.pubchem.serialize_pubchem",
+            "pubchem/serialize_pubchem.sh",
+        ),
+    }
 )
 
 
@@ -91,6 +100,8 @@ _KNOWN_KEYS = {
     "max_failed_inputs",
     "max_orphan_bodies",
     "rows_loaded_equals_staging",
+    "max_peak_rss_mb",
+    "parts_within_caps",
 }
 
 
@@ -199,11 +210,28 @@ _SIMPLE = {
     "max_empty_text_pct": (_max_rule, "empty_text_pct"),
     "max_failed_inputs": (_max_rule, "failed_inputs"),
     "max_orphan_bodies": (_max_rule, "orphan_bodies"),
+    "max_peak_rss_mb": (_max_rule, "peak_rss_mb"),
 }
 _PER_KEY = {
     "max_status_pct": "extract_status_pct",
     "max_null_pct": "null_pct",
 }
+
+
+def _parts_within_caps(measures: dict, rule: str) -> list[str]:
+    """Every part is within the profile's row and byte caps (measured on the
+    staging shards by ``gate_report``; the caps come from the profile)."""
+    fails = []
+    for key, cap_key, what in (
+        ("max_rows_per_source_file", "part_rows", "rows"),
+        ("max_est_bytes_per_source_file", "part_bytes", "estimated bytes"),
+    ):
+        value, cap = measures.get(key), measures.get(cap_key)
+        if value is None or cap is None:
+            fails.append(_missing(rule))
+        elif value > cap:
+            fails.append(f"{rule}: a part has {_num(value)} {what}, over the cap of {_num(cap)}")
+    return fails
 
 
 def evaluate(measures: dict, stage_rules: dict) -> list[str]:
@@ -233,6 +261,8 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(_missing(rule))
             elif not value:
                 fails.append(f"{rule}: the loaded rows differ from the staging rows")
+        elif rule == "parts_within_caps" and limit:
+            fails += _parts_within_caps(measures, rule)
     return fails
 
 
@@ -607,7 +637,7 @@ def _hash_failures(source: str, stage: str, record: dict) -> list[str]:
 
 def _cmd_report(args: argparse.Namespace) -> int:
     from episteme.data.checkpoint_markers import input_key
-    from episteme.ops import gate_report, gate_slice
+    from episteme.ops import gate_report, gate_slice, profile
 
     source, stage = args.source, args.stage
     rules = load_rules(source)
@@ -632,8 +662,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
         else sample_root / "02_processed" / "staging" / source
     )
     measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+    prof = profile.get_profile()
+    measures["part_rows"] = prof.part_rows
+    measures["part_bytes"] = prof.part_bytes
     if stage == "load":
-        source_files = [input_key(p, raw_dir) for p in inputs]
+        # Part shards carry their own source_file (<input_key>__partNNNNN).
+        source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
         with _connect() as conn:
             # The loader keeps one row per id (a re-issued id under another
             # source_file replaces the older row), so compare distinct ids.

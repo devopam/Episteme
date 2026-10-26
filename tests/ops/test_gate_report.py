@@ -3,7 +3,7 @@ import json
 import polars as pl
 import pytest
 
-from episteme.ops import gate, gate_report
+from episteme.ops import gate, gate_report, profile
 
 
 def _write(path, rows):
@@ -287,3 +287,25 @@ def test_the_markdown_report_rounds_for_display(tmp_path):
     gate_report.write_report({"empty_text_pct": 100 / 3, "rows": 3}, [], tmp_path)
     md = (tmp_path / "gate_report.md").read_text(encoding="utf-8")
     assert "| empty_text_pct | 33.3333 |" in md
+
+
+def test_measure_staging_lists_source_files_and_part_maxima(tmp_path):
+    _write(
+        tmp_path / "s1.parquet",
+        [{"id": f"a{i}", "text": "x" * 10, "source_file": "k__part00001"} for i in range(3)],
+    )
+    _write(
+        tmp_path / "s2.parquet",
+        [{"id": "b0", "text": None, "source_file": "k__part00002"}],
+    )
+    m = gate_report.measure_staging(tmp_path, inputs=[])
+    assert m["source_files"] == ["k__part00001", "k__part00002"]
+    assert m["max_rows_per_source_file"] == 3
+    assert m["max_est_bytes_per_source_file"] == 3 * 10 + 3 * profile.PART_ROW_OVERHEAD_BYTES
+
+
+def test_measure_staging_part_maxima_none_without_rows(tmp_path):
+    m = gate_report.measure_staging(tmp_path, inputs=[])
+    assert m["source_files"] == []
+    assert m["max_rows_per_source_file"] is None
+    assert m["max_est_bytes_per_source_file"] is None
