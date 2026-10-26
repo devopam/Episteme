@@ -1139,11 +1139,16 @@ Each part marker and the primary success marker record the name, size and mtime 
 After `load_articles` exits 0, `load_pubchem.sh` runs `python -m episteme.data.pubchem.retire`. The retire step:
 
 1. Reads `retire_pending.json`. With no file or an empty list, it stops. It takes no lock and sends no query.
-2. Drops each pending name that has a part success marker again. A later serialize wrote that part again, so its rows are current. These names are never deleted.
-3. Deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` is one of the other names (`source_file = ANY(...)`, which uses the `(source, source_file)` index). It writes one `load_replace` audit row and commits.
-4. Empties `retire_pending.json`.
+2. Takes the heavy lock of the `load` stage. The serializer writes the file under the same lock. It reads the file again and sorts each name into one of three groups:
+   - The part has no success marker: the part is gone. Its rows are deleted.
+   - The part has a success marker and a load marker: a later serialize wrote the part again and a load loaded it. The name is dropped.
+   - The part has a success marker but no load marker: the part was written again but not loaded yet (for example after `load --skip-unit`). The name stays pending. Nothing is deleted.
+3. If there are names to delete, takes the advisory lock and deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` is one of these names (`source_file = ANY(...)`, which uses the `(source, source_file)` index). It writes one `load_replace` audit row. The row gives the deleted names in `old_value` (`{"source_files": [...]}`) and the count in `rows_affected`. Then it commits.
+4. Still under the heavy lock, removes from the file only the names that it deleted or dropped.
 
-A stop between steps 3 and 4 leaves the names in the file. The next retire deletes them again (0 rows): this is safe. A `retire_pending.json` that is not a JSON list of names stops the retire step with exit 1, before any query. Rows from before parts (`source_file` is the bare `<input_key>`) are not covered.
+A stop between steps 3 and 4 leaves the names in the file. The next retire deletes them again (0 rows): this is safe. A stop during the delete cancels the statement. A `retire_pending.json` that is not a JSON list of names stops the retire step with exit 1, before any query. Rows from before parts (`source_file` is the bare `<input_key>`) are not covered.
+
+The code hash of the `pubchem` load gate covers the retire step (`gate.hash_modules`), so a change to it voids a `pubchem` load pass.
 
 **Gate.** The rules are in `src/episteme/ops/gate_rules/pubchem.json`. The serialize rules include `max_peak_rss_mb` and `parts_within_caps`. There is no speed rule: the report shows `rows_per_s`, but compute capacity varies. Run the sample before a full run:
 
