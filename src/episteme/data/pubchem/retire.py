@@ -16,18 +16,25 @@ A part deleted without a load marker was never loaded and is not recorded.
 This step reads that file:
 
 1. No file, or an empty list: nothing to do. No lock, no database query.
-2. A pending name that has a part success marker again is current: a later
-   serialize wrote that part again (same part number). Its rows are current
-   (or the next load replaces them), so it is never deleted; it is dropped
-   from the file.
-3. The other names: one ``postgres_loader.delete_source_files`` call deletes
-   exactly their ``pubchem`` rows (``source_file = ANY(...)``, index-only),
-   with one ``load_replace`` audit row, and commits. Then the names leave the
-   file.
+2. Else it takes the heavy lock of the ``load`` stage (serialize writes the
+   file under the same lock), reads the file again, and classifies each name
+   (``classify_pending``): no part success marker -> delete its rows; a
+   success marker and a load_success marker (a later serialize wrote the part
+   again and it was loaded) -> drop the name; a success marker only (written
+   again, not loaded yet, e.g. ``--skip-unit``) -> keep the name pending and
+   delete nothing.
+3. With names to delete it also takes the advisory lock, and one
+   ``postgres_loader.delete_source_files`` call deletes exactly their
+   ``pubchem`` rows (``source_file = ANY(...)``, index-only), with one
+   ``load_replace`` audit row that names them in ``old_value``, and commits.
+4. Still under the heavy lock, it writes back the file without the names it
+   deleted or dropped.
 
 A stop between the commit and the file update leaves the names in the file;
 the next run deletes them again (0 rows, one more audit row): idempotent.
 A file that is not a JSON list of strings exits 1 before any database call.
+The connection of the running delete is visible to the stop handler, so a
+stop or the parent watchdog cancels it.
 
 ``load_pubchem.sh`` runs this only after ``load_articles`` exited 0.
 ``--force``, ``--reason`` and ``--skip-unit`` are accepted and ignored:
@@ -48,21 +55,45 @@ from episteme.data.pubchem.serialize_pubchem import (
     write_retire_pending,
 )
 
+_SHARD_EXTS: tuple[str, ...] = (".parquet", ".jsonl")
 
-def split_pending(processed_dir: Path, pending: list[str]) -> tuple[list[str], list[str]]:
-    """``(to_delete, current)``: a pending name with a part success marker is
-    current (written again by a later serialize) and is never deleted."""
+
+def _is_loaded(processed_dir: Path, name: str) -> bool:
+    """True when the shard of part ``name`` has a load_success marker (the
+    loader names it by shard file name: ``.parquet`` or ``.jsonl``)."""
+    return any(
+        checkpoint_markers.load_success_marker_path(processed_dir, SOURCE, f"{name}{ext}").is_file()
+        for ext in _SHARD_EXTS
+    )
+
+
+def classify_pending(
+    processed_dir: Path, pending: list[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """``(to_delete, done, waiting)`` for the pending part names:
+
+    - no part success marker: the part is gone; delete its rows;
+    - a success marker AND a load_success marker: a later serialize wrote the
+      part again and it was loaded (the loader replaced its rows by
+      source_file); drop the name;
+    - a success marker only: the part was written again but not loaded yet
+      (for example ``--skip-unit``). Its old rows may hold CIDs that the new
+      part does not, so keep the name pending and delete nothing."""
     to_delete: list[str] = []
-    current: list[str] = []
+    done: list[str] = []
+    waiting: list[str] = []
     for name in pending:
-        if checkpoint_markers.success_marker_path(processed_dir, SOURCE, name).is_file():
-            current.append(name)
-        else:
+        if not checkpoint_markers.success_marker_path(processed_dir, SOURCE, name).is_file():
             to_delete.append(name)
-    return to_delete, current
+        elif _is_loaded(processed_dir, name):
+            done.append(name)
+        else:
+            waiting.append(name)
+    return to_delete, done, waiting
 
 
 def _retire(processed_dir: Path, run_id: str | None) -> int:
+    # A first read only decides whether a lock is needed at all.
     try:
         pending = read_retire_pending(processed_dir)
     except ValueError as exc:
@@ -71,27 +102,53 @@ def _retire(processed_dir: Path, run_id: str | None) -> int:
     if not pending:
         print("pubchem: no deleted part pending; nothing retired")
         return 0
-    to_delete, current = split_pending(processed_dir, pending)
-    for name in current:
-        print(f"{name}: written again by a later serialize -- not retired")
-    if not to_delete:
-        write_retire_pending(processed_dir, [])
-        print("pubchem: every pending part is current again; nothing retired")
-        return 0
 
     from episteme.data.db.connection import connection
+    from episteme.ops import lock
+    from episteme.ops import status as ops_status
     from episteme.ops.stop import stage_guard
 
-    with stage_guard(lambda: None, lock_stage="load", db_lock=True, source=SOURCE) as g:
-        with connection() as conn:
-            deleted = postgres_loader.delete_source_files(
-                conn, source=SOURCE, source_files=to_delete, run_id=run_id
-            )
-            conn.commit()
-        # After the commit: a stop before this line leaves the names pending,
-        # and the next run deletes them again (0 rows).
-        write_retire_pending(processed_dir, [])
-        print(f"pubchem: retired {deleted} article(s) of {len(to_delete)} deleted part(s)")
+    holder: list = [None]  # the connection of the running delete, for stage_guard
+    # The heavy lock covers the pending file: serialize writes it under the same
+    # lock, so the file is read again, classified and written back inside it.
+    with stage_guard(lambda: holder[0], lock_stage="load", source=SOURCE) as g:
+        try:
+            pending = read_retire_pending(processed_dir)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return g.exit_code(1)
+        to_delete, done, waiting = classify_pending(processed_dir, pending)
+        for name in done:
+            print(f"{name}: written again and loaded -- dropped")
+        for name in waiting:
+            print(f"{name}: written again, not loaded yet -- stays pending")
+        deleted = 0
+        if to_delete:
+            # The advisory lock only when there is a delete to run.
+            with (
+                ops_status.current().long_statement("waiting for the advisory lock"),
+                lock.advisory_lock(wait=not lock.no_wait()),
+            ):
+                with connection() as conn:
+                    holder[0] = conn
+                    try:
+                        deleted = postgres_loader.delete_source_files(
+                            conn, source=SOURCE, source_files=to_delete, run_id=run_id
+                        )
+                        conn.commit()
+                    finally:
+                        holder[0] = None
+        removed = set(to_delete) | set(done)
+        if removed:
+            # After the commit: a stop before this write leaves the names
+            # pending, and the next run deletes them again (0 rows). Only the
+            # names this run deleted or dropped leave the file.
+            current_pending = read_retire_pending(processed_dir)
+            write_retire_pending(processed_dir, [n for n in current_pending if n not in removed])
+        print(
+            f"pubchem: retired {deleted} article(s) of {len(to_delete)} deleted part(s); "
+            f"{len(waiting)} part(s) stay pending"
+        )
         return g.exit_code(0)
 
 

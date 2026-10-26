@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from episteme.data.checkpoint_markers import load_success_marker_path
+from episteme.data.checkpoint_markers import load_success_marker_path, success_marker_path
 from episteme.data.pubchem import retire
 from episteme.data.pubchem import serialize_pubchem as mod
 
@@ -129,47 +129,90 @@ def test_six_digit_loaded_part_is_recorded(tmp_path, monkeypatch):
 
 
 def _boom(*a, **k):
-    raise AssertionError("no lock and no connection expected")
+    raise AssertionError("not expected here")
+
+
+class _Db:
+    """Patched lock, advisory lock, connection and delete for the retire step."""
+
+    def __init__(self, monkeypatch, *, db: bool):
+        self.calls: list[dict] = []
+        self.guards: list[dict] = []
+        self.advisory = 0
+        self.committed = 0
+        self.on_lock = None  # a hook: runs when the heavy lock is taken
+        self.conn_ref = None
+        db_self = self
+
+        class _Conn:
+            def commit(self):
+                db_self.committed += 1
+
+        class _G:
+            def exit_code(self, rc):
+                return rc
+
+        @contextlib.contextmanager
+        def _guard(conn_ref, **kw):
+            db_self.guards.append(kw)
+            db_self.conn_ref = conn_ref
+            if db_self.on_lock is not None:
+                db_self.on_lock()
+            yield _G()
+
+        @contextlib.contextmanager
+        def _advisory(**kw):
+            db_self.advisory += 1
+            yield
+
+        @contextlib.contextmanager
+        def _connection():
+            yield _Conn()
+
+        def _delete(conn, **kw):
+            # The stop handler can reach the connection of the running delete.
+            assert db_self.conn_ref() is conn
+            db_self.calls.append(kw)
+            return 2
+
+        monkeypatch.setattr("episteme.ops.stop.stage_guard", _guard)
+        if db:
+            monkeypatch.setattr("episteme.ops.lock.advisory_lock", _advisory)
+            monkeypatch.setattr("episteme.data.db.connection.connection", _connection)
+            monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _delete)
+        else:
+            monkeypatch.setattr("episteme.ops.lock.advisory_lock", _boom)
+            monkeypatch.setattr("episteme.data.db.connection.connection", _boom)
+            monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _boom)
 
 
 @pytest.fixture
 def no_db(monkeypatch):
+    """No lock and no database at all."""
+    db = _Db(monkeypatch, db=False)
     monkeypatch.setattr("episteme.ops.stop.stage_guard", _boom)
-    monkeypatch.setattr("episteme.data.db.connection.connection", _boom)
-    monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _boom)
+    return db
+
+
+@pytest.fixture
+def lock_only(monkeypatch):
+    """The heavy lock (for the file update) but no database."""
+    return _Db(monkeypatch, db=False)
 
 
 @pytest.fixture
 def fake_db(monkeypatch):
-    """Patched lock, connection and delete; returns the delete calls."""
-    calls: list[dict] = []
-    state = {"committed": 0, "guards": []}
+    return _Db(monkeypatch, db=True)
 
-    class _Conn:
-        def commit(self):
-            state["committed"] += 1
 
-    class _G:
-        def exit_code(self, rc):
-            return rc
-
-    @contextlib.contextmanager
-    def _guard(conn_ref, **kw):
-        state["guards"].append(kw)
-        yield _G()
-
-    @contextlib.contextmanager
-    def _connection():
-        yield _Conn()
-
-    def _delete(conn, **kw):
-        calls.append(kw)
-        return 2
-
-    monkeypatch.setattr("episteme.ops.stop.stage_guard", _guard)
-    monkeypatch.setattr("episteme.data.db.connection.connection", _connection)
-    monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _delete)
-    return calls, state
+def _mark_current(out: Path, name: str, *, loaded: bool) -> None:
+    m = success_marker_path(out, "pubchem", name)
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text("{}", encoding="utf-8")
+    if loaded:
+        lm = load_success_marker_path(out, "pubchem", f"{name}.parquet")
+        lm.parent.mkdir(parents=True, exist_ok=True)
+        lm.write_text("{}", encoding="utf-8")
 
 
 def test_no_pending_file_makes_no_db_call(tmp_path, no_db):
@@ -184,37 +227,37 @@ def test_an_empty_pending_file_makes_no_db_call(tmp_path, no_db):
 
 
 def test_pending_names_are_deleted_and_the_file_emptied(tmp_path, monkeypatch, fake_db):
-    calls, state = fake_db
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
     for n in (1, 2, 3):
         _mark_loaded(out, KEY, n)
     _serialize_shrunk(raw, out, monkeypatch)  # 2 parts now; part 3 is gone
-    assert retire.main(["--processed-dir", str(out), "--force", "--reason", "r"]) == 0
-    # Parts 1 and 2 were written again (current success markers): not deleted.
-    assert calls == [
-        {"source": "pubchem", "source_files": _parts(KEY, (3,)), "run_id": calls[0]["run_id"]}
+    for n in (1, 2):  # the load of the 2 new parts
+        _mark_loaded(out, KEY, n)
+    assert retire._retire(out, "run-7") == 0
+    # Parts 1 and 2 were written again and loaded: dropped, not deleted.
+    assert fake_db.calls == [
+        {"source": "pubchem", "source_files": _parts(KEY, (3,)), "run_id": "run-7"}
     ]
-    assert state["committed"] == 1
-    assert state["guards"] == [{"lock_stage": "load", "db_lock": True, "source": "pubchem"}]
+    assert fake_db.committed == 1 and fake_db.advisory == 1
+    assert fake_db.guards == [{"lock_stage": "load", "source": "pubchem"}]
     assert mod.read_retire_pending(out) == []
 
 
 def test_a_unit_that_shrinks_to_zero_rows_retires_all_its_parts(tmp_path, monkeypatch, fake_db):
-    calls, _state = fake_db
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
     for n in (1, 2, 3):
         _mark_loaded(out, KEY, n)
     _serialize_shrunk(raw, out, monkeypatch, cids=[])  # 0 rows: no part is written
     assert retire.main(["--processed-dir", str(out)]) == 0
-    assert [c["source_files"] for c in calls] == [_parts(KEY, (1, 2, 3))]
+    assert [c["source_files"] for c in fake_db.calls] == [_parts(KEY, (1, 2, 3))]
     assert mod.read_retire_pending(out) == []
 
 
-def test_a_name_written_again_is_not_deleted(tmp_path, monkeypatch, no_db):
+def test_a_name_written_again_and_loaded_is_dropped(tmp_path, monkeypatch, lock_only):
     # A part deleted (loaded), then written again with the same number and
-    # loaded: its rows are current. Retire must not touch the database.
+    # loaded: its rows are current. No database call; the names are dropped.
     raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
     _serialize(monkeypatch, raw, out)
     for n in (1, 2, 3):
@@ -224,11 +267,79 @@ def test_a_name_written_again_is_not_deleted(tmp_path, monkeypatch, no_db):
     for n in (1, 2, 3):
         _mark_loaded(out, KEY, n)
     assert retire.main(["--processed-dir", str(out)]) == 0
-    assert mod.read_retire_pending(out) == []  # moot names are dropped
+    assert mod.read_retire_pending(out) == []
+
+
+def test_a_rewritten_part_not_loaded_stays_pending(tmp_path, monkeypatch, lock_only):
+    # Part 3 loaded -> a rebuild records it and writes it again -> a load with
+    # --skip-unit for part 3 exits 0. Part 3 has a success marker but no load
+    # marker: its old rows may hold CIDs that the new part 3 does not. It is
+    # neither deleted nor dropped.
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    _serialize_shrunk(raw, out, monkeypatch, cids=range(1, 12))  # 3 parts again
+    for n in (1, 2):  # part 3 skipped by --skip-unit
+        _mark_loaded(out, KEY, n)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert mod.read_retire_pending(out) == _parts(KEY, (3,))
+
+
+def test_skip_unit_sequence_still_retires_the_old_rows_later(tmp_path, monkeypatch):
+    raw, out = _make_raw(tmp_path / "raw", list(range(1, 11))), tmp_path / "out"
+    _serialize(monkeypatch, raw, out)
+    for n in (1, 2, 3):
+        _mark_loaded(out, KEY, n)
+    _serialize_shrunk(raw, out, monkeypatch, cids=range(1, 12))
+    for n in (1, 2):  # part 3 skipped
+        _mark_loaded(out, KEY, n)
+    _Db(monkeypatch, db=False)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    # A later shrink deletes part 3 again. It has no load marker now, so this
+    # delete records nothing new, but the pending name from before is kept.
+    _serialize_shrunk(raw, out, monkeypatch)
+    assert _parts(KEY, (3,))[0] in mod.read_retire_pending(out)
+    db = _Db(monkeypatch, db=True)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert [c["source_files"] for c in db.calls] == [_parts(KEY, (3,))]
+
+
+def test_the_pending_file_is_read_again_under_the_lock(tmp_path, fake_db):
+    # A serialize that held the heavy lock while this run waited: it wrote part
+    # P again (not loaded yet) and added Q. P must not be deleted, Q not lost.
+    out = tmp_path / "out"
+    p, q = f"{KEY}__part00002", "other.tsv__part00009"
+    mod.write_retire_pending(out, [p])
+
+    def _serialize_ran():
+        _mark_current(out, p, loaded=False)
+        mod.add_retire_pending(out, [q])
+
+    fake_db.on_lock = _serialize_ran
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert [c["source_files"] for c in fake_db.calls] == [[q]]
+    assert mod.read_retire_pending(out) == [p]
+
+
+def test_a_name_added_after_the_delete_is_kept(tmp_path, monkeypatch, fake_db):
+    # The write-back removes only the names this run deleted or dropped.
+    out = tmp_path / "out"
+    a, late = f"{KEY}__part00004", f"{KEY}__part00005"
+    mod.write_retire_pending(out, [a])
+    real = retire.postgres_loader.delete_source_files
+
+    def _delete_then_add(conn, **kw):
+        n = real(conn, **kw)
+        mod.add_retire_pending(out, [late])
+        return n
+
+    monkeypatch.setattr(retire.postgres_loader, "delete_source_files", _delete_then_add)
+    assert retire.main(["--processed-dir", str(out)]) == 0
+    assert mod.read_retire_pending(out) == [late]
 
 
 def test_a_crash_between_delete_and_file_update_is_idempotent(tmp_path, monkeypatch, fake_db):
-    calls, _state = fake_db
     out = tmp_path / "out"
     stale = _parts(KEY, (7,))
     mod.write_retire_pending(out, stale)
@@ -243,7 +354,7 @@ def test_a_crash_between_delete_and_file_update_is_idempotent(tmp_path, monkeypa
     assert mod.read_retire_pending(out) == stale  # the file survived
     monkeypatch.setattr(retire, "write_retire_pending", real)
     assert retire.main(["--processed-dir", str(out)]) == 0
-    assert [c["source_files"] for c in calls] == [stale, stale]  # same delete, again
+    assert [c["source_files"] for c in fake_db.calls] == [stale, stale]  # same delete, again
     assert mod.read_retire_pending(out) == []
 
 
@@ -253,6 +364,42 @@ def test_a_bad_pending_file_fails_without_a_db_call(tmp_path, no_db):
     p.parent.mkdir(parents=True)
     p.write_text('{"not": "a list"}', encoding="utf-8")
     assert retire.main(["--processed-dir", str(out)]) == 1
+
+
+def test_delete_source_files_audits_the_deleted_names(monkeypatch):
+    from episteme.data import postgres_loader
+
+    executed: list[tuple] = []
+
+    class _Cur:
+        rowcount = 3
+
+        def execute(self, sql, params):
+            executed.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        postgres_loader.audit_trail, "record", lambda ev, **kw: audits.append({"ev": ev, **kw})
+    )
+    names = ["k__part00003", "k__part00002", "k__part00003"]
+    assert postgres_loader.delete_source_files(_Conn(), source="pubchem", source_files=names) == 3
+    assert all("= ANY(%s)" in sql and "EXCEPT" not in sql for sql, _ in executed)
+    assert [a["ev"] for a in audits] == ["load_replace"]
+    assert audits[0]["old_value"] == {"source_files": ["k__part00002", "k__part00003"]}
+    assert audits[0]["rows_affected"] == 3
+    assert audits[0]["object"] == "pubchem retire 2 source_file(s)"
+    with pytest.raises(ValueError):
+        postgres_loader.delete_source_files(_Conn(), source="pubchem", source_files=[])
 
 
 def test_load_wrapper_runs_retire_only_after_a_good_load():
@@ -377,6 +524,12 @@ def test_retire_deletes_the_rows_of_a_deleted_part(pg_conn, monkeypatch, tmp_pat
             "ORDER BY seq DESC LIMIT 1"
         )
         assert cur.fetchone() == ("pubchem retire 1 source_file(s)", 2)
+        cur.execute(
+            "SELECT old_value FROM episteme._audit "
+            "WHERE event_type = 'load_replace' AND object LIKE 'pubchem retire%' "
+            "ORDER BY seq DESC LIMIT 1"
+        )
+        assert cur.fetchone()[0] == {"source_files": [stale]}
 
     # A second retire has nothing pending: no change.
     assert _retire(monkeypatch, processed) == 0

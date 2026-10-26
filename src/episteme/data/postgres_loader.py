@@ -443,7 +443,8 @@ def delete_source_files(
     (``retire_source_files`` does not touch it either).
 
     One transaction; the caller commits. Records one ``load_replace`` audit
-    event (object ``"<source> retire <n> source_file(s)"``) and returns the
+    event (object ``"<source> retire <n> source_file(s)"``, ``old_value``
+    ``{"source_files": [the sorted names]}``) and returns the
     count of deleted ``episteme.articles`` rows. Raises ``ValueError`` on an
     empty ``source_files`` before it touches the connection."""
     if not source_files:
@@ -470,6 +471,9 @@ def delete_source_files(
         conn=conn,
         object=f"{source} retire {len(names)} source_file(s)",
         rows_affected=deleted,
+        # GxP: the row names what was deleted (the prior value), as strings only
+        # (hash-safe over the jsonb round trip, docs/11 section 3).
+        old_value={"source_files": names},
         run_id=run_id,
     )
     return deleted
