@@ -88,11 +88,12 @@ The standard says: the first 2 parts and 1 part from the middle of the file. A f
 | serialize | `empty_text_pct` | max 0 |
 | serialize | `license_counts` | `public_domain` only |
 | serialize | `extract_status_pct` | `partial` at most the value of the first real sample plus a margin; the 2026-09-16 2.4M-row run had 15.8% partial |
-| serialize | `rows_per_s` | a floor that keeps the full run under 6 h (about 6,000 rows/s) |
 | serialize | `peak_rss_mb` | max 1,024 |
 | load | `rows_loaded_equals_staging` | true |
 
 New measure, only for pubchem: `max_part_rows` and `max_part_bytes`, read from the part markers, with the rules "at most `part_rows`" and "at most `part_bytes`". This shows that the caps are applied.
+
+No speed rule: `rows_per_s` and `elapsed_s` are in the report only. The run time depends on the compute capacity available (decision, user, 2026-10-26).
 
 The first values are confirmed on the first real sample, as was done for apollo (drift log, deferred item j).
 
@@ -116,9 +117,9 @@ The first values are confirmed on the first real sample, as was done for apollo 
 1. PR with the code, the rules and the docs (docs/10 pubchem section and §4.9 gate table, the drift log).
 2. The user merges.
 3. The sample serialize and load; set the first rule values from the report; commit the rules if they change.
-4. The full `pubchem serialize` and `pubchem load`, with the user's go-ahead.
+4. The full `pubchem serialize`, then `pubchem load --bulk` (drop and rebuild the partition's indexes around the load, as for pubmed; decision, user, 2026-10-26), with the user's go-ahead.
 
-## 8. Open questions for the reviewer
+## 8. Decisions
 
-1. The `rows_per_s` floor and the 6 h target: is 6 h the right limit for the serialize?
-2. The full load is about 120 load transactions. At the apollo rate (own partition), that is many hours. Should the full load use `load --bulk` (drop and rebuild the indexes of the partition), as pubmed did?
+1. No speed limit in the gate rules: the run time depends on the compute capacity available (user, 2026-10-26).
+2. The full load uses `load --bulk` (user, 2026-10-26).
