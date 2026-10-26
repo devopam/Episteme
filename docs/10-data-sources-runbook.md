@@ -125,7 +125,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (unset: the profile's rule, the physical cores minus one, limited by memory; 3 on the 4-core laptop). `--workers N` on a module overrides it. |
 | `EPISTEME_IO_CONCURRENCY` | Parallel reads or writes on the data disk. Unset: the profile's rule (2 on an HDD or an unknown disk kind; 4 x cores on an SSD). The profile reads it, but no stage uses it yet. |
 | `EPISTEME_BATCH_ROWS` | Rows per write, fetch, load and graph batch. Unset: the profile's rule (50,000; 100,000 when RAM is 48 GB or more). |
-| `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES` | Row and byte caps of one part. The profile reads them. No stage writes parts yet. |
+| `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES` | Row and byte caps of one part. The profile reads them. `pubchem serialize` writes parts (section 5.2). |
 | `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM`, `EPISTEME_PG_WORK_MEM` | Values that `tune_postgres.sh` applies. Unset: the profile's rule (section 2.5). |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
 | `EPISTEME_FETCH_BATCH` | URLs per batch in `http_fetch` (default 64). A download pauses between batches (section 4.8). A value that is not a positive number gives a WARNING and 64. |
@@ -693,8 +693,10 @@ A full run of a gated stage needs a valid pass. The pass comes from a sample run
 | `bookshelf` | `extract`, `load` | Only packages of at most 1 GB. Up to 20 packages spread evenly through the list (all of them if there are 20 or fewer), plus the package at the 99th percentile of size. | 2 GB |
 | `europepmc_manuscript` | `extract`, `load` | The first baseline package by name, the newest baseline package by date, the newest incremental package by date, and the `.filelist.csv` or `.filelist.txt` files of each. | 1 GB |
 | `apollo` | `extract`, `load` | In each of three groups, the smallest file of at least 10 MB. The groups are `train/pretrain` `*_qa.json`, `train/pretrain` `*_text.json`, and `train/sft` files whose name starts with `medical`. | 4 GB |
+| `pubchem` | `serialize`, `load` | The first 2 × `part_rows` CIDs and `part_rows` CIDs from the middle of `CID-SMILES`. Each sibling file is cut to the same CIDs. | 1 GB |
 
-- A source with no rules file is not gated. `pubchem` has none: its slice needs the parts of sub-project 2.
+- A source with no rules file is not gated.
+- The `pubchem` slice is cut, not linked: the cut files are new files with the same relative paths. Only the first primary file is cut when more than one exists.
 - The stages `download`, `graph`, `enrich` and `materialize` are not gated.
 - A slice keeps the path of each file relative to the raw folder of the source. The `input_key` and the row ids are therefore the same as in a full run.
 - If a group has no file, a file is missing, or the slice is over its cap, the run refuses (exit 2).
@@ -1106,6 +1108,42 @@ Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimi
 | `uniprot: no mirror reachable` | All probed mirrors failed `reldate.txt`; check network or `UNIPROT_MIRRORS` |
 | `mesh: ... none returned HTTP 200` | NLM layout changed; the wrapper warns and exits 0 with nothing resolved. Check `MESH_BASE` |
 | Serializer prints `ERROR: no *.fasta.gz ... under <raw dir>` | Nothing downloaded yet, or the bounded set did not include the FASTA (uniprot needs `--max-files 4` or more) |
+
+#### pubchem: bounded parts
+
+`pubchem serialize` reads `CID-SMILES` and its sibling files in one pass. Each file is sorted by CID. The serializer joins the files as a stream. It holds no table in memory and writes no spill files.
+
+The output of one primary file is a sequence of parts. A part is a shard of its own. A part ends at `EPISTEME_PART_ROWS` rows or at `EPISTEME_PART_BYTES` estimated bytes, whichever comes first. The estimate is the UTF-8 length of the `text` of each row plus 256 bytes of overhead. The parts are `<input_key>__part00001`, `<input_key>__part00002` and so on. The name of a part is its `source_file`, its shard stem and its success marker.
+
+Each part has one `serialize_commit` audit row. After the last part, the primary file gets its own success marker. A unit with 0 rows writes no part and no audit row.
+
+**Resume.** A rerun resumes by CID range, not by row count:
+
+1. The serializer keeps the longest run of parts that have a marker and a shard, and whose CID ranges follow each other.
+2. It deletes every part above that run. It deletes the markers first, then the shards. It also deletes the serialize, failed and load markers of each deleted part.
+3. It skips the records up to the last kept CID.
+4. It writes the next parts.
+
+If the caps changed, the serializer logs a warning. No CID is lost or written twice, because the part boundary is a CID.
+
+**`--force`.** `--force` deletes the primary marker and all parts of the unit, then serializes the unit again.
+
+**Load.** `pubchem load` loads each part as one shard in one transaction. Use a plain `load` for the full load. Do not use `--bulk`. The indexes on `pmid`, `pmcid` and `doi` are partial `WHERE ... IS NOT NULL` btrees, and the GIN indexes get only a NULL entry for a `pubchem` row. A `pubchem` load therefore adds almost nothing to them. `--bulk` drops the indexes of the parent table and rebuilds them over every source, which costs far more than the load.
+
+**Gate.** The rules are in `src/episteme/ops/gate_rules/pubchem.json`. The serialize rules include `max_peak_rss_mb` and `parts_within_caps`. There is no speed rule: the report shows `rows_per_s`, but compute capacity varies. Run the sample before a full run:
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubchem serialize --sample
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pubchem load --sample
+```
+
+Run these only when no production run is going.
+
+| Issue | Mitigation |
+|---|---|
+| `pubchem: the primary file has no CID lines` (sample) | The `CID-SMILES` file is empty or every CID is empty. Download it again. |
+| `CID ... after ...: the file is not sorted by CID` | A file is not sorted. Download it again. |
+| A part is missing its shard after a stop | Rerun `serialize`. The resume keeps the parts before the gap and writes the rest. |
 
 ### 5.3 Volatile sources (download only)
 

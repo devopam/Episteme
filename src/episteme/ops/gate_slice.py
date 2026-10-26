@@ -189,8 +189,12 @@ def _build_pubchem(raw: Path, dest: Path, part_rows: int | None = None) -> dict:
     if not primaries:
         raise SliceError(f"pubchem: no CID-SMILES file under {raw}")
     primary = primaries[0]
+    if part_rows < 1:
+        raise SliceError(f"pubchem: part_rows must be at least 1 (got {part_rows})")
     try:
         n_lines = sum(1 for _ in _iter_cid_raw(primary))
+        if n_lines < 1:
+            raise SliceError("pubchem: the primary file has no CID lines")
         r1_end = min(2 * part_rows, n_lines)
         r2_start = max(n_lines // 2, r1_end)
         r2_end = min(r2_start + part_rows, n_lines)

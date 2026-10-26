@@ -390,3 +390,27 @@ def test_pubchem_slice_round_trip(roots, monkeypatch, tmp_path):
     assert stats["rows"] == 30 and stats["failed"] == 0
     shards = list((tmp_path / "proc" / "staging" / "pubchem").glob("*__part*.*"))
     assert len({re.search(r"__part(\d+)", p.name).group(1) for p in shards}) == 3
+
+
+def test_pubchem_slice_empty_primary_refuses(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    d = roots[0] / "pubchem" / _PC_DIR
+    _gz_lines(d / "CID-SMILES.gz", [])
+    with pytest.raises(gate_slice.SliceError, match="no CID lines"):
+        _pc_prepare(roots)
+    assert not (roots[2] / "pubchem" / "slice.json").exists()
+
+
+def test_pubchem_slice_all_cids_empty_refuses(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    d = roots[0] / "pubchem" / _PC_DIR
+    _gz_lines(d / "CID-SMILES.gz", ["\tCCC\n", "\tCC\n"])
+    with pytest.raises(gate_slice.SliceError, match="no CID lines"):
+        _pc_prepare(roots)
+
+
+def test_pubchem_slice_part_rows_below_one_refuses(roots, monkeypatch):
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 0)
+    _pubchem(roots[0], n=5)
+    with pytest.raises(gate_slice.SliceError, match="part_rows"):
+        _pc_prepare(roots)

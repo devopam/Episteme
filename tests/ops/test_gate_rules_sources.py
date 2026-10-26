@@ -125,3 +125,46 @@ def test_apollo_sample_output_passes_and_bad_yield_fails():
     assert gate.evaluate(_apollo(rows_per_input=3.0), rules)
     assert gate.evaluate(_apollo(text_bytes_per_input_byte=0.01), rules)
     assert gate.evaluate(_apollo(license_counts={"unknown": 5}), rules)
+
+
+def _pubchem(**over):
+    base = {
+        "failed_inputs": 0,
+        "duplicate_ids": 0,
+        "empty_text_pct": 0.0,
+        "license_counts": {"public_domain": 30},
+        "extract_status_pct": {"ok": 90.0, "partial": 10.0},
+        "peak_rss_mb": 600,
+        "max_rows_per_source_file": 10,
+        "max_est_bytes_per_source_file": 5000,
+        "part_rows": 10,
+        "part_bytes": 10**6,
+    }
+    base.update(over)
+    return base
+
+
+def test_pubchem_rules_parse_and_use_known_keys_only():
+    rules = gate.load_rules("pubchem")
+    assert rules is not None
+    for stage in ("serialize", "load"):
+        assert gate.is_gated("pubchem", stage)
+        assert not set(rules[stage]) - gate._KNOWN_KEYS
+    assert not any("rows_per_s" in k for k in rules["serialize"])
+
+
+def test_pubchem_serialize_rules_pass_and_fail():
+    rules = gate.load_rules("pubchem")["serialize"]
+    assert gate.evaluate(_pubchem(), rules) == []
+    assert gate.evaluate(_pubchem(failed_inputs=1), rules)
+    assert gate.evaluate(_pubchem(license_counts={"unknown": 3}), rules)
+    assert gate.evaluate(_pubchem(extract_status_pct={"ok": 70.0, "partial": 30.0}), rules)
+    assert gate.evaluate(_pubchem(peak_rss_mb=2000), rules)
+    assert gate.evaluate(_pubchem(max_rows_per_source_file=11), rules)
+
+
+def test_pubchem_load_rules_require_no_orphans_and_equal_rows():
+    load = gate.load_rules("pubchem")["load"]
+    assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": True}, load) == []
+    assert gate.evaluate({"orphan_bodies": 1, "rows_loaded_equals_staging": True}, load)
+    assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": False}, load)
