@@ -1113,7 +1113,7 @@ Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimi
 
 `pubchem serialize` reads `CID-SMILES` and its sibling files in one pass. Each file is sorted by CID. The serializer joins the files as a stream. It holds no table in memory and writes no spill files.
 
-The output of one primary file is a sequence of parts. A part is a shard of its own. A part ends at `EPISTEME_PART_ROWS` rows or at `EPISTEME_PART_BYTES` estimated bytes, whichever comes first. The estimate is the UTF-8 length of the `text` of each row plus 256 bytes of overhead. The parts are `<input_key>__part00001`, `<input_key>__part00002` and so on. The name of a part is its `source_file`, its shard stem and its success marker.
+The output of one primary file is a sequence of parts. A part is a shard of its own. A part holds at most `EPISTEME_PART_ROWS` rows and at most `EPISTEME_PART_BYTES` estimated bytes. The estimate is the UTF-8 length of the `text` of each row plus 256 bytes of overhead. A row that does not fit in the bytes that are left ends the part and starts the next part. One exception: a single row larger than `EPISTEME_PART_BYTES` goes alone in its own part, so that part is over the byte cap. The gate rule `parts_within_caps` lets such a single-row part pass. The parts are `<input_key>__part00001`, `<input_key>__part00002` and so on. The name of a part is its `source_file`, its shard stem and its success marker.
 
 Each part has one `serialize_commit` audit row. After the last part, the primary file gets its own success marker. A unit with 0 rows writes no part and no audit row.
 
@@ -1125,6 +1125,8 @@ Each part has one `serialize_commit` audit row. After the last part, the primary
 4. It writes the next parts.
 
 If the caps changed, the serializer logs a warning. No CID is lost or written twice, because the part boundary is a CID.
+
+Each part marker records the name, size and mtime of the primary file and of each sibling file it used. If one of these changed (for example after a new download), the serializer logs a warning and deletes all parts of the unit, with their load markers, as `--force` does. Then it writes the unit again.
 
 **`--force`.** `--force` deletes the primary marker and all parts of the unit, then serializes the unit again.
 
@@ -1143,7 +1145,7 @@ Run these only when no production run is going.
 |---|---|
 | `pubchem: the primary file has no CID lines` (sample) | The `CID-SMILES` file is empty or every CID is empty. Download it again. |
 | `CID ... after ...: the file is not sorted by CID` | A file is not sorted. Download it again. |
-| A part is missing its shard after a stop | Rerun `serialize`. The resume keeps the parts before the gap and writes the rest. |
+| A part is missing its shard after a stop | Rerun `serialize`. The resume keeps the parts before the gap and writes the rest. If the primary file already has its success marker, a plain rerun skips the unit: use `--force --reason "<why>"` to write the unit again. |
 
 ### 5.3 Volatile sources (download only)
 
