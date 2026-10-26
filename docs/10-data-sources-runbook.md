@@ -776,6 +776,7 @@ bash scripts/data/run_pipeline.sh bookshelf extract --skip-gate --reason "<why>"
 2. Read the line `Result: PASS` or `Result: FAIL`.
 3. Read the list `Failed rules`. Each line names the rule, the measure and the limit.
 4. Read the table `Measures`. It shows every measure, also those that no rule reads.
+   The table rounds decimals to 6 significant digits. The rules compare the exact values: 1 empty text in 25,000 rows (0.004 %) fails `max_empty_text_pct: 0`. `gate_report.json` holds the exact values.
 5. A line `<rule>: the measure is missing` means the gate could not compute the measure. A missing measure always fails.
 6. A line `run record: the command exited with rc N` means the stage itself failed.
 7. A line `code_hash: ...` or `rules_hash: ... changed during the sample run` means the code or the rules changed while the sample ran. Run the sample again.
