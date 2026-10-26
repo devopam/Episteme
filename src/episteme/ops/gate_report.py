@@ -37,7 +37,9 @@ def _q(name: str) -> str:
 
 
 def _pct(part: int | float, whole: int | float) -> float:
-    return round(100.0 * part / whole, 2) if whole else 0.0
+    # Exact: a rule compares this value, so rounding could hide a rare row
+    # (1 in 25,000 is 0.004 %). The Markdown report rounds for display.
+    return 100.0 * part / whole if whole else 0.0
 
 
 def _size(path: Path) -> int:
@@ -207,16 +209,16 @@ def measure_staging(
     finally:
         con.close()
 
-    measures["rows_per_input"] = round(rows / len(inputs), 4) if inputs else None
+    measures["rows_per_input"] = rows / len(inputs) if inputs else None
     measures["text_bytes_per_input_byte"] = (
-        round(measures["text_bytes"] / input_bytes, 6) if input_bytes else None
+        measures["text_bytes"] / input_bytes if input_bytes else None
     )
 
     if record is not None:
         elapsed = record.get("elapsed_s")
         measures["elapsed_s"] = elapsed
         measures["peak_rss_mb"] = record.get("peak_rss_mb")
-        measures["rows_per_s"] = round(rows / elapsed, 3) if elapsed else None
+        measures["rows_per_s"] = rows / elapsed if elapsed else None
         if record.get("failed_inputs") is not None:
             measures["failed_inputs"] = record["failed_inputs"]
         elif record.get("rc") == 0:
@@ -261,6 +263,17 @@ def measure_load(
     }
 
 
+def _display(value: Any) -> Any:
+    """Round floats to 6 significant digits for the Markdown report only."""
+    if isinstance(value, float):
+        return float(f"{value:.6g}")
+    if isinstance(value, dict):
+        return {k: _display(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_display(v) for v in value]
+    return value
+
+
 def _fmt(value: Any) -> str:
     return "n/a" if value is None else str(value)
 
@@ -272,7 +285,7 @@ def _render_md(measures: dict, failures: list[str]) -> str:
     lines += [f"- {f}" for f in failures] or ["- (none)"]
     lines += ["", "## Measures", "", "| measure | value |", "| --- | --- |"]
     for key in sorted(measures):
-        value = measures[key]
+        value = _display(measures[key])
         if isinstance(value, (dict, list)):
             value = json.dumps(value, sort_keys=True)
         lines.append(f"| {key} | {str(_fmt(value)).replace('|', chr(92) + '|')} |")

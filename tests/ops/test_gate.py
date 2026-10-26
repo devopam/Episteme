@@ -233,6 +233,19 @@ def test_code_hash_ignores_a_module_the_stage_does_not_import(tmp_path):
     assert _hash(tmp_path / "src") == before
 
 
+def test_code_hash_ignores_line_endings(tmp_path):
+    """Two checkouts of the same commit can differ only in line endings
+    (core.autocrlf): a pass made in one must be valid in the other."""
+    pkg = _make_pkg(tmp_path / "src")
+    wrapper = tmp_path / "run.sh"
+    wrapper.write_bytes(b"echo 1\n")
+    before = _hash(tmp_path / "src", wrapper)
+    (pkg / "helper.py").write_bytes(b"VALUE = 1\r\n")
+    (pkg / "stage.py").write_bytes(b"from pkg import helper\r\n")
+    wrapper.write_bytes(b"echo 1\r\n")
+    assert _hash(tmp_path / "src", wrapper) == before
+
+
 def test_code_hash_changes_when_the_wrapper_changes(tmp_path):
     _make_pkg(tmp_path / "src")
     wrapper = tmp_path / "run.sh"
