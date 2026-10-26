@@ -329,6 +329,9 @@ def test_pubchem_slice_ranges(roots, monkeypatch):
     res, _ = _pc_prepare(roots)
     assert res["ranges"] == [[1, 20], [51, 60]]
     assert res["n_lines"] == 100
+    assert res["part_rows"] == 10
+    meta = json.loads((roots[2] / "pubchem" / "slice.json").read_text(encoding="utf-8"))
+    assert meta["part_rows"] == 10
     assert res["inputs"] == ["Compound/Extras/CID-SMILES.gz"]
     assert res["copied"] == len(res["files"]) == 4
     assert res["linked"] == 0

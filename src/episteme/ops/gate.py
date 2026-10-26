@@ -15,7 +15,8 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
 ``peak_rss_mb``, and for ``parts_within_caps`` ``max_rows_per_source_file``,
 ``max_est_bytes_per_source_file`` (staging) with ``part_rows``, ``part_bytes``
-(the profile's caps). A rule
+(the caps recorded in the sample's part markers; the profile's caps when the
+sample has no part marker). A rule
 whose measure is missing fails: a gate never passes on data it did not see.
 
 Limits: the code hash covers the ``episteme`` modules that the stage imports and
@@ -637,6 +638,36 @@ def _hash_failures(source: str, stage: str, record: dict) -> list[str]:
     return out
 
 
+def _sample_part_caps(source: str, sample_root: Path) -> tuple[tuple[int, int] | None, list[str]]:
+    """The ``(part_rows, part_bytes)`` that wrote the sample's parts, read from
+    the part success markers (``<sample_root>/02_processed/_ops/<source>/
+    success/*__part*.ok``), and the failure lines. ``None`` when no part marker
+    exists (the caller then uses the profile). Every marker must record both
+    caps and all must agree; else the caps are ``None`` and a line fails."""
+    from episteme.data.checkpoint_markers import success_marker_path
+
+    success_dir = success_marker_path(sample_root / "02_processed", source, "x").parent
+    seen: set[tuple[Any, Any]] = set()
+    fails: list[str] = []
+    for p in sorted(success_dir.glob("*__part*.ok")):
+        try:
+            stats = json.loads(p.read_text(encoding="utf-8")).get("stats") or {}
+        except (OSError, ValueError, AttributeError):
+            fails.append(f"parts_within_caps: part marker {p.name} is not readable")
+            continue
+        caps = (stats.get("part_rows"), stats.get("part_bytes"))
+        if not all(isinstance(c, int) and not isinstance(c, bool) for c in caps):
+            fails.append(f"parts_within_caps: part marker {p.name} has no part_rows/part_bytes")
+            continue
+        seen.add(caps)
+    if len(seen) > 1:
+        listed = ", ".join(f"{r}/{b}" for r, b in sorted(seen))
+        fails.append(f"parts_within_caps: the part markers disagree on the caps ({listed})")
+    if fails or not seen:
+        return None, fails
+    return seen.pop(), []
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     from episteme.data.checkpoint_markers import input_key
     from episteme.ops import gate_report, gate_slice, profile
@@ -664,9 +695,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
         else sample_root / "02_processed" / "staging" / source
     )
     measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
-    prof = profile.get_profile()
-    measures["part_rows"] = prof.part_rows
-    measures["part_bytes"] = prof.part_bytes
+    # The caps that wrote the parts, not the caps of the profile now.
+    caps, cap_failures = _sample_part_caps(source, sample_root)
+    if caps is None:
+        prof = profile.get_profile()
+        caps = (prof.part_rows, prof.part_bytes)
+    measures["part_rows"], measures["part_bytes"] = caps
     if stage == "load":
         # Part shards carry their own source_file (<input_key>__partNNNNN).
         source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
@@ -678,7 +712,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
                     conn, source, source_files, staging_rows=measures.get("distinct_ids")
                 )
             )
-    failures = _hash_failures(source, stage, record) + evaluate(measures, stage_rules)
+    failures = (
+        _hash_failures(source, stage, record) + cap_failures + evaluate(measures, stage_rules)
+    )
     if record.get("rc") not in (0, None):
         failures.insert(0, f"run record: the command exited with rc {record['rc']}")
     report_path = gate_report.write_report(measures, failures, sample_root)

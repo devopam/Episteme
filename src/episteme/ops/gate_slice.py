@@ -244,6 +244,7 @@ def _build_pubchem(raw: Path, dest: Path, part_rows: int | None = None) -> dict:
         "inputs": [primary.relative_to(raw).as_posix()],
         "bytes": sum(_size(p) for p in written),
         "n_lines": n_lines,
+        "part_rows": part_rows,
         "ranges": ranges,
     }
 
