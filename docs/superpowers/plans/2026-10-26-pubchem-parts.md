@@ -10,6 +10,9 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-26-pubchem-parts-design.md`
 
+> **As built (2026-10-27).** Three steps below were superseded during review: the reader opens files in binary mode (`open_gz(path, "rb")`) and only `
+` ends a line, so a lone CR stays inside a field (Task 1 Step 4); mass values stay the raw strings as read, not `float` (Task 1 Interfaces); and a part ends before the row that would take it over `part_bytes`, so it holds at most `part_bytes` (Task 2 Step 3). The spec (§4.1, §4.2, §4.5) and the code are the reference.
+
 ## Global Constraints
 
 - Part caps come from `episteme.ops.profile.get_profile()` (`part_rows`, `part_bytes`; env `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES`). No new env key.

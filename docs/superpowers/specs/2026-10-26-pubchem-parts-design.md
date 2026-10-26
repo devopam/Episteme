@@ -44,7 +44,7 @@ Not in scope: new pubchem properties (synonyms, MeSH, PMID, patents), the licenc
 ### 4.2 Parts
 
 - One primary file is one unit of work. Its output is a sequence of parts, numbered from 1.
-- A part ends when it reaches `part_rows` rows or `part_bytes` of staging data, whichever comes first. The byte count is the sum of the UTF-8 length of each row's `text` plus a fixed per-row overhead; it is an estimate of the staging size, and it is deterministic for one input and one pair of caps.
+- A part holds at most `part_rows` rows and at most `part_bytes` of estimated staging data. A row that would take the part over `part_bytes` ends the part and starts the next one; only a single row larger than `part_bytes` may exceed the cap, alone in its own part (final review, 2026-10-26). The byte count is the sum of the UTF-8 length of each row's `text` plus a fixed per-row overhead; it is an estimate of the staging size, and it is deterministic for one input and one pair of caps.
 - The part's `source_file` and shard stem are `<input_key>__part00001`, `<input_key>__part00002`, and so on (5 digits; 120 million rows at 1 million rows per part need 3 digits).
 - Each part writes:
   - its staging shard (`write_rows`, parquet);
@@ -91,7 +91,7 @@ The standard says: the first 2 parts and 1 part from the middle of the file. A f
 | serialize | `peak_rss_mb` | max 1,024 |
 | load | `rows_loaded_equals_staging` | true |
 
-New measure, only for pubchem: `max_part_rows` and `max_part_bytes`, read from the part markers, with the rules "at most `part_rows`" and "at most `part_bytes`". This shows that the caps are applied.
+New measures (as built): `max_rows_per_source_file` and `max_est_bytes_per_source_file`, read from the staging shards grouped by `source_file`; the byte maximum leaves out single-row parts. The rule `parts_within_caps` checks them against the caps read from the sample's part markers (all must agree), else the profile. This shows that the caps are applied.
 
 No speed rule: `rows_per_s` and `elapsed_s` are in the report only. The run time depends on the compute capacity available (decision, user, 2026-10-26).
 
