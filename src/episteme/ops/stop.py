@@ -42,17 +42,30 @@ STOP_POLL_S = 1.0
 STOP_CANCEL_AFTER_S = 5.0
 
 _TERM_SEEN = False
+# True once a stop (SIGINT, SIGTERM, SIGBREAK, the stop file) reached this
+# stage: the watchdog then delivers no second stop from the stop file, which
+# could cut the cleanup of the first one short.
+_STOPPING = False
 
 
 def _on_term(signum: int, frame: Any) -> None:
-    global _TERM_SEEN
+    global _TERM_SEEN, _STOPPING
     _TERM_SEEN = True
+    _STOPPING = True
+    signal.default_int_handler(signum, frame)
+
+
+def _on_int(signum: int, frame: Any) -> None:
+    global _STOPPING
+    _STOPPING = True
     signal.default_int_handler(signum, frame)
 
 
 def install_stop_handlers() -> None:
     """SIGTERM (and SIGBREAK on Windows) raise ``KeyboardInterrupt`` in the
-    main thread. Safe to call more than once."""
+    main thread. SIGINT keeps raising ``KeyboardInterrupt`` and also marks the
+    stop; a SIGINT that starts ignored (a POSIX background job) stays ignored.
+    Safe to call more than once."""
     names = ("SIGTERM", "SIGBREAK")
     for name in names:
         sig = getattr(signal, name, None)
@@ -62,6 +75,11 @@ def install_stop_handlers() -> None:
             signal.signal(sig, _on_term)
         except ValueError:  # not the main thread
             _LOG.warning("cannot install %s handler outside the main thread", name)
+    if signal.getsignal(signal.SIGINT) in (signal.default_int_handler, _on_int):
+        try:
+            signal.signal(signal.SIGINT, _on_int)
+        except ValueError:  # not the main thread
+            _LOG.warning("cannot install SIGINT handler outside the main thread")
 
 
 def _norm(path: str) -> str:
@@ -272,10 +290,11 @@ def start_parent_watchdog(
             except OSError:
                 return
             asked_at = time.monotonic()
-            if _TERM_SEEN:
-                # POSIX: the runner also forwards a real SIGTERM. A second
-                # interrupt could break the cleanup of the first.
-                _LOG.warning("stop requested (%s, %s): a SIGTERM already arrived", why, request)
+            if _STOPPING:
+                # A stop already arrived: a forwarded SIGTERM (POSIX) or a
+                # console Ctrl-C (Windows). A second interrupt could cut the
+                # cleanup of the first short.
+                _LOG.warning("stop requested (%s, %s): a stop already arrived", why, request)
                 return
             _LOG.warning("stop requested (%s, %s): stopping the stage", why or "?", request)
             _thread.interrupt_main(signal.SIGTERM)
@@ -374,8 +393,9 @@ def stage_guard(
         if c is not None:
             c.cancel_safe()
 
-    global _TERM_SEEN
+    global _TERM_SEEN, _STOPPING
     _TERM_SEEN = False
+    _STOPPING = False
     install_stop_handlers()
     done = threading.Event()
     start_parent_watchdog(_cancel, stop=done)
@@ -408,6 +428,7 @@ def stage_guard(
         print(f"refused: the lock is busy: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_BUSY) from None
     except KeyboardInterrupt:
+        _STOPPING = True  # no second stop from the stop file during the cleanup
         end_state = "stopped"
         try:
             _cancel()

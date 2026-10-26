@@ -416,6 +416,7 @@ def test_watchdog_explicit_parent_gone_at_start_exits(monkeypatch):
 def test_stop_file_runs_the_sigterm_handler_in_the_main_thread(monkeypatch, tmp_path):
     # Windows: bash cannot signal a native Python, so the runner writes a file.
     monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
     old = signal.signal(signal.SIGTERM, stop._on_term)
     codes = _no_exit(monkeypatch)
     alive = FakeProc(99)
@@ -448,6 +449,7 @@ def test_stop_file_is_delivered_once(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
     monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
     codes = _no_exit(monkeypatch)
     monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
     request = tmp_path / "stop.request"
@@ -468,6 +470,7 @@ def test_stop_file_cancels_the_statement_after_a_grace_period(monkeypatch, tmp_p
     # C call returns: the watchdog then cancels the statement.
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: None)
     monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
     _no_exit(monkeypatch)
     monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
     request = tmp_path / "stop.request"
@@ -495,6 +498,7 @@ def test_stop_file_is_polled_without_a_parent_to_watch(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
     monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
     _fake_psutil(monkeypatch, {})
     monkeypatch.setattr(stop, "_runner_pid", lambda: None)
     monkeypatch.setattr(stop, "_ancestor_to_watch", lambda: None)
@@ -575,7 +579,7 @@ def test_stop_file_after_a_real_sigterm_is_not_delivered_again(monkeypatch, tmp_
     # interrupt could break the cleanup of the first (the worker termination).
     calls = []
     monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
-    monkeypatch.setattr(stop, "_TERM_SEEN", True)  # the real SIGTERM has run
+    monkeypatch.setattr(stop, "_STOPPING", True)  # the real SIGTERM has run
     _no_exit(monkeypatch)
     monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
     request = tmp_path / "stop.request"
@@ -599,3 +603,64 @@ def test_stop_file_after_a_real_sigterm_is_not_delivered_again(monkeypatch, tmp_
     assert calls == []
     assert cancels == [1]  # the grace-period cancel still applies
     assert "already" in caplog.text
+
+
+def test_stop_file_is_not_delivered_while_a_ctrl_c_is_handled(monkeypatch, tmp_path):
+    # Windows: a console Ctrl-C reaches the native stage directly (SIGINT, not
+    # SIGTERM); the runner's stop file follows about 1 s later. A second
+    # interrupt could cut the cleanup short (stage_guard's finally).
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", True)
+    _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("INT", encoding="utf-8")
+    done = threading.Event()
+    t = stop.start_parent_watchdog(
+        lambda: None, interval=30.0, stop=done, stop_file=request, stop_poll=0.01
+    )
+    time.sleep(0.3)
+    done.set()
+    t.join(5)
+    assert calls == []
+
+
+def test_stage_guard_marks_a_keyboardinterrupt_as_stopping(monkeypatch):
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    monkeypatch.setattr(stop, "_STOPPING", True)  # reset on entry
+    seen = []
+    with pytest.raises(SystemExit) as ei:
+        with stop.stage_guard(lambda: None):
+            seen.append(stop._STOPPING)
+            raise KeyboardInterrupt
+    assert ei.value.code == 130
+    assert seen == [False]
+    assert stop._STOPPING is True
+
+
+def test_on_term_marks_stopping(monkeypatch):
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    with pytest.raises(KeyboardInterrupt):
+        stop._on_term(signal.SIGTERM, None)
+    assert stop._STOPPING is True
+
+
+def test_sigint_handler_marks_stopping_and_keeps_an_ignored_sigint(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(stop.signal, "signal", lambda s, h: seen.setdefault(s, []).append(h))
+    monkeypatch.setattr(stop.signal, "getsignal", lambda s: signal.default_int_handler)
+    stop.install_stop_handlers()
+    handler = seen[signal.SIGINT][0]
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    with pytest.raises(KeyboardInterrupt):
+        handler(signal.SIGINT, None)
+    assert stop._STOPPING is True
+    # A SIGINT that starts ignored (a POSIX background job) stays ignored.
+    seen.clear()
+    monkeypatch.setattr(stop.signal, "getsignal", lambda s: signal.SIG_IGN)
+    stop.install_stop_handlers()
+    assert signal.SIGINT not in seen
