@@ -336,10 +336,16 @@ def code_hash(
     h = hashlib.sha256()
     for path in sorted(stage_files(module, src_root)):
         h.update(path.relative_to(src_root).as_posix().encode("utf-8") + b"\0")
-        h.update(path.read_bytes() + b"\0")
+        h.update(_lf(path.read_bytes()) + b"\0")
     if wrapper is not None:
-        h.update(b"wrapper\0" + wrapper.read_bytes())
+        h.update(b"wrapper\0" + _lf(wrapper.read_bytes()))
     return h.hexdigest()
+
+
+def _lf(data: bytes) -> bytes:
+    """CRLF to LF: two checkouts of one commit can differ only in line endings
+    (core.autocrlf), and a pass made in one must be valid in the other."""
+    return data.replace(b"\r\n", b"\n")
 
 
 def rules_hash(source: str) -> str:
