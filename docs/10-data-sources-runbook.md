@@ -1132,7 +1132,7 @@ Each part marker and the primary success marker record the name, size and mtime 
 
 **`--force`.** `--force` deletes the primary marker and all parts of the unit, then serializes the unit again.
 
-**Load.** `pubchem load` loads each part as one shard in one transaction. Use a plain `load` for the full load. Do not use `--bulk`. The indexes on `pmid`, `pmcid` and `doi` are partial `WHERE ... IS NOT NULL` btrees, and the GIN indexes get only a NULL entry for a `pubchem` row. A `pubchem` load therefore adds almost nothing to them. `--bulk` drops the indexes of the parent table and rebuilds them over every source, which costs far more than the load.
+**Load.** Run `pubchem serialize` to completion before `pubchem load`: the loader loads every staged shard, also one that a stopped serialize left without a success marker. `pubchem load` loads each part as one shard in one transaction. Use a plain `load` for the full load. Do not use `--bulk`. The indexes on `pmid`, `pmcid` and `doi` are partial `WHERE ... IS NOT NULL` btrees, and the GIN indexes get only a NULL entry for a `pubchem` row. A `pubchem` load therefore adds almost nothing to them. `--bulk` drops the indexes of the parent table and rebuilds them over every source, which costs far more than the load.
 
 **Retire.** A rebuild or a resume can delete parts that were loaded (a smaller input, other caps). The serializer deletes their shards and markers, but their rows stay in the database: a plain `load` replaces only the parts it loads. So, before the serializer deletes a part that has a load marker, it adds the name of the part to `_ops/pubchem/retire_pending.json`. A part without a load marker was never loaded and is not recorded.
 
@@ -1140,9 +1140,9 @@ After `load_articles` exits 0, `load_pubchem.sh` runs `python -m episteme.data.p
 
 1. Reads `retire_pending.json`. With no file or an empty list, it stops. It takes no lock and sends no query.
 2. Takes the heavy lock of the `load` stage. The serializer writes the file under the same lock. It reads the file again and sorts each name into one of three groups:
-   - The part has no success marker: the part is gone. Its rows are deleted.
-   - The part has a success marker and a load marker: a later serialize wrote the part again and a load loaded it. The name is dropped.
+   - The part has a load marker (with or without a success marker): a load replaced the rows of the name after the serializer recorded it. The name is dropped. The serializer records a name before it deletes the load marker of the part, so a load marker that is still there belongs to a later load (or, after a stop, to the old part, which the next serialize records again).
    - The part has a success marker but no load marker: the part was written again but not loaded yet (for example after `load --skip-unit`). The name stays pending. Nothing is deleted.
+   - The part has neither: the part is gone. Its rows are deleted.
 3. If there are names to delete, takes the advisory lock and deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` is one of these names (`source_file = ANY(...)`, which uses the `(source, source_file)` index). It writes one `load_replace` audit row. The row gives the deleted names in `old_value` (`{"source_files": [...]}`) and the count in `rows_affected`. Then it commits.
 4. Still under the heavy lock, removes from the file only the names that it deleted or dropped.
 
