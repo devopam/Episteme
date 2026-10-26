@@ -188,3 +188,43 @@ def test_write_rows_rejects_batch_size_below_one(tmp_path):
         with pytest.raises(ValueError, match="batch_size"):
             write_rows(_mixed_rows(), tmp_path, source="pmc", source_file="b.xml", batch_size=bad)
     assert not (tmp_path / "staging").exists()
+
+
+def _text_rows(n, chars):
+    return [
+        finalize_row(_row(id=f"pmc:{i}", source="pmc", source_file="f.xml", text="x" * chars))
+        for i in range(n)
+    ]
+
+
+def test_a_batch_also_ends_at_the_byte_cap(tmp_path, monkeypatch):
+    # 2026-10-26: europepmc full-text rows (~58 KB each) made one 50,000-row
+    # batch ~3 GB; the byte cap bounds a batch whatever the row size.
+    import pyarrow.parquet as pq
+
+    from episteme.data import staging_writer
+
+    rows = _text_rows(10, 400)
+    one = staging_writer._row_chars(rows[0])  # every row has the same size
+    assert all(staging_writer._row_chars(r) == one for r in rows)
+    # 2.5 rows of string data: a batch ends at its 3rd row; the row cap (1,000) never binds.
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", int(2.5 * one))
+    capped = write_rows(rows, tmp_path / "c", source="pmc", source_file="f.xml", batch_size=1000)
+    pf = pq.ParquetFile(capped["paths"][0])
+    sizes = [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)]
+    assert sizes == [3, 3, 3, 1]
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 10**12)
+    plain = write_rows(rows, tmp_path / "p", source="pmc", source_file="f.xml", batch_size=1000)
+    assert pq.read_table(capped["paths"][0]).equals(pq.read_table(plain["paths"][0]))
+
+
+def test_a_row_over_the_byte_cap_is_a_batch_of_its_own(tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    from episteme.data import staging_writer
+
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 100)
+    res = write_rows(_text_rows(3, 500), tmp_path, source="pmc", source_file="f.xml", batch_size=10)
+    pf = pq.ParquetFile(res["paths"][0])
+    assert [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)] == [1, 1, 1]
+    assert res["n_rows"] == 3

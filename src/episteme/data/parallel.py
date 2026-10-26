@@ -24,6 +24,11 @@ pending futures are cancelled (``Future.cancel`` on each), the units already
 in flight finish, and their results (and markers) are kept and returned.
 ``stop_on_failure=False`` keeps the old behaviour: every file runs.
 
+A stop (``KeyboardInterrupt`` or ``SystemExit``, e.g. SIGTERM through
+``stage_guard``) is different: the queued units are cancelled and the workers
+in flight are terminated, so the stage exits at once. Their units have no
+success marker and run again on the next run.
+
 Transient errors: ``fn`` classifies its own exception (where the real exception
 exists) and raises ``TransientUnitError``. The unit is then called again after
 ``waits[0]``, ``waits[1]``, ... seconds; after ``len(waits)`` retries it is a
@@ -153,8 +158,31 @@ def run_per_file(
             max_workers=max_workers, mp_context=multiprocessing.get_context("spawn")
         )
     with pool:
-        _run_pool(pool, fn, files, raw_dir, stop_on_failure, waits, sleep, kwargs, _emit)
+        try:
+            _run_pool(pool, fn, files, raw_dir, stop_on_failure, waits, sleep, kwargs, _emit)
+        except (KeyboardInterrupt, SystemExit):
+            # A stop: end the workers in flight. Without this the pool's
+            # shutdown(wait=True) on leaving the ``with`` waits for them to
+            # finish their units (2026-10-26: hours, on three large archives).
+            # Safe: a unit writes its shard atomically and its marker only on
+            # success, so a killed unit is redone on the next run.
+            if isinstance(pool, ProcessPoolExecutor):
+                _terminate_workers(pool)
+            raise
     return results
+
+
+def _terminate_workers(pool: ProcessPoolExecutor) -> None:
+    """Terminate the pool's worker processes and wait briefly for them."""
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+    for proc in procs:
+        proc.join(timeout=5)
+    _LOG.warning("stopped: terminated %d worker(s) in flight", len(procs))
 
 
 def _call_inline(

@@ -364,3 +364,40 @@ def test_default_sleep_goes_through_the_module_seam(tmp_path, monkeypatch):
     raw, files = _files(tmp_path, ("a.txt",))
     run_per_file(_always_transient, files, workers=1, raw_dir=raw)
     assert calls == [30, 60, 120]
+
+
+def _write_pid_then_sleep(path: Path, *, raw_dir: Path, pids: Path) -> dict:
+    """A long unit: records its worker pid, then sleeps far past the test."""
+    (pids / f"{os.getpid()}").write_text("", encoding="utf-8")
+    time.sleep(120)
+    return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def test_a_stop_ends_the_workers_in_flight(tmp_path, spawn_child_env, monkeypatch):
+    # 2026-10-26: a SIGTERM during the europepmc full extract left the stage in
+    # the pool's shutdown(wait=True), waiting hours for 3 in-flight workers.
+    import psutil
+
+    from episteme.data import parallel
+
+    raw, files = _files(tmp_path, ("a.txt", "b.txt", "c.txt"))
+    pids = tmp_path / "pids"
+    pids.mkdir()
+
+    def wait_then_stop(fs, return_when):
+        deadline = time.monotonic() + 60
+        while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.2)
+        raise KeyboardInterrupt  # the stop signal, as stage_guard delivers it
+
+    monkeypatch.setattr(parallel, "wait", wait_then_stop)
+    t0 = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_per_file(_write_pid_then_sleep, files, workers=2, raw_dir=raw, pids=pids)
+    assert time.monotonic() - t0 < 60  # not the 120 s of the units
+    worker_pids = [int(p.name) for p in pids.iterdir()]
+    assert len(worker_pids) == 2
+    deadline = time.monotonic() + 10
+    while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not any(psutil.pid_exists(p) for p in worker_pids)

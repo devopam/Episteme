@@ -124,7 +124,7 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_DUCKDB_TEMP_DIR` | Spill root for those connections (default `<processed root>/_ops/_duckdb_tmp`). Set it to a fast local disk when the processed root is on a slow disk: the `pubchem` join spilled 31 GB at random-I/O speed to the USB HDD and slowed every other job on it (2026-10-18). |
 | `EPISTEME_EXTRACT_WORKERS` | Worker processes per extract stage and the `openalex` serialize (unset: the profile's rule, the physical cores minus one, limited by memory; 3 on the 4-core laptop). `--workers N` on a module overrides it. |
 | `EPISTEME_IO_CONCURRENCY` | Parallel reads or writes on the data disk. Unset: the profile's rule (2 on an HDD or an unknown disk kind; 4 x cores on an SSD). The profile reads it, but no stage uses it yet. |
-| `EPISTEME_BATCH_ROWS` | Rows per write, fetch, load and graph batch. Unset: the profile's rule (50,000; 100,000 when RAM is 48 GB or more). |
+| `EPISTEME_BATCH_ROWS` | Rows per write, fetch, load and graph batch. Unset: the profile's rule (50,000; 100,000 when RAM is 48 GB or more). A staging write batch also ends at 64 MB of string data (`staging_writer.WRITE_BATCH_BYTES`), whatever its row count. |
 | `EPISTEME_PART_ROWS`, `EPISTEME_PART_BYTES` | Row and byte caps of one part. The profile reads them. No stage writes parts yet. |
 | `EPISTEME_PG_SHARED_BUFFERS`, `EPISTEME_PG_MAINTENANCE_WORK_MEM`, `EPISTEME_PG_WORK_MEM` | Values that `tune_postgres.sh` applies. Unset: the profile's rule (section 2.5). |
 | `EPISTEME_SAMPLE_LIMIT` | Default for the extract/serialize `--max-files` when the flag is absent (default 0 = all files). |
@@ -450,6 +450,8 @@ bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 These rules apply to the `extract`, `serialize`, `load` and `graph` stages. Downloads keep their own rule: record the failure and continue.
 
 **Fail fast.** A stage stops at the first unit that fails. A unit is one input file (extract, serialize) or one shard (load). The stage does not start the next unit. With more than one worker, the units already running finish or fail. The exit code is 1.
+
+**Stop.** A stop (Ctrl-C, SIGTERM, the parent watchdog) is not a failure. The stage cancels the queued units and terminates the workers in flight, then exits 130 or 143. A terminated unit has no success marker, so the next run does it again. The stage does not wait for the units in flight to finish.
 
 **Retries.** A transient error is retried 3 times. The waits are 30, 60 and 120 seconds. A load or graph unit takes its connection for each attempt from the pool. That connection can be a healthy idle one that the pool reuses. After a server restart, the pool can hand out dead idle connections, and each one uses up an attempt. If the third retry fails, the error is permanent and the stage stops.
 

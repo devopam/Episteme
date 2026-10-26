@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,12 @@ from episteme.data.article_schema import ARTICLE_COLUMNS
 from episteme.ops.profile import default_batch_rows
 
 WRITE_BATCH_ROWS = default_batch_rows()
+# A write batch also ends at this much string data (characters), whatever its
+# row count (2026-10-26: europepmc full-text rows average ~58 KB, so a
+# 50,000-row batch held ~3 GB and three workers exhausted a 16 GB machine).
+# Peak memory per writer is a small multiple of it (Python strings, the column
+# lists and the Arrow arrays).
+WRITE_BATCH_BYTES = 64 * 1024 * 1024
 
 
 def rows_to_columnar(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
@@ -93,6 +99,30 @@ def _batch_to_table(rows: list[dict[str, Any]]):
     return pa.table(arrays, schema=schema)
 
 
+def _row_chars(row: dict[str, Any]) -> int:
+    """String size of one row (characters of its str values): the cheap proxy
+    the byte cap uses. No encode: it runs once per row."""
+    return sum(len(v) for v in row.values() if isinstance(v, str))
+
+
+def _batches(rows: Iterable[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
+    """Batches of at most ``batch_size`` rows that also end once their string
+    data reaches ``WRITE_BATCH_BYTES`` (read at call time, so tests can shrink
+    it). A row over the cap is a batch of its own. Rows are never dropped or
+    reordered."""
+    cap = WRITE_BATCH_BYTES
+    batch: list[dict[str, Any]] = []
+    size = 0
+    for row in rows:
+        batch.append(row)
+        size += _row_chars(row)
+        if len(batch) >= batch_size or size >= cap:
+            yield batch
+            batch, size = [], 0
+    if batch:
+        yield batch
+
+
 def _write_parquet_stream(
     rows: Iterable[dict[str, Any]],
     staging_root: Path,
@@ -104,9 +134,9 @@ def _write_parquet_stream(
     """Stream rows into one Parquet file (one row group per batch); returns (paths, n_rows)."""
     import pyarrow.parquet as pq
 
-    it = iter(rows)
-    first = list(itertools.islice(it, batch_size))
-    if not first:
+    batches = _batches(rows, batch_size)
+    first = next(batches, None)
+    if first is None:
         return [], 0
 
     out_path = _out_path(staging_root, source, source_file, ".parquet")
@@ -114,11 +144,9 @@ def _write_parquet_stream(
     n = 0
     try:
         with pq.ParquetWriter(tmp_path, _article_schema(), compression="zstd") as writer:
-            batch = first
-            while batch:
+            for batch in itertools.chain([first], batches):
                 writer.write_table(_batch_to_table(batch))
                 n += len(batch)
-                batch = list(itertools.islice(it, batch_size))
         os.replace(tmp_path, out_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
