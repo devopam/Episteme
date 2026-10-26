@@ -525,3 +525,25 @@ def test_a_primary_marker_without_the_parts_format_does_not_skip(
     assert primary["parts_list"] == [mod.part_source_file(KEY, n) for n in (1, 2, 3)]
     assert "inputs" in primary
     assert _all_cids(out) == CIDS
+
+
+def test_part_audit_row_comes_before_its_success_marker(raw, out, monkeypatch):
+    # A stop between the two leaves an audited part without a marker (rewritten
+    # and audited again), never a marked part without an audit row.
+    _caps(monkeypatch, 4)
+    calls: list[tuple[str, str]] = []
+    real_mark = mod.mark_success
+
+    def _mark(processed_dir, source, name, stats=None):
+        calls.append(("mark", name))
+        return real_mark(processed_dir, source, name, stats=stats)
+
+    monkeypatch.setattr(mod, "mark_success", _mark)
+    monkeypatch.setattr(mod, "_best_effort_audit", lambda name, n: calls.append(("audit", name)))
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    expected: list[tuple[str, str]] = []
+    for n in (1, 2, 3):
+        psf = mod.part_source_file(KEY, n)
+        expected += [("audit", psf), ("mark", psf)]
+    expected.append(("mark", KEY))
+    assert calls == expected

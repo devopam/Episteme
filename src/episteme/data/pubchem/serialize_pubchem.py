@@ -78,10 +78,11 @@ larger than ``part_bytes`` goes alone in its own part, which is then over the
 byte cap (a row cannot be split; ``gate_report`` leaves single-row parts out
 of its byte maximum). The caps come from the runtime profile (``_part_caps``).
 Part ``n`` has the ``source_file``, shard stem and success marker
-``<input_key>__partNNNNN`` (``part_source_file``; at least 5 digits); its marker records
-``first_cid`` / ``last_cid`` and the caps, and it gets one
-``serialize_commit`` audit row. After the last part the primary file gets its
-own success marker (``parts``, total ``n_rows``); it has no shard and no audit
+``<input_key>__partNNNNN`` (``part_source_file``; at least 5 digits); its
+marker records ``first_cid`` / ``last_cid`` and the caps, and it gets one
+``serialize_commit`` audit row, written before its marker. After the last
+part the primary file gets its own success marker (``parts``,
+``parts_list``, ``inputs``, total ``n_rows``); it has no shard and no audit
 row of its own. A restart does not count rows: it keeps the longest prefix of
 parts whose markers and shards exist and whose CID ranges follow each other,
 deletes every part above it (markers first, then shards), passes over every
@@ -559,8 +560,9 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
     settled by Tasks 4/5/6, not re-litigated here).
 
     One chained audit row on a fresh connection, degrading to the file-only
-    mirror when no DB is reachable. Never raises -- ``mark_success`` has
-    already run for this file."""
+    mirror when no DB is reachable. Never raises. ``process_one`` calls it
+    for a part BEFORE that part's ``mark_success`` (a stop between the two
+    gives a duplicate audit row on the rerun, never a missing one)."""
     with _AUDIT_LOCK:
         try:
             from episteme.data.db.connection import connection as _pg_connection
@@ -861,8 +863,12 @@ def process_one(
                     "inputs": fingerprint,
                     "write": write_info,
                 }
-                mark_success(processed_dir, SOURCE, psf, stats=part_stats)
+                # The audit row comes before the marker: a stop between the
+                # two leaves an audited part without a marker, which the next
+                # run writes and audits again (a duplicate audit row), never a
+                # marked part without an audit row.
                 _best_effort_audit(psf, part["rows"])
+                mark_success(processed_dir, SOURCE, psf, stats=part_stats)
                 n_rows_new += part["rows"]
                 n_rows_total += part["rows"]
                 status_counts.update(part["counts"])
