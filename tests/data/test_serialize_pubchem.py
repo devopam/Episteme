@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 import polars as pl
@@ -376,6 +377,36 @@ def test_unsorted_sibling_late_in_file_fails_fast(tmp_path):
     res = process_one(raw / "CID-SMILES.tsv", processed_dir=processed, raw_dir=raw, force=False)
     assert res["ok"] is False
     assert "CID-IUPAC.tsv line 1001" in res["error"]
+    assert list((processed / "_ops" / "pubchem" / "failed").glob("*"))
+
+
+@pytest.mark.parametrize(
+    ("iupac", "match"),
+    [
+        # The cursor moves past CID 2 to CID 3 and is ahead when the primary ends:
+        # the line "2" after "3" was never read.
+        pytest.param("1\ta\n3\tc\n2\tb\n", r"CID-IUPAC.tsv line 3: CID 2 after 3", id="ahead"),
+        # A backward CID in the tail beyond the primary's last CID.
+        pytest.param(
+            "1\ta\n2\tb\n7\tg\n9\ti\n8\th\n", r"CID-IUPAC.tsv line 5: CID 8 after 9", id="tail"
+        ),
+    ],
+)
+def test_unsorted_sibling_after_the_primary_ends_fails(tmp_path, iupac, match):
+    from episteme.data.pubchem.serialize_pubchem import iter_merged_records, process_one
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    primary = _write(raw / "CID-SMILES.tsv", "1\tC\n2\tCC\n")
+    sib = _write(raw / "CID-IUPAC.tsv", iupac)
+    with pytest.raises(PubchemInputError, match=match):
+        list(iter_merged_records(primary, {"iupac_name": sib}))
+
+    processed = tmp_path / "processed"
+    res = process_one(primary, processed_dir=processed, raw_dir=raw, force=False)
+    assert res["ok"] is False
+    assert re.search(match, res["error"])
+    assert not (processed / "_ops" / "pubchem" / "success" / "CID-SMILES.tsv.ok").exists()
     assert list((processed / "_ops" / "pubchem" / "failed").glob("*"))
 
 

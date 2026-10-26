@@ -364,7 +364,9 @@ def iter_merged_records(
     All files are sorted by CID, so each sibling keeps one cursor that moves
     forward while its CID is lower than the primary CID. Memory is one line
     per file. A sibling CID absent from the primary is ignored; a primary CID
-    absent from a sibling gets ``None`` for that sibling's fields.
+    absent from a sibling gets ``None`` for that sibling's fields. After the
+    last primary record, every sibling is read to its end, so an order error
+    anywhere in a sibling raises ``PubchemInputError``.
 
     The masses of CID-Mass stay the raw strings as read (or ``None``): the row
     text does not use them.
@@ -397,6 +399,13 @@ def iter_merged_records(
                 else:
                     rec.update(zip(fields, values, strict=True))
             yield rec
+        # The primary has ended. Read every sibling to its end through the
+        # validating reader: a line behind a cursor that is ahead, or a
+        # backward CID in a tail beyond the primary's last CID, raises
+        # PubchemInputError here, so the unit cannot succeed on such a file.
+        for cursor in cursors.values():
+            for _ in cursor:
+                pass
     finally:
         for it in (primary, *cursors.values()):
             with contextlib.suppress(Exception):
