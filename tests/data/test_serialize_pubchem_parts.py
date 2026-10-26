@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import polars as pl
@@ -370,3 +371,59 @@ def test_marker_range_that_does_not_chain_ends_the_kept_prefix(
     assert (primary["parts_kept"], primary["parts_written"]) == (1, 2)
     cids = _all_cids(out)
     assert sorted(cids) == CIDS and len(cids) == len(set(cids))
+
+
+def test_resume_drops_parts_when_an_input_changed(raw, out, monkeypatch, audits, caplog):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    fp = _part_marker(out, 1)["inputs"]
+    assert [f[0] for f in fp] == [
+        "CID-SMILES.tsv",
+        "CID-IUPAC.tsv",
+        "CID-Mass.tsv",
+        "CID-Title.tsv",
+    ]
+    # A stop after part 1, then a new download of one sibling.
+    success_marker_path(out, "pubchem", KEY).unlink()
+    for n in (2, 3):
+        success_marker_path(out, "pubchem", mod.part_source_file(KEY, n)).unlink()
+    lm = _load_marker(out, 1)
+    lm.parent.mkdir(parents=True, exist_ok=True)
+    lm.write_text("{}", encoding="utf-8")
+    title = raw / "CID-Title.tsv"
+    title.write_bytes("".join(f"{c}\tEthanol (new)\n" for c in CIDS).encode())
+    st = title.stat()
+    os.utime(title, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    audits.clear()
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert any("input" in r.getMessage() and "changed" in r.getMessage() for r in caplog.records)
+    assert not lm.exists()
+    primary = _marker(out, KEY)["stats"]
+    assert (primary["parts_kept"], primary["parts_written"]) == (0, 3)
+    assert [a[0] for a in audits] == [mod.part_source_file(KEY, n) for n in (1, 2, 3)]
+    assert all("(new)" in t for t in pl.read_parquet(_shard(out, 1))["text"].to_list())
+    assert _all_cids(out) == CIDS
+
+
+def test_resume_keeps_parts_when_the_inputs_are_the_same(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    success_marker_path(out, "pubchem", KEY).unlink()
+    success_marker_path(out, "pubchem", mod.part_source_file(KEY, 3)).unlink()
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _marker(out, KEY)["stats"]["parts_kept"] == 2
+
+
+def test_a_kept_part_without_a_fingerprint_is_dropped(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    success_marker_path(out, "pubchem", KEY).unlink()
+    m1 = success_marker_path(out, "pubchem", mod.part_source_file(KEY, 1))
+    payload = json.loads(m1.read_text(encoding="utf-8"))
+    del payload["stats"]["inputs"]
+    m1.write_text(json.dumps(payload), encoding="utf-8")
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _marker(out, KEY)["stats"]["parts_kept"] == 0
+    assert _all_cids(out) == CIDS

@@ -87,7 +87,11 @@ parts whose markers and shards exist and whose CID ranges follow each other,
 deletes every part above it (markers first, then shards), passes over every
 record up to the last kept CID without building rows, and writes the next
 parts. Changed caps log a warning; no CID is lost or written twice, because
-the boundary is a CID. ``--force`` deletes the primary marker and all parts
+the boundary is a CID. Each part marker also records ``inputs``, the
+``[name, size, mtime_ns]`` of the primary file and of each sibling used; when
+the kept parts' ``inputs`` differ from the current files (or a marker has
+none), the run logs a warning and drops every part of the unit, as
+``--force`` does. ``--force`` deletes the primary marker and all parts
 of the unit first.
 
 PubChem compound-extras records carry no bibliographic shape: ``title`` /
@@ -632,6 +636,18 @@ def _kept_parts(processed_dir: Path, key: str) -> list[dict[str, Any]]:
     return kept
 
 
+def _input_fingerprint(path: Path, siblings: dict[str, Path]) -> list[list[Any]]:
+    """``[name, size, mtime_ns]`` of the primary file, then of each sibling
+    used, sorted by name. Lists, not tuples, so it compares equal to the copy
+    read back from a part marker's JSON."""
+    files = [path, *sorted(siblings.values(), key=lambda p: p.name)]
+    out: list[list[Any]] = []
+    for p in files:
+        st = p.stat()
+        out.append([p.name, st.st_size, st.st_mtime_ns])
+    return out
+
+
 def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
     """Delete the markers, then the shards, of every part of ``key`` above
     ``j``. Markers go first: a stop between the two steps leaves a shard
@@ -685,7 +701,21 @@ def process_one(
     try:
         if force:
             success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
+        siblings = _find_siblings(path)
+        fingerprint = _input_fingerprint(path, siblings)
         kept = [] if force else _kept_parts(processed_dir, basename)
+        if any(st.get("inputs") != fingerprint for st in kept):
+            # A kept part from other input files (a new download, a sibling
+            # added or gone, or a marker without a fingerprint) cannot be
+            # resumed: drop every part of the unit, as --force does.
+            _LOG.warning(
+                "%s: an input file changed since the kept parts were written "
+                "(name, size or mtime of the primary or a sibling); dropping all "
+                "%d kept parts and writing the unit again",
+                basename,
+                len(kept),
+            )
+            kept = []
         j = len(kept)
         _delete_parts_above(processed_dir, basename, j)
         if any((st.get("part_rows"), st.get("part_bytes")) != (cap_rows, cap_bytes) for st in kept):
@@ -703,7 +733,7 @@ def process_one(
             status_counts.update(st.get("extract_status_counts") or {})
         resume_cid: int | None = kept[-1]["last_cid"] if kept else None
 
-        records = iter_merged_records(path, _find_siblings(path), iter_stats)
+        records = iter_merged_records(path, siblings, iter_stats)
         with contextlib.closing(records):
             # Cheap skip: records in the kept range build no row.
             pending_src = (rec for rec in records if resume_cid is None or rec["cid"] > resume_cid)
@@ -778,6 +808,7 @@ def process_one(
                     "part_rows": cap_rows,
                     "part_bytes": cap_bytes,
                     "est_bytes": part["est_bytes"],
+                    "inputs": fingerprint,
                     "write": write_info,
                 }
                 mark_success(processed_dir, SOURCE, psf, stats=part_stats)
