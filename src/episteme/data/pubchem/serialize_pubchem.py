@@ -68,6 +68,24 @@ brief does not ask for. Flagged as a possible follow-up enrichment, not
 attempted here (same discipline as uniprot task-6's ``.dat``-format scope
 cut).
 
+Bounded units of work (pubchem sub-project 2, spec 2026-10-26 Sec 4.2-4.3):
+one primary file is still one unit of work, but its output is a sequence of
+parts numbered from 1. A part ends at ``part_rows`` rows or at an estimated
+``part_bytes`` (sum of each row's UTF-8 ``text`` length plus
+``PART_ROW_OVERHEAD_BYTES``), whichever comes first; the caps come from the
+runtime profile (``_part_caps``). Part ``n`` has the ``source_file``, shard
+stem and success marker ``<input_key>__partNNNNN`` (``part_source_file``);
+its marker records ``first_cid`` / ``last_cid`` and the caps, and it gets one
+``serialize_commit`` audit row. After the last part the primary file gets its
+own success marker (``parts``, total ``n_rows``); it has no shard and no audit
+row of its own. A restart does not count rows: it keeps the longest prefix of
+parts whose markers and shards exist and whose CID ranges follow each other,
+deletes every part above it (markers first, then shards), passes over every
+record up to the last kept CID without building rows, and writes the next
+parts. Changed caps log a warning; no CID is lost or written twice, because
+the boundary is a CID. ``--force`` deletes the primary marker and all parts
+of the unit first.
+
 PubChem compound-extras records carry no bibliographic shape: ``title`` /
 ``journal`` / ``year`` / ``authors`` are always ``None`` on the row (PubChem's
 own per-CID "title" -- e.g. "Acetyl-DL-carnitine" -- is folded into ``text``
@@ -110,7 +128,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
+import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -137,15 +158,18 @@ from episteme.data.article_schema import (  # noqa: E402
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
     discover_input_files,
+    failed_marker_path,
     input_key,
     is_success,
     mark_failed,
     mark_success,
+    success_marker_path,
     write_run_manifest,
 )
 from episteme.data.gz import open_gz  # noqa: E402
 from episteme.data.parallel import record_first_failure, run_per_file, skip_files  # noqa: E402
 from episteme.data.staging_writer import write_rows  # noqa: E402
+from episteme.ops.profile import PART_ROW_OVERHEAD_BYTES, get_profile  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
 from episteme.ops.skip import add_skip_args, check_skip_args  # noqa: E402
 from episteme.ops.stop import stage_guard  # noqa: E402
@@ -305,12 +329,13 @@ def iter_merged_records(
     """
     cursors: dict[str, Iterator[tuple[int, list[str | None]]]] = {}
     heads: dict[str, tuple[int, list[str | None]] | None] = {}
-    for key, path in sibling_paths.items():
-        n_fields = len(_SIBLING_DEFS[key]["columns"]) - 1
-        cursors[key] = _iter_cid_lines(path, n_fields)
-        heads[key] = next(cursors[key], None)
+    primary = _iter_cid_lines(primary_path, 1, stats)
     try:
-        for cid, (smiles,) in _iter_cid_lines(primary_path, 1, stats):
+        for key, path in sibling_paths.items():
+            n_fields = len(_SIBLING_DEFS[key]["columns"]) - 1
+            cursors[key] = _iter_cid_lines(path, n_fields)
+            heads[key] = next(cursors[key], None)
+        for cid, (smiles,) in primary:
             rec: dict[str, Any] = {"cid": cid, "smiles": smiles}
             for key, spec in _SIBLING_DEFS.items():
                 names = list(spec["columns"])[1:]
@@ -329,7 +354,7 @@ def iter_merged_records(
                         rec[name] = value
             yield rec
     finally:
-        for it in cursors.values():
+        for it in (primary, *cursors.values()):
             with contextlib.suppress(Exception):
                 it.close()  # type: ignore[attr-defined]
 
@@ -514,6 +539,84 @@ def _best_effort_audit(basename: str, n_rows: int) -> None:
                 )
 
 
+def part_source_file(key: str, n: int) -> str:
+    """The ``source_file`` (and shard stem, and marker name) of part ``n`` of
+    the unit whose ``input_key`` is ``key``."""
+    return f"{key}__part{n:05d}"
+
+
+def _part_caps() -> tuple[int, int]:
+    """``(part_rows, part_bytes)`` from the runtime profile (a test seam)."""
+    profile = get_profile()
+    return profile.part_rows, profile.part_bytes
+
+
+def _staging_dir(processed_dir: Path) -> Path:
+    return Path(processed_dir) / "staging" / SOURCE
+
+
+def _part_shards(processed_dir: Path, psf: str) -> list[Path]:
+    """Every staging file of one part: ``{psf}.parquet``, ``{psf}.jsonl`` and a
+    leftover ``{psf}.parquet.tmp`` (``staging_writer._out_path`` names a shard
+    ``{stem}{suffix}``; each ``write_rows`` call writes one file)."""
+    d = _staging_dir(processed_dir)
+    if not d.is_dir():
+        return []
+    return sorted(d.glob(glob.escape(psf) + ".*"))
+
+
+def _read_part_marker(processed_dir: Path, psf: str) -> dict[str, Any] | None:
+    p = success_marker_path(processed_dir, SOURCE, psf)
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    stats = payload.get("stats") if isinstance(payload, dict) else None
+    return stats if isinstance(stats, dict) else None
+
+
+def _kept_parts(processed_dir: Path, key: str) -> list[dict[str, Any]]:
+    """The stats of parts 1..j: the longest prefix whose markers are readable,
+    whose shard exists, and whose CID ranges follow each other."""
+    kept: list[dict[str, Any]] = []
+    prev_last: int | None = None
+    while True:
+        psf = part_source_file(key, len(kept) + 1)
+        st = _read_part_marker(processed_dir, psf)
+        if st is None:
+            break
+        if not any(not p.name.endswith(".tmp") for p in _part_shards(processed_dir, psf)):
+            break
+        first, last = st.get("first_cid"), st.get("last_cid")
+        if not (isinstance(first, int) and isinstance(last, int) and first <= last):
+            break
+        if prev_last is not None and first <= prev_last:
+            break
+        kept.append(st)
+        prev_last = last
+    return kept
+
+
+def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
+    """Delete the markers, then the shards, of every part of ``key`` above
+    ``j``. Markers go first: a stop between the two steps leaves a shard
+    without a marker (deleted on the next run), never a marker without data."""
+    pattern = re.compile(re.escape(key) + r"__part(\d{5})\.")
+    prefix = glob.escape(f"{key}__part") + "*"
+    dirs = [
+        success_marker_path(processed_dir, SOURCE, "x").parent,
+        failed_marker_path(processed_dir, SOURCE, "x").parent,
+    ]
+    for group in (dirs, [_staging_dir(processed_dir)]):
+        for d in group:
+            if not d.is_dir():
+                continue
+            for p in d.glob(prefix):
+                m = pattern.match(p.name)
+                if m and int(m.group(1)) > j:
+                    p.unlink(missing_ok=True)
+
+
 def process_one(
     path: Path,
     *,
@@ -521,48 +624,133 @@ def process_one(
     raw_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
+    """Serialize one primary file as a sequence of bounded parts.
+
+    See the module docstring, "Bounded units of work": each part is a shard
+    plus a success marker that records its CID range; a restart keeps the
+    longest chain of complete parts and resumes after its last CID.
+    """
     basename = input_key(path, raw_dir)
     if not force and is_success(processed_dir, SOURCE, basename):
         return {"source_file": basename, "skipped": True, "reason": "success_marker"}
 
     t0 = time.time()
+    cap_rows, cap_bytes = _part_caps()
     status_counts: Counter[str] = Counter()
-    n_rows = 0
+    n_rows_total = 0
+    n_rows_new = 0
     iter_stats: dict[str, int] = {}
+    current_part: int | None = None
     try:
-
-        def _counted() -> Iterator[dict[str, Any]]:
-            nonlocal n_rows
-            with contextlib.closing(
-                iter_rows_from_file(path, source_file=basename, stats=iter_stats)
-            ) as source_rows:
-                for row in source_rows:
-                    status_counts[str(row.get("extract_status"))] += 1
-                    n_rows += 1
-                    yield row
-
-        gen = _counted()
-        try:
-            write_info = write_rows(
-                gen,
-                processed_dir,
-                source=SOURCE,
-                source_file=basename,
-                prefer_parquet=True,
-                batch_size=_WRITE_BATCH_ROWS,
+        if force:
+            success_marker_path(processed_dir, SOURCE, basename).unlink(missing_ok=True)
+        kept = [] if force else _kept_parts(processed_dir, basename)
+        j = len(kept)
+        _delete_parts_above(processed_dir, basename, j)
+        if any((st.get("part_rows"), st.get("part_bytes")) != (cap_rows, cap_bytes) for st in kept):
+            _LOG.warning(
+                "%s: the part caps changed since the kept parts were written "
+                "(kept %d parts; caps now part_rows=%d part_bytes=%d); the kept parts "
+                "keep their CID ranges and the new parts use the new caps",
+                basename,
+                j,
+                cap_rows,
+                cap_bytes,
             )
-        finally:
-            gen.close()
-        elapsed = round(time.time() - t0, 4)
-        stats = {
-            "n_rows": n_rows,
+        for st in kept:
+            n_rows_total += int(st.get("n_rows") or 0)
+            status_counts.update(st.get("extract_status_counts") or {})
+        resume_cid: int | None = kept[-1]["last_cid"] if kept else None
+
+        records = iter_merged_records(path, _find_siblings(path), iter_stats)
+        with contextlib.closing(records):
+            # Cheap skip: records in the kept range build no row.
+            pending_src = (rec for rec in records if resume_cid is None or rec["cid"] > resume_cid)
+            n = j
+            current_part = n + 1
+            pending = next(pending_src, None)
+            while pending is not None:
+                n += 1
+                current_part = n
+                psf = part_source_file(basename, n)
+                part: dict[str, Any] = {
+                    "rows": 0,
+                    "est_bytes": 0,
+                    "first_cid": None,
+                    "last_cid": None,
+                    "counts": Counter(),
+                }
+
+                def _part_rows(psf: str = psf, part: dict[str, Any] = part):
+                    nonlocal pending
+                    while pending is not None:
+                        rec, pending = pending, None
+                        row = pubchem_row(rec, psf)
+                        if row is None:
+                            iter_stats["skipped_no_id"] = iter_stats.get("skipped_no_id", 0) + 1
+                            pending = next(pending_src, None)
+                            continue
+                        text = row.get("text")
+                        part["rows"] += 1
+                        part["est_bytes"] += (
+                            len(text.encode("utf-8")) if text else 0
+                        ) + PART_ROW_OVERHEAD_BYTES
+                        if part["first_cid"] is None:
+                            part["first_cid"] = rec["cid"]
+                        part["last_cid"] = rec["cid"]
+                        part["counts"][str(row.get("extract_status"))] += 1
+                        yield row
+                        # The cap check comes before the next pull, so a part
+                        # never takes a record it does not keep.
+                        if part["rows"] >= cap_rows or part["est_bytes"] >= cap_bytes:
+                            return
+                        pending = next(pending_src, None)
+
+                gen = _part_rows()
+                try:
+                    write_info = write_rows(
+                        gen,
+                        processed_dir,
+                        source=SOURCE,
+                        source_file=psf,
+                        prefer_parquet=True,
+                        batch_size=_WRITE_BATCH_ROWS,
+                    )
+                finally:
+                    gen.close()
+                if part["rows"] == 0:  # every remaining record was dropped
+                    n -= 1
+                    break
+                part_stats = {
+                    "n_rows": part["rows"],
+                    "extract_status_counts": dict(part["counts"]),
+                    "first_cid": part["first_cid"],
+                    "last_cid": part["last_cid"],
+                    "part_rows": cap_rows,
+                    "part_bytes": cap_bytes,
+                    "est_bytes": part["est_bytes"],
+                    "write": write_info,
+                }
+                mark_success(processed_dir, SOURCE, psf, stats=part_stats)
+                _best_effort_audit(psf, part["rows"])
+                n_rows_new += part["rows"]
+                n_rows_total += part["rows"]
+                status_counts.update(part["counts"])
+                current_part = n + 1
+                pending = next(pending_src, None)
+
+        stats: dict[str, Any] = {
+            "n_rows": n_rows_total,
+            "parts": n,
+            "parts_written": n - j,
+            "parts_kept": j,
+            "part_rows": cap_rows,
+            "part_bytes": cap_bytes,
             "extract_status_counts": dict(status_counts),
-            "elapsed_sec": elapsed,
-            "write": write_info,
+            "elapsed_sec": round(time.time() - t0, 4),
         }
         stats.update(iter_stats)
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         if is_transient(e):
@@ -573,7 +761,7 @@ def process_one(
             basename,
             error_class=type(e).__name__,
             message=str(e),
-            stats={"n_rows_partial": n_rows},
+            stats={"n_rows_partial": n_rows_new, "failed_part": current_part},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}

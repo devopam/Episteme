@@ -51,10 +51,12 @@ FX = Path(__file__).resolve().parents[1] / "fixtures" / "sp4" / "pubchem"
 
 
 def _read_shard(staging_dir: Path) -> pl.DataFrame:
-    shards = list(staging_dir.glob("*.parquet")) or list(staging_dir.glob("*.jsonl"))
+    """All rows of every part shard under ``staging_dir``, in part order."""
+    shards = sorted(staging_dir.glob("*.parquet")) or sorted(staging_dir.glob("*.jsonl"))
     assert shards, f"no shard under {staging_dir}"
-    s = shards[0]
-    return pl.read_parquet(s) if s.suffix == ".parquet" else pl.read_ndjson(s)
+    return pl.concat(
+        [pl.read_parquet(s) if s.suffix == ".parquet" else pl.read_ndjson(s) for s in shards]
+    )
 
 
 def test_pubchem_serialize_rows(tmp_path):
@@ -240,12 +242,13 @@ def test_pubchem_record_without_cid_is_counted_and_skipped(tmp_path):
     (raw / "CID-SMILES.tsv").write_text("1\tCC(=O)O\n\tCCO\n", encoding="utf-8")
     res = serialize_pubchem(raw, tmp_path / "processed")
     assert res["ok"] == 1 and res["failed"] == 0
-    df = pl.read_parquet(next((tmp_path / "processed" / "staging" / "pubchem").glob("*.parquet")))
+    df = _read_shard(tmp_path / "processed" / "staging" / "pubchem")
     ids = [str(i) for i in df["id"].to_list()]
     assert not any(i.endswith(":unknown") for i in ids)
     assert ids == ["pubchem:1"]
+    # The unit's own (primary) marker, not a part marker.
     marker = json.loads(
-        next((tmp_path / "processed" / "_ops" / "pubchem" / "success").glob("*.ok")).read_text()
+        (tmp_path / "processed" / "_ops" / "pubchem" / "success" / "CID-SMILES.tsv.ok").read_text()
     )
     assert marker["stats"]["skipped_no_id"] == 1
 
@@ -265,14 +268,7 @@ def test_pubchem_tiny_batches_match_default_shard(tmp_path, monkeypatch):
     assert staging_writer.WRITE_BATCH_ROWS != 1  # the patch above is module-local
 
     def _rows(root):
-        df = _read_shard(root / "staging" / "pubchem") if "_read_shard" in globals() else None
-        if df is None:
-            shards = list((root / "staging" / "pubchem").glob("*.*"))
-            df = (
-                pl.read_parquet(shards[0])
-                if shards[0].suffix == ".parquet"
-                else pl.read_ndjson(shards[0])
-            )
+        df = _read_shard(root / "staging" / "pubchem")
         return [{k: v for k, v in r.items() if k != "retrieved_at"} for r in df.to_dicts()]
 
     assert _rows(tiny_dir) == _rows(default_dir)
