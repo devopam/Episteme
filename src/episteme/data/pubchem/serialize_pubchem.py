@@ -161,6 +161,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     failed_marker_path,
     input_key,
     is_success,
+    load_success_marker_path,
     mark_failed,
     mark_success,
     success_marker_path,
@@ -600,12 +601,18 @@ def _kept_parts(processed_dir: Path, key: str) -> list[dict[str, Any]]:
 def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:
     """Delete the markers, then the shards, of every part of ``key`` above
     ``j``. Markers go first: a stop between the two steps leaves a shard
-    without a marker (deleted on the next run), never a marker without data."""
+    without a marker (deleted on the next run), never a marker without data.
+
+    The load-success markers of those parts go too. The loader names them by
+    shard file name (``load_success/<psf>.parquet.ok``) and skips a shard
+    whose marker exists, so a part rewritten with a new CID range must lose
+    its load marker or its new rows never reach the database."""
     pattern = re.compile(re.escape(key) + r"__part(\d{5})\.")
     prefix = glob.escape(f"{key}__part") + "*"
     dirs = [
         success_marker_path(processed_dir, SOURCE, "x").parent,
         failed_marker_path(processed_dir, SOURCE, "x").parent,
+        load_success_marker_path(processed_dir, SOURCE, "x").parent,
     ]
     for group in (dirs, [_staging_dir(processed_dir)]):
         for d in group:

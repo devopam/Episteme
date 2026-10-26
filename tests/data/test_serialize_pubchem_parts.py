@@ -15,7 +15,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from episteme.data.checkpoint_markers import success_marker_path
+from episteme.data.checkpoint_markers import load_success_marker_path, success_marker_path
 from episteme.data.pubchem import serialize_pubchem as mod
 from episteme.ops.profile import PART_ROW_OVERHEAD_BYTES
 
@@ -270,3 +270,65 @@ def test_part_caps_reads_profile(monkeypatch):
 
     monkeypatch.setattr(mod, "get_profile", lambda: _P())
     assert mod._part_caps() == (7, 99)
+
+
+def _load_marker(out: Path, n: int) -> Path:
+    # The loader names a load marker by shard file name (load_articles.py).
+    return load_success_marker_path(out, "pubchem", _shard(out, n).name)
+
+
+def test_deleted_part_also_loses_its_load_marker(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    for n in (1, 2, 3):
+        p = _load_marker(out, n)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}", encoding="utf-8")
+    # A resume that keeps part 1 only: parts 2 and 3 are deleted and rewritten.
+    success_marker_path(out, "pubchem", KEY).unlink()
+    success_marker_path(out, "pubchem", mod.part_source_file(KEY, 2)).unlink()
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _load_marker(out, 1).is_file()
+    assert not _load_marker(out, 2).exists()
+    assert not _load_marker(out, 3).exists()
+
+
+def test_force_also_drops_load_markers(raw, out, monkeypatch, audits):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    p = _load_marker(out, 1)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}", encoding="utf-8")
+    assert mod.serialize_pubchem(raw, out, force=True)["ok"] == 1
+    assert not p.exists()
+
+
+@pytest.mark.parametrize(
+    "bad_first",
+    [
+        pytest.param(4, id="overlap"),
+        pytest.param(2, id="overlap-deep"),
+        pytest.param("5", id="str"),
+    ],
+)
+def test_marker_range_that_does_not_chain_ends_the_kept_prefix(
+    raw, out, monkeypatch, audits, bad_first
+):
+    _caps(monkeypatch, 4)
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    success_marker_path(out, "pubchem", KEY).unlink()
+    m2 = success_marker_path(out, "pubchem", mod.part_source_file(KEY, 2))
+    payload = json.loads(m2.read_text(encoding="utf-8"))
+    payload["stats"]["first_cid"] = bad_first  # part 1 ends at CID 4
+    m2.write_text(json.dumps(payload), encoding="utf-8")
+    part1_mtime = _shard(out, 1).stat().st_mtime_ns
+
+    audits.clear()
+    assert mod.serialize_pubchem(raw, out)["ok"] == 1
+    assert _shard(out, 1).stat().st_mtime_ns == part1_mtime
+    assert [a[0] for a in audits] == [mod.part_source_file(KEY, n) for n in (2, 3)]
+    assert _part_marker(out, 2)["first_cid"] == 5
+    primary = _marker(out, KEY)["stats"]
+    assert (primary["parts_kept"], primary["parts_written"]) == (1, 2)
+    cids = _all_cids(out)
+    assert sorted(cids) == CIDS and len(cids) == len(set(cids))
