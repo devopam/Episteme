@@ -26,7 +26,9 @@ in flight finish, and their results (and markers) are kept and returned.
 
 A stop (``KeyboardInterrupt`` or ``SystemExit``, e.g. SIGTERM through
 ``stage_guard``) is different: the queued units are cancelled and the workers
-in flight are terminated, so the stage exits at once. Their units have no
+in flight are terminated, so the stage exits at once. The wait for the pool
+wakes every ``POOL_WAIT_S`` seconds, so a stop from the stop-file watchdog
+(``_thread.interrupt_main``, no real signal) also reaches it at once. Their units have no
 success marker and run again on the next run.
 
 Transient errors: ``fn`` classifies its own exception (where the real exception
@@ -67,6 +69,10 @@ _LOG = logging.getLogger(__name__)
 
 _EXECUTORS = ("process", "thread")
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
+# The pool wait wakes this often (seconds), so a stop that
+# ``_thread.interrupt_main`` delivers (the stop-file watchdog of
+# episteme.ops.stop) runs at once, not when the next unit ends.
+POOL_WAIT_S = 1.0
 
 
 def default_workers() -> int:
@@ -230,7 +236,10 @@ def _run_pool(
     broken_logged = False
     try:
         while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            # Timed: the main thread must run Python code again to see a stop
+            # from ``_thread.interrupt_main``; an untimed wait holds it until a
+            # unit ends (hours on a large archive).
+            done, _ = wait(pending, timeout=POOL_WAIT_S, return_when=FIRST_COMPLETED)
             for fut in done:
                 path, tries = pending.pop(fut)
                 if fut.cancelled():

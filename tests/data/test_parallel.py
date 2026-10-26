@@ -384,7 +384,7 @@ def test_a_stop_ends_the_workers_in_flight(tmp_path, spawn_child_env, monkeypatc
     pids = tmp_path / "pids"
     pids.mkdir()
 
-    def wait_then_stop(fs, return_when):
+    def wait_then_stop(fs, timeout=None, return_when=None):
         deadline = time.monotonic() + 60
         while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
             time.sleep(0.2)
@@ -397,6 +397,40 @@ def test_a_stop_ends_the_workers_in_flight(tmp_path, spawn_child_env, monkeypatc
     assert time.monotonic() - t0 < 60  # not the 120 s of the units
     worker_pids = [int(p.name) for p in pids.iterdir()]
     assert len(worker_pids) == 2
+    deadline = time.monotonic() + 10
+    while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not any(psutil.pid_exists(p) for p in worker_pids)
+
+
+def test_a_stop_from_another_thread_reaches_the_pool_wait(tmp_path, spawn_child_env):
+    # The stop-file watchdog delivers a stop with _thread.interrupt_main, not a
+    # real signal: an untimed wait for the pool would see it only when a unit
+    # ends (hours). The wait wakes every second.
+    import _thread
+    import threading
+
+    import psutil
+
+    raw, files = _files(tmp_path, ("a.txt", "b.txt"))
+    pids = tmp_path / "pids"
+    pids.mkdir()
+
+    def stop_when_running() -> None:
+        deadline = time.monotonic() + 60
+        while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        stopped_at.append(time.monotonic())
+        _thread.interrupt_main()
+
+    stopped_at: list[float] = []
+    t = threading.Thread(target=stop_when_running, daemon=True)
+    t.start()
+    with pytest.raises(KeyboardInterrupt):
+        run_per_file(_write_pid_then_sleep, files, workers=2, raw_dir=raw, pids=pids)
+    t.join(5)
+    assert stopped_at and time.monotonic() - stopped_at[0] < 15
+    worker_pids = [int(p.name) for p in pids.iterdir()]
     deadline = time.monotonic() + 10
     while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
         time.sleep(0.2)
