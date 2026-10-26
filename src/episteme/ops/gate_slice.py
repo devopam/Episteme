@@ -144,14 +144,15 @@ def _pubchem_part_rows() -> int:
 
 
 def _gz_or_plain_writer(dest: Path):
+    """A binary writer: the cut writes each kept line's bytes unchanged."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.suffix == ".gz":
-        return gzip.open(dest, "wt", encoding="utf-8", newline="")
-    return open(dest, "w", encoding="utf-8", newline="")  # noqa: SIM115
+        return gzip.open(dest, "wb")
+    return open(dest, "wb")  # noqa: SIM115
 
 
 def _cut_file(src: Path, dest: Path, keep: Callable[[int, int], bool | None]) -> int:
-    """Write the lines of ``src`` (text as read) for which ``keep(index, cid)`` is true.
+    """Write the lines of ``src`` (bytes as read) for which ``keep(index, cid)`` is true.
 
     ``keep`` returns ``None`` to stop the read. The CID order check of
     ``_iter_cid_raw`` runs on every line read.

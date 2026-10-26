@@ -279,27 +279,38 @@ class PubchemInputError(ValueError):
     streaming merge join needs (integer CIDs, sorted, one row per CID)."""
 
 
-def _open_text(path: Path):
+def _open_binary(path: Path):
     if path.suffix == ".gz":
-        return open_gz(path, "rt", encoding="utf-8", errors="replace", newline="")
-    return open(path, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
+        return open_gz(path, "rb")
+    return open(path, "rb")  # noqa: SIM115
+
+
+def _strip_eol(line: bytes) -> bytes:
+    if line.endswith(b"\r\n"):
+        return line[:-2]
+    if line.endswith(b"\n"):
+        return line[:-1]
+    return line
 
 
 def _iter_cid_raw(
     path: Path, stats: dict[str, int] | None = None
-) -> Iterator[tuple[int, str, list[str]]]:
-    """Yield ``(cid, line, parts)`` for each line of one CID-sorted file.
+) -> Iterator[tuple[int, bytes, list[str]]]:
+    r"""Yield ``(cid, line, parts)`` for each line of one CID-sorted file.
 
-    ``line`` is the line text as read (line ending kept); ``parts`` is the line
-    split on tab. A line with an empty CID is counted in
-    ``stats["skipped_no_id"]`` and skipped. A CID that is not an integer, or
-    that is not strictly greater than the one before, raises
+    The file is read in binary mode and only ``b"\n"`` ends a line, so a lone
+    ``\r`` inside a field stays in the field. ``line`` is the line's bytes as
+    read (line ending kept; the slice cut writes it unchanged); ``parts`` is
+    the line without its ``\n`` or ``\r\n`` ending, decoded as UTF-8 (an
+    invalid byte becomes U+FFFD) and split on tab. A line with an empty CID is
+    counted in ``stats["skipped_no_id"]`` and skipped. A CID that is not an
+    integer, or that is not strictly greater than the one before, raises
     ``PubchemInputError``.
     """
     prev: int | None = None
-    with _open_text(path) as fh:
+    with _open_binary(path) as fh:
         for lineno, line in enumerate(fh, start=1):
-            parts = line.rstrip("\r\n").split("\t")
+            parts = _strip_eol(line).decode("utf-8", errors="replace").split("\t")
             raw = parts[0]
             if not raw:
                 if stats is not None:

@@ -387,6 +387,17 @@ def test_crlf_and_trailing_tab_lines(tmp_path):
     assert "canonical SMILES CC," in rows[1]["text"]
 
 
+def test_lone_cr_inside_a_field_is_not_a_line_break(tmp_path):
+    """Only b"\\n" ends a line: a lone CR inside a title stays in the field."""
+    _write_gz(tmp_path / "CID-SMILES.gz", b"1\tC\r\n2\tCC\n")
+    _write_gz(tmp_path / "CID-Title.gz", b"1\tfoo\rbar\n2\tT2\r\n")
+    rows = list(iter_rows_from_file(tmp_path / "CID-SMILES.gz"))
+    assert [r["source_record_id"] for r in rows] == ["1", "2"]
+    assert "(foo\rbar)" in rows[0]["text"]
+    assert "(T2)" in rows[1]["text"]
+    assert "canonical SMILES C," in rows[0]["text"]
+
+
 def test_memory_is_streaming(tmp_path, monkeypatch):
     from episteme.data import duckdb_conn
 

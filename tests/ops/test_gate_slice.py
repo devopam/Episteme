@@ -409,6 +409,32 @@ def test_pubchem_slice_all_cids_empty_refuses(roots, monkeypatch):
         _pc_prepare(roots)
 
 
+def test_pubchem_slice_keeps_line_bytes_and_a_lone_cr(roots, monkeypatch):
+    """The cut writes each kept line byte for byte: a CRLF ending, a lone CR
+    inside a title and a non-UTF-8 byte survive, and the cut file parses as
+    one record per CID."""
+    import gzip
+
+    from episteme.data.pubchem import serialize_pubchem as sp
+
+    monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 10)
+    d = roots[0] / "pubchem" / _PC_DIR
+    d.mkdir(parents=True)
+    smiles = b"".join(b"%d\tC%d\r\n" % (c, c) for c in range(1, 4))
+    title = b"1\tfoo\rbar\n2\tbad\xffbyte\n3\tT3\r\n"
+    for name, data in (("CID-SMILES.gz", smiles), ("CID-Title.gz", title)):
+        with gzip.open(d / name, "wb") as fh:
+            fh.write(data)
+    _pc_prepare(roots)
+    out = roots[2] / "pubchem" / "01_raw" / "pubchem" / _PC_DIR
+    for name, data in (("CID-SMILES.gz", smiles), ("CID-Title.gz", title)):
+        with gzip.open(out / name, "rb") as fh:
+            assert fh.read() == data
+    rows = list(sp.iter_rows_from_file(out / "CID-SMILES.gz"))
+    assert [r["source_record_id"] for r in rows] == ["1", "2", "3"]
+    assert "(foo\rbar)" in rows[0]["text"]
+
+
 def test_pubchem_slice_part_rows_below_one_refuses(roots, monkeypatch):
     monkeypatch.setattr(gate_slice, "_pubchem_part_rows", lambda: 0)
     _pubchem(roots[0], n=5)
