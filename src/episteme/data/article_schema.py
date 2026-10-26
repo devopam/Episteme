@@ -43,7 +43,7 @@ MIN_OK_TEXT_LEN = 200
 # Advisory key set for the episteme.articles.book_meta JSON blob (SP2 bookshelf rows).
 # book_meta values must be JSON strings when written to a row dict -- see
 # staging_writer.write_parquet_shard's catch-all branch.
-BOOK_META_KEYS = ("isbn", "editors", "publisher", "edition", "n_parts")
+BOOK_META_KEYS = ("isbn", "editors", "publisher", "edition", "n_parts", "skipped_members")
 
 SOURCES = (
     "pubmed",

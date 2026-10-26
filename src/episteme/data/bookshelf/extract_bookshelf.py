@@ -330,17 +330,18 @@ def _nxml_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
     return members
 
 
-def _find_nxml_member(members: list[tarfile.TarInfo], nbk: str) -> tarfile.TarInfo:
-    """The member that carries the book-level metadata. Prefer the one whose
-    stem matches the accession id (the real Bookshelf layout nests it as
-    ``<NBK>/<NBK>.nxml``), then ``TOC`` (case-insensitive), else the first."""
+def _find_nxml_member(members: list[tarfile.TarInfo], nbk: str) -> tarfile.TarInfo | None:
+    """The member that carries the book-level metadata: the one whose stem
+    matches the accession id (the real Bookshelf layout nests it as
+    ``<NBK>/<NBK>.nxml``), then ``TOC`` (case-insensitive). None when neither
+    exists: the caller then takes the first member that is a book document."""
     for m in members:
         if Path(m.name).stem == nbk:
             return m
     for m in members:
         if Path(m.name).stem.lower() == "toc":
             return m
-    return members[0]
+    return None
 
 
 def _part_candidates(root: ET.Element) -> list[dict[str, Any]]:
@@ -442,10 +443,13 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
     # One pass in archive order (the gzip stream is never rewound), and one
     # parsed tree alive at a time (packages reach GBs): each member yields
     # plain-data part candidates, the preferred member also yields the book
-    # fields, then its tree is dropped.
+    # fields, then its tree is dropped. A member whose root is not a Bookshelf
+    # root is an attachment (jatscon20_NBK555479 ships example JATS <article>
+    # files next to its chapters): it is skipped and listed in book_meta.
     cands_by_member: list[list[dict[str, Any]]] = []
     stems: list[str] = []
     book: dict[str, Any] | None = None
+    skipped_members: list[str] = []
     with tarfile.open(path, "r:gz") as tar:
         members = _nxml_members(tar)
         preferred = _find_nxml_member(members, nbk)
@@ -455,17 +459,21 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"cannot extract {member.name} from {source_file}")
             root = ET.parse(fh).getroot()
             if local_name(root.tag) not in _BOOKSHELF_ROOTS:
-                raise ValueError(
-                    f"{source_file}: member {member.name} is not a Bookshelf document "
-                    f"(root <{local_name(root.tag)}>)"
-                )
-            if member is preferred:
+                if member is preferred:
+                    raise ValueError(
+                        f"{source_file}: book-level member {member.name} is not a "
+                        f"Bookshelf document (root <{local_name(root.tag)}>)"
+                    )
+                skipped_members.append(member.name)
+                del root
+                continue
+            if member is preferred or (preferred is None and book is None):
                 book = _book_fields(root)
             stems.append(Path(member.name).stem)
             cands_by_member.append(_part_candidates(root))
             del root
-    if book is None:  # unreachable: the preferred member is one of the members
-        raise ValueError(f"no book-level member in {source_file}")
+    if book is None:
+        raise ValueError(f"{source_file}: no Bookshelf document in the package")
     book_license_text = book["license_text"]
     book_year = book["year"]
     book_lic, book_lic_url, book_lic_raw = book["license"]
@@ -529,6 +537,10 @@ def parse_book_archive(path: Path, raw_dir: Path) -> list[dict[str, Any]]:
             )
 
     book_meta_dict["n_parts"] = len(part_rows)
+    if skipped_members:
+        # Only when a member was skipped: a package without one keeps the
+        # book_meta it had before this key existed (no re-extract needed).
+        book_meta_dict["skipped_members"] = skipped_members
 
     book_row = finalize_row(
         {

@@ -219,16 +219,60 @@ def test_preferred_member_last_each_member_opened_once(tmp_path, monkeypatch):
     assert [r["source_record_id"] for r in rows if r["container_id"]] == ["ch1", "ch2"]
 
 
-def test_non_bookshelf_member_fails_package(tmp_path):
+def test_non_bookshelf_member_is_skipped_and_listed(tmp_path):
+    # A real package (jatscon20_NBK555479) ships example JATS articles as
+    # attachments next to its chapters: not book documents, so not parsed as
+    # parts, and the package does not fail.
+    members = [
+        ("NBK92/ch1.nxml", _wrapper(_chapter("ch1", "C1"))),
+        ("NBK92/EMS1_preprint.xml", "<article><body><p>example</p></body></article>"),
+        ("NBK92/manifest.xml", "<manifest/>"),
+    ]
+    rows, book, parts = _parse(tmp_path, "tr11_NBK92.tar.gz", members)
+    assert [r["source_record_id"] for r in parts] == ["ch1"]
+    meta = json.loads(book[0]["book_meta"])
+    assert meta["skipped_members"] == ["NBK92/EMS1_preprint.xml", "NBK92/manifest.xml"]
+
+
+def test_book_member_order_is_not_disturbed_by_a_skipped_member(tmp_path):
+    # No NBK-named or TOC member: the book fields come from the first book
+    # document, not from a skipped attachment that comes before it.
+    members = [
+        ("NBK93/aaa_example.xml", "<article/>"),
+        ("NBK93/ch1.nxml", _wrapper(_chapter("ch1", "C1"), "First Book Doc")),
+    ]
+    rows, book, parts = _parse(tmp_path, "tr12_NBK93.tar.gz", members)
+    assert book[0]["title"] == "First Book Doc"
+    assert json.loads(book[0]["book_meta"])["skipped_members"] == ["NBK93/aaa_example.xml"]
+
+
+def test_a_package_without_skipped_members_has_no_key(tmp_path):
+    members = [("NBK94/ch1.nxml", _wrapper(_chapter("ch1", "C1")))]
+    rows, book, parts = _parse(tmp_path, "tr13_NBK94.tar.gz", members)
+    assert "skipped_members" not in json.loads(book[0]["book_meta"])
+
+
+def test_a_book_level_member_that_is_not_a_book_fails_the_package(tmp_path):
     import pytest
 
     members = [
-        ("NBK92/ch1.nxml", _wrapper(_chapter("ch1", "C1"))),
-        ("NBK92/manifest.xml", "<manifest/>"),
+        ("NBK95/ch1.nxml", _wrapper(_chapter("ch1", "C1"))),
+        ("NBK95/NBK95.nxml", "<article/>"),
     ]
-    raw_dir = _write_pkg(tmp_path, "tr11_NBK92.tar.gz", members)
+    raw_dir = _write_pkg(tmp_path, "tr14_NBK95.tar.gz", members)
     with pytest.raises(ValueError) as exc:
-        parse_book_archive(raw_dir / "tr11_NBK92.tar.gz", raw_dir)
+        parse_book_archive(raw_dir / "tr14_NBK95.tar.gz", raw_dir)
     assert str(exc.value) == (
-        "tr11_NBK92.tar.gz: member NBK92/manifest.xml is not a Bookshelf document (root <manifest>)"
+        "tr14_NBK95.tar.gz: book-level member NBK95/NBK95.nxml is not a Bookshelf "
+        "document (root <article>)"
     )
+
+
+def test_a_package_with_no_book_document_fails(tmp_path):
+    import pytest
+
+    members = [("NBK96/a.xml", "<article/>"), ("NBK96/manifest.xml", "<manifest/>")]
+    raw_dir = _write_pkg(tmp_path, "tr15_NBK96.tar.gz", members)
+    with pytest.raises(ValueError) as exc:
+        parse_book_archive(raw_dir / "tr15_NBK96.tar.gz", raw_dir)
+    assert str(exc.value) == "tr15_NBK96.tar.gz: no Bookshelf document in the package"
