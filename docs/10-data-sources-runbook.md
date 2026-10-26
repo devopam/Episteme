@@ -1115,7 +1115,7 @@ Semantics of `--max-files` for `openalex download`: empty or `0` runs the unlimi
 
 The output of one primary file is a sequence of parts. A part is a shard of its own. A part holds at most `EPISTEME_PART_ROWS` rows and at most `EPISTEME_PART_BYTES` estimated bytes. The estimate is the UTF-8 length of the `text` of each row plus 256 bytes of overhead. A row that does not fit in the bytes that are left ends the part and starts the next part. One exception: a single row larger than `EPISTEME_PART_BYTES` goes alone in its own part, so that part is over the byte cap. The gate rule `parts_within_caps` lets such a single-row part pass. The parts are `<input_key>__part00001`, `<input_key>__part00002` and so on. The part number has at least 5 digits: part 100000 is `__part100000`. The name of a part is its `source_file`, its shard stem and its success marker.
 
-Each part has one `serialize_commit` audit row. After the last part, the primary file gets its own success marker. A unit with 0 rows writes no part and no audit row.
+Each part has one `serialize_commit` audit row. The serializer writes the audit row of a part before the success marker of the part. A stop between the two leaves an audited part without a marker: the next run writes that part again and audits it again (a duplicate audit row, never a missing one). After the last part, the primary file gets its own success marker. This marker records the names of the parts (`parts_list`) and the input fingerprint (`inputs`). A unit with 0 rows writes no part and no audit row.
 
 **Resume.** A rerun resumes by CID range, not by row count:
 
@@ -1126,11 +1126,21 @@ Each part has one `serialize_commit` audit row. After the last part, the primary
 
 If the caps changed, the serializer logs a warning. No CID is lost or written twice, because the part boundary is a CID.
 
-Each part marker records the name, size and mtime of the primary file and of each sibling file it used. If one of these changed (for example after a new download), the serializer logs a warning and deletes all parts of the unit, with their load markers, as `--force` does. Then it writes the unit again.
+Each part marker and the primary success marker record the name, size and mtime of the primary file and of each sibling file it used. If one of these changed (for example after a new download), the serializer logs a warning and deletes all parts of the unit, with their load markers, as `--force` does. Then it writes the unit again. This also applies to a unit that is complete: a plain `serialize` compares the primary success marker with the current files before it skips the unit, so a new download needs no `--force`. A primary success marker without `parts_list` and `inputs` (written before parts) does not skip the unit: the serializer writes the unit again.
+
+**Sort check.** Each file must be sorted by CID, with one line per CID. The serializer reads every sibling file to its end, also after the last CID of the primary file. A CID that is not greater than the CID before it, in any file, stops the unit with `PubchemInputError`, which names the file and the line. The unit does not succeed.
 
 **`--force`.** `--force` deletes the primary marker and all parts of the unit, then serializes the unit again.
 
 **Load.** `pubchem load` loads each part as one shard in one transaction. Use a plain `load` for the full load. Do not use `--bulk`. The indexes on `pmid`, `pmcid` and `doi` are partial `WHERE ... IS NOT NULL` btrees, and the GIN indexes get only a NULL entry for a `pubchem` row. A `pubchem` load therefore adds almost nothing to them. `--bulk` drops the indexes of the parent table and rebuilds them over every source, which costs far more than the load.
+
+**Retire.** A rebuild can write fewer parts than before (a smaller input, or other caps). The serializer deletes the shards and markers of the parts above the new count, but their rows stay in the database: a plain `load` replaces only the parts it loads. After `load_articles` exits 0, `load_pubchem.sh` runs `python -m episteme.data.pubchem.retire`. For each unit, the retire step:
+
+1. Reads the primary success marker. With no marker, or a marker without `parts_list`, it skips the unit.
+2. Checks that each part in `parts_list` has a load marker. If one part has none (not loaded, or its load failed), it skips the unit.
+3. Deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` starts with `<input_key>__part` and is not in `parts_list`. It writes one `load_replace` audit row per unit.
+
+A unit with 0 parts is skipped: the delete refuses an empty keep-set. The retire step takes the `load` locks (the heavy lock and the advisory lock) only when it has a unit to retire.
 
 **Gate.** The rules are in `src/episteme/ops/gate_rules/pubchem.json`. The serialize rules include `max_peak_rss_mb` and `parts_within_caps`. There is no speed rule: the report shows `rows_per_s`, but compute capacity varies. Run the sample before a full run:
 
@@ -1145,7 +1155,7 @@ Run these only when no production run is going.
 |---|---|
 | `pubchem: the primary file has no CID lines` (sample) | The `CID-SMILES` file is empty or every CID is empty. Download it again. |
 | `CID ... after ...: the file is not sorted by CID` | A file is not sorted. Download it again. |
-| A part is missing its shard after a stop | Rerun `serialize`. The resume keeps the parts before the gap and writes the rest. If the primary file already has its success marker, a plain rerun skips the unit: use `--force --reason "<why>"` to write the unit again. |
+| A part is missing its shard after a stop | Rerun `serialize`. The resume keeps the parts before the gap and writes the rest. If the primary file already has its success marker and the input files did not change, a plain rerun skips the unit: use `--force --reason "<why>"` to write the unit again. |
 
 ### 5.3 Volatile sources (download only)
 
