@@ -1134,13 +1134,16 @@ Each part marker and the primary success marker record the name, size and mtime 
 
 **Load.** `pubchem load` loads each part as one shard in one transaction. Use a plain `load` for the full load. Do not use `--bulk`. The indexes on `pmid`, `pmcid` and `doi` are partial `WHERE ... IS NOT NULL` btrees, and the GIN indexes get only a NULL entry for a `pubchem` row. A `pubchem` load therefore adds almost nothing to them. `--bulk` drops the indexes of the parent table and rebuilds them over every source, which costs far more than the load.
 
-**Retire.** A rebuild can write fewer parts than before (a smaller input, or other caps). The serializer deletes the shards and markers of the parts above the new count, but their rows stay in the database: a plain `load` replaces only the parts it loads. After `load_articles` exits 0, `load_pubchem.sh` runs `python -m episteme.data.pubchem.retire`. For each unit, the retire step:
+**Retire.** A rebuild or a resume can delete parts that were loaded (a smaller input, other caps). The serializer deletes their shards and markers, but their rows stay in the database: a plain `load` replaces only the parts it loads. So, before the serializer deletes a part that has a load marker, it adds the name of the part to `_ops/pubchem/retire_pending.json`. A part without a load marker was never loaded and is not recorded.
 
-1. Reads the primary success marker. With no marker, or a marker without `parts_list`, it skips the unit.
-2. Checks that each part in `parts_list` has a load marker. If one part has none (not loaded, or its load failed), it skips the unit.
-3. Deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` starts with `<input_key>__part` and is not in `parts_list`. It writes one `load_replace` audit row per unit.
+After `load_articles` exits 0, `load_pubchem.sh` runs `python -m episteme.data.pubchem.retire`. The retire step:
 
-A unit with 0 parts is skipped: the delete refuses an empty keep-set. The retire step takes the `load` locks (the heavy lock and the advisory lock) only when it has a unit to retire.
+1. Reads `retire_pending.json`. With no file or an empty list, it stops. It takes no lock and sends no query.
+2. Drops each pending name that has a part success marker again. A later serialize wrote that part again, so its rows are current. These names are never deleted.
+3. Deletes the `pubchem` rows of `episteme.articles` and `episteme.article_body` whose `source_file` is one of the other names (`source_file = ANY(...)`, which uses the `(source, source_file)` index). It writes one `load_replace` audit row and commits.
+4. Empties `retire_pending.json`.
+
+A stop between steps 3 and 4 leaves the names in the file. The next retire deletes them again (0 rows): this is safe. A `retire_pending.json` that is not a JSON list of names stops the retire step with exit 1, before any query. Rows from before parts (`source_file` is the bare `<input_key>`) are not covered.
 
 **Gate.** The rules are in `src/episteme/ops/gate_rules/pubchem.json`. The serialize rules include `max_peak_rss_mb` and `parts_within_caps`. There is no speed rule: the report shows `rows_per_s`, but compute capacity varies. Run the sample before a full run:
 
