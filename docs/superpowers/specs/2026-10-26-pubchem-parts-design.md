@@ -117,10 +117,10 @@ The first values are confirmed on the first real sample, as was done for apollo 
 1. PR with the code, the rules and the docs (docs/10 pubchem section and §4.9 gate table, the drift log).
 2. The user merges.
 3. The sample serialize and load; set the first rule values from the report; commit the rules if they change.
-4. The full `pubchem serialize`, then `pubchem load --bulk` (drop and rebuild the partition's indexes around the load, as for pubmed; decision, user, 2026-10-26), with the user's go-ahead.
+4. The full `pubchem serialize`, then a plain `pubchem load` (§8 decision 2), with the user's go-ahead.
 
 ## 8. Decisions
 
 1. No speed limit in the gate rules: the run time depends on the compute capacity available (user, 2026-10-26).
-2. The full load uses `load --bulk` (user, 2026-10-26).
-3. Known cost of decision 2: `load --bulk` drops the parent indexes of `episteme.articles` (`bulk_indexes.COVERED_INDEXES`), and that drops them on every partition. The rebuild after the load then covers all sources, not only pubchem (several hours, as for pubmed). The plan decides whether a variant that drops and rebuilds only the `articles_pubchem` indexes is worth it; it is not in scope otherwise.
+2. The full load is a plain `load`, not `load --bulk` (user, 2026-10-26; this replaces an earlier "use `--bulk`"). Reason: no index that `--bulk` drops is impacted by pubchem rows. `articles_pmid_idx`, `articles_pmcid_idx` and `articles_doi_idx` are partial (`WHERE … IS NOT NULL`), and pubchem sets those columns to NULL, so its rows get no entry. `articles_mesh_gin`, `articles_authors_gin` and `articles_publication_types_gin` get only a NULL entry. `--bulk` drops parent indexes, so it would force a rebuild over every source for no gain. The sample load (all indexes present) shows the load rate before the full run.
+3. Backlog (drift log): `--bulk` could drop only the covered indexes on columns the loaded source fills (a per-source subset of `bulk_indexes.COVERED_INDEXES`). Dropping a whole parent index is legal, so no DDL change is needed. Not in scope here.

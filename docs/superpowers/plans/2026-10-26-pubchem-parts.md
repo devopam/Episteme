@@ -16,7 +16,7 @@
 - Part `source_file` and shard stem: `f"{input_key}__part{n:05d}"`, n from 1.
 - Byte estimate per row: `len(row["text"].encode("utf-8")) + PART_ROW_OVERHEAD_BYTES`, with `PART_ROW_OVERHEAD_BYTES = 256` defined once in `src/episteme/ops/profile.py`.
 - Rows for the same CID and input stay byte-identical to the DuckDB version (`pubchem_row` and `_build_text` do not change).
-- No speed rule (`rows_per_s` is reported only). The full load uses `load --bulk` (ops step, no code).
+- No speed rule (`rows_per_s` is reported only). The full load is a plain `load`, not `--bulk` (spec §8 decision 2; ops step, no code).
 - `src/episteme/config.py` is the only module that reads `os.environ`. Endpoint URLs only in `scripts/data/_lib/sources.env`.
 - Tests: `uv run pytest -m "not pg"`. Every pg test command is prefixed `EPISTEME_DB_MODE=restricted PGDATABASE=episteme_test` (the shell `.env` is `unrestricted`; a bare pg test writes to production).
 - No real-data run on `D:` while a production run is going (check `D:/episteme/_runlogs/*/SUMMARY.txt`). Tasks use fixtures only.
@@ -154,7 +154,7 @@
 - Create: `src/episteme/ops/gate_rules/pubchem.json`
 - Modify: `tests/ops/test_gate_rules_sources.py` (pubchem in the list of sources with rules)
 - Test (pg): `tests/data/test_load_articles.py` (add `test_load_multi_part_staging` and `test_reload_rewritten_part`)
-- Modify: `docs/10-data-sources-runbook.md` (§4.9 gate table row for pubchem, remove "`pubchem` has none"; the pubchem source section: parts, resume, `--force`, full load with `load --bulk` and the all-partition rebuild cost), `docs/project-incubation-baseline.md` (drift log entry: Finding, Fix, Decisions — no speed rule, `--bulk`; Deferred — first rule values to confirm on the first real sample; Rollout)
+- Modify: `docs/10-data-sources-runbook.md` (§4.9 gate table row for pubchem, remove "`pubchem` has none"; the pubchem source section: parts, resume, `--force`, full load with a plain `load` and why not `--bulk` (spec §8 decision 2)), `docs/project-incubation-baseline.md` (drift log entry: Finding, Fix, Decisions — no speed rule, plain load not `--bulk`; Deferred — first rule values to confirm on the first real sample, and the per-source `--bulk` index subset (spec §8 item 3); Rollout)
 
 **Interfaces:**
 - Consumes: rule keys from Task 3.
@@ -187,4 +187,4 @@
 
 1. PR, review, user merges.
 2. When no production run is going: `run_pipeline.sh pubchem serialize --sample`, then `pubchem load --sample`; set the `partial` limit from the report; commit if it changes.
-3. With the user's go-ahead: `pubchem serialize`, then `pubchem load --bulk`.
+3. With the user's go-ahead: `pubchem serialize`, then `pubchem load` (plain, no `--bulk`).
