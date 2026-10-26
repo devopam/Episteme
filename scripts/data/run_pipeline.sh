@@ -494,6 +494,8 @@ BULK_PENDING=0
 _on_exit() {
     local rc=$?
     trap - EXIT
+    # A stop now must not cut the handler short (end state, run_end, lock).
+    stage_hold_stops
     local rrc=0
     # A signal during the drop: the drop may have finished. Rebuild what is
     # pending (the rebuild covers every pending row).

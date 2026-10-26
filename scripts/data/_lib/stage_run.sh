@@ -12,42 +12,103 @@
 #
 # * stage_exec starts the stage in the background and waits for it; bash's
 #   `wait` returns at once on a trapped signal.
-# * On INT or TERM the trap writes the signal name to $EPISTEME_STOP_FILE.
-#   The stage's parent watchdog (episteme.ops.stop) polls that file every
-#   second and stops the stage as a SIGTERM would (exit 143). The trap then
-#   waits for the stage to end and exits 130 (INT) or 143 (TERM), so the
-#   caller's EXIT handler runs only after the stage has ended.
-# * A background command of a non-interactive bash ignores SIGINT (POSIX), so
-#   Ctrl-C reaches the stage through the stop file too.
+# * On INT or TERM the trap stops the stage, waits for it to end, and exits
+#   130 (INT) or 143 (TERM), so the caller's EXIT handler runs only after the
+#   stage has ended. Two ways reach the stage:
+#   - Not on MSYS/Cygwin: one SIGTERM to the stage and every process under it.
+#     A background job of a non-interactive bash starts with SIGINT ignored,
+#     so SIGINT would not stop it; SIGTERM stops a Python stage (stage_guard
+#     maps it to exit 143), a shell wrapper and its tools alike.
+#   - Everywhere: the signal name in $EPISTEME_STOP_FILE. The parent watchdog
+#     of a Python stage under stage_guard (episteme.ops.stop) polls the file
+#     every second and stops the stage as a SIGTERM would. On MSYS/Cygwin this
+#     is the only way: there `kill` on a native Windows process is a hard
+#     TerminateProcess, so the trap never signals the stage. A stage that is
+#     not under stage_guard then runs to its end (a console Ctrl-C still
+#     reaches a native child directly).
 #
 # EPISTEME_STOP_FILE is the caller's: export it before the first stage. Empty:
-# no stop file; the trap then only waits for the stage.
+# no stop file.
 
-STAGE_PID=""  # the stage that stage_exec waits for; empty between stages
+STAGE_PID=""       # the stage that stage_exec waits for; empty between stages
+STAGE_STARTING=0   # 1 from just before the fork until STAGE_PID is set
+STAGE_FORWARDED=0  # 1 once the trap has signalled the stage (only once)
+# Forward the stop as a signal? Not on MSYS/Cygwin. _EPISTEME_STOP_FORWARD is
+# a test seam only (0 or 1).
+case "${OSTYPE:-}" in
+    msys*|cygwin*) _STAGE_FORWARD="${_EPISTEME_STOP_FORWARD:-0}" ;;
+    *) _STAGE_FORWARD="${_EPISTEME_STOP_FORWARD:-1}" ;;
+esac
 
 # stage_exec CMD [ARG...]: run CMD in the background, wait, return its exit code.
 # stdin, stdout and stderr stay the caller's.
 stage_exec() {
     # A stop request is for the stage that runs now, never for the next one.
     [ -z "${EPISTEME_STOP_FILE:-}" ] || rm -f "$EPISTEME_STOP_FILE"
+    STAGE_FORWARDED=0
+    STAGE_STARTING=1
     "$@" <&0 &
     STAGE_PID=$!
+    STAGE_STARTING=0
     local rc=0
     wait "$STAGE_PID" || rc=$?
     STAGE_PID=""
     return "$rc"
 }
 
+# "PID PPID" of every process: ps where it takes -o (Linux, macOS), else /proc
+# (Cygwin/MSYS, where the PIDs are the ones bash uses).
+_stage_pairs() {
+    ps -A -o pid= -o ppid= 2>/dev/null && return 0
+    local f stat
+    for f in /proc/[0-9]*/stat; do
+        stat="$(cat "$f" 2>/dev/null)" || continue
+        # After the command name, which can hold spaces: "STATE PPID ...".
+        # shellcheck disable=SC2086 # split into fields on purpose
+        set -- ${stat##*) }
+        [ -n "${2:-}" ] && printf '%s %s\n' "${f//[!0-9]/}" "$2"
+    done
+}
+
+# _stage_tree PID: PID and all its descendants, space-separated.
+_stage_tree() {
+    _stage_pairs | awk -v root="$1" '
+        { kids[$2] = kids[$2] " " $1 }
+        END {
+            n = 1; q[1] = root; out = root
+            for (i = 1; i <= n; i++) {
+                m = split(kids[q[i]], k, " ")
+                for (j = 1; j <= m; j++) { q[++n] = k[j]; out = out " " k[j] }
+            }
+            print out
+        }'
+}
+
 # _stage_stop SIGNAL CODE: the INT/TERM trap.
 _stage_stop() {
+    # A signal between the fork and `STAGE_PID=$!`: the job table has the
+    # stage already ($! could still name the previous stage).
+    if [ -z "$STAGE_PID" ] && [ "$STAGE_STARTING" = "1" ]; then
+        STAGE_PID="$(jobs -p | tail -n 1)"
+    fi
     if [ -n "$STAGE_PID" ]; then
+        local tree="" p
+        if [ "$_STAGE_FORWARD" = "1" ] && [ "$STAGE_FORWARDED" = "0" ]; then
+            # Once: a second SIGTERM could break the stage's own cleanup.
+            STAGE_FORWARDED=1
+            tree="$(_stage_tree "$STAGE_PID")"
+            [ -n "$tree" ] || tree="$STAGE_PID"
+            # shellcheck disable=SC2086 # a list of PIDs
+            kill -TERM $tree 2>/dev/null
+            log WARN "stop ($1): sent SIGTERM to the stage (PIDs $tree)"
+        fi
         if [ -n "${EPISTEME_STOP_FILE:-}" ]; then
             # A dry run writes no status, so the run folder may not exist yet.
             mkdir -p "$(dirname "$EPISTEME_STOP_FILE")" 2>/dev/null
             if printf '%s\n' "$1" >"$EPISTEME_STOP_FILE"; then
                 log WARN "stop ($1): asked the stage to stop ($EPISTEME_STOP_FILE); waiting for it to end"
             else
-                log ERROR "stop ($1): could not write $EPISTEME_STOP_FILE; waiting for the stage to end on its own"
+                log ERROR "stop ($1): could not write $EPISTEME_STOP_FILE; waiting for the stage to end"
             fi
         else
             log WARN "stop ($1): no stop file; waiting for the stage to end"
@@ -55,6 +116,12 @@ _stage_stop() {
         # A second signal makes `wait` return early: wait until the stage is gone.
         while kill -0 "$STAGE_PID" 2>/dev/null; do
             wait "$STAGE_PID"
+        done
+        # A wrapper can end before the processes under it: wait for them too.
+        for p in $tree; do
+            while kill -0 "$p" 2>/dev/null; do
+                sleep 0.2
+            done
         done
         STAGE_PID=""
         # The request was for that stage only: the EXIT handler's own Python
@@ -68,4 +135,12 @@ _stage_stop() {
 stage_install_stop_traps() {
     trap '_stage_stop INT 130' INT
     trap '_stage_stop TERM 143' TERM
+}
+
+# stage_hold_stops: for an EXIT handler. A later INT/TERM only logs, so the
+# handler finishes (end state, run_end, lock release). A foreground command of
+# the handler can still get the signal itself (a console Ctrl-C).
+stage_hold_stops() {
+    trap 'log WARN "stop ignored during exit handling (INT)"' INT
+    trap 'log WARN "stop ignored during exit handling (TERM)"' TERM
 }

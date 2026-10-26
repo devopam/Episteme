@@ -118,6 +118,21 @@ def _posix(p: Path) -> str:
     return str(p).replace("\\", "/")
 
 
+def _start(bash: Path, script: str, env: dict, cwd: Path) -> tuple[subprocess.Popen, Path]:
+    """Start the harness; its output goes to a file (a pipe read only after the
+    exit could fill up and block the runner)."""
+    log = cwd / "runner.log"
+    with log.open("wb") as fh:
+        proc = subprocess.Popen(
+            [str(bash), "-c", script],
+            cwd=cwd,  # no pyproject.toml here: get_settings() loads no .env
+            env=env,
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+        )
+    return proc, log
+
+
 def _ours(pid: int, t_start: float) -> psutil.Process | None:
     """A handle on ``pid`` only when it started after this test did."""
     try:
@@ -157,13 +172,7 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
     )
     spawned: list[psutil.Process] = []
     t_start = time.time()
-    runner = subprocess.Popen(
-        [str(bash), "-c", RUNNER],
-        cwd=tmp_path,  # no pyproject.toml here: get_settings() loads no .env
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    runner, log = _start(bash, RUNNER, env, tmp_path)
     try:
         spawned.append(psutil.Process(runner.pid))
         pids = out / "pids"
@@ -183,14 +192,14 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
         t0 = time.monotonic()
         rc = runner.wait(timeout=30)
         elapsed = time.monotonic() - t0
-        err = runner.stderr.read().decode(errors="replace") if runner.stderr else ""
+        err = log.read_text(encoding="utf-8", errors="replace")
 
         assert rc == 143, f"runner exit code {rc}; stderr:\n{err}"
         assert elapsed < 30
         # The runner waited for the stage: nothing is left when it has exited.
         left = [p.pid for p in [stage_proc, *workers] if _running(p)]
         assert left == [], f"still running after the runner exited: {left}"
-        # The stop came through the stop file (the stage exited 143 itself).
+        # The stop reached the stage (it exited 143 itself) and the file was written.
         assert stop_file.read_text(encoding="utf-8").strip() == "TERM"
         assert (out / "stage.rc").read_text().strip() == "143"
         assert not (out / "runner.rc").exists()  # the trap exits; the script does not go on
@@ -204,6 +213,142 @@ def test_a_term_to_the_runner_ends_the_stage_and_its_workers(tmp_path, spawn_chi
             except psutil.NoSuchProcess:
                 pass
         psutil.wait_procs(spawned, timeout=5)
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(5)
+
+
+# --- the bash side alone (MSYS or POSIX processes only: bash PIDs) -------------
+
+HEAD = """\
+. "$SR_LIB/common.sh"
+. "$SR_LIB/stage_run.sh"
+"""
+
+
+def _harness(tmp_path: Path, extra: dict[str, str] | None = None):
+    bash = _bash()
+    if bash is None:
+        pytest.skip("needs bash")
+    out = tmp_path / "out"
+    out.mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "EPISTEME_RUNNER_PID"}
+    env.update(SR_LIB=_posix(LIB), SR_OUT=_posix(out), SR_STOP=_posix(tmp_path / "stop.request"))
+    env.update(extra or {})
+    return bash, out, env
+
+
+def _wait_file(path: Path, proc: subprocess.Popen, secs: float = 30) -> str:
+    deadline = time.monotonic() + secs
+    while not (path.is_file() and path.read_text().strip()):
+        assert time.monotonic() < deadline, f"{path.name} was not written"
+        assert proc.poll() is None, f"the runner exited early (rc={proc.returncode})"
+        time.sleep(0.1)
+    return path.read_text().strip()
+
+
+def _bash_alive(bash: Path, pids: list[str]) -> list[str]:
+    """The PIDs (bash's own numbering) that still run."""
+    out = subprocess.run(
+        [
+            str(bash),
+            "-c",
+            'for p in "$@"; do kill -0 "$p" 2>/dev/null && echo "$p"; done',
+            "_",
+            *pids,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return out.stdout.split()
+
+
+def _bash_kill(bash: Path, pids: list[str]) -> None:
+    """Clean-up: only the PIDs this test's harness wrote."""
+    if pids:
+        subprocess.run(
+            [str(bash), "-c", 'kill -KILL "$@" 2>/dev/null; true', "_", *pids], timeout=30
+        )
+
+
+def test_posix_forwards_a_stop_to_a_stage_that_ignores_sigint(tmp_path):
+    # A background job of a non-interactive bash starts with SIGINT ignored: a
+    # shell stage (no stage_guard, no stop file) must still stop on Ctrl-C.
+    # Forwarding is off on MSYS (kill there is a TerminateProcess for a native
+    # process); the seam turns it on for this all-MSYS process tree.
+    bash, out, env = _harness(tmp_path, {"_EPISTEME_STOP_FORWARD": "1"})
+    script = (
+        HEAD
+        + 'export EPISTEME_STOP_FILE="$SR_STOP"\n'
+        + "stage_install_stop_traps\n"
+        + 'echo "$$" > "$SR_OUT/runner.pid"\n'
+        + 'stage_exec sh -c \'echo $$ > "$1/wrapper.pid"; '
+        + 'sleep 300 & echo $! > "$1/child.pid"; wait\' sh "$SR_OUT"\n'
+    )
+    runner, log = _start(bash, script, env, tmp_path)
+    pids: list[str] = []
+    try:
+        runner_pid = _wait_file(out / "runner.pid", runner)
+        pids = [_wait_file(out / "wrapper.pid", runner), _wait_file(out / "child.pid", runner)]
+        subprocess.run([str(bash), "-c", f"kill -INT {runner_pid}"], check=True, timeout=30)
+        rc = runner.wait(timeout=30)
+        err = log.read_text(encoding="utf-8", errors="replace")
+        assert rc == 130, err
+        assert _bash_alive(bash, pids) == [], err
+        assert "sent SIGTERM to the stage" in err
+    finally:
+        _bash_kill(bash, _bash_alive(bash, pids) if pids else [])
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(5)
+
+
+def test_a_stop_between_the_fork_and_the_pid_still_waits_for_the_stage(tmp_path):
+    # The trap runs after `cmd &` but before `STAGE_PID=$!`: it finds the stage
+    # in the job table and waits for it, so the lock is not released early.
+    bash, out, env = _harness(tmp_path, {"_EPISTEME_STOP_FORWARD": "0"})
+    script = (
+        HEAD
+        + 'trap \'echo "$SECONDS" > "$SR_OUT/waited"\' EXIT\n'
+        + "STAGE_STARTING=1\n"
+        + "sleep 3 &\n"
+        + "SECONDS=0\n"
+        + "_stage_stop TERM 143\n"
+    )
+    runner, log = _start(bash, script, env, tmp_path)
+    try:
+        rc = runner.wait(timeout=30)
+        err = log.read_text(encoding="utf-8", errors="replace")
+        assert rc == 143, err
+        assert int((out / "waited").read_text().strip()) >= 2, err
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(5)
+
+
+def test_a_stop_during_the_exit_handler_does_not_cut_it_short(tmp_path):
+    # _on_exit writes the end state, run_end and the lock release (and may run
+    # the --bulk rebuild). A TERM in it must not run `exit 143` half-way.
+    bash, out, env = _harness(tmp_path)
+    script = (
+        HEAD
+        + "stage_install_stop_traps\n"
+        + 'trap \'stage_hold_stops; echo "$$" > "$SR_OUT/runner.pid"; sleep 3; '
+        + 'echo ok > "$SR_OUT/exit.ok"\' EXIT\n'
+        + "exit 0\n"
+    )
+    runner, log = _start(bash, script, env, tmp_path)
+    try:
+        runner_pid = _wait_file(out / "runner.pid", runner)
+        subprocess.run([str(bash), "-c", f"kill -TERM {runner_pid}"], check=True, timeout=30)
+        rc = runner.wait(timeout=30)
+        err = log.read_text(encoding="utf-8", errors="replace")
+        assert (out / "exit.ok").is_file(), err
+        assert rc == 0, err
+        assert "stop ignored during exit handling (TERM)" in err
+    finally:
         if runner.poll() is None:
             runner.kill()
             runner.wait(5)
