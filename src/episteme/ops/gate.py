@@ -549,6 +549,25 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
         child.wait(timeout=5)
 
 
+# Exit codes of a stage that a stop ended: 130/143, the negative signal numbers
+# a POSIX Popen reports, and Windows STATUS_CONTROL_C_EXIT.
+_STOP_RCS = frozenset({130, 143, -2, -15, 0xC000013A})
+
+
+def _end_survivors(procs: list[Any]) -> None:
+    """Terminate, then kill, the processes in ``procs`` that still run."""
+    import psutil
+
+    alive = [p for p in procs if p.is_running()]
+    for p in alive:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.terminate()
+    _gone, left = psutil.wait_procs(alive, timeout=5)
+    for p in left:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.kill()
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     import psutil
 
@@ -581,6 +600,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     peak = 0
     interrupted = False
     term = {"seen": False}
+    seen_tree: list[Any] = []
 
     def _on_term(signum: int, frame: Any) -> None:
         # run_pipeline.sh forwards a stop as SIGTERM (POSIX): take the
@@ -602,12 +622,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         interrupted = True
         rc = 143 if term["seen"] else 130
+        # The descendants now: one that outlives the child is ended below.
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            seen_tree = proc.children(recursive=True)
         # The stage got the same stop: let it end (and clean up) on its own.
         with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt):
             child.wait(timeout=STOP_GRACE_S)
     finally:
         if child.poll() is None:
             _stop_tree(proc, child)
+        elif seen_tree:
+            _end_survivors(seen_tree)
         if old_term is not None:
             with contextlib.suppress(ValueError):
                 signal.signal(signal.SIGTERM, old_term)
@@ -617,7 +642,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "peak_rss_mb": round(peak / (1024 * 1024), 1),
         **hashes,
     }
-    if interrupted:
+    # On Windows no signal reaches gate run: the stage ends by the stop file
+    # with a stop exit code. That is an interrupted run too.
+    if interrupted or rc in _STOP_RCS:
         record["interrupted"] = True
     out = Path(args.record)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -450,3 +450,34 @@ def test_the_pool_still_exposes_its_worker_processes(tmp_path, spawn_child_env):
         procs = pool._processes
         assert isinstance(procs, dict) and procs
         assert all(hasattr(p, "terminate") and hasattr(p, "join") for p in procs.values())
+
+
+def test_a_worker_that_survives_terminate_is_killed(monkeypatch):
+    # Review (CodeRabbit): a worker that ignores terminate() must not keep the
+    # pool shutdown, and so the stop, waiting.
+    from episteme.data import parallel
+
+    class _Proc:
+        def __init__(self, stubborn):
+            self.stubborn, self.alive, self.killed = stubborn, True, False
+
+        def terminate(self):
+            if not self.stubborn:
+                self.alive = False
+
+        def kill(self):
+            self.killed, self.alive = True, False
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+    meek, stubborn = _Proc(False), _Proc(True)
+
+    class _Pool:
+        _processes = {1: meek, 2: stubborn}
+
+    parallel._terminate_workers(_Pool())
+    assert not meek.killed and stubborn.killed and not stubborn.alive

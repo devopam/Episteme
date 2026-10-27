@@ -799,3 +799,48 @@ def test_report_without_part_markers_uses_the_profile(tmp_path, parts_rules, fak
         p.unlink()
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1  # 3 rows > 2
     assert _measures(sample)["part_rows"] == 2
+
+
+def test_run_records_a_stage_that_a_stop_ended_as_interrupted(tmp_path):
+    # Review (Greptile): on Windows the stage ends by the stop file with rc 143
+    # and gate run sees no signal; the record must still say interrupted.
+    rec = tmp_path / "rec.json"
+    rc = gate.main(
+        ["run", "--record", str(rec), "--", sys.executable, "-c", "raise SystemExit(143)"]
+    )
+    assert rc == 143
+    assert json.loads(rec.read_text(encoding="utf-8"))["interrupted"] is True
+
+
+def test_run_does_not_mark_a_plain_failure_interrupted(tmp_path):
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", "raise SystemExit(1)"])
+    assert rc == 1
+    assert "interrupted" not in json.loads(rec.read_text(encoding="utf-8"))
+
+
+def test_run_sigterm_ends_a_descendant_that_outlives_the_stage(tmp_path, monkeypatch):
+    # Review (CodeRabbit): the child exits within the grace wait, but its own
+    # child keeps running; gate run must end it.
+    import time
+
+    import psutil
+
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 20.0)
+    pidfile = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys, time, pathlib;"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']);"
+        f"pathlib.Path(r'{pidfile}').write_text(str(p.pid));"
+        "time.sleep(2.0)"
+    )
+    _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    gpid = int(pidfile.read_text())
+    deadline = time.monotonic() + 10
+    while psutil.pid_exists(gpid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not psutil.pid_exists(gpid)

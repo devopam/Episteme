@@ -194,7 +194,19 @@ def _terminate_workers(pool: ProcessPoolExecutor) -> None:
             pass
     for proc in procs:
         proc.join(timeout=5)
-    _LOG.warning("stopped: terminated %d worker(s) in flight", len(procs))
+    # A worker that ignores terminate() would keep the pool shutdown (and so
+    # the stop) waiting: kill it.
+    survivors = [p for p in procs if p.is_alive()]
+    for proc in survivors:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+    for proc in survivors:
+        proc.join(timeout=5)
+    _LOG.warning(
+        "stopped: terminated %d worker(s) in flight (%d killed)", len(procs), len(survivors)
+    )
 
 
 def _call_inline(

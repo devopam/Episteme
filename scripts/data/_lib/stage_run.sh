@@ -33,6 +33,7 @@
 STAGE_PID=""       # the stage that stage_exec waits for; empty between stages
 STAGE_STARTING=0   # 1 from just before the fork until STAGE_PID is set
 STAGE_FORWARDED=0  # 1 once the trap has signalled the stage (only once)
+STAGE_TREE=""      # the PIDs the first stop signalled; a repeated stop waits for them too
 # Forward the stop as a SIGTERM to the stage tree? Yes on Linux and macOS (a
 # background job starts with SIGINT ignored, so only a signal or the stop file
 # reaches it). No on MSYS/Cygwin: there `kill` on a native Windows process is a
@@ -49,6 +50,7 @@ stage_exec() {
     # A stop request is for the stage that runs now, never for the next one.
     [ -z "${EPISTEME_STOP_FILE:-}" ] || rm -f "$EPISTEME_STOP_FILE"
     STAGE_FORWARDED=0
+    STAGE_TREE=""
     STAGE_STARTING=1
     "$@" <&0 &
     STAGE_PID=$!
@@ -108,7 +110,9 @@ _stage_stop() {
         STAGE_PID="$(jobs -p | tail -n 1)"
     fi
     if [ -n "$STAGE_PID" ]; then
-        local tree="" p
+        # A repeated stop must wait for the same processes as the first one,
+        # even after the wrapper has exited (else the lock goes early).
+        local tree="$STAGE_TREE" p
         local -a pids=()
         if [ "$_STAGE_FORWARD" = "1" ] && [ "$STAGE_FORWARDED" = "0" ]; then
             # Once: a second SIGTERM could break the stage's own cleanup.
@@ -120,6 +124,7 @@ _stage_stop() {
             done
             [ "${#pids[@]}" -gt 0 ] || pids=("$STAGE_PID")
             tree="${pids[*]}"
+            STAGE_TREE="$tree"
             kill -TERM "${pids[@]}" 2>/dev/null
             log WARN "stop ($1): sent SIGTERM to the stage (PIDs $tree)"
         fi
@@ -147,6 +152,7 @@ _stage_stop() {
             done
         done
         STAGE_PID=""
+        STAGE_TREE=""
         # The request was for that stage only: the EXIT handler's own Python
         # (the --bulk index rebuild) must not see it. The file stays as a record.
         EPISTEME_STOP_FILE=""
