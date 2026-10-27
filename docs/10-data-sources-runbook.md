@@ -446,6 +446,8 @@ bash scripts/data/db/bulk_load_indexes.sh rebuild   # idempotent; safe to re-run
 
 **Loader timing:** every `ok` line of a load ends with `read_sec=` (reading the shard and building rows), `copy_sec=` (inside `COPY`) and `rows_per_sec=` (over the whole shard, deletes included). When `read_sec` dominates, the client is the bottleneck; when `copy_sec` does, the database is.
 
+**Loader id lookups:** the loader's id-keyed deletes (the `article_body` delete by shard id and the id-collision delete in `episteme.articles`) read the shard's ids from a temp table that holds them distinct and sorted. These two statements run with hash join, merge join and seq scan off, so they walk the `article_body` primary key and `articles_<source>_id_idx` in order. Without this the planner scanned the whole partition for each shard (287 s and 267 s per `pubchem` part, growing with the partition). The settings are back to their earlier values right after the two statements.
+
 ### 4.7 Failure rules
 
 These rules apply to the `extract`, `serialize`, `load` and `graph` stages. Downloads keep their own rule: record the failure and continue.
