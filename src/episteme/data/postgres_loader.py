@@ -251,7 +251,10 @@ def _rows_committed() -> int:
         return _PROCESS_ROWS[0]
 
 
-_PLANNER_SETTINGS = ("enable_hashjoin", "enable_mergejoin", "enable_seqscan")
+# enable_hashagg too: the IN (SELECT ...) de-duplicates _load_ids, and a hashed
+# Aggregate there loses the sorted order (found by the plan test, PR #93
+# review); without it the planner uses Sort + Unique, which keeps the order.
+_PLANNER_SETTINGS = ("enable_hashjoin", "enable_mergejoin", "enable_seqscan", "enable_hashagg")
 
 
 @contextmanager

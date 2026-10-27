@@ -494,13 +494,45 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
         with postgres_loader._ordered_index_probes(cur):
             plans = []
             for sql, params in ((c2, ("chembl",)), (d0, ("chembl", ["F_x"]))):
-                cur.execute(sql, params)
-                plans.append(" | ".join(r[0] for r in cur.fetchall()))
+                cur.execute(sql.replace("EXPLAIN ", "EXPLAIN (FORMAT JSON) ", 1), params)
+                plans.append(cur.fetchone()[0][0]["Plan"])
         cur.execute("SELECT current_setting('enable_hashjoin')")
         assert cur.fetchone()[0] == before
     pg_conn.rollback()
 
-    for plan in plans:
-        assert "Index" in plan, plan
-        assert "Hash Semi Join" not in plan, plan
-        assert not re.search(r"Seq Scan on (articles|article_body)_default", plan), plan
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    def scans_load_ids(node):
+        # The outer side must read _load_ids in its stored (sorted) order:
+        # only order-keeping nodes may sit between the loop and that scan.
+        if node["Node Type"] == "Seq Scan":
+            return node.get("Relation Name") == "_load_ids"
+        if node["Node Type"] in ("Unique", "Sort", "Materialize") and node.get("Plans"):
+            return scans_load_ids(node["Plans"][0])
+        return False
+
+    for target, plan in zip(("article_body", "articles"), plans, strict=True):
+        every = list(nodes(plan))
+        types = {n["Node Type"] for n in every}
+        # Review (Greptile, Sourcery): an "Index" string is not enough; a
+        # bitmap plan, a hash join or an order-losing aggregate would pass it.
+        assert not types & {"Hash Join", "Hash", "Bitmap Heap Scan", "HashAggregate"}, types
+        hashed = [
+            n for n in every if n["Node Type"] == "Aggregate" and n.get("Strategy") == "Hashed"
+        ]
+        assert not hashed, hashed  # a hashed de-duplication loses the sorted order
+        loops = [n for n in every if n["Node Type"] == "Nested Loop"]
+        assert loops, types
+        outer, inner = loops[0]["Plans"][0], loops[0]["Plans"][1]
+        assert scans_load_ids(outer), outer
+        inner_scans = [
+            n for n in nodes(inner) if n["Node Type"] in ("Index Scan", "Index Only Scan")
+        ]
+        assert inner_scans, inner
+        assert all(re.match(rf"{target}(_|$)", n["Relation Name"]) for n in inner_scans), (
+            inner_scans
+        )
+        assert all(n.get("Index Cond") for n in inner_scans), inner_scans

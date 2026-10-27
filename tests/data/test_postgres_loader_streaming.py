@@ -114,7 +114,7 @@ class _FakeCur:
         self.log.append(" ".join(sql.split()))
 
     def fetchone(self):
-        return ("on", "on", "on")
+        return ("on", "on", "on", "on")
 
     def copy(self, sql):
         self.log.append(" ".join(sql.split()))
@@ -153,7 +153,7 @@ def test_load_ids_table_is_sorted_and_distinct(tmp_path, monkeypatch):
 def test_planner_settings_wrap_only_the_two_id_probes(tmp_path, monkeypatch):
     log = _load_log(tmp_path, monkeypatch)
     off = ["SET LOCAL enable_hashjoin = off", "SET LOCAL enable_mergejoin = off"]
-    off.append("SET LOCAL enable_seqscan = off")
+    off += ["SET LOCAL enable_seqscan = off", "SET LOCAL enable_hashagg = off"]
     on = [s.replace("= off", "= 'on'") for s in off]
     c2 = next(
         i for i, s in enumerate(log) if "article_id IN (SELECT id FROM pg_temp._load_ids)" in s
@@ -162,8 +162,8 @@ def test_planner_settings_wrap_only_the_two_id_probes(tmp_path, monkeypatch):
         i for i, s in enumerate(log) if "id IN (SELECT id FROM pg_temp._load_ids) AND source" in s
     )
     # settings off right before (c2); (c2) and (d0) back to back; restored right after (d0)
-    assert log[c2 - 3 : c2] == off
+    assert log[c2 - len(off) : c2] == off
     assert d0 == c2 + 1
-    assert log[d0 + 1 : d0 + 4] == on
+    assert log[d0 + 1 : d0 + 1 + len(on)] == on
     # no other statement runs with the planner settings changed
-    assert sum(s.startswith("SET LOCAL") for s in log) == 6
+    assert sum(s.startswith("SET LOCAL") for s in log) == 2 * len(off)

@@ -160,7 +160,7 @@ class _Cur:
         pass
 
     def fetchone(self):
-        return ("on", "on", "on")  # the planner settings read
+        return ("on", "on", "on", "on")  # the planner settings read
 
     @contextlib.contextmanager
     def copy(self, *a, **k):
