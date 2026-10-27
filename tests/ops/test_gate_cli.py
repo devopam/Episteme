@@ -840,7 +840,15 @@ def test_run_sigterm_ends_a_descendant_that_outlives_the_stage(tmp_path, monkeyp
     rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
     assert rc == 143
     gpid = int(pidfile.read_text())
+
+    def running(pid):
+        # A zombie (ended, not reaped by a PID 1 that does not reap) counts as ended.
+        try:
+            return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+
     deadline = time.monotonic() + 10
-    while psutil.pid_exists(gpid) and time.monotonic() < deadline:
+    while running(gpid) and time.monotonic() < deadline:
         time.sleep(0.2)
-    assert not psutil.pid_exists(gpid)
+    assert not running(gpid)
