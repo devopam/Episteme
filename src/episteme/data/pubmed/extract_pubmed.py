@@ -421,7 +421,15 @@ def process_one(
                 )
             finally:
                 gen.close()
-            graph_info = gw.close()
+            try:
+                graph_info = gw.close()
+            except BaseException:
+                # write_rows has already renamed the shard to its final name,
+                # and load_articles globs shards regardless of markers: never
+                # leave a shard without its graph files.
+                for p in write_info.get("paths", []):
+                    Path(p).unlink(missing_ok=True)
+                raise
 
         elapsed = round(time.time() - t0, 4)
         stats = {

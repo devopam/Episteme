@@ -63,11 +63,21 @@ def _guidelines(raw: Path) -> Path:
 def _manuscript(raw: Path) -> Path:
     p = raw / "units.tar.gz"
     with tarfile.open(p, "w:gz") as tar:
-        for i in range(N):
+        for i in range(N - 1):
             body = f"{_BODY} {i}".encode()
             info = tarfile.TarInfo(name=f"PMC{1000 + i}.txt")
             info.size = len(body)
             tar.addfile(info, io.BytesIO(body))
+        # One .xml member: runs the NamedTemporaryFile branch of the reader.
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><article><front><article-meta>'
+            '<article-id pub-id-type="pmcid">PMC2000</article-id>'
+            "<title-group><article-title>T</article-title></title-group>"
+            f"</article-meta></front><body><p>{_BODY}</p></body></article>"
+        ).encode()
+        info = tarfile.TarInfo(name="PMC2000.xml")
+        info.size = len(xml)
+        tar.addfile(info, io.BytesIO(xml))
     return p
 
 
@@ -134,13 +144,17 @@ class _Counted:
         self.real = real
         self.produced = 0
         self.fail_after = fail_after
+        self.closed = False
 
     def __call__(self, *a, **kw):
-        for item in self.real(*a, **kw):
-            if self.fail_after is not None and self.produced >= self.fail_after:
-                raise RuntimeError("boom mid-stream")
-            self.produced += 1
-            yield item
+        try:
+            for item in self.real(*a, **kw):
+                if self.fail_after is not None and self.produced >= self.fail_after:
+                    raise RuntimeError("boom mid-stream")
+                self.produced += 1
+                yield item
+        finally:
+            self.closed = True
 
 
 def _setup(tmp_path, monkeypatch, case, *, fail_after=None):
@@ -196,4 +210,45 @@ def test_midstream_failure_records_rows_produced_before_the_error(tmp_path, monk
     assert "boom mid-stream" in res["error"]
     marker = json.loads(failed_marker_path(processed, source, res["source_file"]).read_text())
     assert marker["stats"] == {"n_rows_partial": 2}
+    assert not success_marker_path(processed, source, res["source_file"]).exists()
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_writer_failure_closes_the_reader_and_leaves_no_tmp(tmp_path, monkeypatch, case):
+    mod, source, raw, path, counted = _setup(tmp_path, monkeypatch, case)
+
+    def failing_write_rows(rows, *args, **kwargs):
+        next(rows)
+        next(rows)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mod, "write_rows", failing_write_rows)
+    processed = tmp_path / "processed"
+    res = mod.process_one(path, raw_dir=raw, processed_dir=processed, force=False)
+
+    assert res["ok"] is False
+    assert "disk full" in res["error"]
+    assert counted.closed is True
+    assert list(processed.rglob("*.tmp")) == []
+    marker = json.loads(failed_marker_path(processed, source, res["source_file"]).read_text())
+    assert marker["stats"] == {"n_rows_partial": 2}
+
+
+def test_pubmed_graph_close_failure_removes_the_final_shard(tmp_path, monkeypatch):
+    from episteme.data import graph_files
+
+    case = next(c for c in CASES if c[0] == "pubmed")
+    mod, source, raw, path, _counted = _setup(tmp_path, monkeypatch, case)
+
+    def failing_close(self):
+        self.abort()
+        raise OSError("graph close failed")
+
+    monkeypatch.setattr(graph_files.GraphFileWriter, "close", failing_close)
+    processed = tmp_path / "processed"
+    res = mod.process_one(path, raw_dir=raw, processed_dir=processed, force=False)
+
+    assert res["ok"] is False
+    staging = processed / "staging" / source
+    assert not staging.exists() or list(staging.iterdir()) == []
     assert not success_marker_path(processed, source, res["source_file"]).exists()
