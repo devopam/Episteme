@@ -197,10 +197,15 @@ def test_id_collision_across_source_files_is_replaced(pg_conn, tmp_path, monkeyp
     write_b = write_rows(
         [row_b], tmp_path / "02_processed", source="chembl", source_file="chembl_36.db"
     )
-    postgres_loader.load_source_file(
+    res_b = postgres_loader.load_source_file(
         pg_conn, source="chembl", staging_path=Path(write_b["paths"][0]), run_id="rB"
     )
     pg_conn.commit()
+    # counts unchanged by the ordered id probes: the old article row (d0) and
+    # its body row (c1, via the linkage) are each deleted exactly once
+    assert res_b["deleted"] == 1
+    assert res_b["body_deleted"] == 1
+    assert res_b["event"] == "load_replace"
 
     with pg_conn.cursor() as cur:
         # exactly ONE row for this id -- the old chembl_35.db row must be gone
@@ -439,3 +444,95 @@ def test_two_loads_in_one_transaction(pg_conn, tmp_path, monkeypatch):
     with pg_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM episteme.articles WHERE source = 'chembl'")
         assert cur.fetchone()[0] == 4
+
+
+def test_id_probes_plan_as_ordered_index_scans(pg_conn):
+    """Inside a load-like transaction the (c2) and (d0) statements, run under
+    _ordered_index_probes, plan as index scans: no Hash Semi Join and no Seq
+    Scan of the big partitions. The settings are restored afterwards."""
+    import re
+
+    from episteme.data import postgres_loader
+
+    _setup_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE INDEX IF NOT EXISTS articles_id_idx ON episteme.articles (id)")
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file) "
+            "SELECT 'chembl:C' || g, 'chembl', 'F_' || (g % 7) FROM generate_series(1, 5000) g"
+        )
+        cur.execute(
+            "INSERT INTO episteme.article_body (article_id, source, text) "
+            "SELECT 'chembl:C' || g, 'chembl', 'b' FROM generate_series(1, 5000) g"
+        )
+        cur.execute("ANALYZE episteme.articles")
+        cur.execute("ANALYZE episteme.article_body")
+    pg_conn.commit()
+
+    c2 = (
+        "EXPLAIN DELETE FROM episteme.article_body "
+        "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)"
+    )
+    d0 = (
+        "EXPLAIN DELETE FROM episteme.articles "
+        "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
+        "AND NOT (source_file = ANY(%s))"
+    )
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE pg_temp._load_ids_raw (id text) ON COMMIT DROP")
+        cur.execute(
+            "INSERT INTO pg_temp._load_ids_raw SELECT 'chembl:C' || g "
+            "FROM generate_series(1, 4000, 4) g"
+        )
+        cur.execute(
+            "CREATE TEMP TABLE pg_temp._load_ids ON COMMIT DROP AS "
+            "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id"
+        )
+        cur.execute("ANALYZE pg_temp._load_ids")
+        cur.execute("SELECT current_setting('enable_hashjoin')")
+        before = cur.fetchone()[0]
+        with postgres_loader._ordered_index_probes(cur):
+            plans = []
+            for sql, params in ((c2, ("chembl",)), (d0, ("chembl", ["F_x"]))):
+                cur.execute(sql.replace("EXPLAIN ", "EXPLAIN (FORMAT JSON) ", 1), params)
+                plans.append(cur.fetchone()[0][0]["Plan"])
+        cur.execute("SELECT current_setting('enable_hashjoin')")
+        assert cur.fetchone()[0] == before
+    pg_conn.rollback()
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    def scans_load_ids(node):
+        # The outer side must read _load_ids in its stored (sorted) order:
+        # only order-keeping nodes may sit between the loop and that scan.
+        if node["Node Type"] == "Seq Scan":
+            return node.get("Relation Name") == "_load_ids"
+        if node["Node Type"] in ("Unique", "Sort", "Materialize") and node.get("Plans"):
+            return scans_load_ids(node["Plans"][0])
+        return False
+
+    for target, plan in zip(("article_body", "articles"), plans, strict=True):
+        every = list(nodes(plan))
+        types = {n["Node Type"] for n in every}
+        # Review (Greptile, Sourcery): an "Index" string is not enough; a
+        # bitmap plan, a hash join or an order-losing aggregate would pass it.
+        assert not types & {"Hash Join", "Hash", "Bitmap Heap Scan", "HashAggregate"}, types
+        hashed = [
+            n for n in every if n["Node Type"] == "Aggregate" and n.get("Strategy") == "Hashed"
+        ]
+        assert not hashed, hashed  # a hashed de-duplication loses the sorted order
+        loops = [n for n in every if n["Node Type"] == "Nested Loop"]
+        assert loops, types
+        outer, inner = loops[0]["Plans"][0], loops[0]["Plans"][1]
+        assert scans_load_ids(outer), outer
+        inner_scans = [
+            n for n in nodes(inner) if n["Node Type"] in ("Index Scan", "Index Only Scan")
+        ]
+        assert inner_scans, inner
+        assert all(re.match(rf"{target}(_|$)", n["Relation Name"]) for n in inner_scans), (
+            inner_scans
+        )
+        assert all(n.get("Index Cond") for n in inner_scans), inner_scans

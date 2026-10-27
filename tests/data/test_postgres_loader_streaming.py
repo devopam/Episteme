@@ -84,3 +84,110 @@ def test_parquet_readers_close_the_file(tmp_path, monkeypatch, reader):
     list(getattr(postgres_loader, reader)(shard, "parquet", 3))  # fully consumed
     assert len(opened) == 2
     assert all(pf.closed_by_reader for pf in opened)
+
+
+class _FakeCopy:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write_row(self, row):
+        pass
+
+
+class _FakeCur:
+    """Records every statement; answers the planner-setting read with 'on'."""
+
+    def __init__(self, log):
+        self.log = log
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.log.append(" ".join(sql.split()))
+
+    def fetchone(self):
+        return ("on", "on", "on", "on", True)
+
+    def copy(self, sql):
+        self.log.append(" ".join(sql.split()))
+        return _FakeCopy()
+
+
+class _FakeConn:
+    def __init__(self):
+        self.log = []
+
+    def cursor(self):
+        return _FakeCur(self.log)
+
+
+def _load_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(postgres_loader.audit_trail, "record", lambda *a, **k: None)
+    conn = _FakeConn()
+    postgres_loader.load_source_file(
+        conn, source="chembl", staging_path=_shard(tmp_path, 4), run_id="r"
+    )
+    return conn.log
+
+
+def test_load_ids_table_is_sorted_and_distinct(tmp_path, monkeypatch):
+    log = _load_log(tmp_path, monkeypatch)
+    create = [s for s in log if s.startswith("CREATE TEMP TABLE pg_temp._load_ids ")]
+    assert len(create) == 1
+    assert "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id" in create[0]
+    i_create = log.index(create[0])
+    # the COPY fills the raw table, the sorted table is built from it, then ANALYZEd
+    assert any(s.startswith("COPY pg_temp._load_ids_raw") for s in log[:i_create])
+    assert "DROP TABLE pg_temp._load_ids_raw" in log[i_create + 1 :]
+    assert "ANALYZE pg_temp._load_ids" in log[i_create + 1 :]
+
+
+def test_planner_settings_wrap_only_the_two_id_probes(tmp_path, monkeypatch):
+    log = _load_log(tmp_path, monkeypatch)
+    off = ["SET LOCAL enable_hashjoin = off", "SET LOCAL enable_mergejoin = off"]
+    off += ["SET LOCAL enable_seqscan = off", "SET LOCAL enable_hashagg = off"]
+    on = [s.replace("= off", "= 'on'") for s in off]
+    c2 = next(
+        i for i, s in enumerate(log) if "article_id IN (SELECT id FROM pg_temp._load_ids)" in s
+    )
+    d0 = next(
+        i for i, s in enumerate(log) if "id IN (SELECT id FROM pg_temp._load_ids) AND source" in s
+    )
+    # settings off right before (c2); (c2) and (d0) back to back; restored right after (d0)
+    assert log[c2 - len(off) : c2] == off
+    assert d0 == c2 + 1
+    assert log[d0 + 1 : d0 + 1 + len(on)] == on
+    # no other statement runs with the planner settings changed
+    assert sum(s.startswith("SET LOCAL") for s in log) == 2 * len(off)
+
+
+def test_planner_settings_are_left_alone_without_the_id_index(tmp_path, monkeypatch, caplog):
+    # Review (CodeRabbit, PR #93): without articles_id_idx (migration 0004),
+    # forcing the settings would make (d0) a nested loop over a Seq Scan.
+    import logging
+
+    from episteme.data import postgres_loader
+
+    log: list[str] = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            log.append(" ".join(sql.split()))
+
+        def fetchone(self):
+            return ("on", "on", "on", "on", False)
+
+    with caplog.at_level(logging.WARNING, logger=postgres_loader.__name__):
+        with postgres_loader._ordered_index_probes(_Cur()):
+            log.append("PROBE")
+    assert not any(s.startswith("SET LOCAL") for s in log), log
+    assert "PROBE" in log
+    assert "articles_id_idx is missing" in caplog.text

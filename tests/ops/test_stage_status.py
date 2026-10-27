@@ -159,6 +159,9 @@ class _Cur:
     def execute(self, *a, **k):
         pass
 
+    def fetchone(self):
+        return ("on", "on", "on", "on", True)  # the planner settings read
+
     @contextlib.contextmanager
     def copy(self, *a, **k):
         yield type("CP", (), {"write_row": lambda self, r: None})()
