@@ -488,6 +488,7 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
             "CREATE TEMP TABLE pg_temp._load_ids ON COMMIT DROP AS "
             "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id"
         )
+        cur.execute("CREATE UNIQUE INDEX ON pg_temp._load_ids (id)")
         cur.execute("ANALYZE pg_temp._load_ids")
         cur.execute("SELECT current_setting('enable_hashjoin')")
         before = cur.fetchone()[0]
@@ -508,7 +509,7 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
     def scans_load_ids(node):
         # The outer side must read _load_ids in its stored (sorted) order:
         # only order-keeping nodes may sit between the loop and that scan.
-        if node["Node Type"] == "Seq Scan":
+        if node["Node Type"] in ("Seq Scan", "Index Only Scan", "Index Scan"):
             return node.get("Relation Name") == "_load_ids"
         if node["Node Type"] in ("Unique", "Sort", "Materialize") and node.get("Plans"):
             return scans_load_ids(node["Plans"][0])
@@ -520,6 +521,9 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
         # Review (Greptile, Sourcery): an "Index" string is not enough; a
         # bitmap plan, a hash join or an order-losing aggregate would pass it.
         assert not types & {"Hash Join", "Hash", "Bitmap Heap Scan", "HashAggregate"}, types
+        # A node the planner could not avoid under the forced settings is marked
+        # Disabled: that was the quadratic Seq Scan of _load_ids (2026-10-27).
+        assert not [n for n in every if n.get("Disabled")], every
         hashed = [
             n for n in every if n["Node Type"] == "Aggregate" and n.get("Strategy") == "Hashed"
         ]

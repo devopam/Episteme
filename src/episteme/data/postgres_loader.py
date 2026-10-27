@@ -357,6 +357,14 @@ def load_source_file(
             "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id"
         )
         cur.execute("DROP TABLE pg_temp._load_ids_raw")
+        # A unique index on the ids: with stale partition statistics (a part just
+        # loaded, not analyzed yet) the planner can put the partition on the
+        # outer side of the forced nested loop; without this index the inner
+        # side was a Seq Scan of every id per partition row (quadratic; the
+        # pubchem load sample hung 30+ min on (d0), 2026-10-27). With it, both
+        # join orders are index probes. It also tells the planner the ids are
+        # distinct.
+        cur.execute("CREATE UNIQUE INDEX ON pg_temp._load_ids (id)")
         cur.execute("ANALYZE pg_temp._load_ids")
         source_files = sorted(source_file_set)
 
