@@ -4,7 +4,8 @@
 owns the transaction boundary):
 
     1. hash the shard in 1 MiB chunks; COPY its ids into a temp table
-       ``pg_temp._load_ids`` (ON COMMIT DROP); collect its distinct source_file(s)
+       ``pg_temp._load_ids`` (ON COMMIT DROP; distinct, sorted by id); collect its
+       distinct source_file(s)
     2. DELETE FROM episteme.article_body for every article of the replaced
        source_file(s) (via the articles.id linkage), then for the shard's own ids
     3. DELETE FROM episteme.articles: an incoming id under another source_file,
@@ -37,7 +38,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -250,6 +251,35 @@ def _rows_committed() -> int:
         return _PROCESS_ROWS[0]
 
 
+_PLANNER_SETTINGS = ("enable_hashjoin", "enable_mergejoin", "enable_seqscan")
+
+
+@contextmanager
+def _ordered_index_probes(cur) -> Iterator[None]:
+    """Force an index nested loop for the id-keyed deletes, then restore.
+
+    Measured on the pubchem load (2026-10-27, partition ~10M rows, ~886k ids per
+    part): with hash joins allowed both id deletes planned as a Hash Semi Join
+    over a full Seq Scan of the partition (287 s and 267 s per part, 520k+ pages
+    read from a HDD, growing with every part). With the ids sorted and the
+    planner forced to an index nested loop they took 41 s and 10 s (about 1-2k
+    pages). Sorted ids make each index page get read about once, so the cost is
+    ids x index depth, not the partition size. The settings are SET LOCAL and are
+    put back to their earlier values right after the two statements, so every
+    other statement plans as before. After an error the transaction is aborted
+    and rolls the SET LOCALs back, so nothing is restored then.
+    """
+    cur.execute("SELECT " + ", ".join(f"current_setting('{n}')" for n in _PLANNER_SETTINGS))
+    saved = cur.fetchone()
+    for name in _PLANNER_SETTINGS:
+        cur.execute(f"SET LOCAL {name} = off")
+    yield
+    for name, value in zip(_PLANNER_SETTINGS, saved, strict=True):
+        if value not in ("on", "off"):  # booleans only; never format anything else
+            raise ValueError(f"unexpected {name} value {value!r}")
+        cur.execute(f"SET LOCAL {name} = '{value}'")
+
+
 def load_source_file(
     conn,
     *,
@@ -289,14 +319,23 @@ def load_source_file(
         # a ~570k-id article_body delete run for 15+ minutes. Joins and
         # IN (SELECT ...) against an ANALYZEd table plan as hash/index lookups.
         # DROP first so two loads in one transaction do not collide.
+        # The ids are then rebuilt DISTINCT and SORTED into _load_ids (physical
+        # order = id order), so the two id probes below can walk the indexes in
+        # order (see _ordered_index_probes).
+        cur.execute("DROP TABLE IF EXISTS pg_temp._load_ids_raw")
         cur.execute("DROP TABLE IF EXISTS pg_temp._load_ids")
-        cur.execute("CREATE TEMP TABLE pg_temp._load_ids (id text) ON COMMIT DROP")
+        cur.execute("CREATE TEMP TABLE pg_temp._load_ids_raw (id text) ON COMMIT DROP")
         source_file_set: set[str] = set()
-        with cur.copy("COPY pg_temp._load_ids (id) FROM STDIN") as cp:
+        with cur.copy("COPY pg_temp._load_ids_raw (id) FROM STDIN") as cp:
             for ids, sfs in _iter_id_batches(staging_path, fmt, batch_size):
                 for i in ids:
                     cp.write_row((i,))
                 source_file_set.update(sfs)
+        cur.execute(
+            "CREATE TEMP TABLE pg_temp._load_ids ON COMMIT DROP AS "
+            "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id"
+        )
+        cur.execute("DROP TABLE pg_temp._load_ids_raw")
         cur.execute("ANALYZE pg_temp._load_ids")
         source_files = sorted(source_file_set)
 
@@ -323,31 +362,33 @@ def load_source_file(
                 (source, source_files, source),
             )
             body_deleted = cur.rowcount
-            cur.execute(
-                "DELETE FROM episteme.article_body "
-                "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)",
-                (source,),
-            )
-            body_deleted += cur.rowcount
+            # (c2) and (d0) probe by id: force the ordered index plan (see helper).
+            with _ordered_index_probes(cur):
+                cur.execute(
+                    "DELETE FROM episteme.article_body "
+                    "WHERE source = %s AND article_id IN (SELECT id FROM pg_temp._load_ids)",
+                    (source,),
+                )
+                body_deleted += cur.rowcount
 
-            # (d0) id-collision guard: a periodic full-dump re-release (SP4's
-            # normal re-run shape) may reuse a native id under a DIFFERENT
-            # source_file than the one that first wrote it. Delete any such row
-            # here. The NOT(...) predicate keeps this delete disjoint from the
-            # per-source_file loop below (that loop's predicate is
-            # source_file = ANY([sf]) -- the exact complement of this one) --
-            # neither delete can ever match a row the other matches, so
-            # per_file_deleted[sf]'s accounting in the loop below stays exact
-            # with no double-counting. Scoped by source, same as every other
-            # delete here (source_file basenames are not globally unique across
-            # sources).
-            cur.execute(
-                "DELETE FROM episteme.articles "
-                "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
-                "AND NOT (source_file = ANY(%s))",
-                (source, source_files),
-            )
-            deleted += cur.rowcount
+                # (d0) id-collision guard: a periodic full-dump re-release (SP4's
+                # normal re-run shape) may reuse a native id under a DIFFERENT
+                # source_file than the one that first wrote it. Delete any such row
+                # here. The NOT(...) predicate keeps this delete disjoint from the
+                # per-source_file loop below (that loop's predicate is
+                # source_file = ANY([sf]) -- the exact complement of this one) --
+                # neither delete can ever match a row the other matches, so
+                # per_file_deleted[sf]'s accounting in the loop below stays exact
+                # with no double-counting. Scoped by source, same as every other
+                # delete here (source_file basenames are not globally unique across
+                # sources).
+                cur.execute(
+                    "DELETE FROM episteme.articles "
+                    "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
+                    "AND NOT (source_file = ANY(%s))",
+                    (source, source_files),
+                )
+                deleted += cur.rowcount
 
             # (d) articles, per source_file, so _lineage gets per-file counts.
             # scoped by source: source_file basenames are not globally unique across sources
