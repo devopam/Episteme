@@ -445,7 +445,7 @@ def test_run_stops_the_child_on_an_unexpected_error(tmp_path, monkeypatch):
         started.append(p)
         return p
 
-    def boom(_proc):
+    def boom(_proc, _known=None):
         raise RuntimeError("poll failed")
 
     monkeypatch.setattr(subprocess, "Popen", popen)
@@ -852,3 +852,23 @@ def test_run_sigterm_ends_a_descendant_that_outlives_the_stage(tmp_path, monkeyp
     while running(gpid) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not running(gpid)
+
+
+def test_run_maps_a_signal_exit_to_the_shell_stop_code(tmp_path, monkeypatch):
+    # Review (CodeRabbit): a stage killed by SIGTERM gives Popen rc -15; the
+    # runner knows only 130/143 as a stop, so gate run returns 143.
+    class _Child:
+        pid = os.getpid()
+
+        def wait(self, timeout=None):
+            return -15
+
+        def poll(self):
+            return -15
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd: _Child())
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", "anything"])
+    assert rc == 143
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert data["rc"] == 143 and data["child_rc"] == -15 and data["interrupted"] is True

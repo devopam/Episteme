@@ -512,8 +512,10 @@ def _connect():
         yield conn
 
 
-def _tree_rss(proc: Any) -> int:
-    """Summed RSS (bytes) of ``proc`` and all its descendants, now."""
+def _tree_rss(proc: Any, known: dict[int, Any] | None = None) -> int:
+    """Summed RSS (bytes) of ``proc`` and all its descendants, now. Each
+    descendant seen is also added to ``known`` (pid -> psutil.Process), so a
+    stop can still end one whose parent has already exited."""
     import psutil
 
     total = 0
@@ -521,6 +523,9 @@ def _tree_rss(proc: Any) -> int:
         procs = [proc, *proc.children(recursive=True)]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return 0
+    if known is not None:
+        for p in procs[1:]:
+            known.setdefault(p.pid, p)
     for p in procs:
         try:
             total += p.memory_info().rss
@@ -549,9 +554,10 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
         child.wait(timeout=5)
 
 
-# Exit codes of a stage that a stop ended: 130/143, the negative signal numbers
-# a POSIX Popen reports, and Windows STATUS_CONTROL_C_EXIT.
-_STOP_RCS = frozenset({130, 143, -2, -15, 0xC000013A})
+# Exit codes of a stage that a stop ended -> the shell stop code the runner
+# knows (130 Ctrl-C, 143 SIGTERM): the codes themselves, the negative signal
+# numbers a POSIX Popen reports, and Windows STATUS_CONTROL_C_EXIT.
+_STOP_RCS = {130: 130, 143: 143, -2: 130, -15: 143, 0xC000013A: 130}
 
 
 def _end_survivors(procs: list[Any]) -> None:
@@ -600,7 +606,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     peak = 0
     interrupted = False
     term = {"seen": False}
-    seen_tree: list[Any] = []
+    known: dict[int, Any] = {}  # every descendant seen while the stage ran
 
     def _on_term(signum: int, frame: Any) -> None:
         # run_pipeline.sh forwards a stop as SIGTERM (POSIX): take the
@@ -613,7 +619,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         old_term = signal.signal(signal.SIGTERM, _on_term)
     try:
         while True:
-            peak = max(peak, _tree_rss(proc))
+            peak = max(peak, _tree_rss(proc, known))
             try:
                 rc = child.wait(timeout=POLL_S)
                 break
@@ -622,20 +628,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         interrupted = True
         rc = 143 if term["seen"] else 130
-        # The descendants now: one that outlives the child is ended below.
-        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-            seen_tree = proc.children(recursive=True)
+        # The descendants now, added to those seen while it ran: one that
+        # outlives the child (or the stage) is ended below.
+        _tree_rss(proc, known)
         # The stage got the same stop: let it end (and clean up) on its own.
         with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt):
             child.wait(timeout=STOP_GRACE_S)
     finally:
         if child.poll() is None:
             _stop_tree(proc, child)
-        elif seen_tree:
-            _end_survivors(seen_tree)
+        if interrupted and known:
+            # On both paths: a descendant can be reparented during the grace
+            # wait and so be missing from _stop_tree's own lookup.
+            _end_survivors(list(known.values()))
         if old_term is not None:
             with contextlib.suppress(ValueError):
                 signal.signal(signal.SIGTERM, old_term)
+    raw_rc = rc
+    rc = _STOP_RCS.get(rc, rc)  # a signal exit (-15) reaches the runner as 143
     record = {
         "elapsed_s": round(time.monotonic() - t0, 3),
         "rc": rc,
@@ -644,8 +654,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     }
     # On Windows no signal reaches gate run: the stage ends by the stop file
     # with a stop exit code. That is an interrupted run too.
-    if interrupted or rc in _STOP_RCS:
+    if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if raw_rc != rc:
+        record["child_rc"] = raw_rc
     out = Path(args.record)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2), encoding="utf-8")

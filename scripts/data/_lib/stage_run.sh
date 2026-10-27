@@ -115,8 +115,9 @@ _stage_stop() {
         local tree="$STAGE_TREE" p
         local -a pids=()
         if [ "$_STAGE_FORWARD" = "1" ] && [ "$STAGE_FORWARDED" = "0" ]; then
-            # Once: a second SIGTERM could break the stage's own cleanup.
-            STAGE_FORWARDED=1
+            # Find the tree BEFORE the flag is set: a nested stop during the
+            # lookup then does the whole forward itself (it ends in `exit`),
+            # instead of seeing "forwarded" with no tree stored yet.
             tree="$(_stage_tree "$STAGE_PID")"
             # Only plain decimal PIDs reach kill; the stage itself at least.
             for p in $tree; do
@@ -125,6 +126,8 @@ _stage_stop() {
             [ "${#pids[@]}" -gt 0 ] || pids=("$STAGE_PID")
             tree="${pids[*]}"
             STAGE_TREE="$tree"
+            # Once: a second SIGTERM could break the stage's own cleanup.
+            STAGE_FORWARDED=1
             kill -TERM "${pids[@]}" 2>/dev/null
             log WARN "stop ($1): sent SIGTERM to the stage (PIDs $tree)"
         fi
