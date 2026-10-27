@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import logging
 import threading
 import time
 from collections import Counter
@@ -251,6 +252,8 @@ def _rows_committed() -> int:
         return _PROCESS_ROWS[0]
 
 
+_LOG = logging.getLogger(__name__)
+
 # enable_hashagg too: the IN (SELECT ...) de-duplicates _load_ids, and a hashed
 # Aggregate there loses the sorted order (found by the plan test, PR #93
 # review); without it the planner uses Sort + Unique, which keeps the order.
@@ -272,8 +275,23 @@ def _ordered_index_probes(cur) -> Iterator[None]:
     other statement plans as before. After an error the transaction is aborted
     and rolls the SET LOCALs back, so nothing is restored then.
     """
-    cur.execute("SELECT " + ", ".join(f"current_setting('{n}')" for n in _PLANNER_SETTINGS))
-    saved = cur.fetchone()
+    cur.execute(
+        "SELECT "
+        + ", ".join(f"current_setting('{n}')" for n in _PLANNER_SETTINGS)
+        + ", to_regclass('episteme.articles_id_idx') IS NOT NULL"
+    )
+    *saved, has_id_index = cur.fetchone()
+    if not has_id_index:
+        # Review (CodeRabbit, PR #93): articles_id_idx comes from migration 0004,
+        # not schema.sql. Without it, forcing these settings cannot give an index
+        # probe and would make (d0) a nested loop over a Seq Scan -- far worse
+        # than the default plan. Keep the default planner then, and say why.
+        _LOG.warning(
+            "episteme.articles_id_idx is missing (apply migration 0004): "
+            "the id probes keep the default planner settings and may be slow"
+        )
+        yield
+        return
     for name in _PLANNER_SETTINGS:
         cur.execute(f"SET LOCAL {name} = off")
     yield

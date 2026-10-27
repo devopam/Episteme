@@ -100,7 +100,7 @@ class _Cursor:
         self.rowcount = 0
 
     def fetchone(self):
-        return ("on", "on", "on", "on")  # the planner settings read
+        return ("on", "on", "on", "on", True)  # the planner settings read
 
     def copy(self, sql):
         target = sql.split("(")[0].replace("COPY", "").strip()

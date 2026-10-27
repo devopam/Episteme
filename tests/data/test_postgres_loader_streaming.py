@@ -114,7 +114,7 @@ class _FakeCur:
         self.log.append(" ".join(sql.split()))
 
     def fetchone(self):
-        return ("on", "on", "on", "on")
+        return ("on", "on", "on", "on", True)
 
     def copy(self, sql):
         self.log.append(" ".join(sql.split()))
@@ -167,3 +167,27 @@ def test_planner_settings_wrap_only_the_two_id_probes(tmp_path, monkeypatch):
     assert log[d0 + 1 : d0 + 1 + len(on)] == on
     # no other statement runs with the planner settings changed
     assert sum(s.startswith("SET LOCAL") for s in log) == 2 * len(off)
+
+
+def test_planner_settings_are_left_alone_without_the_id_index(tmp_path, monkeypatch, caplog):
+    # Review (CodeRabbit, PR #93): without articles_id_idx (migration 0004),
+    # forcing the settings would make (d0) a nested loop over a Seq Scan.
+    import logging
+
+    from episteme.data import postgres_loader
+
+    log: list[str] = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            log.append(" ".join(sql.split()))
+
+        def fetchone(self):
+            return ("on", "on", "on", "on", False)
+
+    with caplog.at_level(logging.WARNING, logger=postgres_loader.__name__):
+        with postgres_loader._ordered_index_probes(_Cur()):
+            log.append("PROBE")
+    assert not any(s.startswith("SET LOCAL") for s in log), log
+    assert "PROBE" in log
+    assert "articles_id_idx is missing" in caplog.text
