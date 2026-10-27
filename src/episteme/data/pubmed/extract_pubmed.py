@@ -395,25 +395,47 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
+    n_rows = 0
     counters: Counter[str] = Counter()
     try:
         with GraphFileWriter(processed_dir, SOURCE, basename) as gw:
-            for row, edges, rec_counters in iter_records_from_file(path, source_file=basename):
-                status_counts[str(row.get("extract_status"))] += 1
-                rows.append(row)
-                counters.update(rec_counters)
-                for rel_name, rel_rows in edges.items():
-                    if rel_rows:
-                        gw.add(rel_name, rel_rows)
-            graph_info = gw.close()
 
-        write_info = write_rows(
-            rows, processed_dir, source=SOURCE, source_file=basename, prefer_parquet=True
-        )
+            def _stream_rows():
+                # One pass: each record's graph edges go to the graph writer as
+                # its row passes to the staging writer, so memory stays bounded
+                # by one write batch, not by the file.
+                nonlocal n_rows
+                for row, edges, rec_counters in iter_records_from_file(path, source_file=basename):
+                    status_counts[str(row.get("extract_status"))] += 1
+                    n_rows += 1
+                    counters.update(rec_counters)
+                    for rel_name, rel_rows in edges.items():
+                        if rel_rows:
+                            gw.add(rel_name, rel_rows)
+                    yield row
+                # The last row has passed: publish the graph files NOW, before
+                # write_rows renames the shard into place (it does that only
+                # after this generator ends). load_articles globs shards
+                # regardless of markers, so a shard must never be final
+                # without its graph files, also after a hard kill between the
+                # two. The other order is harmless: graph files without a
+                # shard are not loaded (graph_load reads success markers) and
+                # a re-extract overwrites them.
+                graph_box["info"] = gw.close()
+
+            graph_box: dict[str, Any] = {}
+            gen = _stream_rows()
+            try:
+                write_info = write_rows(
+                    gen, processed_dir, source=SOURCE, source_file=basename, prefer_parquet=True
+                )
+            finally:
+                gen.close()
+            graph_info = graph_box["info"]
+
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
@@ -422,7 +444,7 @@ def process_one(
             "edges_skipped_no_pmid": counters["edges_skipped_no_pmid"],
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         if is_transient(e):
@@ -433,7 +455,7 @@ def process_one(
             basename,
             error_class="parse_error" if "Parse" in type(e).__name__ else "unknown",
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
