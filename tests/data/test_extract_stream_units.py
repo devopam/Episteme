@@ -234,6 +234,62 @@ def test_writer_failure_closes_the_reader_and_leaves_no_tmp(tmp_path, monkeypatc
     assert marker["stats"] == {"n_rows_partial": 2}
 
 
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+def test_real_writer_failure_mid_batch_leaves_no_tmp_and_no_shard(tmp_path, monkeypatch, case):
+    # Review (Greptile): use the REAL writer, so a staging .tmp file exists when
+    # the write fails; it must be removed and no shard must appear.
+    import pyarrow.parquet as pq
+
+    from episteme.data import staging_writer
+
+    mod, source, raw, path, counted = _setup(tmp_path, monkeypatch, case)
+    monkeypatch.setattr(staging_writer, "WRITE_BATCH_BYTES", 1)  # one row per batch
+    calls = {"n": 0}
+    real_write_table = pq.ParquetWriter.write_table
+
+    def failing_write_table(self, table, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full mid-batch")
+        return real_write_table(self, table, *a, **kw)
+
+    monkeypatch.setattr(pq.ParquetWriter, "write_table", failing_write_table)
+    processed = tmp_path / "processed"
+    res = mod.process_one(path, raw_dir=raw, processed_dir=processed, force=False)
+
+    assert res["ok"] is False and "disk full mid-batch" in res["error"]
+    assert calls["n"] == 2  # the first batch was written to the .tmp file
+    assert counted.closed is True
+    assert list(processed.rglob("*.tmp")) == []
+    staging = processed / "staging" / source
+    assert not staging.exists() or list(staging.glob("*.parquet")) == []
+    assert not success_marker_path(processed, source, res["source_file"]).exists()
+
+
+def test_pubmed_graph_files_are_final_before_the_shard(tmp_path, monkeypatch):
+    # Review (Greptile): a hard kill between the two must never leave a final
+    # shard without its graph files, so the graph files are published first.
+    from episteme.data import graph_files
+
+    case = next(c for c in CASES if c[0] == "pubmed")
+    mod, source, raw, path, _counted = _setup(tmp_path, monkeypatch, case)
+    processed = tmp_path / "processed"
+    staging = processed / "staging" / source
+    seen = {}
+    real_close = graph_files.GraphFileWriter.close
+
+    def spying_close(self):
+        seen["shards_at_graph_close"] = sorted(p.name for p in staging.glob("*.parquet"))
+        return real_close(self)
+
+    monkeypatch.setattr(graph_files.GraphFileWriter, "close", spying_close)
+    res = mod.process_one(path, raw_dir=raw, processed_dir=processed, force=False)
+
+    assert res["ok"] is True
+    assert seen["shards_at_graph_close"] == []  # no final shard yet when the graph files close
+    assert list(staging.glob("*.parquet"))  # the shard is final afterwards
+
+
 def test_pubmed_graph_close_failure_removes_the_final_shard(tmp_path, monkeypatch):
     from episteme.data import graph_files
 

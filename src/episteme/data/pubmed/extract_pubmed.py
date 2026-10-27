@@ -413,7 +413,17 @@ def process_one(
                         if rel_rows:
                             gw.add(rel_name, rel_rows)
                     yield row
+                # The last row has passed: publish the graph files NOW, before
+                # write_rows renames the shard into place (it does that only
+                # after this generator ends). load_articles globs shards
+                # regardless of markers, so a shard must never be final
+                # without its graph files, also after a hard kill between the
+                # two. The other order is harmless: graph files without a
+                # shard are not loaded (graph_load reads success markers) and
+                # a re-extract overwrites them.
+                graph_box["info"] = gw.close()
 
+            graph_box: dict[str, Any] = {}
             gen = _stream_rows()
             try:
                 write_info = write_rows(
@@ -421,15 +431,7 @@ def process_one(
                 )
             finally:
                 gen.close()
-            try:
-                graph_info = gw.close()
-            except BaseException:
-                # write_rows has already renamed the shard to its final name,
-                # and load_articles globs shards regardless of markers: never
-                # leave a shard without its graph files.
-                for p in write_info.get("paths", []):
-                    Path(p).unlink(missing_ok=True)
-                raise
+            graph_info = graph_box["info"]
 
         elapsed = round(time.time() - t0, 4)
         stats = {
