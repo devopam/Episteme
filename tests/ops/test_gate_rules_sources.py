@@ -133,7 +133,7 @@ def _pubchem(**over):
         "duplicate_ids": 0,
         "empty_text_pct": 0.0,
         "license_counts": {"public_domain": 30},
-        "extract_status_pct": {"ok": 90.0, "partial": 10.0},
+        "extract_status_pct": {"ok": 99.7416, "partial": 0.2584},  # the first real sample
         "peak_rss_mb": 600,
         "max_rows_per_source_file": 10,
         "max_est_bytes_per_source_file": 5000,
@@ -159,6 +159,8 @@ def test_pubchem_serialize_rules_pass_and_fail():
     assert gate.evaluate(_pubchem(failed_inputs=1), rules)
     assert gate.evaluate(_pubchem(license_counts={"unknown": 3}), rules)
     assert gate.evaluate(_pubchem(extract_status_pct={"ok": 70.0, "partial": 30.0}), rules)
+    # 2.0 %: a missing sibling file (rows without IUPAC, title or mass) fails at once.
+    assert gate.evaluate(_pubchem(extract_status_pct={"ok": 97.5, "partial": 2.5}), rules)
     assert gate.evaluate(_pubchem(peak_rss_mb=2000), rules)
     assert gate.evaluate(_pubchem(max_rows_per_source_file=11), rules)
 
