@@ -544,28 +544,38 @@ def process_one(
 
     t0 = time.time()
     status_counts: Counter[str] = Counter()
-    rows: list[dict[str, Any]] = []
-    try:
+    n_rows = 0
+
+    def _stream_rows():
+        # Count while streaming: the writer pulls one row at a time, so memory
+        # stays bounded by one write batch, not by the unit.
+        nonlocal n_rows
         for row in iter_rows_from_file(path, source_file=basename):
             status_counts[str(row.get("extract_status"))] += 1
-            rows.append(row)
+            n_rows += 1
+            yield row
 
-        write_info = write_rows(
-            rows,
-            processed_dir,
-            source=SOURCE,
-            source_file=basename,
-            prefer_parquet=True,
-        )
+    try:
+        gen = _stream_rows()
+        try:
+            write_info = write_rows(
+                gen,
+                processed_dir,
+                source=SOURCE,
+                source_file=basename,
+                prefer_parquet=True,
+            )
+        finally:
+            gen.close()
         elapsed = round(time.time() - t0, 4)
         stats = {
-            "n_rows": len(rows),
+            "n_rows": n_rows,
             "extract_status_counts": dict(status_counts),
             "elapsed_sec": elapsed,
             "write": write_info,
         }
         mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, len(rows))
+        _best_effort_audit(basename, n_rows)
         return {"source_file": basename, "skipped": False, "ok": True, **stats}
     except Exception as e:  # noqa: BLE001
         if is_transient(e):
@@ -577,7 +587,7 @@ def process_one(
             basename,
             error_class="parse_error" if ("JSON" in cls or "Decode" in cls) else "unknown",
             message=str(e),
-            stats={"n_rows_partial": len(rows)},
+            stats={"n_rows_partial": n_rows},
             exc=e,
         )
         return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
