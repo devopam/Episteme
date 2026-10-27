@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -492,6 +493,9 @@ def pass_valid(source: str, stage: str, processed_root: Path) -> tuple[bool, str
 # ("ok", "not gated", "no pass", "code changed", "rules changed") on stdout.
 
 POLL_S = 0.5
+# After a stop, `gate run` waits this long for the stage to end on its own (it
+# got the same stop) before it ends the stage's process tree.
+STOP_GRACE_S = 30.0
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "data" / "db" / "migrations"
 
 
@@ -508,8 +512,10 @@ def _connect():
         yield conn
 
 
-def _tree_rss(proc: Any) -> int:
-    """Summed RSS (bytes) of ``proc`` and all its descendants, now."""
+def _tree_rss(proc: Any, known: dict[int, Any] | None = None) -> int:
+    """Summed RSS (bytes) of ``proc`` and all its descendants, now. Each
+    descendant seen is also added to ``known`` (pid -> psutil.Process), so a
+    stop can still end one whose parent has already exited."""
     import psutil
 
     total = 0
@@ -517,6 +523,9 @@ def _tree_rss(proc: Any) -> int:
         procs = [proc, *proc.children(recursive=True)]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return 0
+    if known is not None:
+        for p in procs[1:]:
+            known.setdefault(p.pid, p)
     for p in procs:
         try:
             total += p.memory_info().rss
@@ -543,6 +552,26 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
             p.kill()
     with contextlib.suppress(Exception):
         child.wait(timeout=5)
+
+
+# Exit codes of a stage that a stop ended -> the shell stop code the runner
+# knows (130 Ctrl-C, 143 SIGTERM): the codes themselves, the negative signal
+# numbers a POSIX Popen reports, and Windows STATUS_CONTROL_C_EXIT.
+_STOP_RCS = {130: 130, 143: 143, -2: 130, -15: 143, 0xC000013A: 130}
+
+
+def _end_survivors(procs: list[Any]) -> None:
+    """Terminate, then kill, the processes in ``procs`` that still run."""
+    import psutil
+
+    alive = [p for p in procs if p.is_running()]
+    for p in alive:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.terminate()
+    _gone, left = psutil.wait_procs(alive, timeout=5)
+    for p in left:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.kill()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -576,9 +605,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     proc = psutil.Process(child.pid)
     peak = 0
     interrupted = False
+    term = {"seen": False}
+    known: dict[int, Any] = {}  # every descendant seen while the stage ran
+
+    def _on_term(signum: int, frame: Any) -> None:
+        # run_pipeline.sh forwards a stop as SIGTERM (POSIX): take the
+        # KeyboardInterrupt path, so the record is written (rc 143).
+        term["seen"] = True
+        raise KeyboardInterrupt
+
+    old_term: Any = None
+    with contextlib.suppress(ValueError):  # not the main thread: no handler
+        old_term = signal.signal(signal.SIGTERM, _on_term)
     try:
         while True:
-            peak = max(peak, _tree_rss(proc))
+            peak = max(peak, _tree_rss(proc, known))
             try:
                 rc = child.wait(timeout=POLL_S)
                 break
@@ -586,18 +627,37 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 continue
     except KeyboardInterrupt:
         interrupted = True
-        rc = 130
+        rc = 143 if term["seen"] else 130
+        # The descendants now, added to those seen while it ran: one that
+        # outlives the child (or the stage) is ended below.
+        _tree_rss(proc, known)
+        # The stage got the same stop: let it end (and clean up) on its own.
+        with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt):
+            child.wait(timeout=STOP_GRACE_S)
     finally:
         if child.poll() is None:
             _stop_tree(proc, child)
+        if interrupted and known:
+            # On both paths: a descendant can be reparented during the grace
+            # wait and so be missing from _stop_tree's own lookup.
+            _end_survivors(list(known.values()))
+        if old_term is not None:
+            with contextlib.suppress(ValueError):
+                signal.signal(signal.SIGTERM, old_term)
+    raw_rc = rc
+    rc = _STOP_RCS.get(rc, rc)  # a signal exit (-15) reaches the runner as 143
     record = {
         "elapsed_s": round(time.monotonic() - t0, 3),
         "rc": rc,
         "peak_rss_mb": round(peak / (1024 * 1024), 1),
         **hashes,
     }
-    if interrupted:
+    # On Windows no signal reaches gate run: the stage ends by the stop file
+    # with a stop exit code. That is an interrupted run too.
+    if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if raw_rc != rc:
+        record["child_rc"] = raw_rc
     out = Path(args.record)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, indent=2), encoding="utf-8")

@@ -2,6 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/_lib/common.sh"
+. "$HERE/_lib/stage_run.sh"
 load_dotenv
 # require_env EPISTEME_ACTOR is deferred to *after* argument validation (M5) so a
 # no-arg invocation prints usage() rather than a "missing env var" error.
@@ -391,6 +392,19 @@ RUN_DIR="$("$PY" -m episteme.ops.status run-dir --run-id "$RUN_ID" 2>/dev/null)"
 RUN_DIR="${RUN_DIR%$'\r'}"  # a Windows Python can write CRLF to a pipe
 [ -n "$RUN_DIR" ] || log WARN "status: could not resolve the run folder; EPISTEME_RUN_DIR is empty (no failed_files.txt in a run folder for this run)"
 export EPISTEME_RUN_DIR="$RUN_DIR"
+# The stop-request file: on INT/TERM the runner writes it, and the stage's
+# parent watchdog stops the stage (bash cannot signal a native Windows Python).
+# Without a run folder it goes to the temp folder, so a stop still reaches the
+# stage. Python reads the path: on Git Bash give it the Windows form.
+if [ -n "$RUN_DIR" ]; then
+    EPISTEME_STOP_FILE="$RUN_DIR/stop.request"
+else
+    EPISTEME_STOP_FILE="${TMPDIR:-/tmp}/episteme-$RUN_ID.stop.request"
+    if command -v cygpath >/dev/null 2>&1; then
+        EPISTEME_STOP_FILE="$(cygpath -m "$EPISTEME_STOP_FILE")"
+    fi
+fi
+export EPISTEME_STOP_FILE
 
 # The stage lock (operating standard spec 6.1): download -> the download lock;
 # every stage that writes the DB or 02_processed -> the heavy lock. A single
@@ -479,6 +493,8 @@ BULK_NOTE=""    # " (bulk index drop)" or " (bulk index rebuild)" while that ste
 BULK_PENDING=0
 _on_exit() {
     local rc=$?
+    # A stop now must not cut the handler short (end state, run_end, lock).
+    stage_hold_stops
     trap - EXIT
     local rrc=0
     # A signal during the drop: the drop may have finished. Rebuild what is
@@ -533,10 +549,12 @@ _on_exit() {
     exit "$rrc"
 }
 trap _on_exit EXIT
-# A signal ends the runner through the EXIT handler, after the stage (or the
-# lock acquire it waits on) exits.
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# A signal ends the runner through the EXIT handler (exit 130 or 143). During a
+# stage (stage_exec) the trap first writes $EPISTEME_STOP_FILE, which stops the
+# stage, and waits for the stage to end: the end state, run_end and the lock
+# release come after it. Outside a stage the trap exits after the foreground
+# command (such as a lock acquire) ends. See _lib/stage_run.sh.
+stage_install_stop_traps
 
 _run_end() { # REASON (empty: a clean end). DR-1: a dry run writes no run_end.
     [ "${EPISTEME_DRY_RUN:-0}" = "1" ] && return 0
@@ -581,10 +599,11 @@ run_stage() {
         # hashes the stage code and the rules first: the pass carries these
         # hashes, so a code change during the run cannot be certified.
         [ "$1" != "bash" ] || shift
-        "$PY" -m episteme.ops.gate run --record "$SAMPLE_RECORD" --source "$SOURCE" --stage "$name" \
+        stage_exec "$PY" -m episteme.ops.gate run --record "$SAMPLE_RECORD" --source "$SOURCE" --stage "$name" \
             -- "$NATIVE_BASH" "$@" || rc=$?
     else
-        "$@" || rc=$?
+        # In the background (stage_run.sh): a stop reaches the stage at once.
+        stage_exec "$@" || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         local reason state unit_args=()
@@ -779,8 +798,9 @@ _bulk_rebuild() {
     BULK_PENDING=0
     log INFO "bulk: rebuilding the secondary indexes (group $BULK_GROUP)"
     # The rebuild always waits, also under --no-wait: a refused rebuild would
-    # leave the secondary indexes dropped.
-    EPISTEME_NO_WAIT='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
+    # leave the secondary indexes dropped. A stop request of the stage must not
+    # stop the rebuild that runs after it (from the EXIT handler).
+    EPISTEME_NO_WAIT='' EPISTEME_STOP_FILE='' bash "$HERE/db/bulk_load_indexes.sh" rebuild
 }
 if [ "$BULK" = "1" ]; then
     log INFO "bulk: dropping the secondary indexes (group $BULK_GROUP)"

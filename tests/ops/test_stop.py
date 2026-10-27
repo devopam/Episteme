@@ -408,3 +408,259 @@ def test_watchdog_explicit_parent_gone_at_start_exits(monkeypatch):
     t = stop.start_parent_watchdog(lambda: None, interval=0.01, parent_pid=99)
     t.join(5)
     assert codes == [143]
+
+
+# --- the stop file (run_pipeline.sh writes it on INT/TERM) ---------------------
+
+
+def test_stop_file_runs_the_sigterm_handler_in_the_main_thread(monkeypatch, tmp_path):
+    # Windows: bash cannot signal a native Python, so the runner writes a file.
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    old = signal.signal(signal.SIGTERM, stop._on_term)
+    codes = _no_exit(monkeypatch)
+    alive = FakeProc(99)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (alive, 99))
+    request = tmp_path / "run" / "stop.request"
+    done = threading.Event()
+    t = None
+    try:
+        t = stop.start_parent_watchdog(
+            lambda: None, interval=30.0, stop=done, stop_file=request, stop_poll=0.05
+        )
+        t0 = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            request.parent.mkdir()
+            request.write_text("TERM\n", encoding="utf-8")
+            while time.monotonic() - t0 < 3:
+                time.sleep(0.01)
+        assert time.monotonic() - t0 < 3
+        assert stop._TERM_SEEN is True
+        assert threading.current_thread() is threading.main_thread()
+        assert codes == []  # no os._exit on the stop-file path
+    finally:
+        done.set()
+        if t is not None:
+            t.join(5)
+        signal.signal(signal.SIGTERM, old)
+
+
+def test_stop_file_is_delivered_once(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    codes = _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("INT\n", encoding="utf-8")
+    done = threading.Event()
+    t = stop.start_parent_watchdog(
+        lambda: None, interval=30.0, stop=done, stop_file=request, stop_poll=0.01
+    )
+    time.sleep(0.3)
+    done.set()
+    t.join(5)
+    assert calls == [(signal.SIGTERM,)]
+    assert codes == []
+
+
+def test_stop_file_cancels_the_statement_after_a_grace_period(monkeypatch, tmp_path):
+    # A main thread inside a long statement sees the interrupt only when the
+    # C call returns: the watchdog then cancels the statement.
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: None)
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("TERM\n", encoding="utf-8")
+    cancels = []
+    done = threading.Event()
+    t = stop.start_parent_watchdog(
+        lambda: cancels.append(1),
+        interval=30.0,
+        stop=done,
+        stop_file=request,
+        stop_poll=0.01,
+        cancel_after=0.1,
+    )
+    deadline = time.monotonic() + 3
+    while not cancels and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    done.set()
+    t.join(5)
+    assert cancels == [1]
+
+
+def test_stop_file_is_polled_without_a_parent_to_watch(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    _fake_psutil(monkeypatch, {})
+    monkeypatch.setattr(stop, "_runner_pid", lambda: None)
+    monkeypatch.setattr(stop, "_ancestor_to_watch", lambda: None)
+    codes = _no_exit(monkeypatch)
+    request = tmp_path / "stop.request"
+    done = threading.Event()
+    t = stop.start_parent_watchdog(
+        lambda: None, interval=30.0, stop=done, stop_file=request, stop_poll=0.01
+    )
+    request.write_text("TERM\n", encoding="utf-8")
+    deadline = time.monotonic() + 3
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    done.set()
+    t.join(5)
+    assert calls == [(signal.SIGTERM,)]
+    assert codes == []
+
+
+def test_stop_file_comes_from_settings(monkeypatch, tmp_path):
+    import episteme.config as cfg
+
+    path = tmp_path / "stop.request"
+    monkeypatch.setattr(cfg, "get_settings", lambda: replace(get_settings(), stop_file=path))
+    assert stop._stop_file() == path
+
+
+def test_parent_gone_terminates_the_child_processes_before_exit(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    import psutil
+
+    # Only a process this test starts; the fake "self" lists only it.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        mine = psutil.Process(child.pid)
+
+        class Me:
+            def children(self, recursive=False):
+                assert recursive
+                return [mine]
+
+        monkeypatch.setattr(stop, "_self_process", lambda: Me())
+        monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99, alive=[False]), 99))
+        seen = []
+
+        def fake_exit(code):
+            seen.append((code, child.poll()))
+
+        monkeypatch.setattr(stop.os, "_exit", fake_exit)
+        t = stop.start_parent_watchdog(lambda: None, interval=0.01, parent_pid=99)
+        t.join(20)
+        assert len(seen) == 1
+        code, child_rc = seen[0]
+        assert code == 143
+        assert child_rc is not None, "the child was still running at the exit"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(10)
+
+
+def test_child_cleanup_errors_do_not_block_the_exit(monkeypatch):
+    def boom():
+        raise RuntimeError("no process table")
+
+    monkeypatch.setattr(stop, "_self_process", boom)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99, alive=[False]), 99))
+    codes = _no_exit(monkeypatch)
+    t = stop.start_parent_watchdog(lambda: None, interval=0.01, parent_pid=99)
+    t.join(5)
+    assert codes == [143]
+
+
+def test_stop_file_after_a_real_sigterm_is_not_delivered_again(monkeypatch, tmp_path, caplog):
+    # POSIX: the runner forwards a SIGTERM and writes the stop file. A second
+    # interrupt could break the cleanup of the first (the worker termination).
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_STOPPING", True)  # the real SIGTERM has run
+    _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("TERM\n", encoding="utf-8")
+    cancels = []
+    done = threading.Event()
+    with caplog.at_level("WARNING", logger=stop._LOG.name):
+        t = stop.start_parent_watchdog(
+            lambda: cancels.append(1),
+            interval=30.0,
+            stop=done,
+            stop_file=request,
+            stop_poll=0.01,
+            cancel_after=0.1,
+        )
+        deadline = time.monotonic() + 3
+        while not cancels and time.monotonic() < deadline:
+            time.sleep(0.01)
+    done.set()
+    t.join(5)
+    assert calls == []
+    assert cancels == [1]  # the grace-period cancel still applies
+    assert "already" in caplog.text
+
+
+def test_stop_file_is_not_delivered_while_a_ctrl_c_is_handled(monkeypatch, tmp_path):
+    # Windows: a console Ctrl-C reaches the native stage directly (SIGINT, not
+    # SIGTERM); the runner's stop file follows about 1 s later. A second
+    # interrupt could cut the cleanup short (stage_guard's finally).
+    calls = []
+    monkeypatch.setattr(stop._thread, "interrupt_main", lambda *a: calls.append(a))
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    monkeypatch.setattr(stop, "_STOPPING", True)
+    _no_exit(monkeypatch)
+    monkeypatch.setattr(stop, "_watch_target", lambda pid: (FakeProc(99), 99))
+    request = tmp_path / "stop.request"
+    request.write_text("INT", encoding="utf-8")
+    done = threading.Event()
+    t = stop.start_parent_watchdog(
+        lambda: None, interval=30.0, stop=done, stop_file=request, stop_poll=0.01
+    )
+    time.sleep(0.3)
+    done.set()
+    t.join(5)
+    assert calls == []
+
+
+def test_stage_guard_marks_a_keyboardinterrupt_as_stopping(monkeypatch):
+    monkeypatch.setattr(stop, "install_stop_handlers", lambda: None)
+    monkeypatch.setattr(stop, "start_parent_watchdog", lambda *a, **k: None)
+    monkeypatch.setattr(stop, "_STOPPING", True)  # reset on entry
+    seen = []
+    with pytest.raises(SystemExit) as ei:
+        with stop.stage_guard(lambda: None):
+            seen.append(stop._STOPPING)
+            raise KeyboardInterrupt
+    assert ei.value.code == 130
+    assert seen == [False]
+    assert stop._STOPPING is True
+
+
+def test_on_term_marks_stopping(monkeypatch):
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    monkeypatch.setattr(stop, "_TERM_SEEN", False)
+    with pytest.raises(KeyboardInterrupt):
+        stop._on_term(signal.SIGTERM, None)
+    assert stop._STOPPING is True
+
+
+def test_sigint_handler_marks_stopping_and_keeps_an_ignored_sigint(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(stop.signal, "signal", lambda s, h: seen.setdefault(s, []).append(h))
+    monkeypatch.setattr(stop.signal, "getsignal", lambda s: signal.default_int_handler)
+    stop.install_stop_handlers()
+    handler = seen[signal.SIGINT][0]
+    monkeypatch.setattr(stop, "_STOPPING", False)
+    with pytest.raises(KeyboardInterrupt):
+        handler(signal.SIGINT, None)
+    assert stop._STOPPING is True
+    # A SIGINT that starts ignored (a POSIX background job) stays ignored.
+    seen.clear()
+    monkeypatch.setattr(stop.signal, "getsignal", lambda s: signal.SIG_IGN)
+    stop.install_stop_handlers()
+    assert signal.SIGINT not in seen

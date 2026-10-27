@@ -364,3 +364,120 @@ def test_default_sleep_goes_through_the_module_seam(tmp_path, monkeypatch):
     raw, files = _files(tmp_path, ("a.txt",))
     run_per_file(_always_transient, files, workers=1, raw_dir=raw)
     assert calls == [30, 60, 120]
+
+
+def _write_pid_then_sleep(path: Path, *, raw_dir: Path, pids: Path) -> dict:
+    """A long unit: records its worker pid, then sleeps far past the test."""
+    (pids / f"{os.getpid()}").write_text("", encoding="utf-8")
+    time.sleep(120)
+    return {"source_file": path.name, "skipped": False, "ok": True}
+
+
+def test_a_stop_ends_the_workers_in_flight(tmp_path, spawn_child_env, monkeypatch):
+    # 2026-10-26: a SIGTERM during the europepmc full extract left the stage in
+    # the pool's shutdown(wait=True), waiting hours for 3 in-flight workers.
+    import psutil
+
+    from episteme.data import parallel
+
+    raw, files = _files(tmp_path, ("a.txt", "b.txt", "c.txt"))
+    pids = tmp_path / "pids"
+    pids.mkdir()
+
+    def wait_then_stop(fs, timeout=None, return_when=None):
+        deadline = time.monotonic() + 60
+        while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.2)
+        raise KeyboardInterrupt  # the stop signal, as stage_guard delivers it
+
+    monkeypatch.setattr(parallel, "wait", wait_then_stop)
+    t0 = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_per_file(_write_pid_then_sleep, files, workers=2, raw_dir=raw, pids=pids)
+    assert time.monotonic() - t0 < 60  # not the 120 s of the units
+    worker_pids = [int(p.name) for p in pids.iterdir()]
+    assert len(worker_pids) == 2
+    deadline = time.monotonic() + 10
+    while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not any(psutil.pid_exists(p) for p in worker_pids)
+
+
+def test_a_stop_from_another_thread_reaches_the_pool_wait(tmp_path, spawn_child_env):
+    # The stop-file watchdog delivers a stop with _thread.interrupt_main, not a
+    # real signal: an untimed wait for the pool would see it only when a unit
+    # ends (hours). The wait wakes every second.
+    import _thread
+    import threading
+
+    import psutil
+
+    raw, files = _files(tmp_path, ("a.txt", "b.txt"))
+    pids = tmp_path / "pids"
+    pids.mkdir()
+
+    def stop_when_running() -> None:
+        deadline = time.monotonic() + 60
+        while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        stopped_at.append(time.monotonic())
+        _thread.interrupt_main()
+
+    stopped_at: list[float] = []
+    t = threading.Thread(target=stop_when_running, daemon=True)
+    t.start()
+    with pytest.raises(KeyboardInterrupt):
+        run_per_file(_write_pid_then_sleep, files, workers=2, raw_dir=raw, pids=pids)
+    t.join(5)
+    assert stopped_at and time.monotonic() - stopped_at[0] < 15
+    worker_pids = [int(p.name) for p in pids.iterdir()]
+    deadline = time.monotonic() + 10
+    while any(psutil.pid_exists(p) for p in worker_pids) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not any(psutil.pid_exists(p) for p in worker_pids)
+
+
+def test_the_pool_still_exposes_its_worker_processes(tmp_path, spawn_child_env):
+    # _terminate_workers reads the private ProcessPoolExecutor._processes; this
+    # pins it on every interpreter CI and production run (3.13, 3.14).
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    ) as pool:
+        pool.submit(os.getpid).result(timeout=60)
+        procs = pool._processes
+        assert isinstance(procs, dict) and procs
+        assert all(hasattr(p, "terminate") and hasattr(p, "join") for p in procs.values())
+
+
+def test_a_worker_that_survives_terminate_is_killed(monkeypatch):
+    # Review (CodeRabbit): a worker that ignores terminate() must not keep the
+    # pool shutdown, and so the stop, waiting.
+    from episteme.data import parallel
+
+    class _Proc:
+        def __init__(self, stubborn):
+            self.stubborn, self.alive, self.killed = stubborn, True, False
+
+        def terminate(self):
+            if not self.stubborn:
+                self.alive = False
+
+        def kill(self):
+            self.killed, self.alive = True, False
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+    meek, stubborn = _Proc(False), _Proc(True)
+
+    class _Pool:
+        _processes = {1: meek, 2: stubborn}
+
+    parallel._terminate_workers(_Pool())
+    assert not meek.killed and stubborn.killed and not stubborn.alive

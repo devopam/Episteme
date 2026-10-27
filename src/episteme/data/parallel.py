@@ -24,6 +24,13 @@ pending futures are cancelled (``Future.cancel`` on each), the units already
 in flight finish, and their results (and markers) are kept and returned.
 ``stop_on_failure=False`` keeps the old behaviour: every file runs.
 
+A stop (``KeyboardInterrupt`` or ``SystemExit``, e.g. SIGTERM through
+``stage_guard``) is different: the queued units are cancelled and the workers
+in flight are terminated, so the stage exits at once. The wait for the pool
+wakes every ``POOL_WAIT_S`` seconds, so a stop from the stop-file watchdog
+(``_thread.interrupt_main``, no real signal) also reaches it at once. Their units have no
+success marker and run again on the next run.
+
 Transient errors: ``fn`` classifies its own exception (where the real exception
 exists) and raises ``TransientUnitError``. The unit is then called again after
 ``waits[0]``, ``waits[1]``, ... seconds; after ``len(waits)`` retries it is a
@@ -62,6 +69,10 @@ _LOG = logging.getLogger(__name__)
 
 _EXECUTORS = ("process", "thread")
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
+# The pool wait wakes this often (seconds), so a stop that
+# ``_thread.interrupt_main`` delivers (the stop-file watchdog of
+# episteme.ops.stop) runs at once, not when the next unit ends.
+POOL_WAIT_S = 1.0
 
 
 def default_workers() -> int:
@@ -153,8 +164,49 @@ def run_per_file(
             max_workers=max_workers, mp_context=multiprocessing.get_context("spawn")
         )
     with pool:
-        _run_pool(pool, fn, files, raw_dir, stop_on_failure, waits, sleep, kwargs, _emit)
+        try:
+            _run_pool(pool, fn, files, raw_dir, stop_on_failure, waits, sleep, kwargs, _emit)
+        except (KeyboardInterrupt, SystemExit):
+            # A stop: end the workers in flight. Without this the pool's
+            # shutdown(wait=True) on leaving the ``with`` waits for them to
+            # finish their units (2026-10-26: hours, on three large archives).
+            # Safe: a unit writes its shard atomically and its marker only on
+            # success, so a killed unit is redone on the next run.
+            if isinstance(pool, ProcessPoolExecutor):
+                _terminate_workers(pool)
+            raise
     return results
+
+
+def _terminate_workers(pool: ProcessPoolExecutor) -> None:
+    """Terminate the pool's worker processes and wait briefly for them.
+
+    ``ProcessPoolExecutor`` has no public handle on its workers, so this reads
+    the private ``_processes`` (present on 3.13 and 3.14; a test pins it). If a
+    later Python drops it, every live ``multiprocessing`` child of this stage
+    is a pool worker (a stage runs one pool), so those are terminated."""
+    workers = getattr(pool, "_processes", None)
+    procs = list(workers.values()) if workers is not None else multiprocessing.active_children()
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+    for proc in procs:
+        proc.join(timeout=5)
+    # A worker that ignores terminate() would keep the pool shutdown (and so
+    # the stop) waiting: kill it.
+    survivors = [p for p in procs if p.is_alive()]
+    for proc in survivors:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+    for proc in survivors:
+        proc.join(timeout=5)
+    _LOG.warning(
+        "stopped: terminated %d worker(s) in flight (%d killed)", len(procs), len(survivors)
+    )
 
 
 def _call_inline(
@@ -202,7 +254,10 @@ def _run_pool(
     broken_logged = False
     try:
         while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            # Timed: the main thread must run Python code again to see a stop
+            # from ``_thread.interrupt_main``; an untimed wait holds it until a
+            # unit ends (hours on a large archive).
+            done, _ = wait(pending, timeout=POOL_WAIT_S, return_when=FIRST_COMPLETED)
             for fut in done:
                 path, tries = pending.pop(fut)
                 if fut.cancelled():

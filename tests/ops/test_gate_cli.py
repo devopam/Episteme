@@ -445,7 +445,7 @@ def test_run_stops_the_child_on_an_unexpected_error(tmp_path, monkeypatch):
         started.append(p)
         return p
 
-    def boom(_proc):
+    def boom(_proc, _known=None):
         raise RuntimeError("poll failed")
 
     monkeypatch.setattr(subprocess, "Popen", popen)
@@ -649,6 +649,67 @@ def test_report_without_start_hashes_fails_closed(tmp_path, rules_dir, fake_hash
     assert "no code hash" in capsys.readouterr().out
 
 
+def _sigterm_once_started(monkeypatch):
+    """Popen spy; a thread sends SIGTERM (as a Python-level signal) to this
+    process once the child runs, as the runner's forwarded stop does on POSIX."""
+    import _thread
+    import signal
+    import threading
+    import time
+
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*a, **k):
+        p = real_popen(*a, **k)
+        started.append(p)
+        return p
+
+    def send():
+        deadline = time.monotonic() + 30
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.3)
+        _thread.interrupt_main(signal.SIGTERM)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    threading.Thread(target=send, daemon=True).start()
+    return started
+
+
+def test_run_sigterm_records_143_and_lets_the_stage_end(tmp_path, monkeypatch):
+    # The stage got the same SIGTERM: gate run waits for it, then writes its record.
+    import signal
+
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 20.0)
+    stopped = []
+    monkeypatch.setattr(gate, "_stop_tree", lambda proc, child: stopped.append(1))
+    before = signal.getsignal(signal.SIGTERM)
+    started = _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    code = "import time; time.sleep(2.0)"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert data["rc"] == 143 and data["interrupted"] is True
+    assert started[0].returncode == 0  # it ended on its own
+    assert stopped == []
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_run_sigterm_ends_a_stage_that_does_not_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 0.5)
+    started = _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    code = "import time; time.sleep(60)"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    assert json.loads(rec.read_text(encoding="utf-8"))["rc"] == 143
+    assert started[0].poll() is not None
+
+
 def test_load_measures_use_staging_source_files(tmp_path, rules_dir, fake_hash, monkeypatch):
     import polars as pl
 
@@ -738,3 +799,76 @@ def test_report_without_part_markers_uses_the_profile(tmp_path, parts_rules, fak
         p.unlink()
     assert gate.main(_report_args(sample, rec, tmp_path / "prod")) == 1  # 3 rows > 2
     assert _measures(sample)["part_rows"] == 2
+
+
+def test_run_records_a_stage_that_a_stop_ended_as_interrupted(tmp_path):
+    # Review (Greptile): on Windows the stage ends by the stop file with rc 143
+    # and gate run sees no signal; the record must still say interrupted.
+    rec = tmp_path / "rec.json"
+    rc = gate.main(
+        ["run", "--record", str(rec), "--", sys.executable, "-c", "raise SystemExit(143)"]
+    )
+    assert rc == 143
+    assert json.loads(rec.read_text(encoding="utf-8"))["interrupted"] is True
+
+
+def test_run_does_not_mark_a_plain_failure_interrupted(tmp_path):
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", "raise SystemExit(1)"])
+    assert rc == 1
+    assert "interrupted" not in json.loads(rec.read_text(encoding="utf-8"))
+
+
+def test_run_sigterm_ends_a_descendant_that_outlives_the_stage(tmp_path, monkeypatch):
+    # Review (CodeRabbit): the child exits within the grace wait, but its own
+    # child keeps running; gate run must end it.
+    import time
+
+    import psutil
+
+    monkeypatch.setattr(gate, "POLL_S", 0.1)
+    monkeypatch.setattr(gate, "STOP_GRACE_S", 20.0)
+    pidfile = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys, time, pathlib;"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']);"
+        f"pathlib.Path(r'{pidfile}').write_text(str(p.pid));"
+        "time.sleep(2.0)"
+    )
+    _sigterm_once_started(monkeypatch)
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", sys.executable, "-c", code])
+    assert rc == 143
+    gpid = int(pidfile.read_text())
+
+    def running(pid):
+        # A zombie (ended, not reaped by a PID 1 that does not reap) counts as ended.
+        try:
+            return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+
+    deadline = time.monotonic() + 10
+    while running(gpid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not running(gpid)
+
+
+def test_run_maps_a_signal_exit_to_the_shell_stop_code(tmp_path, monkeypatch):
+    # Review (CodeRabbit): a stage killed by SIGTERM gives Popen rc -15; the
+    # runner knows only 130/143 as a stop, so gate run returns 143.
+    class _Child:
+        pid = os.getpid()
+
+        def wait(self, timeout=None):
+            return -15
+
+        def poll(self):
+            return -15
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd: _Child())
+    rec = tmp_path / "rec.json"
+    rc = gate.main(["run", "--record", str(rec), "--", "anything"])
+    assert rc == 143
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert data["rc"] == 143 and data["child_rc"] == -15 and data["interrupted"] is True
