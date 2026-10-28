@@ -499,7 +499,9 @@ def test_flipped_id_probe_still_probes_an_index(pg_conn):
     assert loops, every
     inner = loops[0]["Plans"][1]
     inner_load_ids = [n for n in nodes(inner) if n.get("Relation Name") == "_load_ids"]
-    # whichever side _load_ids is on, it is never read by a full scan per outer row
+    # Review (CodeRabbit, #94): require the flipped plan, or the loop below
+    # checks nothing; on the inner side _load_ids is never a full scan.
+    assert inner_load_ids, inner
     for n in inner_load_ids:
         assert n["Node Type"] in ("Index Scan", "Index Only Scan"), n
         assert n.get("Index Cond"), n
