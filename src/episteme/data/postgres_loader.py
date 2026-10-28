@@ -166,18 +166,20 @@ def _jsonl_batches(
     staging_path: Path, batch_size: int, batch_bytes: int
 ) -> Iterator[list[dict[str, Any]]]:
     """JSONL rows in batches of at most ``batch_size`` rows; a batch ends before
-    a line would take it past ``batch_bytes`` (counted as line length)."""
+    a line would take it past ``batch_bytes`` (counted in UTF-8 bytes)."""
     batch: list[dict[str, Any]] = []
     size = 0
     with staging_path.open(encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
-            if batch and (len(batch) >= batch_size or size + len(line) > batch_bytes):
+            # UTF-8 bytes, not characters: the writer keeps non-ASCII text as is.
+            line_bytes = len(line.encode("utf-8"))
+            if batch and (len(batch) >= batch_size or size + line_bytes > batch_bytes):
                 yield batch
                 batch, size = [], 0
             batch.append(json.loads(line))
-            size += len(line)
+            size += line_bytes
     if batch:
         yield batch
 

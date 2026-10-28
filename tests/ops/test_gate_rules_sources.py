@@ -25,9 +25,20 @@ def test_load_section_requires_no_orphans_and_equal_rows(source):
     load = gate.load_rules(source)["load"]
     assert load["max_orphan_bodies"] == 0
     assert load["rows_loaded_equals_staging"] is True
-    assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": True}, load) == []
-    assert gate.evaluate({"orphan_bodies": 1, "rows_loaded_equals_staging": True}, load)
-    assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": False}, load)
+    # 642.5 MB: the europepmc_manuscript load sample's peak after the byte cap (2026-10-28).
+    ok = {"orphan_bodies": 0, "rows_loaded_equals_staging": True, "peak_rss_mb": 642.5}
+    assert gate.evaluate(ok, load) == []
+    assert gate.evaluate({**ok, "orphan_bodies": 1}, load)
+    assert gate.evaluate({**ok, "rows_loaded_equals_staging": False}, load)
+
+
+def test_europepmc_load_fails_over_its_memory_limit():
+    # 2026-10-28: the load reached 19.5 GB before the byte cap; the gate now stops that.
+    load = gate.load_rules("europepmc_manuscript")["load"]
+    ok = {"orphan_bodies": 0, "rows_loaded_equals_staging": True}
+    assert load["max_peak_rss_mb"] == 4096
+    assert gate.evaluate({**ok, "peak_rss_mb": 4096}, load) == []
+    assert gate.evaluate({**ok, "peak_rss_mb": 19_503}, load)
 
 
 def _bookshelf(**over):

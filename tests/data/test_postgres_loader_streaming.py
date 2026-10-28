@@ -88,6 +88,18 @@ def test_a_row_wider_than_the_cap_is_its_own_batch(tmp_path):
     assert [len(b["id"]) for b in batches] == [1, 1, 1]
 
 
+def test_jsonl_byte_cap_counts_utf8_bytes(tmp_path):
+    # Review (CodeRabbit, #96): 2,000 "é" are 2,000 characters but 4,000 bytes.
+    import json
+
+    path = tmp_path / "w.jsonl"
+    rows = [{"id": f"pmc:U{i}", "source_file": "F", "body_text": "é" * 2000} for i in range(4)]
+    text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    path.write_text(text, encoding="utf-8")
+    batches = list(postgres_loader._iter_batches(path, "jsonl", 50_000, batch_bytes=6_000))
+    assert [len(b["id"]) for b in batches] == [1, 1, 1, 1]
+
+
 def test_a_parquet_row_wider_than_the_cap_is_its_own_batch(tmp_path):
     path = _wide_shard(tmp_path, 3, 50_000)
     batches = list(postgres_loader._iter_batches(path, "parquet", 50_000, batch_bytes=10_000))
