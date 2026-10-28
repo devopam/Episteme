@@ -26,7 +26,7 @@ Episteme builds a connected, dated medical knowledge layer from open sources (`d
 
 What this means (Claude's call, to settle in projects 5 and 6):
 - **Access per tenant:** every tool call carries the tenant and the caller. The tool layer checks the tenant's entitlements before it runs.
-- **Licences per tenant:** licence-bound data (Stream 2, section 4.6, for example MedDRA) is served only to a tenant that holds the licence. The tenant is the licence holder for its own use. The operator hosts and queries the data on the tenant's behalf, so before projects 5 and 6 build the access checks, the operator's own rights to host, query and expose each licence-bound source are confirmed with its licensor and recorded in `docs/02` (section 9). Open data is shared by all tenants, with the attribution its licence requires.
+- **Licences per tenant:** licence-bound data (Stream 2, section 4.6, for example MedDRA) is served only to a tenant that holds the licence. The tenant is the licence holder for its own use. The operator hosts and queries the data on the tenant's behalf, so before projects 5 and 6 build the access checks, the operator's own rights to host, query and expose each licence-bound source are confirmed with its licensor and recorded in `docs/02-data-sources.md`, section 2.4 ("Licensed vocabularies"). This is an open question in section 9 below, and a prerequisite for projects 2, 5 and 6. Open data is shared by all tenants, with the attribution its licence requires.
 - **Isolation:** the shared reference store and graph are read-only to tenants. Any tenant-specific data (for example a tenant's own documents or configured targeted medical events) is isolated per tenant in the database, for example with row-level security.
 - **Audit:** every agent audit record must carry the tenant and the caller identity. The current audit contract cannot do this: `record()` writes `actor` from the operator-set `EPISTEME_ACTOR`, which is not checked against an identity system, and has no tenant or caller field. Project 6 extends the contract (`docs/11`): the field names and types, whether they are required, how the tool layer passes them to `record()`, whether they enter the hash input (new rows only; existing chain rows keep their hashes), and what enforces a non-empty, authenticated value.
 
@@ -166,7 +166,7 @@ Details: Appendices B and C. Summary:
 | EDQM Standard Terms reuse terms (online and API only) | 3 |
 | PostgreSQL 19's actual graph-depth limit | 4 |
 | Serving hardware for the agent | 6 |
-| The operator's rights to host, query and expose each licence-bound source on a tenant's behalf | 2, 5 |
+| The operator's rights to host, query and expose each licence-bound source on a tenant's behalf; recorded in `docs/02` section 2.4 | 2, 5, 6 |
 | Presidio recogniser set, recall threshold and the store for original text | 1, 6 |
 | Which open-weight model, and which orchestrator framework | 6, 7 |
 | How "relevance in context" is judged in expert review (who reviews, against what) | 1 |

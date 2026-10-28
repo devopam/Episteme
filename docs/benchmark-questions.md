@@ -33,8 +33,8 @@ Purpose: a fixed set of real questions to score every model on the same terms: c
 - **Question:** "Drug X is suddenly being reported together with many other drugs. Is this linked to a drug lot, or to combinations already listed in the warnings?"
 - **Expected answer:**
   1. Resolve X to its active ingredient (UNII) and every product that contains it.
-  2. Co-reported drugs in FAERS: recent window against a baseline, with a disproportionality statistic per pair.
-  3. Each rising pair marked "already in the label" (DailyMed interactions and warnings) or "new".
+  2. Co-reported drugs in FAERS: recent window against a baseline, with a disproportionality statistic per pair. The answer states the FAERS release and data cut-off, and the exact dates of both windows.
+  3. Each rising pair marked "already in the label" (DailyMed interactions and warnings) or "new". The answer states the DailyMed label set and release it checked, and the label coverage (products of the ingredient with a label checked, out of all its products) before it marks any pair "new". A pair is "new" only against the labels actually checked.
   4. Lot: reports grouped by batch number; recalls and enforcement actions for the products.
   5. Mechanism for each new pair: shared enzyme or target, only where ChEMBL or UniProt supports it. The answer states the mechanism coverage (pairs with a supported mechanism out of all new pairs) and says "no supported mechanism found" for the rest. An inferred mechanism without evidence scores as an invented claim.
   6. Recent publications and case reports on each pair, cited.
@@ -47,17 +47,17 @@ Purpose: a fixed set of real questions to score every model on the same terms: c
 
 - **Persona / domain:** researcher / human drug
 - **Question:** "What adverse events are associated with ingredient Y across all products that contain it, and what connects them?"
-- **Expected answer:** events reported with Y across every product with Y (not one label), in "reported with" language; for each event with a strong reporting signal, the paths that connect it: Y → target → pathway → event; Y → structurally similar compounds → their events; Y → genetic variants → events in some patients; each path with its evidence.
+- **Expected answer:** events reported with Y across every product with Y that the reference store holds (not one label), with the product coverage stated (products mapped to Y, and product names in the reports that could not be mapped), in "reported with" language; for each event with a strong reporting signal, the paths that connect it: Y → target → pathway → event; Y → structurally similar compounds → their events; Y → genetic variants → events in some patients; each path with its evidence.
 - **Must be exact:** UNII, target and pathway identifiers, variant identifiers, event terms, counts, citations.
 - **Expected gaps:** a FAERS report can list several drugs and several reactions without linking a given drug to a given reaction, and FAERS gives neither event rates nor causality, so the answer says "reported with", states how many reports list other drugs too, and makes no causal or incidence claim unless another cited source supports it; paths with no supporting evidence are not shown as findings; event terms whose hierarchy needs a MedDRA licence are matched by name only (pending the licence decision).
-- **Sources needed:** pubchem (loaded), ChEMBL, UniProt, Reactome, ClinVar, openFDA `drug/event`, literature (pubmed loaded; europepmc loading).
+- **Sources needed:** the product universe and ingredient resolution: openFDA `drug/ndc` and DailyMed SPL with its substance (UNII) index; pubchem (loaded), ChEMBL, UniProt, Reactome, ClinVar, openFDA `drug/event`, literature (pubmed loaded; europepmc loaded).
 - **Origin:** the user's persona 1, 2026-10-28.
 
 ### Q3. Device malfunction cluster (proposed)
 
 - **Persona / domain:** pv-bot / device
 - **Question:** "Are recent malfunction reports for device model Z linked to one production lot, and has there been a recall?"
-- **Expected answer:** reports for the device by product code and model; grouping by lot or serial where present; recalls and their reasons; similar devices with the same failure.
+- **Expected answer:** reports for the device by product code and model; grouping by lot where a lot identifier is present, or by serial number only through a manufacturer mapping from serial to lot. Without a lot identifier or such a mapping, the answer reports only the serial clustering and leaves the lot link unresolved (a serial number identifies one device, not a production lot); recalls and their reasons; similar devices with the same failure.
 - **Must be exact:** device identifiers, product codes, report counts, recall numbers and classes.
 - **Expected gaps:** lot and serial coverage in the reports; reports that do not name the model; UDI presence and validation coverage (the UDI is not in every report and is not validated), with the fallback stated when no UDI is present (match on product code, brand and model name, at a lower confidence).
 - **Sources needed:** openFDA `device/event` (MAUDE), `device/recall`, `device/udi` (GUDID): none downloaded or wired yet.
@@ -70,5 +70,5 @@ Purpose: a fixed set of real questions to score every model on the same terms: c
 - **Expected answer:** veterinary reports by species for products with W; human reports for the same ingredient; the events common to both and those seen only in one; label warnings on each side.
 - **Must be exact:** ingredient identifier, species, counts, label references.
 - **Expected gaps:** species coverage; differences in how the two systems code events; the data cut-off of each side (the veterinary data is updated quarterly and can lag receipt by 3-6 months), stated before the event sets are compared.
-- **Sources needed:** openFDA `animalandveterinary/event` (not downloaded); DailyMed animal SPL release (downloaded, not loaded); openFDA `drug/event`.
+- **Sources needed:** openFDA `animalandveterinary/event` (not downloaded); DailyMed animal SPL release (downloaded, not loaded) for the veterinary labels; DailyMed human Rx and OTC SPL releases (downloaded, not loaded; the same source as Q1) for the human labels, with the release and label coverage of each side stated; openFDA `drug/event`.
 - **Origin:** proposed by Claude, from the user's animal scope, 2026-10-28. To be reviewed by the user.
