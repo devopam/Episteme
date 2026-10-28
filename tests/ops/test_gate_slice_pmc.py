@@ -88,7 +88,7 @@ def test_select_pmc_without_files_raises(raw):
 
 def test_pmc_slice_spec():
     spec = gate_slice.SLICES["pmc"]
-    assert spec.max_bytes == 2 * gate_slice.GB
+    assert spec.max_bytes == 4 * gate_slice.GB
     assert spec.raw_subpath == Path("pmc/oa_comm")
     assert spec.is_unit(Path("PMC1.1.json"))
     assert not spec.is_unit(Path("PMC1.1.xml"))
@@ -112,6 +112,6 @@ def test_pmc_is_gated_for_extract_and_load():
     for stage in ("extract", "load"):
         assert not set(rules[stage]) - gate._KNOWN_KEYS
     assert gate.stage_module("pmc", "extract")[0] == "episteme.data.pmc.extract_pmc"
-    assert rules["extract"]["allowed_licenses"] == ["commercial"]
+    assert rules["extract"]["allowed_licenses"] == ["CC0", "CC BY", "CC BY-SA", "CC BY-ND"]
     assert rules["extract"]["max_peak_rss_mb"] == 2048
     assert rules["extract"]["parts_within_caps"] is True

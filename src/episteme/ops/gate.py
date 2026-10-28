@@ -556,6 +556,27 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
         child.wait(timeout=5)
 
 
+# A stage that counts failed inputs beyond its exit code (pmc: failed articles)
+# writes this file under its ops folder; ``gate run`` reads it (opt-in). It
+# lives here, not in checkpoint_markers, so no stage code hash depends on it.
+FAILED_INPUTS_FILE = "failed_inputs.json"
+
+
+def read_failed_inputs(processed_root: Path, source: str, run_id: str | None) -> int | None:
+    """``failed_inputs`` of ``<ops>/failed_inputs.json`` when it is of run ``run_id``;
+    ``None`` when the file is missing, unreadable or of another run."""
+    if not run_id:
+        return None
+    try:
+        path = Path(processed_root) / "_ops" / source / FAILED_INPUTS_FILE
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("run_id") != run_id:
+            return None
+        return int(data["failed_inputs"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 # Exit codes of a stage that a stop ended -> the shell stop code the runner
 # knows (130 Ctrl-C, 143 SIGTERM): the codes themselves, the negative signal
 # numbers a POSIX Popen reports, and Windows STATUS_CONTROL_C_EXIT.
@@ -662,7 +683,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Opt-in: a stage that counts failed inputs beyond its exit code (pmc:
         # failed articles) writes failed_inputs.json for this run id.
         from episteme.config import get_settings
-        from episteme.data.checkpoint_markers import read_failed_inputs
 
         settings = get_settings()
         failed = read_failed_inputs(settings.processed_root, args.source, settings.run_id)

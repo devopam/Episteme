@@ -4,7 +4,10 @@
     "max_duplicate_ids_in_shard": 0,
     "max_empty_text_pct": 5.0,
     "allowed_licenses": [
-      "commercial"
+      "CC0",
+      "CC BY",
+      "CC BY-SA",
+      "CC BY-ND"
     ],
     "max_peak_rss_mb": 2048,
     "parts_within_caps": true

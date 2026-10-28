@@ -143,3 +143,26 @@ def test_manifest_lists_paths_relative_to_the_raw_dir(tmp_path: Path) -> None:
     m = b.read_manifest(b.write_manifest(tmp_path / "processed", grouped[0], tmp_path))
     assert m["paths"] == ["metadata/PMC10.1.json"]
     assert b.manifest_files(m, tmp_path) == [meta]
+
+
+def test_key_and_rel_equal_input_key_and_the_manifest_paths(tmp_path: Path) -> None:
+    meta = _touch(tmp_path, "metadata/PMC5.1.json")
+    outside = tmp_path.parent / f"{tmp_path.name}_out" / "PMC9.1.json"
+    outside.parent.mkdir()
+    outside.write_text("{}", encoding="utf-8")
+    raw = tmp_path.resolve()
+    for p in (meta, outside):
+        key, rel = b.key_and_rel(p, raw)
+        assert key == checkpoint_markers.input_key(p, tmp_path)
+    assert b.key_and_rel(meta, raw)[1] == "metadata/PMC5.1.json"
+    assert b.key_and_rel(outside, raw)[1] == outside.resolve().as_posix()
+
+
+def test_group_by_bucket_carries_keys_and_paths(tmp_path: Path) -> None:
+    files = [_touch(tmp_path, f"metadata/PMC{n}.1.json") for n in (3, 4)]
+    grouped, _ = b.group_by_bucket(files, tmp_path)
+    bk = grouped[0]
+    assert list(bk.keys) == [checkpoint_markers.input_key(p, tmp_path) for p in bk.files]
+    m = b.read_manifest(b.write_manifest(tmp_path / "processed", bk, tmp_path))
+    assert m["files"] == list(bk.keys)
+    assert m["paths"] == list(bk.rels)

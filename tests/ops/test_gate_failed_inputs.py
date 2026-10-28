@@ -10,9 +10,15 @@ from pathlib import Path
 import pytest
 
 from episteme import config
-from episteme.data.checkpoint_markers import FAILED_INPUTS_FILE, ops_root
+from episteme.data.checkpoint_markers import ops_root
 from episteme.data.pmc import extract_pmc as pmc
 from episteme.ops import gate
+
+FAILED_INPUTS_FILE = pmc.FAILED_INPUTS_FILE
+
+
+def test_writer_and_reader_agree_on_the_file_name():
+    assert pmc.FAILED_INPUTS_FILE == gate.FAILED_INPUTS_FILE
 
 
 def _article(raw: Path, n: int, *, broken: bool = False) -> None:

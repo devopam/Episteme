@@ -38,7 +38,7 @@ Not in scope: the per-article parsing (`row_from_meta_and_xml`, `parse_jats_fiel
 
 ### 4.1 Buckets by PMC id
 
-- A **bucket** is a fixed range of numeric PMC ids. `bucket = id // BUCKET_IDS`. `BUCKET_IDS` defaults to 50,000 (Claude's call). PMC ids on disk run up to about 13.5 million (for example `PMC13525915`), which gives about 270 buckets. With 935k articles that averages about 3,500 articles per bucket.
+- A **bucket** is a fixed range of numeric PMC ids. `bucket = id // BUCKET_IDS`. `BUCKET_IDS` defaults to 50,000 (Claude's call). PMC ids on disk run up to about 13.5 million (for example `PMC13525915`), which gives about 270 buckets (fewer non-empty). With 935k articles that averages about 3,500 articles per bucket.
 - Bucket boundaries never move. A newly downloaded article always falls into the same bucket, so resume and change detection work per bucket, not per file position. (A part numbered by position, as pubchem does, would shift every later part when one file is added.)
 - Within a bucket, files are processed in `input_key` order.
 - **Versions:** when several versions of one article are in the same bucket, only the highest version is extracted. The others are counted in the part's stats as `superseded_versions`. All versions of one article share one id, so they always fall into one bucket.
@@ -66,12 +66,12 @@ Not in scope: the per-article parsing (`row_from_meta_and_xml`, `parse_jats_fiel
 
 ### 4.5 Graph phase
 
-- `graph_builder.build` for `pmc` replaces the single `fetchall()` with a server-side (named) cursor ordered by `source_file`, read in fixed-size batches. It builds edges one `source_file` (one part) at a time and commits per part, as today.
+- `graph_builder.build` for `pmc` replaces the single `fetchall()` with a server-side (named) cursor ordered by `source_file`, read in fixed-size batches. It builds edges one `source_file` (one part) at a time. The build runs in ONE transaction (the named cursor needs it), so it does not commit per part. A long single graph transaction at 935k parses is a deferred item (drift log).
 - Raw JATS is still re-read per article through `_find_xml(raw_dir, pmcid)`. Its directory index is built once per run, not per article.
 
 ### 4.6 Sample slice and gate rules
 
-- **Slice:** `gate_slice` gains a `pmc` selector. It picks the largest bucket by total bytes of its XML files, one bucket near the median, and the bucket with the most superseded versions. The slice is hard-linked as for the other sources, under a cap of 2 GB (Claude's call).
+- **Slice:** `gate_slice` gains a `pmc` selector. It picks the largest bucket by total bytes of its XML files, one bucket near the median, and the bucket with the most superseded versions. The slice is hard-linked as for the other sources, under a cap of 4 GB (Claude's call; the same as apollo).
 - **Rules** (`gate_rules/pmc.json`), Claude's call, to be checked on the first sample:
   - `extract`: `max_failed_inputs` 0, `max_duplicate_ids_in_shard` 0, `max_empty_text_pct` from the sample, `allowed_licenses` as today, `max_peak_rss_mb` 2048, `parts_within_caps`.
   - `load`: `max_orphan_bodies` 0, `rows_loaded_equals_staging`, `max_peak_rss_mb` 4096.
@@ -106,5 +106,5 @@ Not in scope: the per-article parsing (`row_from_meta_and_xml`, `parse_jats_fiel
 | Highest version wins within a bucket | Claude's call |
 | Fingerprint from directory entries; redo a changed bucket as a whole | Claude's call |
 | No resume inside a bucket | Claude's call |
-| Slice: largest bucket, a median bucket, the most-versions bucket; 2 GB cap | Claude's call |
+| Slice: largest bucket, a median bucket, the most-versions bucket; 4 GB cap | Claude's call |
 | Rule thresholds, to be checked on the first sample | Claude's call |

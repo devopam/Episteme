@@ -253,8 +253,9 @@ def _select_pmc(raw: Path) -> list[Path]:
     """The files of three buckets: the largest by XML bytes, the median by XML
     bytes and the one with the most superseded versions (spec 4.6).
 
-    One walk of the metadata folder and one ``stat`` per kept article's XML;
-    no search of ``raw/xml`` (it holds about 935k files). A chosen bucket
+    One walk of the metadata folder and up to four ``is_file`` checks per kept
+    article (``find_xml_for_meta`` with ``search=False``); no search of
+    ``raw/xml`` (it holds about 935k files). A chosen bucket
     brings all of its metadata files, also the lower versions, so the sample
     runs the highest-version choice. Ties go to the lowest bucket number.
     """
@@ -339,7 +340,7 @@ SLICES: dict[str, SliceSpec] = {
     "pubchem": SliceSpec("pubchem", 1 * GB, _select_pubchem, Path("pubchem"), build=_build_pubchem),
     "pmc": SliceSpec(
         "pmc",
-        2 * GB,
+        4 * GB,
         _select_pmc,
         Path("pmc/oa_comm"),
         is_unit=lambda p: p.suffix == ".json",

@@ -66,7 +66,6 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
-    FAILED_INPUTS_FILE,
     discover_input_files,
     failed_marker_path,
     input_key,
@@ -88,6 +87,7 @@ from episteme.data.parallel import (  # noqa: E402
 from episteme.data.pmc.buckets import (  # noqa: E402
     bucket_key,
     group_by_bucket,
+    key_and_rel,
     manifest_files,
     part_name,
     read_manifest,
@@ -102,6 +102,8 @@ from episteme.ops.stop import stage_guard  # noqa: E402
 _LOG = logging.getLogger(__name__)
 
 SOURCE = "pmc"
+# File name the sample gate reads (``gate.FAILED_INPUTS_FILE``; a test keeps them equal).
+FAILED_INPUTS_FILE = "failed_inputs.json"
 
 # Guards the in-process (workers=1) path only. Across worker processes, the mirror
 # append lock in audit_trail and the DB advisory lock serialise audit writes.
@@ -315,7 +317,8 @@ def discover_meta_files(raw_dir: Path) -> list[Path]:
     never going to match in the first place.)
     """
     files = discover_input_files(raw_dir, ["PMC*.json"])
-    files.sort(key=lambda p: input_key(p, raw_dir))
+    raw_resolved = Path(raw_dir).resolve()  # once, not once per article
+    files.sort(key=lambda p: key_and_rel(p, raw_resolved)[0])
     return files
 
 
@@ -694,7 +697,12 @@ def extract_pmc(
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    grouped, unrecognised = group_by_bucket(discover_meta_files(raw_dir), raw_dir)
+    t_phase = time.monotonic()
+    meta_files = discover_meta_files(raw_dir)
+    _LOG.info("discover: %d metadata files in %.1f s", len(meta_files), time.monotonic() - t_phase)
+    t_phase = time.monotonic()
+    grouped, unrecognised = group_by_bucket(meta_files, raw_dir)
+    _LOG.info("group: %d buckets in %.1f s", len(grouped), time.monotonic() - t_phase)
     if unrecognised:
         _LOG.warning(
             "%d metadata file name(s) under %s are not PMC<id>.<version>.json; left out",
@@ -705,7 +713,9 @@ def extract_pmc(
     keys = _select_buckets(list(by_key), skip_units, skip_reason)
     if max_files and max_files > 0:
         keys = keys[:max_files]
+    t_phase = time.monotonic()
     manifests = [write_manifest(processed_dir, by_key[k], raw_dir) for k in keys]
+    _LOG.info("manifests: %d written in %.1f s", len(manifests), time.monotonic() - t_phase)
 
     workers = max(1, int(workers))
     t0 = time.time()
