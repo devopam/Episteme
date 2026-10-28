@@ -257,6 +257,23 @@ def test_failed_article_does_not_fail_the_bucket(tmp_path, raw):
     assert failed_marker_path(out, "pmc", "metadata__PMC2.1.json").is_file()
 
 
+def test_skipped_bucket_still_counts_its_failed_articles(tmp_path, raw, monkeypatch):
+    _article(raw, 1)
+    _article(raw, 2).write_text("{not json", encoding="utf-8")
+    out = tmp_path / "out"
+    first = pmc.extract_pmc(raw, out)
+    assert first["failed_articles_count"] == 1
+    calls: list = []
+    monkeypatch.setattr(pmc, "write_rows", lambda *a, **k: calls.append(1))
+    second = pmc.extract_pmc(raw, out)
+    assert calls == []  # the bucket was skipped
+    assert second["ok"] == 0 and second["failed"] == 0
+    assert second["failed_articles_count"] == 1
+    pmc._write_failed_inputs(out, second)
+    p = pmc.ops_root(out, "pmc") / pmc.FAILED_INPUTS_FILE
+    assert json.loads(p.read_text(encoding="utf-8"))["failed_inputs"] == 1
+
+
 def test_transient_article_error_retries_the_bucket(tmp_path, raw, monkeypatch):
     from episteme.ops.retry import TransientUnitError
 

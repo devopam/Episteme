@@ -469,7 +469,13 @@ def process_bucket(
         if not force:
             done = _read_bucket_marker(processed_dir, key)
             if done is not None and done["inputs"] == fingerprint:
-                return {"source_file": key, "skipped": True, "reason": "success_marker"}
+                return {
+                    "source_file": key,
+                    "skipped": True,
+                    "reason": "success_marker",
+                    # The failures the marker recorded still count in the run.
+                    "failed_articles_count": int(done.get("failed_articles_count") or 0),
+                }
             if is_success(processed_dir, SOURCE, key):
                 _LOG.warning(
                     "%s: %s; writing the bucket again from part 1",
