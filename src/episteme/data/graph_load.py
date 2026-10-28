@@ -117,14 +117,17 @@ def _copy_relation(cur, rel: str, path: Path, source_file: str) -> int:
     sf_idx = cols.index("source_file")
     n = 0
     with cur.copy(f"COPY {TABLE_FOR[rel]} ({', '.join(cols)}) FROM STDIN") as cp:
-        for batch in pq.ParquetFile(path).iter_batches(batch_size=_BATCH_ROWS, columns=cols):
-            columns = [batch.column(i).to_pylist() for i in range(len(cols))]
-            # Key every row on the load's source_file, so the per-file delete, the facets
-            # and the lineage row always agree with what was copied.
-            columns[sf_idx] = [source_file] * batch.num_rows
-            for row in zip(*columns, strict=True):
-                cp.write_row(row)
-            n += batch.num_rows
+        # pre_buffer off: the default keeps every chunk read until the reader is
+        # gone, so memory grows with the file (see postgres_loader.PARQUET_PRE_BUFFER).
+        with pq.ParquetFile(path, pre_buffer=False) as pf:
+            for batch in pf.iter_batches(batch_size=_BATCH_ROWS, columns=cols):
+                columns = [batch.column(i).to_pylist() for i in range(len(cols))]
+                # Key every row on the load's source_file, so the per-file delete, the
+                # facets and the lineage row always agree with what was copied.
+                columns[sf_idx] = [source_file] * batch.num_rows
+                for row in zip(*columns, strict=True):
+                    cp.write_row(row)
+                n += batch.num_rows
     return n
 
 
