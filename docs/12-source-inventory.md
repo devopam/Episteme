@@ -8,7 +8,7 @@ Conventions: "not stated" means neither the code nor `docs/02` / `docs/10` state
 
 | source | class | stages wired | licence (class + basis) | cadence | script |
 |---|---|---|---|---|---|
-| `pmc` | literature | download, extract, load, graph, materialize, enrich | per-article, from PMC metadata `license_code`, normalised by `article_schema.normalize_license`; `commercial` only for CC0 / CC BY / BY-SA / BY-ND, otherwise `text_mining` (`extract_pmc.py`) | continuous / daily (docs/10 s2) | `pmc/download_pmc.sh` |
+| `pmc` | literature | download, extract (50,000-id buckets in bounded parts; gated: extract, load; docs/10 s6 PMC), load, graph, materialize, enrich | per-article, from PMC metadata `license_code`, normalised by `article_schema.normalize_license`; `commercial` only for CC0 / CC BY / BY-SA / BY-ND, otherwise `text_mining` (`extract_pmc.py`) | continuous / daily (docs/10 s2) | `pmc/download_pmc.sh` |
 | `pubmed` | literature | download, extract, load, graph | `unknown` -> `open_metadata`: records carry no licence text (`extract_pubmed.py`) | baseline annual; update files daily (docs/10 s1) | `pubmed/download_pubmed.sh` |
 | `apollo` | literature | download, extract, load, graph | `permissive` -> `commercial`, from the HF card's `apache-2.0` (`extract_apollo.py`); docs/02 still lists commercial-use diligence as open | static corpus releases (docs/10 s8) | `apollo/download_apollo.sh` |
 | `europepmc_preprint` | literature | download, extract, load, graph | per-article licence from JATS, normalised; NC licences -> `text_mining` (docs/10 s3) | incremental range files as EPMC publishes (docs/10 s3) | `europepmc/preprints/download_europepmc_preprint.sh` |

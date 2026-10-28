@@ -249,6 +249,55 @@ def _build_pubchem(raw: Path, dest: Path, part_rows: int | None = None) -> dict:
     }
 
 
+def _select_pmc(raw: Path) -> list[Path]:
+    """The files of three buckets: the largest by XML bytes, the median by XML
+    bytes and the one with the most superseded versions (spec 4.6).
+
+    One walk of the metadata folder and one ``stat`` per kept article's XML;
+    no search of ``raw/xml`` (it holds about 935k files). A chosen bucket
+    brings all of its metadata files, also the lower versions, so the sample
+    runs the highest-version choice. Ties go to the lowest bucket number.
+    """
+    from episteme.data.pmc.buckets import bucket_of, group_by_bucket, parse_meta_name
+    from episteme.data.pmc.extract_pmc import discover_meta_files, find_xml_for_meta
+
+    meta_files = discover_meta_files(raw)
+    buckets, _unrecognised = group_by_bucket(meta_files, raw)
+    if not buckets:
+        raise SliceError(f"pmc: no PMC*.json metadata file under {raw}")
+
+    xml_of: dict[Path, Path] = {}
+
+    def xml_bytes(bucket) -> int:
+        total = 0
+        for meta in bucket.files:
+            xml = find_xml_for_meta(meta, raw, meta.stem, search=False)
+            if xml is not None:
+                xml_of[meta] = xml
+                total += _size(xml)
+        return total
+
+    sizes = {b: xml_bytes(bk) for b, bk in buckets.items()}
+    by_size = sorted(sizes, key=lambda b: (sizes[b], b))
+    largest = max(sizes, key=lambda b: (sizes[b], -b))
+    median = by_size[(len(by_size) - 1) // 2]
+    most_versions = max(buckets, key=lambda b: (buckets[b].superseded, -b))
+    chosen = sorted({largest, median, most_versions})
+
+    out: list[Path] = []
+    for meta in sorted(meta_files, key=lambda p: p.as_posix()):
+        parsed = parse_meta_name(meta.name)
+        if parsed is None or bucket_of(parsed[0]) not in chosen:
+            continue
+        out.append(meta)
+        xml = xml_of.get(meta)
+        if xml is None:
+            xml = find_xml_for_meta(meta, raw, meta.stem, search=False)
+        if xml is not None and xml not in out:
+            out.append(xml)
+    return out
+
+
 def _every_file(_p: Path) -> bool:
     return True
 
@@ -286,6 +335,13 @@ SLICES: dict[str, SliceSpec] = {
     ),
     "apollo": SliceSpec("apollo", 4 * GB, _select_apollo, Path("apollo")),
     "pubchem": SliceSpec("pubchem", 1 * GB, _select_pubchem, Path("pubchem"), build=_build_pubchem),
+    "pmc": SliceSpec(
+        "pmc",
+        2 * GB,
+        _select_pmc,
+        Path("pmc/oa_comm"),
+        is_unit=lambda p: p.suffix == ".json",
+    ),
 }
 
 

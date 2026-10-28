@@ -8,7 +8,7 @@ import pytest
 
 from episteme.ops import gate
 
-SOURCES = ["bookshelf", "europepmc_manuscript", "apollo"]
+SOURCES = ["bookshelf", "europepmc_manuscript", "apollo", "pmc"]
 
 
 @pytest.mark.parametrize("source", SOURCES)

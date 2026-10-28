@@ -58,6 +58,7 @@ _EXTRACT_MODULES = {
         "europepmc_manuscript/extract_europepmc_manuscript.sh",
     ),
     "apollo": ("episteme.data.apollo.extract_apollo", "apollo/extract_apollo.sh"),
+    "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
