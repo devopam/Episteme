@@ -52,8 +52,9 @@ def _seed(pg_conn, tmp_path, monkeypatch):
     with pg_conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO episteme.articles (id, source, source_file, pmid, pmcid, year)
-            VALUES ('pmcid:PMC1', 'pmc', 'B01.xml', '111', 'PMC1', 2024)
+            INSERT INTO episteme.articles
+              (id, source, source_file, pmid, pmcid, source_record_id, year)
+            VALUES ('pmcid:PMC1', 'pmc', 'B01.xml', '111', 'PMC1', 'PMC1.1', 2024)
             """
         )
     pg_conn.commit()
@@ -439,4 +440,4 @@ def test_pmc_graph_reads_rows_through_a_named_cursor(pg_conn, tmp_path, monkeypa
     assert [g[0] for g in groups] == sorted(layout)
     assert {g[0]: len(g[1]) for g in groups} == layout
     assert sum(len(g[1]) for g in groups) == 7
-    assert groups[0][1][0] == ("pmcid:PMC1", "101", "PMC1")
+    assert groups[0][1][0] == ("pmcid:PMC1", "101", "PMC1", None)

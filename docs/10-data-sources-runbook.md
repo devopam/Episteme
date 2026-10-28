@@ -919,7 +919,7 @@ The article list comes from the bucket's daily S3 inventory (`inventory-reports/
 **Extract in buckets and parts.** `pmc extract` groups the metadata files by a fixed PMC id range: a bucket holds 50,000 ids (`bucket = id // 50000`). Each article keeps only its highest version. A bucket is the unit of work, so the 935k articles become about 270 buckets (fewer non-empty), not 935k units.
 
 - **Names.** A bucket key is `pmc_b0021` (four digits). A part is `pmc_b0021__part00001`. The staging shards are `<processed>/staging/pmc/pmc_b0021__part00001.parquet`. A part ends at the row or byte cap of the profile (`part_rows`, `part_bytes`, section 2.5). The manifest of a bucket is `<processed>/_ops/pmc/buckets/pmc_b0021.json`.
-- **Flags.** `--max-files N` means N articles for `download` and N buckets for `extract` (one bucket is up to 50,000 ids). With `all`, the same number goes to both stages. `--skip-unit` takes a bucket key (for example `--skip-unit pmc_b0021 --reason "..."`).
+- **Flags.** `--max-files N` means N buckets for `extract` (one bucket is up to 50,000 ids). The article-count meaning (N articles) is for `download` only. With `all`, the same number goes to both stages. `--skip-unit` takes a bucket key (for example `--skip-unit pmc_b0021 --reason "..."`).
 - **Resume and redo.** A bucket stores a fingerprint of its files (the `input_key`, size and mtime of each metadata file and its XML). A bucket with a success marker and the same fingerprint is skipped. A changed fingerprint redoes the whole bucket: there is no resume inside a bucket. The old parts of a redone bucket are replaced, and a part that is no longer written is retired.
 - **Failed articles.** A broken article does not fail its bucket. It gets a failed marker (its own `input_key`) in the same `failed/` folder, and the bucket marker lists it in `failed_articles` and `failed_articles_count`. The next run tries the bucket again only if the fingerprint changed or `--force` is used.
 - **Retire after load.** An extract that replaces parts writes the names to retire under `<processed>/_ops/pmc/retire_pending.d/` (one file per bucket). `load_pmc.sh` runs `episteme.data.pmc.retire` after a good load. It deletes the rows of the old parts, then clears the pending file. A load that fails leaves the file for the next run.
@@ -928,10 +928,10 @@ The article list comes from the bucket's daily S3 inventory (`inventory-reports/
 - **Rules.** The thresholds in `gate_rules/pmc.json` are provisional. Check them on the first sample. `max_failed_inputs` counts failed buckets plus failed articles: `pmc extract` writes `<processed>/_ops/pmc/failed_inputs.json` (`run_id`, `failed_inputs`) at the end of each run, and `gate run` reads it when the `run_id` is its own. The exit code of the stage does not change.
 
 ```bash
-# first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
+# download: --max-files counts articles (here 20; the default cap is 10, 0 = everything)
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --max-files 20
-# extract: --max-files counts buckets (here the first 2 buckets)
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc extract --max-files 2
+# extract: --max-files counts buckets, not articles (1 = one bucket of up to 50,000 ids)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc extract --max-files 1
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc load
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc graph
 
