@@ -60,7 +60,7 @@ Purpose: a fixed set of real questions to score every model on the same terms: c
 - **Expected answer:** reports for the device by product code and model; grouping by lot where a lot identifier is present, or by serial number only through a manufacturer mapping from serial to lot. Without a lot identifier or such a mapping, the answer reports only the serial clustering and leaves the lot link unresolved (a serial number identifies one device, not a production lot); recalls and their reasons; similar devices with the same failure.
 - **Must be exact:** device identifiers, product codes, report counts, recall numbers and classes.
 - **Expected gaps:** lot and serial coverage in the reports; reports that do not name the model; UDI presence and validation coverage (the UDI is not in every report and is not validated), with the fallback stated when no UDI is present (match on product code, brand and model name, at a lower confidence).
-- **Sources needed:** openFDA `device/event` (MAUDE), `device/recall`, `device/udi` (GUDID): none downloaded or wired yet.
+- **Sources needed:** openFDA `device/event` (MAUDE), `device/recall`, `device/udi` (GUDID): none downloaded or wired yet. No manufacturer serial-to-lot mapping source is in scope: until one is added (with its own validation rule), the answer leaves the lot link unresolved for every report that has a serial number but no lot identifier.
 - **Origin:** proposed by Claude, from the user's device scope, 2026-10-28. To be reviewed by the user.
 
 ### Q4. Veterinary adverse events for a shared ingredient (proposed)
