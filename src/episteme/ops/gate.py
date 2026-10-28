@@ -658,6 +658,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # with a stop exit code. That is an interrupted run too.
     if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if args.source:
+        # Opt-in: a stage that counts failed inputs beyond its exit code (pmc:
+        # failed articles) writes failed_inputs.json for this run id.
+        from episteme.config import get_settings
+        from episteme.data.checkpoint_markers import read_failed_inputs
+
+        settings = get_settings()
+        failed = read_failed_inputs(settings.processed_root, args.source, settings.run_id)
+        if failed is not None:
+            record["failed_inputs"] = failed
     if raw_rc != rc:
         record["child_rc"] = raw_rc
     out = Path(args.record)

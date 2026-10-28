@@ -66,6 +66,7 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    FAILED_INPUTS_FILE,
     discover_input_files,
     failed_marker_path,
     input_key,
@@ -73,7 +74,9 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     load_success_marker_path,
     mark_failed,
     mark_success,
+    ops_root,
     success_marker_path,
+    write_marker,
     write_run_manifest,
 )
 from episteme.data.jats import parse_jats_fields  # noqa: E402
@@ -815,7 +818,19 @@ def _main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
+    _write_failed_inputs(processed_dir, res)
     return 1 if res["failed"] else 0
+
+
+def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
+    """Tell the sample gate how many inputs failed: failed buckets plus failed
+    articles. ``gate run`` reads the file when its ``run_id`` is the run's own."""
+    run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
+    failed = int(res.get("failed") or 0) + int(res.get("failed_articles_count") or 0)
+    write_marker(
+        ops_root(processed_dir, SOURCE) / FAILED_INPUTS_FILE,
+        {"run_id": run_id, "failed_inputs": failed},
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

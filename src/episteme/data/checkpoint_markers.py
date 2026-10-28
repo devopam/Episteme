@@ -15,6 +15,27 @@ _LOG = logging.getLogger(__name__)
 _POSIX = os.name == "posix"  # directories can be fsynced (a seam for tests)
 
 
+# A stage that counts failed inputs beyond its exit code (pmc: failed articles)
+# writes this file under its ops folder; ``gate run`` reads it (opt-in).
+FAILED_INPUTS_FILE = "failed_inputs.json"
+
+
+def read_failed_inputs(processed_root: Path, source: str, run_id: str | None) -> int | None:
+    """``failed_inputs`` of ``<ops>/failed_inputs.json`` when it is of run ``run_id``;
+    ``None`` when the file is missing, unreadable or of another run."""
+    if not run_id:
+        return None
+    try:
+        data = json.loads(
+            (ops_root(processed_root, source) / FAILED_INPUTS_FILE).read_text(encoding="utf-8")
+        )
+        if data.get("run_id") != run_id:
+            return None
+        return int(data["failed_inputs"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def ops_root(processed_root: Path, source: str) -> Path:
     return Path(processed_root) / "_ops" / source
 

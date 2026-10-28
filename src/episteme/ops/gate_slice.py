@@ -285,6 +285,7 @@ def _select_pmc(raw: Path) -> list[Path]:
     chosen = sorted({largest, median, most_versions})
 
     out: list[Path] = []
+    seen: set[Path] = set()
     for meta in sorted(meta_files, key=lambda p: p.as_posix()):
         parsed = parse_meta_name(meta.name)
         if parsed is None or bucket_of(parsed[0]) not in chosen:
@@ -293,7 +294,8 @@ def _select_pmc(raw: Path) -> list[Path]:
         xml = xml_of.get(meta)
         if xml is None:
             xml = find_xml_for_meta(meta, raw, meta.stem, search=False)
-        if xml is not None and xml not in out:
+        if xml is not None and xml not in seen:
+            seen.add(xml)
             out.append(xml)
     return out
 

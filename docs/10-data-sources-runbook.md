@@ -925,7 +925,7 @@ The article list comes from the bucket's daily S3 inventory (`inventory-reports/
 - **Retire after load.** An extract that replaces parts writes the names to retire under `<processed>/_ops/pmc/retire_pending.d/` (one file per bucket). `load_pmc.sh` runs `episteme.data.pmc.retire` after a good load. It deletes the rows of the old parts, then clears the pending file. A load that fails leaves the file for the next run.
 - **Old per-article state.** A processed folder that holds the old state (shards or markers named after `metadata__PMC*`) must be cleaned, and its rows retired, before the first bucket run. The production folder has none (checked 2026-10-28).
 - **Sample.** `pmc extract --sample` and `pmc load --sample` use three buckets (section 4.9): the largest by XML bytes, the median, and the one with the most superseded versions.
-- **Rules.** The thresholds in `gate_rules/pmc.json` are provisional. Check them on the first sample.
+- **Rules.** The thresholds in `gate_rules/pmc.json` are provisional. Check them on the first sample. `max_failed_inputs` counts failed buckets plus failed articles: `pmc extract` writes `<processed>/_ops/pmc/failed_inputs.json` (`run_id`, `failed_inputs`) at the end of each run, and `gate run` reads it when the `run_id` is its own. The exit code of the stage does not change.
 
 ```bash
 # first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
