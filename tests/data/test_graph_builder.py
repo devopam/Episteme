@@ -378,3 +378,65 @@ def test_pgq_path_when_available(pg_conn, tmp_path, monkeypatch):
     graph_builder.build(pg_conn, source="pmc", raw_dir=raw, run_id="g1")
     pg_conn.commit()
     assert set(graph_builder._neighbours_pgq(pg_conn, "111", 1)) == {"222"}
+
+
+def test_pmc_graph_reads_rows_through_a_named_cursor(pg_conn, tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
+    _setup_schema(pg_conn)
+
+    layout = {"pmc_b0001__part00001": 3, "pmc_b0001__part00002": 2, "pmc_b0002__part00001": 2}
+    n = 0
+    with pg_conn.cursor() as cur:
+        for source_file, count in layout.items():
+            for _ in range(count):
+                n += 1
+                cur.execute(
+                    "INSERT INTO episteme.articles (id, source, source_file, pmid, pmcid, year) "
+                    "VALUES (%s, 'pmc', %s, %s, %s, 2024)",
+                    (f"pmcid:PMC{n}", source_file, str(100 + n), f"PMC{n}"),
+                )
+    pg_conn.commit()
+
+    from episteme.data import graph_builder
+
+    seen: dict[str, list] = {"names": [], "sizes": [], "fetchall": []}
+
+    class _Cur:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def fetchmany(self, size):
+            seen["sizes"].append(size)
+            return self._inner.fetchmany(size)
+
+        def fetchall(self):
+            seen["fetchall"].append(True)
+            return self._inner.fetchall()
+
+        def __getattr__(self, attr):
+            return getattr(self._inner, attr)
+
+    class _Conn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def cursor(self, *args, **kwargs):
+            seen["names"].append(kwargs.get("name"))
+            return _Cur(self._inner.cursor(*args, **kwargs))
+
+    groups = list(graph_builder._pmc_rows_by_file(_Conn(pg_conn), batch_rows=2))
+
+    assert seen["names"] and all(seen["names"])  # a named (server-side) cursor
+    assert seen["fetchall"] == []
+    assert set(seen["sizes"]) == {2}
+    assert [g[0] for g in groups] == sorted(layout)
+    assert {g[0]: len(g[1]) for g in groups} == layout
+    assert sum(len(g[1]) for g in groups) == 7
+    assert groups[0][1][0] == ("pmcid:PMC1", "101", "PMC1")
