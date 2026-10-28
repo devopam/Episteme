@@ -94,3 +94,39 @@ def test_stop_survives_a_failing_rollback_and_is_not_retried(monkeypatch, tmp_pa
     with pytest.raises(KeyboardInterrupt):
         graph_load.build_pubmed_graph(Conn(False), processed_dir=tmp_path, run_id="r")
     assert sleeps == []
+
+
+def test_copy_relation_reads_parquet_without_pre_buffer(tmp_path, monkeypatch):
+    # 2026-10-28: pyarrow's default pre_buffer keeps every chunk read until the
+    # reader is gone, so memory grows with the file. The graph copy turns it off.
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from episteme.data.graph_files import RELATION_COLUMNS
+
+    cols = RELATION_COLUMNS["mesh"]
+    path = tmp_path / "mesh.parquet"
+    pq.write_table(pa.table({c: ["v1", "v2"] for c in cols}), path)
+
+    seen, rows = [], []
+    real = pq.ParquetFile
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("pre_buffer"))
+        return real(*args, **kwargs)
+
+    class _Copy:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def write_row(self, row):
+            rows.append(row)
+
+    cur = types.SimpleNamespace(copy=lambda sql: _Copy())
+    monkeypatch.setattr(pq, "ParquetFile", spy)
+    assert graph_load._copy_relation(cur, "mesh", path, "F.xml.gz") == 2
+    assert seen == [False]
+    assert len(rows) == 2

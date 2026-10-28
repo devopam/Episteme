@@ -30,6 +30,110 @@ def _shard(tmp_path: Path, n: int, *, prefer_parquet: bool = True) -> Path:
     return Path(info["paths"][0])
 
 
+def _wide_shard(tmp_path: Path, n: int, width: int, *, prefer_parquet: bool = True) -> Path:
+    """A shard of full-text-like rows: each body is ``width`` characters."""
+    rows = [
+        finalize_row(
+            {
+                **empty_article_row(),
+                "id": f"pmc:W{i}",
+                "source": "chembl",
+                "source_file": "F_w.db",
+                "source_record_id": f"W{i}",
+                "license": "CC BY-SA",
+                "subset": "commercial",
+                "title": f"Title {i}",
+                "body_text": ("x" * (width - 1)) + str(i % 10),
+            }
+        )
+        for i in range(n)
+    ]
+    info = write_rows(
+        rows, tmp_path, source="chembl", source_file="W.db", prefer_parquet=prefer_parquet
+    )
+    return Path(info["paths"][0])
+
+
+def _batch_text_bytes(cols) -> int:
+    return sum(len(v or "") for c in ("title", "abstract", "body_text", "text") for v in cols[c])
+
+
+@pytest.mark.parametrize("prefer_parquet", [True, False])
+def test_load_batches_end_at_the_byte_cap(tmp_path, prefer_parquet):
+    # 2026-10-28: 50,000 rows of ~30 KB full text decoded to ~13 GB. The row
+    # count alone must not set the batch: wide rows end a batch at the byte cap.
+    path = _wide_shard(tmp_path, 60, 10_000, prefer_parquet=prefer_parquet)
+    fmt = "parquet" if path.suffix == ".parquet" else "jsonl"
+    cap = 100_000
+    batches = list(postgres_loader._iter_batches(path, fmt, 50_000, batch_bytes=cap))
+    assert sum(len(b["id"]) for b in batches) == 60
+    assert len(batches) > 1
+    assert all(_batch_text_bytes(b) <= cap for b in batches), [
+        _batch_text_bytes(b) for b in batches
+    ]
+    assert [i for b in batches for i in b["id"]] == [f"pmc:W{i}" for i in range(60)]
+
+
+@pytest.mark.parametrize("prefer_parquet", [True, False])
+def test_narrow_rows_keep_the_row_batch(tmp_path, prefer_parquet):
+    path = _shard(tmp_path, 40, prefer_parquet=prefer_parquet)
+    fmt = "parquet" if path.suffix == ".parquet" else "jsonl"
+    batches = list(postgres_loader._iter_batches(path, fmt, 16))
+    assert [len(b["id"]) for b in batches] == [16, 16, 8]
+
+
+def test_a_row_wider_than_the_cap_is_its_own_batch(tmp_path):
+    path = _wide_shard(tmp_path, 3, 50_000, prefer_parquet=False)
+    batches = list(postgres_loader._iter_batches(path, "jsonl", 50_000, batch_bytes=10_000))
+    assert [len(b["id"]) for b in batches] == [1, 1, 1]
+
+
+def test_jsonl_byte_cap_counts_utf8_bytes(tmp_path):
+    # Review (CodeRabbit, #96): 2,000 "é" are 2,000 characters but 4,000 bytes.
+    import json
+
+    path = tmp_path / "w.jsonl"
+    rows = [{"id": f"pmc:U{i}", "source_file": "F", "body_text": "é" * 2000} for i in range(4)]
+    text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    path.write_text(text, encoding="utf-8")
+    batches = list(postgres_loader._iter_batches(path, "jsonl", 50_000, batch_bytes=6_000))
+    assert [len(b["id"]) for b in batches] == [1, 1, 1, 1]
+
+
+def test_a_parquet_row_wider_than_the_cap_is_its_own_batch(tmp_path):
+    path = _wide_shard(tmp_path, 3, 50_000)
+    batches = list(postgres_loader._iter_batches(path, "parquet", 50_000, batch_bytes=10_000))
+    assert [len(b["id"]) for b in batches] == [1, 1, 1]
+
+
+def test_parquet_batch_rows_never_drop_below_one(tmp_path):
+    import pyarrow.parquet as pq
+
+    path = _wide_shard(tmp_path, 3, 50_000)
+    with pq.ParquetFile(path) as pf:
+        assert postgres_loader._parquet_batch_rows(pf, 50_000, 10_000) == 1
+        assert postgres_loader._parquet_batch_rows(pf, 2, 10**12) == 2
+
+
+@pytest.mark.parametrize("reader", ["_iter_batches", "_iter_id_batches"])
+def test_parquet_readers_turn_off_pre_buffer(tmp_path, monkeypatch, reader):
+    # 2026-10-28: the default pre_buffer held 2,150 MB after 400 read steps of a
+    # 4 GB shard, growing with the shard. Both loader readers must turn it off.
+    import pyarrow.parquet as pq
+
+    seen = []
+    real = pq.ParquetFile
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("pre_buffer"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", spy)
+    path = _shard(tmp_path, 4)
+    list(getattr(postgres_loader, reader)(path, "parquet", 2))
+    assert seen == [False]
+
+
 class _NoConn:
     """Any use of the connection fails the test: the guard must run first."""
 

@@ -70,6 +70,14 @@ BODY_COLUMNS: tuple[str, ...] = (
 # Rows per streamed batch (the loader's memory bound) and the content-hash
 # read size.
 LOAD_BATCH_ROWS = default_batch_rows()
+# A batch also ends at this many bytes of row data (2026-10-28): a row of a
+# full-text source is ~30 KB, so 50,000 rows decoded to ~13 GB of Python strings.
+# The same cap as the staging writer's WRITE_BATCH_BYTES.
+LOAD_BATCH_BYTES = 64 * 1024 * 1024
+# pyarrow's default pre_buffer keeps every column chunk it has read until the
+# reader is gone: 2,150 MB after 400 read steps of one 4 GB shard (2026-10-28),
+# and the memory grows with the shard. Off, the same read holds 16 MB.
+PARQUET_PRE_BUFFER = False
 _HASH_CHUNK_BYTES = 1 << 20
 
 # SP1-β loads pmc only. These sources are identifier enrichment, not a text
@@ -154,28 +162,93 @@ def _iter_jsonl(staging_path: Path) -> Iterator[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def _iter_batches(staging_path: Path, fmt: str, batch_size: int) -> Iterator[dict[str, list[Any]]]:
-    """Per batch of at most ``batch_size`` rows: every ``ARTICLE_COLUMNS`` name ->
-    its values, one per row (never the whole shard). Parquet columns are
-    converted once per column (``to_pylist``), not once per row as a dict. A
-    column absent from the shard reads as all ``None``, as ``dict.get`` did.
-    ``id`` and ``source_file`` are required (``KeyError`` if absent), as before."""
+def _jsonl_batches(
+    staging_path: Path, batch_size: int, batch_bytes: int
+) -> Iterator[list[dict[str, Any]]]:
+    """JSONL rows in batches of at most ``batch_size`` rows; a batch ends before
+    a line would take it past ``batch_bytes`` (counted in UTF-8 bytes)."""
+    batch: list[dict[str, Any]] = []
+    size = 0
+    with staging_path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            # UTF-8 bytes, not characters: the writer keeps non-ASCII text as is.
+            line_bytes = len(line.encode("utf-8"))
+            if batch and (len(batch) >= batch_size or size + line_bytes > batch_bytes):
+                yield batch
+                batch, size = [], 0
+            batch.append(json.loads(line))
+            size += line_bytes
+    if batch:
+        yield batch
+
+
+def _parquet_batch_rows(pf: Any, batch_size: int, batch_bytes: int) -> int:
+    """Rows per parquet batch: ``batch_size``, lowered so that a batch of the
+    widest row group's average row stays within ``batch_bytes`` (at least 1).
+    The width is the uncompressed size per row from the row-group metadata."""
+    md = pf.metadata
+    widest = max(
+        (
+            md.row_group(i).total_byte_size / md.row_group(i).num_rows
+            for i in range(md.num_row_groups)
+            if md.row_group(i).num_rows
+        ),
+        default=0.0,
+    )
+    if widest <= 0:
+        return batch_size
+    return max(1, min(batch_size, int(batch_bytes // widest)))
+
+
+def _arrow_columns(batches: list[Any], columns: tuple[str, ...], names: set[str]) -> dict:
+    """Record batches -> every ``columns`` name -> its values (absent: all None)."""
+    import pyarrow as pa
+
+    table = pa.Table.from_batches(batches)
+    n = table.num_rows
+    return {c: (table.column(c).to_pylist() if c in names else [None] * n) for c in columns}
+
+
+def _iter_batches(
+    staging_path: Path, fmt: str, batch_size: int, batch_bytes: int = LOAD_BATCH_BYTES
+) -> Iterator[dict[str, list[Any]]]:
+    """Per batch of at most ``batch_size`` rows and about ``batch_bytes`` of row
+    data: every ``ARTICLE_COLUMNS`` name -> its values, one per row (never the
+    whole shard). Parquet columns are converted once per column (``to_pylist``),
+    not once per row as a dict. A column absent from the shard reads as all
+    ``None``, as ``dict.get`` did. ``id`` and ``source_file`` are required
+    (``KeyError`` if absent), as before. A batch ends before a read step
+    (parquet) or a line (JSONL) would take it past either limit; a single larger
+    step or line is its own batch."""
     columns = article_schema.ARTICLE_COLUMNS
     if fmt == "parquet":
         import pyarrow.parquet as pq
 
-        with pq.ParquetFile(staging_path) as pf:
+        with pq.ParquetFile(staging_path, pre_buffer=PARQUET_PRE_BUFFER) as pf:
             names = set(pf.schema_arrow.names)
             for required in ("id", "source_file"):
                 if required not in names:
                     raise KeyError(required)
             present = [c for c in columns if c in names]
-            for rb in pf.iter_batches(batch_size=batch_size, columns=present):
-                n = rb.num_rows
-                yield {c: (rb.column(c).to_pylist() if c in names else [None] * n) for c in columns}
+            # Read in steps of a quarter of the estimated batch, then end a batch
+            # on the decoded size (``nbytes``): the metadata size is after
+            # parquet encoding and can be far below the decoded strings.
+            step = max(1, _parquet_batch_rows(pf, batch_size, batch_bytes) // 4)
+            pending: list[Any] = []
+            rows = size = 0
+            for rb in pf.iter_batches(batch_size=step, columns=present):
+                if pending and (rows + rb.num_rows > batch_size or size + rb.nbytes > batch_bytes):
+                    yield _arrow_columns(pending, columns, names)
+                    pending, rows, size = [], 0, 0
+                pending.append(rb)
+                rows += rb.num_rows
+                size += rb.nbytes
+            if pending:
+                yield _arrow_columns(pending, columns, names)
         return
-    it = _iter_jsonl(staging_path)
-    while batch := list(itertools.islice(it, batch_size)):
+    for batch in _jsonl_batches(staging_path, batch_size, batch_bytes):
         cols = {c: [r.get(c) for r in batch] for c in columns}
         cols["id"] = [r["id"] for r in batch]
         cols["source_file"] = [r["source_file"] for r in batch]
@@ -221,7 +294,7 @@ def _iter_id_batches(
     if fmt == "parquet":
         import pyarrow.parquet as pq
 
-        with pq.ParquetFile(staging_path) as pf:
+        with pq.ParquetFile(staging_path, pre_buffer=PARQUET_PRE_BUFFER) as pf:
             for rb in pf.iter_batches(batch_size=batch_size, columns=["id", "source_file"]):
                 yield rb.column("id").to_pylist(), rb.column("source_file").to_pylist()
         return
