@@ -13,4 +13,7 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-exec "$PY" -m episteme.data.load_articles --source pmc "$@"
+"$PY" -m episteme.data.load_articles --source pmc "$@" || exit $?
+
+# Retire the rows of deleted parts, only after a load that exited 0.
+exec "$PY" -m episteme.data.pmc.retire "$@"

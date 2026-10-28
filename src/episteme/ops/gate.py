@@ -94,6 +94,7 @@ def stage_module(source: str, stage: str) -> tuple[str, str]:
 # step after load_articles.
 EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pubchem", "load"): ("episteme.data.pubchem.retire",),
+    ("pmc", "load"): ("episteme.data.pmc.retire",),
 }
 
 
