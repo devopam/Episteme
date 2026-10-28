@@ -109,81 +109,71 @@ def test_discover_meta_files_keeps_distinct_paths_same_basename(tmp_path):
     assert {f.resolve() for f in files} == {meta_a.resolve(), meta_b.resolve()}
 
 
-def test_same_basename_different_subdirs_both_processed(tmp_path):
-    """Checkpoint-collision regression test (Task 9): two metadata files
-    with the *same basename* (``PMC1.json``) in different subdirectories
-    under raw_dir must each get their own discovery hit, checkpoint
-    marker, and row -- not collapse into one, either at discovery
-    (basename dedup) or at the success-marker check (basename identity).
-
-    Also proves that, for this colocated-XML layout, the same-name
-    collision does not cross-contaminate XML resolution: each metadata
-    file's colocated XML (``meta_path.with_suffix(".xml")``, now the FIRST
-    -- most specific -- candidate ``find_xml_for_meta`` checks, per the
-    SP6/SP7 drift-log close-out ordering fix) is matched to its own row,
-    not the sibling directory's file. This is NOT the same as proving XML
-    resolution is collision-safe in general: absent a colocated file,
-    ``find_xml_for_meta`` still falls through to ``raw_dir / "xml" /
-    f"{version_id}.xml"`` (a single shared directory keyed only by
-    ``version_id = meta_path.stem``, which two same-basename metas share),
-    so a raw_dir carrying that layout instead -- e.g. a real
-    ``download_pmc.py`` output tree merged from two runs, both dropping XML
-    into the one shared ``xml/`` dir with no colocated copy -- would still
-    resolve both same-named metas to that one shared file. Two or more
-    *distinct* files found only via the ``rglob`` fallback are now treated
-    as ambiguous (logged, ``None`` returned) rather than picked
-    arbitrarily; a single shared path hit by exact name is not covered by
-    that ambiguity check and is intentionally left as pre-existing,
-    documented behaviour -- see the task-9 report for the full reasoning.
-    """
-    raw = tmp_path / "01_raw" / "pmc" / "oa_comm"
-    dir_a = raw / "metadata" / "batch_a"
-    dir_b = raw / "metadata" / "batch_b"
-    dir_a.mkdir(parents=True)
-    dir_b.mkdir(parents=True)
-
-    meta_a = dir_a / "PMC1.json"
-    meta_b = dir_b / "PMC1.json"
-    xml_a = dir_a / "PMC1.xml"
-    xml_b = dir_b / "PMC1.xml"
-
-    meta_a.write_text(_meta("PMC1", 40000001, "10.0/a"), encoding="utf-8")
-    meta_b.write_text(_meta("PMC2", 40000002, "10.0/b"), encoding="utf-8")
-    xml_a.write_text(_xml("PMC1", 40000001, "10.0/a"), encoding="utf-8")
-    xml_b.write_text(_xml("PMC2", 40000002, "10.0/b"), encoding="utf-8")
-
-    processed = tmp_path / "02_processed"
-    res = extract_pmc(raw, processed, workers=1)
-
-    assert res["inputs"] == 2
-    assert res["ok"] == 2
-    assert res["failed"] == 0
-
-    marks = sorted(p.name for p in (processed / "_ops" / "pmc" / "success").glob("*.ok"))
-    assert len(marks) == 2
-    assert marks[0] != marks[1]
-    assert any("batch_a" in m for m in marks)
-    assert any("batch_b" in m for m in marks)
-
-    shard_dir = processed / "staging" / "pmc"
+def _read_staging(processed: Path) -> list[dict]:
     rows = []
-    for shard in shard_dir.glob("*"):
+    for shard in (processed / "staging" / "pmc").glob("*"):
         if shard.suffix == ".parquet":
             import pyarrow.parquet as pq
 
             rows.extend(pq.read_table(shard).to_pylist())
         else:
             rows.extend(json.loads(line) for line in shard.read_text().splitlines())
+    return rows
 
-    pmcids = sorted(r["pmcid"] for r in rows)
-    assert pmcids == ["PMC1", "PMC2"]
+
+def test_articles_in_different_subdirs_each_attach_their_own_xml(tmp_path):
+    """Checkpoint-collision regression test (Task 9), bucket layout: two
+    articles in different subdirectories under raw_dir are both extracted,
+    and each row takes its pmid/doi from its own colocated XML (the FIRST,
+    most specific, candidate of ``find_xml_for_meta``), not the sibling
+    directory's file."""
+    raw = tmp_path / "01_raw" / "pmc" / "oa_comm"
+    dir_a = raw / "metadata" / "batch_a"
+    dir_b = raw / "metadata" / "batch_b"
+    dir_a.mkdir(parents=True)
+    dir_b.mkdir(parents=True)
+
+    (dir_a / "PMC1.1.json").write_text(_meta("PMC1", 40000001, "10.0/a"), encoding="utf-8")
+    (dir_b / "PMC2.1.json").write_text(_meta("PMC2", 40000002, "10.0/b"), encoding="utf-8")
+    (dir_a / "PMC1.1.xml").write_text(_xml("PMC1", 40000001, "10.0/a"), encoding="utf-8")
+    (dir_b / "PMC2.1.xml").write_text(_xml("PMC2", 40000002, "10.0/b"), encoding="utf-8")
+
+    processed = tmp_path / "02_processed"
+    res = extract_pmc(raw, processed, workers=1)
+
+    assert (res["inputs"], res["ok"], res["failed"], res["rows"]) == (1, 1, 0, 2)
+    rows = _read_staging(processed)
+    assert sorted(r["pmcid"] for r in rows) == ["PMC1", "PMC2"]
+    assert {r["source_file"] for r in rows} == {"pmc_b0000__part00001"}
     by_pmcid = {r["pmcid"]: r for r in rows}
-    # No XML cross-contamination: each row's pmid/doi must come from its own
-    # directory's metadata+xml pair, not the sibling same-basename file's.
     assert by_pmcid["PMC1"]["pmid"] == "40000001"
     assert by_pmcid["PMC2"]["pmid"] == "40000002"
     assert by_pmcid["PMC1"]["doi"] == "10.0/a"
     assert by_pmcid["PMC2"]["doi"] == "10.0/b"
+
+
+def test_same_basename_different_subdirs_both_considered_one_kept(tmp_path):
+    """Two metadata files with the same basename (``PMC1.1.json``) in
+    different subdirectories are both discovered and considered (never
+    collapsed by basename). They are the same article and version, so the
+    bucket keeps one -- the first by input_key -- and counts the other in
+    ``duplicate_files``. The kept row takes its XML from its own folder."""
+    raw = tmp_path / "01_raw" / "pmc" / "oa_comm"
+    dir_a = raw / "metadata" / "batch_a"
+    dir_b = raw / "metadata" / "batch_b"
+    dir_a.mkdir(parents=True)
+    dir_b.mkdir(parents=True)
+    (dir_a / "PMC1.1.json").write_text(_meta("PMC1", 40000001, "10.0/a"), encoding="utf-8")
+    (dir_b / "PMC1.1.json").write_text(_meta("PMC1", 40000002, "10.0/b"), encoding="utf-8")
+    (dir_a / "PMC1.1.xml").write_text(_xml("PMC1", 40000001, "10.0/a"), encoding="utf-8")
+    (dir_b / "PMC1.1.xml").write_text(_xml("PMC1", 40000002, "10.0/b"), encoding="utf-8")
+
+    assert len(discover_meta_files(raw)) == 2
+    processed = tmp_path / "02_processed"
+    res = extract_pmc(raw, processed, workers=1)
+    assert (res["rows"], res["duplicate_files"]) == (1, 1)
+    (row,) = _read_staging(processed)
+    assert (row["pmid"], row["doi"]) == ("40000001", "10.0/a")
 
 
 # --------------------------------------------------------------------------- #

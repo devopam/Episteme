@@ -110,3 +110,36 @@ def test_bucket_names_do_not_collide_across_raw_roots(tmp_path: Path) -> None:
     assert m1["files"] == ["batch1__PMC10.1.json"]
     assert m2["files"] == ["batch9__PMC10.1.json"]
     assert (proc1 / "_ops" / "pmc" / "buckets" / "pmc_b0000.json").is_file()
+
+
+def test_fingerprint_changes_when_an_xml_changes(tmp_path: Path) -> None:
+    m1 = _touch(tmp_path, "metadata/PMC10.1.json", "{}")
+    x1 = _touch(tmp_path, "metadata/PMC10.1.xml", "<a/>")
+    m2 = _touch(tmp_path, "metadata/PMC11.1.json", "{}")
+    grouped, _ = b.group_by_bucket([m1, m2], tmp_path)
+    first = b.bucket_fingerprint(grouped[0], tmp_path)
+    assert len(first) == 3  # two metadata files, one XML
+
+    x1.write_text("<a>an XML-only change, longer</a>", encoding="utf-8")
+    second = b.bucket_fingerprint(grouped[0], tmp_path)
+    assert second != first
+
+    _touch(tmp_path, "metadata/PMC11.1.xml", "<b/>")  # a new XML for PMC11
+    third = b.bucket_fingerprint(grouped[0], tmp_path)
+    assert third != second
+    assert len(third) == 4
+
+
+def test_fingerprint_does_not_search_the_xml_tree(tmp_path: Path, monkeypatch) -> None:
+    meta = _touch(tmp_path, "metadata/PMC10.1.json", "{}")
+    _touch(tmp_path, "xml/deep/PMC10.1.xml", "<a/>")  # only the rglob fallback finds it
+    grouped, _ = b.group_by_bucket([meta], tmp_path)
+    assert len(b.bucket_fingerprint(grouped[0], tmp_path)) == 1
+
+
+def test_manifest_lists_paths_relative_to_the_raw_dir(tmp_path: Path) -> None:
+    meta = _touch(tmp_path, "metadata/PMC10.1.json")
+    grouped, _ = b.group_by_bucket([meta], tmp_path)
+    m = b.read_manifest(b.write_manifest(tmp_path / "processed", grouped[0], tmp_path))
+    assert m["paths"] == ["metadata/PMC10.1.json"]
+    assert b.manifest_files(m, tmp_path) == [meta]

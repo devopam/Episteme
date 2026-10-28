@@ -102,7 +102,8 @@ def bucket_fingerprint(bucket: Bucket, raw_dir: Path) -> list[list]:
     entries: list[list] = []
     for meta in bucket.files:
         paths = [meta]
-        xml = find_xml_for_meta(meta, raw_dir, meta.stem)
+        # search=False: no rglob over raw_dir/xml (935k files on real data).
+        xml = find_xml_for_meta(meta, raw_dir, meta.stem, search=False)
         if xml is not None:
             paths.append(xml)
         for p in paths:
@@ -118,11 +119,23 @@ def _manifest_path(processed_dir: Path, bucket: int) -> Path:
     )
 
 
+def _rel_path(path: Path, raw_dir: Path) -> str:
+    """``path`` relative to ``raw_dir`` in POSIX form; absolute when outside it."""
+    p = Path(path).resolve()
+    try:
+        return p.relative_to(Path(raw_dir).resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
 def write_manifest(processed_dir: Path, bucket: Bucket, raw_dir: Path) -> Path:
+    """``files`` holds the input keys; ``paths`` the same files relative to
+    ``raw_dir`` (an input key cannot be turned back into a path)."""
     payload: dict[str, Any] = {
         "bucket": bucket.bucket,
         "key": bucket_key(bucket.bucket),
         "files": [checkpoint_markers.input_key(p, raw_dir) for p in bucket.files],
+        "paths": [_rel_path(p, raw_dir) for p in bucket.files],
         "superseded_versions": bucket.superseded,
         "duplicate_files": bucket.duplicate_files,
         "fingerprint": bucket_fingerprint(bucket, raw_dir),
@@ -132,3 +145,8 @@ def write_manifest(processed_dir: Path, bucket: Bucket, raw_dir: Path) -> Path:
 
 def read_manifest(path: Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def manifest_files(manifest: dict, raw_dir: Path) -> list[Path]:
+    """The metadata paths of a manifest (``raw_dir`` joined with ``paths``)."""
+    return [Path(raw_dir) / p for p in manifest["paths"]]

@@ -79,6 +79,17 @@ def _last_failure(root: Path, mod) -> dict:
     return json.loads((root / "_ops" / mod.SOURCE / "last_failure.json").read_text("utf-8"))
 
 
+def _unit_keys(mod, raw_dir: Path) -> set[str]:
+    """The unit names ``--skip-unit`` takes: an input_key per raw file, or for
+    pmc (units are id buckets) a bucket key per bucket."""
+    if mod.SOURCE == "pmc":
+        from episteme.data.pmc import buckets
+
+        grouped, _ = buckets.group_by_bucket(mod.discover_meta_files(raw_dir), raw_dir)
+        return {buckets.bucket_key(b) for b in grouped}
+    return {input_key(f, raw_dir) for f in raw_dir.rglob("*") if f.is_file()}
+
+
 @pytest.mark.parametrize("module,func,raw_dir,stage", CASES, ids=IDS)
 def test_transient_error_is_retried_then_recorded(
     tmp_path, root, slept, monkeypatch, module, func, raw_dir, stage
@@ -95,8 +106,7 @@ def test_transient_error_is_retried_then_recorded(
     rec = _last_failure(root, mod)
     assert rec["stage"] == stage and rec["run_id"] == "failfast-1"
     assert "TransientUnitError" in rec["error"] and "I/O error" in rec["error"]
-    keys = {input_key(f, raw_dir) for f in raw_dir.rglob("*") if f.is_file()}
-    assert rec["unit"] in keys  # the input_key --skip-unit takes
+    assert rec["unit"] in _unit_keys(mod, raw_dir)  # the name --skip-unit takes
 
 
 @pytest.mark.parametrize("module,func,raw_dir,stage", CASES, ids=IDS)
@@ -118,7 +128,13 @@ def test_permanent_error_is_not_retried_and_main_returns_1(
     assert f"stopped at {rec['unit']}" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("module,func,raw_dir,stage", CASES, ids=IDS)
+# pmc has no per-file process_one: its unit is a bucket (see the pmc section).
+_PER_FILE = [c for c in CASES if "extract_pmc" not in c[0]]
+
+
+@pytest.mark.parametrize(
+    "module,func,raw_dir,stage", _PER_FILE, ids=[c[0].rsplit(".", 1)[1] for c in _PER_FILE]
+)
 def test_process_one_raises_transient_unit_error(
     tmp_path, monkeypatch, module, func, raw_dir, stage
 ):
@@ -148,36 +164,58 @@ _FIX = REPO / "tests" / "data" / "fixtures" / "pmc"
 
 
 def _pmc_raw(tmp_path: Path, n: int = 3) -> Path:
-    """n copies of the PMC fixture as PMCFIX000{i}.1.json (+ .xml)."""
+    """n copies of the PMC fixture, one per id bucket: PMC{i * BUCKET_IDS + 1}.1.json
+    (+ .xml) for i = 0..n-1, so the buckets are pmc_b0000, pmc_b0001, ..."""
+    from episteme.data.pmc.buckets import BUCKET_IDS
+
     raw = tmp_path / "raw"
     raw.mkdir()
-    meta = (_FIX / "PMCFIX0001.1.json").read_text("utf-8")
-    xml = (_FIX / "PMCFIX0001.1.xml").read_text("utf-8")
-    for i in range(1, n + 1):
-        (raw / f"PMCFIX000{i}.1.json").write_text(meta, encoding="utf-8")
-        (raw / f"PMCFIX000{i}.1.xml").write_text(xml, encoding="utf-8")
+    meta = (_FIX / "PMC9000001.1.json").read_text("utf-8")
+    xml = (_FIX / "PMC9000001.1.xml").read_text("utf-8")
+    for i in range(n):
+        pmcid = f"PMC{i * BUCKET_IDS + 1}"
+        (raw / f"{pmcid}.1.json").write_text(meta.replace("PMCFIX0001", pmcid), "utf-8")
+        (raw / f"{pmcid}.1.xml").write_text(xml.replace("PMCFIX0001", pmcid), "utf-8")
     return raw
 
 
-def test_one_worker_stops_at_the_failing_second_file(tmp_path, root, monkeypatch):
+def test_one_worker_stops_at_the_failing_second_bucket(tmp_path, root, monkeypatch):
     raw = _pmc_raw(tmp_path)
-    real = pmc.row_from_meta_and_xml
+    real = pmc.write_rows
     called: list[str] = []
 
-    def _row(meta_path, raw_dir):
-        called.append(meta_path.name)
-        if meta_path.name == "PMCFIX0002.1.json":
-            raise ValueError("broken record")
-        return real(meta_path, raw_dir)
+    def _write_rows(rows, *a, **k):
+        called.append(k["source_file"])
+        if k["source_file"].startswith("pmc_b0001"):
+            raise ValueError("broken bucket")
+        return real(rows, *a, **k)
 
-    monkeypatch.setattr(pmc, "row_from_meta_and_xml", _row)
+    monkeypatch.setattr(pmc, "write_rows", _write_rows)
     out = tmp_path / "out"
     res = pmc.extract_pmc(raw, out, workers=1)
-    assert called == ["PMCFIX0001.1.json", "PMCFIX0002.1.json"]  # third never called
+    assert called == ["pmc_b0000__part00001", "pmc_b0001__part00001"]  # third never called
     assert (res["inputs"], res["ok"], res["failed"]) == (3, 1, 1)
-    assert is_success(out, "pmc", "PMCFIX0001.1.json")
-    assert not is_success(out, "pmc", "PMCFIX0003.1.json")
-    assert _last_failure(root, pmc)["unit"] == "PMCFIX0002.1.json"
+    assert is_success(out, "pmc", "pmc_b0000")
+    assert not is_success(out, "pmc", "pmc_b0002")
+    assert _last_failure(root, pmc)["unit"] == "pmc_b0001"
+
+
+def test_pmc_process_bucket_raises_transient_unit_error(tmp_path, monkeypatch):
+    """Classification happens in the worker, where the real exception exists."""
+    from episteme.data.pmc import buckets
+
+    raw = _pmc_raw(tmp_path, 1)
+    out = tmp_path / "out"
+
+    def _timeout(*_a, **_k):
+        raise TimeoutError("disk timed out")
+
+    monkeypatch.setattr(pmc, "write_rows", _timeout)
+    grouped, _ = buckets.group_by_bucket(pmc.discover_meta_files(raw), raw)
+    manifest = buckets.write_manifest(out, grouped[0], raw)
+    with pytest.raises(TransientUnitError) as exc:
+        pmc.process_bucket(manifest, raw_dir=raw, processed_dir=out, force=True)
+    assert "disk timed out" in exc.value.cause
 
 
 @pytest.fixture
@@ -208,15 +246,15 @@ def _argv(raw: Path, out: Path, *extra: str) -> list[str]:
     return ["--raw-dir", str(raw), "--processed-dir", str(out), "--workers", "1", *extra]
 
 
-def test_skip_unit_skips_the_named_file_with_an_audit_row(tmp_path, root, fake_skip_db):
+def test_skip_unit_skips_the_named_bucket_with_an_audit_row(tmp_path, root, fake_skip_db):
     raw = _pmc_raw(tmp_path)
     out = tmp_path / "out"
-    argv = _argv(raw, out, "--skip-unit", "PMCFIX0002.1.json", "--reason", "corrupt upstream")
+    argv = _argv(raw, out, "--skip-unit", "pmc_b0001", "--reason", "corrupt upstream")
     assert pmc.main(argv) == 0
-    assert fake_skip_db == [("unit_skip", "pmc PMCFIX0002.1.json", "corrupt upstream")]
-    assert is_success(out, "pmc", "PMCFIX0001.1.json")
-    assert not is_success(out, "pmc", "PMCFIX0002.1.json")
-    assert is_success(out, "pmc", "PMCFIX0003.1.json")
+    assert fake_skip_db == [("unit_skip", "pmc pmc_b0001", "corrupt upstream")]
+    assert is_success(out, "pmc", "pmc_b0000")
+    assert not is_success(out, "pmc", "pmc_b0001")
+    assert is_success(out, "pmc", "pmc_b0002")
 
 
 def test_unknown_skip_unit_exits_2_before_any_file(tmp_path, root, fake_skip_db):
@@ -226,13 +264,13 @@ def test_unknown_skip_unit_exits_2_before_any_file(tmp_path, root, fake_skip_db)
         pmc.main(_argv(raw, out, "--skip-unit", "nope.json", "--reason", "r"))
     assert e.value.code == 2
     assert fake_skip_db == []
-    assert not is_success(out, "pmc", "PMCFIX0001.1.json")
+    assert not is_success(out, "pmc", "pmc_b0000")
 
 
 def test_skip_unit_requires_reason(tmp_path, root):
     raw = _pmc_raw(tmp_path, 1)
     with pytest.raises(SystemExit) as e:
-        pmc.main(_argv(raw, tmp_path / "out", "--skip-unit", "PMCFIX0001.1.json"))
+        pmc.main(_argv(raw, tmp_path / "out", "--skip-unit", "pmc_b0000"))
     assert e.value.code == 2
 
 
@@ -247,7 +285,7 @@ def test_run_without_skip_unit_opens_no_skip_connection(tmp_path, root, monkeypa
 
 def test_skipping_every_file_is_a_clean_run(tmp_path, root, fake_skip_db, capsys):
     raw = _pmc_raw(tmp_path, 1)
-    argv = _argv(raw, tmp_path / "out", "--skip-unit", "PMCFIX0001.1.json", "--reason", "r")
+    argv = _argv(raw, tmp_path / "out", "--skip-unit", "pmc_b0000", "--reason", "r")
     assert pmc.main(argv) == 0
     out = capsys.readouterr()
     assert "done inputs=0 ok=0 failed=0" in out.out
