@@ -150,6 +150,21 @@ def test_load_ids_table_is_sorted_and_distinct(tmp_path, monkeypatch):
     assert "ANALYZE pg_temp._load_ids" in log[i_create + 1 :]
 
 
+def test_loader_indexes_load_ids_before_the_id_probes(tmp_path, monkeypatch):
+    # Review (Sourcery, #94): the pg plan test builds its own index, so this pins
+    # that load_source_file itself creates it, after the table and before ANALYZE
+    # and the two id probes. Without it a flipped nested loop is quadratic.
+    log = _load_log(tmp_path, monkeypatch)
+    i_index = log.index("CREATE UNIQUE INDEX ON pg_temp._load_ids (id)")
+    i_create = next(
+        i for i, s in enumerate(log) if s.startswith("CREATE TEMP TABLE pg_temp._load_ids ")
+    )
+    i_analyze = log.index("ANALYZE pg_temp._load_ids")
+    i_probes = [i for i, s in enumerate(log) if "IN (SELECT id FROM pg_temp._load_ids)" in s]
+    assert len(i_probes) == 2, log
+    assert i_create < i_index < i_analyze < min(i_probes)
+
+
 def test_planner_settings_wrap_only_the_two_id_probes(tmp_path, monkeypatch):
     log = _load_log(tmp_path, monkeypatch)
     off = ["SET LOCAL enable_hashjoin = off", "SET LOCAL enable_mergejoin = off"]

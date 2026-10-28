@@ -446,6 +446,65 @@ def test_two_loads_in_one_transaction(pg_conn, tmp_path, monkeypatch):
         assert cur.fetchone()[0] == 4
 
 
+def test_flipped_id_probe_still_probes_an_index(pg_conn):
+    """Review (Sourcery, #94): when the planner expects almost no target rows it
+    puts the partition on the outer side of the forced nested loop. That is the
+    plan that hung (2026-10-27): every target row of the part's own file is
+    excluded by NOT (source_file = ANY(...)), so the estimate is ~1 row. The inner
+    side must then be an index probe into _load_ids, never a (Disabled) Seq Scan."""
+    from episteme.data import postgres_loader
+
+    _setup_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE INDEX IF NOT EXISTS articles_id_idx ON episteme.articles (id)")
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, source_file) "
+            "SELECT 'chembl:C' || g, 'chembl', 'F_x' FROM generate_series(1, 5000) g"
+        )
+        cur.execute("ANALYZE episteme.articles")
+    pg_conn.commit()
+
+    d0 = (
+        "EXPLAIN (FORMAT JSON) DELETE FROM episteme.articles "
+        "WHERE id IN (SELECT id FROM pg_temp._load_ids) AND source = %s "
+        "AND NOT (source_file = ANY(%s))"
+    )
+    with pg_conn.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE pg_temp._load_ids_raw (id text) ON COMMIT DROP")
+        cur.execute(
+            "INSERT INTO pg_temp._load_ids_raw "
+            "SELECT 'chembl:C' || g FROM generate_series(1, 5000) g"
+        )
+        cur.execute(
+            "CREATE TEMP TABLE pg_temp._load_ids ON COMMIT DROP AS "
+            "SELECT DISTINCT id FROM pg_temp._load_ids_raw ORDER BY id"
+        )
+        cur.execute("CREATE UNIQUE INDEX ON pg_temp._load_ids (id)")
+        cur.execute("ANALYZE pg_temp._load_ids")
+        with postgres_loader._ordered_index_probes(cur):
+            cur.execute(d0, ("chembl", ["F_x"]))
+            plan = cur.fetchone()[0][0]["Plan"]
+    pg_conn.rollback()
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    every = list(nodes(plan))
+    assert not [n for n in every if n.get("Disabled")], every
+    load_ids_scans = [n for n in every if n.get("Relation Name") == "_load_ids"]
+    assert load_ids_scans, every
+    loops = [n for n in every if n["Node Type"] == "Nested Loop"]
+    assert loops, every
+    inner = loops[0]["Plans"][1]
+    inner_load_ids = [n for n in nodes(inner) if n.get("Relation Name") == "_load_ids"]
+    # whichever side _load_ids is on, it is never read by a full scan per outer row
+    for n in inner_load_ids:
+        assert n["Node Type"] in ("Index Scan", "Index Only Scan"), n
+        assert n.get("Index Cond"), n
+
+
 def test_id_probes_plan_as_ordered_index_scans(pg_conn):
     """Inside a load-like transaction the (c2) and (d0) statements, run under
     _ordered_index_probes, plan as index scans: no Hash Semi Join and no Seq
