@@ -36,7 +36,7 @@ Delivery (Owner): a conversational agent. Context carries across turns; each tur
 
 ## 3. Scope
 
-**Now:** human medicines. **In due course (Owner):** medical devices, veterinary products, languages beyond English, more jurisdictions. India-specific data is in scope from the first wave of new sources (Owner).
+**Now:** human medicines. **In due course (Owner):** medical devices, veterinary products, languages beyond English, more jurisdictions. India-specific data is in scope, but its gathering starts **after the beta release** (Owner, 2026-10-28; see section 7).
 
 **Question types (Owner):** safety (adverse events, signals), regulatory compliance (approval status per jurisdiction, label differences), quality (recalls, warning letters, batch failures).
 
@@ -128,7 +128,7 @@ Agreed by the Owner on 2026-10-28. The current loads continue alongside. Each pr
 |---|---|---|---|
 | 1 | Benchmark and evaluation harness | The question set (started in `docs/benchmark-questions.md`), scoring (exact facts, invented values, gaps reported, paths found, known vs new, confidence calibration), expert-review flow, a runner that scores any model with or without the retrieval layer | none |
 | 2 | Reference store design | Dated versioning (4.5); the exact-vs-trained split per source (4.1); stored text without the duplicate (below); placement of pubchem and other reference-type sources | 1 (to measure) |
-| 3 | New sources, one at a time | openFDA `drug/event` (FAERS, with the batch field), `drug/enforcement`, `drug/ndc`, `drug/drugsfda`; DailyMed (downloaded, not loaded); EMA Article 57 and medicine data tables; the India first wave (Appendix B) | 2 |
+| 3 | New sources, one at a time | openFDA `drug/event` (FAERS, with the batch field), `drug/enforcement`, `drug/ndc`, `drug/drugsfda`; DailyMed (downloaded, not loaded); EMA Article 57 and medicine data tables; the India first wave (Appendix B) only after the beta release | 2 |
 | 4 | Concept graph and precomputed edges | Concept tables, edge tables with weights, PGQ graph, depth cap, refresh in batch | 2, 3 |
 | 5 | Tool layer over MCPg | Typed tools returning provenance, confidence basis and coverage | 4 |
 | 6 | Agent harness | Planner, step limits, per-step checks, post-answer check, audit trace, orchestrator choice | 5 |
@@ -138,11 +138,13 @@ Agreed by the Owner on 2026-10-28. The current loads continue alongside. Each pr
 
 **Removing the duplicate touches content hashes (Claude's call on how to handle it).** `content_hash` (`docs/09` §5) is computed over the full `text`, so changing `text` changes the hash, dedup, checkpoints and the audit `input_content_hash`. The running loads continue (Owner) and are not stopped for project 2. Project 2 must prefer an in-place database migration with new hashes, recorded in the audit trail, over a full reload; a reload of any source needs the Owner's approval and must respect the one-heavy-job rule.
 
-**Project 3 feeds project 4 in slices (Claude's call).** Project 4 does not wait for all of project 3. The first slice is the sources that benchmark questions Q1 and Q2 need: openFDA `drug/event`, `drug/enforcement` and `drug/ndc`; DailyMed; ChEMBL; UniProt; Reactome. That allows end-to-end work (projects 4–6) early. EMA and India sources, including the scanned PDFs, follow as later slices.
+**Project 3 feeds project 4 in slices (Claude's call).** Project 4 does not wait for all of project 3. The first slice is the sources that benchmark questions Q1 and Q2 need: openFDA `drug/event`, `drug/enforcement` and `drug/ndc`; DailyMed; ChEMBL; UniProt; Reactome. That allows end-to-end work (projects 4–6) early. EMA sources follow as the next slice. India sources come after the beta release (below).
 
 **Benchmark baselines and scope (Claude's call).** Baselines are generative models that can hold a conversation: open medical instruct models (for example Meditron-class) and general open instruct models, each run with and without the Episteme tool layer. Encoder models (for example BioBERT, PubMedBERT) are not conversational baselines; they may be used inside the tools, for example for entity linking. Q3 (devices) and Q4 (veterinary) stay in the list but are not scored until their scope arrives.
 
 **Hand-off from the build machine to the serving host (Claude's call).** The serving copy is built from dated data releases, not edited in place. Project 2 defines the release: what it contains, how it is moved (for example a dump per release or replication), and how the serving copy keeps the version history that "as of release X" needs. Each environment keeps its own audit chain, and a release records the hash of the source chain at the time it was cut.
+
+**Beta release first, then India (Owner, 2026-10-28).** The beta release covers the current scope, aligned with FDA and EMA: projects 1–6 working end to end on US and EU sources (the first two slices of project 3). Gathering India data (Appendix B) starts after the beta release, as further slices of project 3, followed by their concept-graph and tool updates. What "beta" must pass to count as released is set in project 1's benchmark (Claude's call).
 
 **Jurisdiction as a dimension (Owner).** Every fact carries its jurisdiction and date. Where a jurisdiction has no data, the agent says so (4.4).
 
@@ -180,6 +182,8 @@ Details: Appendices B and C. Summary:
 Working list: `docs/benchmark-questions.md` (four questions: Q1 sudden co-reporting and the lot question; Q2 adverse events by composition; Q3 device malfunctions, proposed; Q4 veterinary vs human events, proposed). The full questionnaire comes later (Owner).
 
 ## Appendix B. India sources (survey 2026-10-28, web search only)
+
+Timing (Owner): gathering starts after the beta release (section 7).
 
 First wave agreed by the Owner: CDSCO not-of-standard-quality and spurious-drug alerts; CDSCO approved new drugs; NLEM 2022; NPPA ceiling prices; Jan Aushadhi list; ICMR Standard Treatment Workflows; PvPI safety alerts.
 
