@@ -26,9 +26,9 @@ Episteme builds a connected, dated medical knowledge layer from open sources (`d
 
 What this means (Claude's call, to settle in projects 5 and 6):
 - **Access per tenant:** every tool call carries the tenant and the caller. The tool layer checks the tenant's entitlements before it runs.
-- **Licences per tenant:** licence-bound data (Stream 2, section 4.6, for example MedDRA) is served only to a tenant that holds the licence. The tenant is the licence holder, not the operator. Open data is shared by all tenants, with the attribution its licence requires.
+- **Licences per tenant:** licence-bound data (Stream 2, section 4.6, for example MedDRA) is served only to a tenant that holds the licence. The tenant is the licence holder for its own use. The operator hosts and queries the data on the tenant's behalf, so before projects 5 and 6 build the access checks, the operator's own rights to host, query and expose each licence-bound source are confirmed with its licensor and recorded in `docs/02` (section 9). Open data is shared by all tenants, with the attribution its licence requires.
 - **Isolation:** the shared reference store and graph are read-only to tenants. Any tenant-specific data (for example a tenant's own documents or configured targeted medical events) is isolated per tenant in the database, for example with row-level security.
-- **Audit:** every audit record carries the tenant and the caller identity.
+- **Audit:** every agent audit record must carry the tenant and the caller identity. The current audit contract cannot do this: `record()` writes `actor` from the operator-set `EPISTEME_ACTOR`, which is not checked against an identity system, and has no tenant or caller field. Project 6 extends the contract (`docs/11`): the field names and types, whether they are required, how the tool layer passes them to `record()`, whether they enter the hash input (new rows only; existing chain rows keep their hashes), and what enforces a non-empty, authenticated value.
 
 **Regulatory status (Owner):** decision support, **not a GxP-validated system**, at least for now. The benchmark gate (section 5, step 6) is engineering quality control, not formal validation evidence. The design keeps the audit trail and versioned data (4.5, 4.7) so that validation remains possible later, but no project does validation work now (Claude's call).
 
@@ -76,16 +76,17 @@ Each reference table keeps its history (valid from, valid to, source release). A
 Licence-bound data (for example MedDRA hierarchies, the IME and DME lists, the Indian Pharmacopoeia) is Stream 2: used only where the deployer holds a licence, never in open training data. `cdisc_bc` and `cdisc_usdm` stay download-only (CLAUDE.md).
 
 ### 4.7 Everything is audited
-The system is decision support, not GxP-validated (section 2), but it keeps data-integrity practice. Every agent step is recorded in the existing hash-chained audit trail (`docs/11-gxp-data-integrity.md`), so any answer can be replayed and explained.
+The system is decision support, not GxP-validated (section 2), but it keeps data-integrity practice. Every agent step is recorded in the hash-chained audit trail (`docs/11-gxp-data-integrity.md`), so any answer can be replayed and explained. Today that trail accepts only the data-pipeline event types in `docs/11` section 4, and `record()` rejects any other type. Project 6 therefore adds agent-step event types and their fields to the contract (for example plan, tool call, claim, answer, post-answer check) before agent steps are recorded.
 
 ### 4.8 Personal data is redacted before it is recorded (Owner)
-Callers can paste case narratives that contain personal data, but the hash-chained audit trail cannot be changed or cleared, while privacy laws (for example GDPR, India's DPDP Act) can require deletion. Decision (Owner): **redaction**, using Presidio (open source, Python; the Owner has contributed to it).
+Callers can paste case narratives that contain personal data, but the audit trail is append-only for the application role (the table owner and superusers are not restricted, and the JSONL mirror is append-only by convention only, `docs/11`), and its hash chain breaks if a row is changed or removed, while privacy laws (for example GDPR, India's DPDP Act) can require deletion. Decision (Owner): **redaction**, using Presidio (open source, Python; the Owner has contributed to it).
 
 How it applies (Claude's call, to settle in project 6):
 - Conversation text is redacted before it reaches the audit trail or any long-lived store. The audit trail holds only redacted text.
 - If the original text must be kept (for example for a reviewer), it goes to a separate, encrypted store with a retention limit, with one key per conversation. Destroying the key erases it. The audit trail refers to it by a keyed hash (HMAC), never by a plain hash of the personal data.
 - Recognisers cover the domain: medical identifiers and patient details in case narratives, plus jurisdiction-specific identifiers (for example India's).
-- Redaction is not perfect. Project 1 measures its recall on test narratives, and the threshold is set from that measurement.
+- Redaction is not perfect. Project 1 measures its recall on test narratives and sets the maximum allowed miss rate.
+- The redaction gate fails closed: if redaction fails, errors, or cannot reach the measured recall for the input, the text is not stored. The audit trail then records only that the step happened and a keyed hash (HMAC), and the caller is told that the text was not kept.
 
 ## 5. Architecture
 
@@ -114,7 +115,7 @@ How it applies (Claude's call, to settle in project 6):
 - **Tuned database (Owner):** indexes, statistics and settings fitted to the real queries, checked with query plans.
 - **Controlled memory footprint (Owner):** every component works within limits set in configuration (batch sizes, cache sizes including the per-conversation cache, worker counts, per-query database memory). Components stream their data and never hold a whole table in memory. This follows the pipeline design principles already in force (bounded units of work, byte-bounded batches).
 - **Graph depth (Owner):** at most 5 hops for now, treated as the current PostgreSQL 19 limit; it may grow later. Reaching the cap is reported as a gap, never as "no connection". Project 4 confirms the real limit; the cap stays a setting either way (Claude's call).
-- **Bounded traversal (Claude's call):** top results by edge weight at each hop, pruning by source, jurisdiction and date, and a time limit per question.
+- **Bounded traversal (Claude's call):** top results by edge weight at each hop, pruning by source, jurisdiction and date, and a time limit per question. Every search reports what its limits discarded (branches cut by fan-out, pruning or time, and the coverage that remains). An incomplete search is reported as a gap, never as "no connection".
 - **Precompute what is expensive (Claude's call):** signal statistics, co-reporting counts and evidence counts are rebuilt in batch when data loads, never computed from raw reports at question time.
 - **No whole-graph summaries built in advance (Claude's call):** summaries of every graph community (as in Microsoft's GraphRAG) are too costly to build and keep current at this scale; targeted path search over precomputed edges is used instead.
 - **Hardware:** the laptop and its USB HDD build the data layer. Serving needs SSD-class storage and runs elsewhere (Claude's call). Model training and fine-tuning run on rented hardware (existing decision).
@@ -134,9 +135,9 @@ Agreed by the Owner on 2026-10-28. The current loads continue alongside. Each pr
 | 6 | Agent harness | Planner, step limits, per-step checks, post-answer check, audit trace, orchestrator choice | 5 |
 | 7 | Fine-tuning on rented hardware | A fine-tuned open-weight model for fluency, tool use and honest gaps, measured on project 1 | 1, 6 |
 
-**Stored text without the duplicate (Owner: storing the text twice "is not an inherent good design").** Today `text` = `title` + `abstract` + `body_text` (`docs/09` §277), so the body is stored twice. Project 2 removes the duplicate. It touches the extraction contract, every extractor and serializer, the loader, `article_body` and the corpus step.
+**Stored text without the duplicate (Owner: storing the text twice "is not an inherent good design").** Today `text` = `title` + `abstract` + `body_text` (`docs/09-extraction-contract.md`, section 5, "Text normalisation"), so the body is stored twice. Project 2 removes the duplicate. It touches the extraction contract, every extractor and serializer, the loader, `article_body` and the corpus step.
 
-**Removing the duplicate touches content hashes (Claude's call on how to handle it).** `content_hash` (`docs/09` §5) is computed over the full `text`, so changing `text` changes the hash, dedup, checkpoints and the audit `input_content_hash`. The running loads continue (Owner) and are not stopped for project 2. Project 2 must prefer an in-place database migration with new hashes, recorded in the audit trail, over a full reload; a reload of any source needs the Owner's approval and must respect the one-heavy-job rule.
+**Removing the duplicate touches content hashes (Claude's call on how to handle it).** `content_hash` (`docs/09` section 5) is computed over the full `text`, so changing `text` changes the hash and later deduplication. Checkpoints use `input_key` and the audit `input_content_hash` hashes the input shard, so neither changes. The running loads continue (Owner) until project 2's migration. At the migration, old-contract loads are drained first (Claude's call): `load_source_file` replaces rows per `source_file` in one transaction, so an old-contract load that commits after the migration would overwrite migrated rows. If a load must run across the boundary, the rows carry a contract or hash version and stale writes are rejected. Project 2 must prefer an in-place database migration with new hashes, recorded in the audit trail, over a full reload; a reload of any source needs the Owner's approval and must respect the one-heavy-job rule.
 
 **Project 3 feeds project 4 in slices (Claude's call).** Project 4 does not wait for all of project 3. The first slice is the sources that benchmark questions Q1 and Q2 need: openFDA `drug/event`, `drug/enforcement` and `drug/ndc`; DailyMed; ChEMBL; UniProt; Reactome. That allows end-to-end work (projects 4–6) early. EMA sources follow as the next slice. India sources come after the beta release (below).
 
@@ -165,6 +166,7 @@ Details: Appendices B and C. Summary:
 | EDQM Standard Terms reuse terms (online and API only) | 3 |
 | PostgreSQL 19's actual graph-depth limit | 4 |
 | Serving hardware for the agent | 6 |
+| The operator's rights to host, query and expose each licence-bound source on a tenant's behalf | 2, 5 |
 | Presidio recogniser set, recall threshold and the store for original text | 1, 6 |
 | Which open-weight model, and which orchestrator framework | 6, 7 |
 | How "relevance in context" is judged in expert review (who reviews, against what) | 1 |
