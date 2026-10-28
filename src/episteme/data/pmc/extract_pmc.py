@@ -17,7 +17,8 @@ own success marker (``parts``, ``parts_list``, ``inputs`` = the manifest
 fingerprint). A bucket whose marker ``inputs`` equal the fingerprint is
 skipped (unless ``--force``); any other bucket is written again from part
 1, after its old parts are deleted (the names of loaded parts go to the
-retire pending list first). An article whose parse fails is left out of its
+retire pending file of the bucket,
+``retire_pending.d/<bucket key>.json``, first). An article whose parse fails is left out of its
 part, listed in the bucket's ``failed_articles`` and given a failed marker;
 the bucket still completes.
 
@@ -398,7 +399,8 @@ def _delete_all_parts(processed_dir: Path, key: str) -> None:
             if m:
                 loaded.append(f"{key}__part{m.group(1)}")
     if loaded:
-        parts_retire.add_retire_pending(processed_dir, SOURCE, loaded)
+        # The bucket's own file: buckets run in worker processes at once.
+        parts_retire.add_retire_pending(processed_dir, SOURCE, loaded, unit=key)
     for d in [*marker_dirs, _staging_dir(processed_dir)]:
         if not d.is_dir():
             continue
@@ -682,8 +684,8 @@ def extract_pmc(
     ``max_files`` limits the number of buckets; ``skip_units`` take bucket
     keys. Returns ``{"inputs", "ok", "failed", "rows", "buckets", "articles",
     "unrecognised_files", "superseded_versions", "duplicate_files",
-    "failed_articles"}``; ``inputs`` and ``buckets`` both count the buckets
-    of this run, ``failed_articles`` is a count.
+    "failed_articles_count"}``; ``inputs`` and ``buckets`` both count the
+    buckets of this run.
     """
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
@@ -734,7 +736,7 @@ def extract_pmc(
         "unrecognised_files": unrecognised,
         "superseded_versions": sum(by_key[k].superseded for k in keys),
         "duplicate_files": sum(by_key[k].duplicate_files for k in keys),
-        "failed_articles": sum(int(r.get("failed_articles_count") or 0) for r in results),
+        "failed_articles_count": sum(int(r.get("failed_articles_count") or 0) for r in results),
     }
 
     run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")

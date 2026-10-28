@@ -3,8 +3,9 @@
     python -m episteme.data.pmc.retire [--processed-dir ...]
 
 Thin entry point over ``episteme.data.parts_retire`` (shared with pubchem).
-``load_pmc.sh`` runs it only after ``load_articles`` exited 0. With no
-``_ops/pmc/retire_pending.json`` (or an empty list) it does nothing: no lock,
+``load_pmc.sh`` runs it only after ``load_articles`` exited 0. Buckets add their
+pending names to ``_ops/pmc/retire_pending.d/<bucket key>.json``. With no
+pending name (no main file, no per-unit file, or empty lists) it does nothing: no lock,
 no database query.
 """
 

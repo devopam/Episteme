@@ -15,7 +15,10 @@ How: when ``serialize`` deletes a part that has a ``load_success`` marker (it
 was loaded), it first adds the part name to
 ``_ops/<source>/retire_pending.json`` (the serializer's ``_delete_parts_above``).
 A part deleted without a load marker was never loaded and is not recorded.
-This step reads that file:
+A unit that runs in a worker process (a pmc bucket) adds its names to its own
+file ``_ops/<source>/retire_pending.d/<unit>.json`` instead, so concurrent
+workers never write one file. The pending names are the union of the main
+file and every per-unit file. This step reads them:
 
 1. No file, or an empty list: nothing to do. No lock, no database query.
 2. Else it takes the heavy lock of the ``load`` stage (serialize writes the
@@ -29,8 +32,11 @@ This step reads that file:
    ``postgres_loader.delete_source_files`` call deletes exactly their
    rows of the source (``source_file = ANY(...)``, index-only), with one
    ``load_replace`` audit row that names them in ``old_value``, and commits.
-4. Still under the heavy lock, it writes back the file without the names it
-   deleted or dropped.
+4. Still under the heavy lock, it writes back the main file without the names
+   it deleted or dropped (the remaining names of the per-unit files it read
+   move into it), then deletes exactly the per-unit files it read, each only
+   when unchanged since the read. A per-unit file written after the read
+   stays for the next run.
 
 A stop between the commit and the file update leaves the names in the file;
 the next run deletes them again (0 rows, one more audit row): idempotent.
@@ -68,19 +74,62 @@ def retire_pending_path(processed_dir: Path, source: str) -> Path:
     return ops_root(processed_dir, source) / "retire_pending.json"
 
 
-def read_retire_pending(processed_dir: Path, source: str) -> list[str]:
-    """The pending part names; ``[]`` when the file does not exist. A file
-    that is not a JSON list of strings raises ``ValueError`` (never guess
-    which rows to delete)."""
-    p = retire_pending_path(processed_dir, source)
-    try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
+def retire_pending_dir(processed_dir: Path, source: str) -> Path:
+    """The per-unit pending files: ``retire_pending.d/<unit>.json``. A unit
+    that runs in a worker process (a pmc bucket) writes only its own file, so
+    concurrent workers never write the same file (no lost names, no
+    concurrent ``os.replace`` of one target)."""
+    return ops_root(processed_dir, source) / "retire_pending.d"
+
+
+def _parse_names(p: Path, text: str) -> list[str]:
     data = json.loads(text)
     if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
         raise ValueError(f"{p}: not a JSON list of part names")
     return data
+
+
+def _read_names(p: Path) -> list[str]:
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return _parse_names(p, text)
+
+
+def _unit_files(processed_dir: Path, source: str) -> list[Path]:
+    d = retire_pending_dir(processed_dir, source)
+    if not d.is_dir():
+        return []
+    # "*.json" leaves out write_marker's ".<name>.<pid>.tmp" temp files.
+    return sorted(p for p in d.glob("*.json") if p.is_file())
+
+
+def read_main_pending(processed_dir: Path, source: str) -> list[str]:
+    """The names in the main pending file only (not the per-unit files)."""
+    return _read_names(retire_pending_path(processed_dir, source))
+
+
+def read_retire_pending(processed_dir: Path, source: str) -> list[str]:
+    """The pending part names: the sorted union of the main file and every
+    per-unit file; ``[]`` when there is none. A file that is not a JSON list
+    of strings raises ``ValueError`` (never guess which rows to delete)."""
+    names = set(read_main_pending(processed_dir, source))
+    for p in _unit_files(processed_dir, source):
+        names.update(_read_names(p))
+    return sorted(names)
+
+
+def _snapshot_unit_files(processed_dir: Path, source: str) -> dict[Path, tuple[str, list[str]]]:
+    """``{path: (text, names)}`` of each per-unit file as it is now."""
+    out: dict[Path, tuple[str, list[str]]] = {}
+    for p in _unit_files(processed_dir, source):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        out[p] = (text, _parse_names(p, text))
+    return out
 
 
 def write_retire_pending(processed_dir: Path, source: str, names: list[str]) -> None:
@@ -88,13 +137,22 @@ def write_retire_pending(processed_dir: Path, source: str, names: list[str]) -> 
     write_marker(retire_pending_path(processed_dir, source), sorted(set(names)))  # type: ignore[arg-type]
 
 
-def add_retire_pending(processed_dir: Path, source: str, names: list[str]) -> None:
-    """Add ``names`` to the pending file. Serialized across this process's
-    worker threads (a read-modify-write); processes are serialized by the
-    heavy lock."""
+def add_retire_pending(
+    processed_dir: Path, source: str, names: list[str], *, unit: str | None = None
+) -> None:
+    """Add ``names`` to a pending file (a read-modify-write, atomic write).
+
+    ``unit`` given: the unit's own file ``retire_pending.d/<unit>.json``. Only
+    the one worker that runs a unit writes its file, so worker processes need
+    no lock between them. ``unit`` None: the main file, serialized across this
+    process's threads (pubchem: its worker threads share one process)."""
+    if unit is not None:
+        p = retire_pending_dir(processed_dir, source) / f"{unit}.json"
+        write_marker(p, sorted(set([*_read_names(p), *names])))  # type: ignore[arg-type]
+        return
     with _PENDING_LOCK:
         write_retire_pending(
-            processed_dir, source, [*read_retire_pending(processed_dir, source), *names]
+            processed_dir, source, [*read_main_pending(processed_dir, source), *names]
         )
 
 
@@ -180,6 +238,10 @@ def _retire(
     # lock, so the file is read again, classified and written back inside it.
     with stage_guard(lambda: holder[0], lock_stage="load", source=source) as g:
         try:
+            # The per-unit files as they are BEFORE the read: only these may
+            # be removed at the end. A file written after this point (or
+            # changed since) stays, so no name is lost.
+            snapshot = _snapshot_unit_files(processed_dir, source)
             pending = read_pending(processed_dir)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -206,12 +268,24 @@ def _retire(
                     finally:
                         holder[0] = None
         removed = set(to_delete) | set(done)
-        if removed:
+        if removed or snapshot:
             # After the commit: a stop before this write leaves the names
             # pending, and the next run deletes them again (0 rows). Only the
-            # names this run deleted or dropped leave the file.
-            current_pending = read_pending(processed_dir)
-            write_pending(processed_dir, [n for n in current_pending if n not in removed])
+            # names this run deleted or dropped leave the file. The names of
+            # the per-unit files read above move into the main file; then
+            # exactly those files go, each only when it is unchanged since the
+            # read (a stop between the two steps leaves a name twice: harmless).
+            current_pending = read_main_pending(processed_dir, source)
+            for _text, names in snapshot.values():
+                current_pending.extend(names)
+            write_pending(processed_dir, sorted({n for n in current_pending if n not in removed}))
+            for p, (text, _names) in snapshot.items():
+                try:
+                    unchanged = p.read_text(encoding="utf-8") == text
+                except FileNotFoundError:
+                    continue
+                if unchanged:
+                    p.unlink(missing_ok=True)
         print(
             f"{source}: retired {deleted} article(s) of {len(to_delete)} deleted part(s); "
             f"{len(waiting)} part(s) stay pending"

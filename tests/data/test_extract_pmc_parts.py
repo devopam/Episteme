@@ -250,7 +250,7 @@ def test_failed_article_does_not_fail_the_bucket(tmp_path, raw):
     _article(raw, 3)
     out = tmp_path / "out"
     res = pmc.extract_pmc(raw, out)
-    assert (res["ok"], res["failed"], res["rows"], res["failed_articles"]) == (1, 0, 2, 1)
+    assert (res["ok"], res["failed"], res["rows"], res["failed_articles_count"]) == (1, 0, 2, 1)
     st = _bucket_marker(out)
     assert st["failed_articles_count"] == 1
     assert [f["file"] for f in st["failed_articles"]] == ["metadata__PMC2.1.json"]
@@ -335,3 +335,23 @@ def test_max_files_limits_buckets(tmp_path, raw):
         _article(raw, n)
     res = pmc.extract_pmc(raw, tmp_path / "out", max_files=2)
     assert (res["buckets"], res["rows"]) == (2, 3)
+
+
+def test_concurrent_rebuilds_keep_every_loaded_part_name(tmp_path, raw, spawn_child_env):
+    """Two buckets rebuild at once in the pool; each records its loaded part
+    names in its own retire_pending.d file, so no name is lost."""
+    for n in (1, 2, 50_001, 50_002):
+        _article(raw, n)
+    out = tmp_path / "out"
+    pmc.extract_pmc(raw, out, workers=2)
+    names = ["pmc_b0000__part00001", "pmc_b0001__part00001"]
+    for name in names:
+        p = load_success_marker_path(out, "pmc", f"{name}.parquet")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}", encoding="utf-8")
+    res = pmc.extract_pmc(raw, out, workers=2, force=True)
+    assert res["ok"] == 2
+    assert parts_retire.read_retire_pending(out, "pmc") == names
+    unit_dir = out / "_ops" / "pmc" / "retire_pending.d"
+    assert sorted(p.name for p in unit_dir.glob("*.json")) == ["pmc_b0000.json", "pmc_b0001.json"]
+    assert not parts_retire.retire_pending_path(out, "pmc").exists()
