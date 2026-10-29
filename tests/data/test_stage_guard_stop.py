@@ -23,13 +23,18 @@ PUBCHEM_FIX = TESTS / "fixtures" / "sp4" / "pubchem"
 
 
 def _pmc_raw(tmp_path: Path) -> Path:
+    """Three articles in three id buckets (pmc_b0000..2): one part each, so
+    the stop on the second ``write_rows`` call falls between units."""
+    from episteme.data.pmc.buckets import BUCKET_IDS
+
     raw = tmp_path / "raw"
     raw.mkdir()
-    meta = (PMC_FIX / "PMCFIX0001.1.json").read_text("utf-8")
-    xml = (PMC_FIX / "PMCFIX0001.1.xml").read_text("utf-8")
-    for i in (1, 2, 3):
-        (raw / f"PMCFIX000{i}.1.json").write_text(meta, encoding="utf-8")
-        (raw / f"PMCFIX000{i}.1.xml").write_text(xml, encoding="utf-8")
+    meta = (PMC_FIX / "PMC9000001.1.json").read_text("utf-8")
+    xml = (PMC_FIX / "PMC9000001.1.xml").read_text("utf-8")
+    for i in (0, 1, 2):
+        pmcid = f"PMC{i * BUCKET_IDS + 1}"
+        (raw / f"{pmcid}.1.json").write_text(meta.replace("PMCFIX0001", pmcid), "utf-8")
+        (raw / f"{pmcid}.1.xml").write_text(xml.replace("PMCFIX0001", pmcid), "utf-8")
     return raw
 
 

@@ -714,6 +714,7 @@ A full run of a gated stage needs a valid pass. The pass comes from a sample run
 | `europepmc_manuscript` | `extract`, `load` | The first baseline package by name, the newest baseline package by date, the newest incremental package by date, and the `.filelist.csv` or `.filelist.txt` files of each. | 1 GB |
 | `apollo` | `extract`, `load` | In each of three groups, the smallest file of at least 10 MB. The groups are `train/pretrain` `*_qa.json`, `train/pretrain` `*_text.json`, and `train/sft` files whose name starts with `medical`. | 4 GB |
 | `pubchem` | `serialize`, `load` | The first 2 × `part_rows` CIDs and `part_rows` CIDs from the middle of `CID-SMILES`. Each sibling file is cut to the same CIDs. | 1 GB |
+| `pmc` | `extract`, `load` | Three buckets of 50,000 PMC ids: the largest by XML bytes, the median by XML bytes, and the one with the most superseded versions (ties: the lowest bucket number). Each brings its metadata and XML files, also the lower versions. | 4 GB |
 
 - A source with no rules file is not gated.
 - The `pubchem` slice is cut, not linked: the cut files are new files with the same relative paths. Only the first primary file is cut when more than one exists.
@@ -915,10 +916,22 @@ Full-text JATS from the public AWS bucket `PMC_S3_BUCKET` (per-article objects w
 
 The article list comes from the bucket's daily S3 inventory (`inventory-reports/pmc-oa-opendata/metadata/<date>/manifest.json` and the `csv.gz` files it names; the bucket README section 5.2). It lists every article version (about 8 million). The downloader saves the inventory under `filelists/inventory/<date>/` (when the newest one cannot be read, it tries the next two older dates and deletes a damaged file), then checks each PMCID's versions from the highest down and keeps the first with a commercial licence. A version already on disk (metadata JSON and XML, neither empty) ends the check without a request, so a stopped run restarts cheaply and a newer version is still found. A PMCID with no commercial version goes into `filelists/noncommercial.txt` as `PMC{id}.{highest version}`; a re-run skips it until the inventory shows a newer version. Delete that file to check every PMCID again. A failed metadata request (anything but a 404) is a failure: the PMCID is not recorded, no older version is chosen in its place, and the run exits 1; run it again to retry. `--max-files N` stops after N downloads. NCBI ESearch is the fallback only when no inventory can be read, and it refuses a request for more than 9,999 ids (ESearch returns no id past that position); on that path and with a local `--filelist`, each PMCID's versions come from a listing of its `PMC{id}.` prefix.
 
+**Extract in buckets and parts.** `pmc extract` groups the metadata files by a fixed PMC id range: a bucket holds 50,000 ids (`bucket = id // 50000`). Each article keeps only its highest version. A bucket is the unit of work, so the 935k articles become about 270 buckets (fewer non-empty), not 935k units.
+
+- **Names.** A bucket key is `pmc_b0021` (four digits). A part is `pmc_b0021__part00001`. The staging shards are `<processed>/staging/pmc/pmc_b0021__part00001.parquet`. A part ends at the row or byte cap of the profile (`part_rows`, `part_bytes`, section 2.5). The manifest of a bucket is `<processed>/_ops/pmc/buckets/pmc_b0021.json`.
+- **Flags.** `--max-files N` means N buckets for `extract` (one bucket is up to 50,000 ids). The article-count meaning (N articles) is for `download` only. With `all`, the same number goes to both stages. `--skip-unit` takes a bucket key (for example `--skip-unit pmc_b0021 --reason "..."`).
+- **Resume and redo.** A bucket stores a fingerprint of its files (the `input_key`, size and mtime of each metadata file and its XML). A bucket with a success marker and the same fingerprint is skipped. A changed fingerprint redoes the whole bucket: there is no resume inside a bucket. The old parts of a redone bucket are replaced, and a part that is no longer written is retired.
+- **Failed articles.** A broken article does not fail its bucket. It gets a failed marker (its own `input_key`) in the same `failed/` folder, and the bucket marker lists it in `failed_articles` and `failed_articles_count`. The next run tries the bucket again only if the fingerprint changed or `--force` is used.
+- **Retire after load.** An extract that replaces parts writes the names to retire under `<processed>/_ops/pmc/retire_pending.d/` (one file per bucket). `load_pmc.sh` runs `episteme.data.pmc.retire` after a good load. It deletes the rows of the old parts, then clears the pending file. A load that fails leaves the file for the next run.
+- **Old per-article state.** A processed folder that holds the old state (shards or markers named after `metadata__PMC*`) must be cleaned, and its rows retired, before the first bucket run. The production folder has none (checked 2026-10-28).
+- **Sample.** `pmc extract --sample` and `pmc load --sample` use three buckets (section 4.9): the largest by XML bytes, the median, and the one with the most superseded versions.
+- **Rules.** The thresholds in `gate_rules/pmc.json` are provisional. Check them on the first sample. `max_failed_inputs` counts failed buckets plus failed articles: `pmc extract` writes `<processed>/_ops/pmc/failed_inputs.json` (`run_id`, `failed_inputs`) at the end of each run, and `gate run` reads it when the `run_id` is its own. The exit code of the stage does not change.
+
 ```bash
-# first time (bounded sample of 20 articles; the default cap is 10, 0 = everything)
+# download: --max-files counts articles (here 20; the default cap is 10, 0 = everything)
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc download --max-files 20
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc extract --max-files 20
+# extract: --max-files counts buckets, not articles (1 = one bucket of up to 50,000 ids)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc extract --max-files 1
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc load
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh pmc graph
 

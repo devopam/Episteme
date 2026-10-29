@@ -63,8 +63,11 @@ via ``audit_trail``.
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -116,23 +119,104 @@ _MESH_HIERARCHY_INSERT = (
     "VALUES (%s, %s, %s) ON CONFLICT (parent_descriptor_ui, child_descriptor_ui) DO NOTHING"
 )
 
+_LOG = logging.getLogger(__name__)
+
 
 def _local(tag: str) -> str:
     """Strip any ``{namespace}`` prefix from an ElementTree tag."""
     return tag.rsplit("}", 1)[-1] if tag else tag
 
 
-def _find_xml(raw_dir: Path, pmcid: str | None) -> Path | None:
-    """First ``<pmcid>*.xml`` under ``raw_dir`` whose stem is ``pmcid`` or
-    ``pmcid`` + a version suffix (``PMC1`` matches ``PMC1.1.xml`` but not
-    ``PMC1000.1.xml``)."""
-    if not pmcid:
+def _version_rank(version: str) -> tuple[tuple[int, int, str], ...]:
+    """Sort key for a dotted version such as ``2.1``: one entry per component.
+
+    A numeric component ranks ``(1, value, "")``; a non-numeric one ranks
+    ``(0, 0, text)``, below every number and ordered by its text, so the result
+    is deterministic. ``"2"`` sorts below ``"2.1"`` (a longer tuple wins a tie).
+    """
+    return tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part) for part in version.split(".")
+    )
+
+
+def _xml_index(raw_dir: Path) -> dict[str, Path]:
+    """Walk ``raw_dir`` once; map each XML file stem (``PMC1.2`` for ``PMC1.2.xml``,
+    the version id) to its path. Real data holds about 935k XML files, so this is
+    the only walk per build.
+
+    The PMC row's ``source_record_id`` is the version id, so the graph reads the
+    exact version that was loaded. When several files share a stem, the path
+    whose parent is ``raw_dir/xml`` wins (the extractor's shared-folder lookup),
+    then the smallest relative path. An unreadable directory is logged and the
+    walk goes on; an unreadable ``raw_dir`` is logged as an error.
+    """
+    shared = os.path.join(str(raw_dir), "xml")
+    best: dict[str, tuple[bool, str, str]] = {}
+    root = str(raw_dir)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            it = os.scandir(current)
+        except OSError as exc:
+            if current == root:
+                _LOG.error("graph: cannot read the raw directory %s: %s", current, exc)
+            else:
+                _LOG.warning("graph: cannot read directory %s: %s", current, exc)
+            continue
+        with it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                name = entry.name
+                if not name.endswith(".xml"):
+                    continue
+                stem = name[:-4]
+                rank = (current != shared, os.path.relpath(entry.path, root))
+                prev = best.get(stem)
+                if prev is None or rank < (prev[0], prev[1]):
+                    best[stem] = (rank[0], rank[1], entry.path)
+    return {stem: Path(path) for stem, (_, _, path) in best.items()}
+
+
+def _find_xml(index: dict[str, Path], version_id: str | None) -> Path | None:
+    """The XML for one version id (``PMC1.1``) from ``_xml_index``; ``None`` when
+    the id is empty or no file carries that exact stem."""
+    if not version_id:
         return None
-    for cand in Path(raw_dir).rglob(f"{pmcid}*.xml"):
-        stem = cand.name[:-4]  # drop ".xml"
-        if stem == pmcid or stem.startswith(f"{pmcid}."):
-            return cand
-    return None
+    return index.get(version_id)
+
+
+def _pmc_rows_by_file(
+    conn, batch_rows: int = 5_000
+) -> Iterator[tuple[str, list[tuple[str, str | None, str | None, str | None]]]]:
+    """Yield ``(source_file, [(id, pmid, pmcid, source_record_id), ...])``, one
+    source_file at a time.
+
+    Reads through a named (server-side) cursor, ``batch_rows`` rows per fetch, so
+    the full pmc row set is never held in memory. Needs the caller's open
+    transaction (``build`` never commits).
+    """
+    current: str | None = None
+    rows: list[tuple[str, str | None, str | None, str | None]] = []
+    with conn.cursor(name="episteme_graph_pmc_rows") as cur:
+        cur.execute(
+            "SELECT id, pmid, pmcid, source_file, source_record_id FROM episteme.articles "
+            "WHERE source = 'pmc' ORDER BY source_file, id"
+        )
+        while True:
+            batch = cur.fetchmany(batch_rows)
+            if not batch:
+                break
+            for _id, pmid, pmcid, source_file, record_id in batch:
+                if source_file != current:
+                    if current is not None:
+                        yield current, rows
+                    current, rows = source_file, []
+                rows.append((_id, pmid, pmcid, record_id))
+    if current is not None:
+        yield current, rows
 
 
 def _parse_jats(xml_path: Path) -> tuple[list[str], list[str]]:
@@ -298,27 +382,21 @@ def build(
     handled: list[str] = []
 
     if source == "pmc":
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, pmid, pmcid, source_file FROM episteme.articles WHERE source = 'pmc'"
-            )
-            article_rows = cur.fetchall()
+        xml_index = _xml_index(raw_dir)
 
-        by_file: dict[str, list[tuple[str, str | None]]] = {}
-        for _id, pmid, pmcid, source_file in article_rows:
-            if not pmid:
-                skipped_no_pmid += 1
+        for source_file, file_rows in _pmc_rows_by_file(conn):
+            articles = [(pmid, record_id) for _id, pmid, _pmcid, record_id in file_rows if pmid]
+            skipped_no_pmid += len(file_rows) - len(articles)
+            if not articles:
                 continue
-            by_file.setdefault(source_file, []).append((pmid, pmcid))
 
-        for source_file, articles in sorted(by_file.items()):
             cites_rows: list[tuple[str, str, str]] = []
             mesh_rows: list[tuple[str, None, str, None, None, str]] = []
             seen_cites: set[tuple[str, str]] = set()
             seen_mesh: set[tuple[str, str]] = set()
 
-            for pmid, pmcid in articles:
-                xml_path = _find_xml(raw_dir, pmcid)
+            for pmid, record_id in articles:
+                xml_path = _find_xml(xml_index, record_id)
                 if xml_path is None:
                     missing_xml += 1
                     continue

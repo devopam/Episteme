@@ -160,7 +160,7 @@ if str(_SRC) not in sys.path:
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
-from episteme.data import staging_writer  # noqa: E402
+from episteme.data import parts_retire, staging_writer  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     LICENSE_PUBLIC_DOMAIN,
@@ -178,9 +178,7 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     load_success_marker_path,
     mark_failed,
     mark_success,
-    ops_root,
     success_marker_path,
-    write_marker,
     write_run_manifest,
 )
 from episteme.data.gz import open_gz  # noqa: E402
@@ -686,41 +684,22 @@ def _input_fingerprint(path: Path, siblings: dict[str, Path]) -> list[list[Any]]
 
 
 # The retire pending file: the part names (source_file values) whose parts
-# serialize deleted after they were loaded. A JSON list, sorted, no duplicates,
-# written atomically. retire.py reads it after a good load.
-_PENDING_LOCK = threading.Lock()
-
-
+# serialize deleted after they were loaded. The helpers live in
+# ``episteme.data.parts_retire`` (shared with pmc); these wrappers pass SOURCE.
 def retire_pending_path(processed_dir: Path) -> Path:
-    return ops_root(processed_dir, SOURCE) / "retire_pending.json"
+    return parts_retire.retire_pending_path(processed_dir, SOURCE)
 
 
 def read_retire_pending(processed_dir: Path) -> list[str]:
-    """The pending part names; ``[]`` when the file does not exist. A file
-    that is not a JSON list of strings raises ``ValueError`` (never guess
-    which rows to delete)."""
-    p = retire_pending_path(processed_dir)
-    try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-    data = json.loads(text)
-    if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
-        raise ValueError(f"{p}: not a JSON list of part names")
-    return data
+    return parts_retire.read_retire_pending(processed_dir, SOURCE)
 
 
 def write_retire_pending(processed_dir: Path, names: list[str]) -> None:
-    """Replace the pending file (atomic: temp file, fsync, rename)."""
-    write_marker(retire_pending_path(processed_dir), sorted(set(names)))  # type: ignore[arg-type]
+    parts_retire.write_retire_pending(processed_dir, SOURCE, names)
 
 
 def add_retire_pending(processed_dir: Path, names: list[str]) -> None:
-    """Add ``names`` to the pending file. Serialized across this process's
-    worker threads (a read-modify-write); processes are serialized by the
-    heavy lock."""
-    with _PENDING_LOCK:
-        write_retire_pending(processed_dir, [*read_retire_pending(processed_dir), *names])
+    parts_retire.add_retire_pending(processed_dir, SOURCE, names)
 
 
 def _delete_parts_above(processed_dir: Path, key: str, j: int) -> None:

@@ -1,0 +1,20 @@
+{
+  "extract": {
+    "max_failed_inputs": 0,
+    "max_duplicate_ids_in_shard": 0,
+    "max_empty_text_pct": 5.0,
+    "allowed_licenses": [
+      "CC0",
+      "CC BY",
+      "CC BY-SA",
+      "CC BY-ND"
+    ],
+    "max_peak_rss_mb": 2048,
+    "parts_within_caps": true
+  },
+  "load": {
+    "max_orphan_bodies": 0,
+    "rows_loaded_equals_staging": true,
+    "max_peak_rss_mb": 4096
+  }
+}
