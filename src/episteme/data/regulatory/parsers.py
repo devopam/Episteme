@@ -16,10 +16,23 @@ import openpyxl
 
 from episteme.data.regulatory.feeds import Feed
 
-# An Article 57 title block holds one to three cells per row; the column header row
-# is the first row with at least this many non-empty cells. The header row moves
-# between releases (row 7 in the design, row 20 in the file fetched on 2026-11-02).
-_MIN_HEADER_CELLS = 3
+# Column names of the Article 57 sheet (the first line of each header cell, as snake
+# case). The header row is the first row where at least _MIN_KNOWN_COLUMNS of them
+# appear. Title rows above it never match. The header row moves between releases
+# (row 7 in the design, row 20 in the file fetched on 2026-11-02).
+ARTICLE57_COLUMNS = frozenset(
+    {
+        "product_name",
+        "active_substance",
+        "route_of_administration",
+        "product_authorisation_country",
+        "marketing_authorisation_holder",
+        "pharmacovigilance_system_master_file_location",
+        "pharmacovigilance_enquiries_email_address",
+        "pharmacovigilance_enquiries_telephone_number",
+    }
+)
+_MIN_KNOWN_COLUMNS = 3
 
 
 def ema_total(path: Path) -> int | None:
@@ -55,11 +68,11 @@ def _article57_xlsx(feed: Feed, path: Path) -> Iterator[dict]:
         for row in ws.iter_rows(values_only=True):
             filled = [c for c in row if c is not None and str(c).strip() != ""]
             if names is None:
-                if len(filled) >= _MIN_HEADER_CELLS:
+                cols = [_column_name(c) if c is not None else "" for c in row]
+                if len(ARTICLE57_COLUMNS.intersection(cols)) >= _MIN_KNOWN_COLUMNS:
                     names = []
-                    for i, cell in enumerate(row):
-                        col = _column_name(cell) if cell is not None else ""
-                        col = col or f"column_{i + 1}"
+                    for i in range(len(row)):
+                        col = cols[i] or f"column_{i + 1}"
                         while col in names:
                             col += "_2"
                         names.append(col)
@@ -71,7 +84,10 @@ def _article57_xlsx(feed: Feed, path: Path) -> Iterator[dict]:
                 for name, v in zip(names, row, strict=False)
             }
         if names is None:
-            raise ValueError(f"no header row found in {path.name}")
+            raise ValueError(
+                f"no header row found in {path.name}: no row has {_MIN_KNOWN_COLUMNS} "
+                "of the known Article 57 column names"
+            )
     finally:
         wb.close()
 

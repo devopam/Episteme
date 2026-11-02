@@ -100,13 +100,14 @@ def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, A
         raise _Retryable(f"request failed: {exc}") from exc
     try:
         ctype = str(resp.headers.get("Content-Type", "")).lower()
+        if resp.status_code != 200:
+            # An HTML error page (404, 5xx) is an ordinary error, not the verification page.
+            raise _Retryable(f"HTTP {resp.status_code}")
         if "html" in ctype:
             raise FeedVerificationError(
-                f"{feed.name}: EMA answered with HTML (status {resp.status_code}), "
-                "not data: its human-verification page; the stage stops"
+                f"{feed.name}: EMA answered status 200 with HTML, not data: "
+                "its human-verification page; the stage stops"
             )
-        if resp.status_code != 200:
-            raise _Retryable(f"HTTP {resp.status_code}")
         size = 0
         first = True
         with open(tmp, "wb") as out:
@@ -128,7 +129,16 @@ def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, A
             out.flush()
             os.fsync(out.fileno())
         declared = resp.headers.get("Content-Length")
-        if declared is not None and str(declared).isdigit() and int(declared) != size:
+        # With Content-Encoding set, requests writes the decoded bytes and Content-Length
+        # counts the encoded ones: the two cannot be compared. The parse and zip checks
+        # below then prove the file is whole.
+        encoded = bool(str(resp.headers.get("Content-Encoding", "")).strip())
+        if (
+            not encoded
+            and declared is not None
+            and str(declared).isdigit()
+            and int(declared) != size
+        ):
             raise _Retryable(f"truncated: {size} of {declared} bytes")
         if size == 0:
             raise _Retryable("empty response")
@@ -170,6 +180,10 @@ def fetch_ema_feeds(
     selected = ema_feeds(feeds)
     if max_files is not None:
         selected = selected[:max_files]
+    keys = [input_key(raw_dir / f"{f.name}{_EXT[f.format]}", raw_dir) for f in selected]
+    clash = sorted({k for k in keys if keys.count(k) > 1})
+    if clash:
+        raise ValueError(f"feeds share a stored file name (and so a marker): {', '.join(clash)}")
     for feed in selected:
         final = raw_dir / f"{feed.name}{_EXT[feed.format]}"
         key = input_key(final, raw_dir)

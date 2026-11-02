@@ -198,6 +198,30 @@ def test_article57_parser_without_a_header_fails(tmp_path):
         list(parse(_feed("article57_xlsx"), path))
 
 
+def test_article57_title_row_with_many_cells_is_not_taken_as_the_header(tmp_path):
+    path = tmp_path / "art57.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for col, text in enumerate(["Report", "of", "09/10/2026", "Rev.90"], start=1):
+        ws.cell(row=1, column=col, value=text)  # four cells, but no column names
+    for col, text in enumerate(["Product name", "Active substance", "Route of administration"], 1):
+        ws.cell(row=4, column=col, value=text)
+    ws.cell(row=5, column=1, value="A")
+    wb.save(path)
+    got = list(parse(_feed("article57_xlsx"), path))
+    assert len(got) == 1 and got[0]["product_name"] == "A"  # row 1 was not the header
+
+
+def test_article57_with_cells_but_no_known_column_names_fails_clearly(tmp_path):
+    path = tmp_path / "art57.xlsx"
+    wb = openpyxl.Workbook()
+    for col, text in enumerate(["one", "two", "three", "four"], start=1):
+        wb.active.cell(row=1, column=col, value=text)
+    wb.save(path)
+    with pytest.raises(ValueError, match="known Article 57 column names"):
+        list(parse(_feed("article57_xlsx"), path))
+
+
 def test_openfda_json_parser_reads_results_from_the_zip(tmp_path):
     path = tmp_path / "drug-enforcement-0001-of-0001.json.zip"
     payload = {

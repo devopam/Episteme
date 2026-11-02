@@ -18,9 +18,13 @@ SOURCE = "ema_download"
 
 
 class FakeResp:
-    def __init__(self, body: bytes, status: int = 200, ctype: str = "application/json", cl=None):
+    def __init__(
+        self, body: bytes, status: int = 200, ctype: str = "application/json", cl=None, enc=None
+    ):
         self.status_code = status
         self.headers = {"Content-Type": ctype}
+        if enc:
+            self.headers["Content-Encoding"] = enc
         if cl is not False:
             self.headers["Content-Length"] = str(len(body) if cl is None else cl)
         self._body = body
@@ -211,12 +215,50 @@ def test_delay_default_comes_from_settings(tmp_path, monkeypatch):
         cfg.get_settings.cache_clear()
 
 
-def test_source_url_reads_sources_env_through_config():
-    from episteme.config import ConfigError, source_url
+def test_source_url_reads_sources_env_through_config(monkeypatch):
+    import episteme.config as cfg
 
-    assert source_url("OPENFDA_CATALOG").startswith("https://")
-    with pytest.raises(ConfigError):
-        source_url("NO_SUCH_KEY_ANYWHERE")
+    monkeypatch.setattr(cfg, "_SOURCES", {"SOME_FEED_URL": "https://feed.test/a.json"})
+    monkeypatch.setattr(cfg, "get_settings", lambda: None)  # sources.env is not read here
+    monkeypatch.delenv("SOME_FEED_URL", raising=False)
+    monkeypatch.delenv("NO_SUCH_KEY_ANYWHERE", raising=False)
+    assert cfg.source_url("SOME_FEED_URL") == "https://feed.test/a.json"
+    monkeypatch.setenv("SOME_FEED_URL", "https://override.test/b.json")  # the environment wins
+    assert cfg.source_url("SOME_FEED_URL") == "https://override.test/b.json"
+    with pytest.raises(cfg.ConfigError):
+        cfg.source_url("NO_SUCH_KEY_ANYWHERE")
+
+
+def test_a_gzip_encoded_response_is_not_judged_truncated(env):
+    # requests decodes gzip: the bytes written are the decoded ones, and Content-Length
+    # counts the encoded ones. The two differ, and the file is still whole.
+    a = _feed("ema_a")
+    body = _json_body(30)
+    session = FakeSession({_url(a): [FakeResp(body, cl=len(body) // 3, enc="gzip")]})
+    out = fetch_ema_feeds(env["raw"], {"ema_a": a}, session=session, **env["kw"])
+    assert out["fetched"] == ["ema_a"] and not out["failed"] and len(session.calls) == 1
+
+
+def test_a_truncated_gzip_encoded_response_is_still_caught_by_parsing(env):
+    a = _feed("ema_a")
+    body = _json_body(30)
+    session = FakeSession({_url(a): [FakeResp(body[:-40], cl=len(body) // 3, enc="gzip")]})
+    out = fetch_ema_feeds(env["raw"], {"ema_a": a}, session=session, **env["kw"])
+    assert "ema_a" in out["failed"] and len(session.calls) == 2
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_an_html_error_page_is_an_ordinary_error_not_the_verification_page(env, status):
+    a, b = _feed("ema_a"), _feed("ema_b")
+    page = b"<html><body>Not here</body></html>"
+    session = FakeSession(
+        {_url(a): [FakeResp(page, status, "text/html")], _url(b): [FakeResp(_json_body(2))]}
+    )
+    out = fetch_ema_feeds(env["raw"], {"ema_a": a, "ema_b": b}, session=session, **env["kw"])
+    assert "ema_a" in out["failed"] and out["fetched"] == ["ema_b"]  # the stage goes on
+    assert session.calls.count(_url(a)) == 2  # retried once, as for any error
+    assert failed_marker_path(env["proc"], SOURCE, "ema_a.json").is_file()
+    assert not (env["raw"] / "ema_a.json").exists()
 
 
 def test_marker_and_file_names_are_input_keys(env):
@@ -228,4 +270,38 @@ def test_marker_and_file_names_are_input_keys(env):
     stored = env["raw"] / "ema_a.json"
     assert input_key(stored, env["raw"]) == "ema_a.json"
     assert success_marker_path(env["proc"], SOURCE, input_key(stored, env["raw"])).is_file()
-    assert isinstance(env["raw"], Path)
+
+
+def test_configured_ema_feeds_never_share_a_stored_file_or_marker():
+    from episteme.data.checkpoint_markers import input_key
+    from episteme.data.regulatory.feeds import load_feeds
+
+    raw = Path("raw") / "ema"
+    feeds = dl.ema_feeds(load_feeds())
+    assert len(feeds) == 13
+    names = [input_key(raw / f"{f.name}{dl._EXT[f.format]}", raw) for f in feeds]
+    assert len(set(names)) == len(names)
+    markers = {success_marker_path(Path("p"), SOURCE, n) for n in names}
+    assert len(markers) == len(names)
+
+
+def test_same_stem_in_two_formats_keeps_two_files_and_two_markers(env):
+    j = _feed("ema_x", "ema_json")
+    x = Feed("ema_x_book", "K_EMA_X_BOOK", "article57_xlsx", "EU", (), (), (), None, "monthly")
+    session = FakeSession(
+        {_url(j): [FakeResp(_json_body(1))], _url(x): [FakeResp(_xlsx_body(), ctype="x/y")]}
+    )
+    out = fetch_ema_feeds(env["raw"], {"a": j, "b": x}, session=session, **env["kw"])
+    assert out["fetched"] == ["ema_x", "ema_x_book"]
+    assert sorted(p.name for p in env["raw"].iterdir()) == ["ema_x.json", "ema_x_book.xlsx"]
+    for n in ("ema_x.json", "ema_x_book.xlsx"):
+        assert success_marker_path(env["proc"], SOURCE, n).is_file()
+
+
+def test_two_feeds_with_one_name_are_refused_before_any_download(env):
+    a1 = _feed("ema_a")
+    a2 = Feed("ema_a", "K_OTHER", "ema_json", "EU", (), (), (), None, "monthly")
+    session = FakeSession({})
+    with pytest.raises(ValueError, match="ema_a.json"):
+        fetch_ema_feeds(env["raw"], {"one": a1, "two": a2}, session=session, **env["kw"])
+    assert session.calls == []
