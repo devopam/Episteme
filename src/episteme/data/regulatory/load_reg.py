@@ -56,6 +56,7 @@ from episteme.data.checkpoint_markers import input_key
 from episteme.data.regulatory.feeds import Feed, load_feeds
 from episteme.data.regulatory.normalize import norm_name, norm_product_key, split_names
 from episteme.data.regulatory.parsers import ema_total, parse
+from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ def field_values(row: dict, path: str) -> list[str]:
         current = nxt
     out = []
     for v in _flatten(current):
-        s = str(v).strip()
+        s = str(v).replace("\x00", "").strip()
         if s:
             out.append(s)
     return out
@@ -271,9 +272,21 @@ class _Invalid(Exception):
     """The feed failed a check: the release is not published."""
 
 
+def _strip_nul(obj: Any) -> Any:
+    """``obj`` with U+0000 removed from every string and key (jsonb and text refuse it).
+    Done on the values, so a literal backslash followed by ``u0000`` is left alone."""
+    if isinstance(obj, str):
+        return obj.replace("\x00", "")
+    if isinstance(obj, list):
+        return [_strip_nul(v) for v in obj]
+    if isinstance(obj, dict):
+        return {_strip_nul(k): _strip_nul(v) for k, v in obj.items()}
+    return obj
+
+
 def _dumps(obj: Any) -> str:
-    # jsonb refuses U+0000; datetimes from a workbook go through str().
-    return json.dumps(obj, default=str, ensure_ascii=False).replace("\\u0000", "")
+    # Datetimes from a workbook go through str().
+    return json.dumps(_strip_nul(obj), default=str, ensure_ascii=False)
 
 
 _COLUMNS = (
@@ -480,18 +493,25 @@ def load_release(
 # ---------------------------------------------------------------------------
 def feed_files(source: str, feed: Feed, raw_dir: Path) -> list[Path]:
     """The raw files of a feed. EMA: ``<raw>/ema/<feed>.json|.xlsx``. openFDA: the zips
-    under ``<raw>/openfda`` that sit in a directory named after the feed
-    (``fda_enforcement`` reads the ``enforcement`` directory), in path order."""
+    under ``<raw>/openfda/drug/<tag>/`` (``fda_enforcement`` reads ``drug/enforcement``;
+    ``device/`` and ``food/`` enforcement zips are not drug recalls and are left out),
+    in path order."""
     if source == "ema":
         ext = {"ema_json": ".json", "article57_xlsx": ".xlsx"}[feed.format]
         p = raw_dir / f"{feed.name}{ext}"
         return [p] if p.is_file() else []
     tag = feed.name.removeprefix("fda_")
-    return sorted(
-        p
-        for p in raw_dir.rglob("*.zip")
-        if tag in p.relative_to(raw_dir).parts[:-1] and p.is_file()
-    )
+    base = raw_dir / "drug" / tag
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.rglob("*.zip") if p.is_file())
+
+
+def marker_name_for(feed: Feed, release_id: str, raw_dir: Path) -> str:
+    """Name of the load marker: ``input_key`` of ``<feed>__<release stem>_<hash>``. The
+    stem and hash keep a release id with ``/`` or quotes out of the marker path."""
+    safe = f"{_stem(release_id, 24)}_{_short_hash(release_id, _HASH_LEN)}"
+    return input_key(raw_dir / f"{feed.name}__{safe}", raw_dir)
 
 
 def _fingerprint(files: Sequence[tuple[Path, str]]) -> list[list]:
@@ -502,10 +522,112 @@ def _fingerprint(files: Sequence[tuple[Path, str]]) -> list[list]:
     return out
 
 
+def select_feeds(source: str, only: Sequence[str] | None) -> list[Feed]:
+    """The configured feeds of ``source``, narrowed by ``--only``; ``ValueError`` names
+    an ``--only`` entry that is not a feed of this source."""
+    feeds = [f for f in load_feeds().values() if f.format in _SOURCE_FORMATS[source]]
+    if only:
+        unknown = sorted(set(only) - {f.name for f in feeds})
+        if unknown:
+            raise ValueError(f"no {source} feed named {unknown!r}")
+        feeds = [f for f in feeds if f.name in set(only)]
+    return feeds
+
+
+def run_feeds(
+    conn: psycopg.Connection,
+    source: str,
+    feeds: Sequence[Feed],
+    raw_dir: Path,
+    processed_root: Path,
+    *,
+    release: str | None,
+    force: bool,
+    reason: str | None,
+    run_id: str,
+) -> dict:
+    """Load each feed in turn. One feed's failure does not stop the others. A feed with
+    no input file is a failed feed (a wrong ``--raw-dir`` must not look like success).
+    Returns ``{"loaded", "skipped", "failed"}`` (``failed`` lists the feed names)."""
+    loaded = skipped = 0
+    failed: list[str] = []
+
+    def _fail(feed: Feed, why: str) -> None:
+        print(f"FAIL {feed.name}: {why}")
+        try:
+            record_failure(source, "load", feed.name, why, run_id=run_id)
+        except Exception:  # noqa: BLE001 - the failure list below still carries it
+            _LOG.exception("could not record the failure of %s", feed.name)
+        failed.append(feed.name)
+
+    for feed in feeds:
+        paths = feed_files(source, feed, raw_dir)
+        if not paths:
+            _fail(feed, f"no input files under {raw_dir}")
+            continue
+        release_id = "?"
+        try:
+            release_id = release or release_id_for(feed, paths)
+            files = list(zip(paths, input_keys(paths, raw_dir), strict=True))
+            fp = _fingerprint(files)
+            marker = checkpoint_markers.load_success_marker_path(
+                processed_root, source, marker_name_for(feed, release_id, raw_dir)
+            )
+            if marker.is_file() and not force:
+                try:
+                    stored = json.loads(marker.read_text(encoding="utf-8")).get("stats", {})
+                except (OSError, ValueError):
+                    stored = {}
+                if stored.get("files") == fp:
+                    print(f"skip {feed.name} {release_id}")
+                    skipped += 1
+                    continue
+            try:
+                with audit_trail.deferred_mirror(conn):
+                    if force:
+                        audit_trail.record(
+                            "force_override",
+                            conn=conn,
+                            object=f"{feed.name} {release_id}",
+                            reason=reason,
+                            run_id=run_id,
+                        )
+                    result = load_release(
+                        conn, feed, paths, release_id, run_id=run_id, raw_dir=raw_dir
+                    )
+                    audit_trail.commit(conn)
+            except BaseException:
+                audit_trail.rollback(conn)
+                raise
+            if result["status"] != "loaded":
+                _fail(feed, f"{release_id}: {result.get('reason')}")
+                continue
+            stats = {k: v for k, v in result.items() if k != "reason"}
+            stats["files"] = fp
+            checkpoint_markers.write_marker(
+                marker,
+                {
+                    "source": source,
+                    "source_file": marker.name,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "stats": stats,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - one feed must not stop the others
+            _fail(feed, f"{release_id}: {exc!r}")
+            continue
+        loaded += 1
+        print(
+            f"ok {feed.name} release={release_id} rows={result['rows']} "
+            f"duplicates={result['duplicates']} conflicts={result['conflicts']} "
+            f"missing_key={result['missing_key']} bad_dates={result['bad_dates']}"
+        )
+    return {"loaded": loaded, "skipped": skipped, "failed": failed}
+
+
 def main(argv: list[str] | None = None) -> int:
     from episteme.data.db import connection as db_connection
     from episteme.data.db.guard import pool_kwargs
-    from episteme.ops.failure import record_failure
     from episteme.ops.status import current
     from episteme.ops.stop import stage_guard
 
@@ -527,21 +649,18 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     source: str = args.source
     raw_dir = args.raw_dir or (settings.raw_root / source)
-    feeds = [f for f in load_feeds().values() if f.format in _SOURCE_FORMATS[source]]
-    if args.only:
-        unknown = sorted(set(args.only) - {f.name for f in feeds})
-        if unknown:
-            print(f"error: no {source} feed named {unknown!r}", file=sys.stderr)
-            return 2
-        feeds = [f for f in feeds if f.name in set(args.only)]
+    try:
+        feeds = select_feeds(source, args.only)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     external_run_id = settings.run_id
     run_id = external_run_id or f"{source}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     own_bracket = external_run_id is None
     dsn = db_connection.admin_dsn_from_settings()
     holder: list = [None]
-    failed: list[str] = []
-    loaded = skipped = missing = 0
+    outcome: dict = {"loaded": 0, "skipped": 0, "failed": []}
 
     with stage_guard(lambda: holder[0], lock_stage="load", db_lock=True, argv=argv, dsn=dsn) as g:
         current().update(source=source)
@@ -551,73 +670,19 @@ def main(argv: list[str] | None = None) -> int:
                 if own_bracket:
                     audit_trail.record("run_start", conn=conn, object=source, run_id=run_id)
                     conn.commit()
-                for feed in feeds:
-                    paths = feed_files(source, feed, raw_dir)
-                    if not paths:
-                        print(f"no input for {feed.name} under {raw_dir}")
-                        missing += 1
-                        continue
-                    release_id = args.release or release_id_for(feed, paths)
-                    files = list(zip(paths, input_keys(paths, raw_dir), strict=True))
-                    fp = _fingerprint(files)
-                    marker_name = f"{feed.name}.{release_id}"
-                    marker = checkpoint_markers.load_success_marker_path(
-                        settings.processed_root, source, marker_name
-                    )
-                    if marker.is_file() and not args.force:
-                        try:
-                            stored = json.loads(marker.read_text(encoding="utf-8")).get("stats", {})
-                        except (OSError, ValueError):
-                            stored = {}
-                        if stored.get("files") == fp:
-                            print(f"skip {feed.name} {release_id}")
-                            skipped += 1
-                            continue
-                    try:
-                        with audit_trail.deferred_mirror(conn):
-                            if args.force:
-                                audit_trail.record(
-                                    "force_override",
-                                    conn=conn,
-                                    object=f"{feed.name} {release_id}",
-                                    reason=args.reason,
-                                    run_id=run_id,
-                                )
-                            result = load_release(
-                                conn, feed, paths, release_id, run_id=run_id, raw_dir=raw_dir
-                            )
-                            audit_trail.commit(conn)
-                    except Exception as exc:  # noqa: BLE001 - one feed must not stop the others
-                        audit_trail.rollback(conn)
-                        print(f"FAIL {feed.name} {release_id}: {exc!r}")
-                        record_failure(source, "load", feed.name, repr(exc), run_id=run_id)
-                        failed.append(feed.name)
-                        continue
-                    if result["status"] != "loaded":
-                        print(f"FAIL {feed.name} {release_id}: {result.get('reason')}")
-                        record_failure(
-                            source, "load", feed.name, str(result.get("reason")), run_id=run_id
-                        )
-                        failed.append(feed.name)
-                        continue
-                    stats = {k: v for k, v in result.items() if k != "reason"}
-                    stats["files"] = fp
-                    checkpoint_markers.write_marker(
-                        marker,
-                        {
-                            "source": source,
-                            "source_file": marker_name,
-                            "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "stats": stats,
-                        },
-                    )
-                    loaded += 1
-                    print(
-                        f"ok {feed.name} release={release_id} rows={result['rows']} "
-                        f"duplicates={result['duplicates']} conflicts={result['conflicts']} "
-                        f"missing_key={result['missing_key']} bad_dates={result['bad_dates']}"
-                    )
+                outcome = run_feeds(
+                    conn,
+                    source,
+                    feeds,
+                    raw_dir,
+                    settings.processed_root,
+                    release=args.release,
+                    force=args.force,
+                    reason=args.reason,
+                    run_id=run_id,
+                )
                 if own_bracket:
+                    failed = outcome["failed"]
                     audit_trail.record(
                         "run_end",
                         conn=conn,
@@ -629,10 +694,10 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 holder[0] = None
         print(
-            f"done feeds={len(feeds)} loaded={loaded} skipped={skipped} "
-            f"no_input={missing} failed={len(failed)}"
+            f"done feeds={len(feeds)} loaded={outcome['loaded']} skipped={outcome['skipped']} "
+            f"failed={len(outcome['failed'])}"
         )
-        return g.exit_code(1 if failed else 0)
+        return g.exit_code(1 if outcome["failed"] else 0)
 
 
 if __name__ == "__main__":

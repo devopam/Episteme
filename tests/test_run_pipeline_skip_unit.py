@@ -103,7 +103,7 @@ def test_skip_unit_misuse_exits_2_and_runs_no_stage(tree, stage, args):
     assert calls == []
 
 
-@pytest.mark.parametrize("source", ["europepmc_id_mappings", "cdisc_ct"])
+@pytest.mark.parametrize("source", ["europepmc_id_mappings", "cdisc_ct", "ema", "openfda"])
 def test_skip_unit_is_rejected_for_loaders_that_do_not_take_it(tree, source):
     proc, calls = _run(tree, source, "load", "--skip-unit", "a", "--reason", "r")
     assert proc.returncode == 2, proc.stderr
@@ -117,3 +117,14 @@ def test_force_and_skip_unit_pass_reason_once(tree):
     )
     assert proc.returncode == 0, proc.stderr
     assert calls == ["load_pubmed.sh --force --reason why --skip-unit s.jsonl"]
+
+
+@pytest.mark.parametrize("source", ["ema", "openfda"])
+@pytest.mark.parametrize("stage", ["load", "all"])
+def test_bulk_is_rejected_for_the_regulatory_feeds(tree, source, stage):
+    proc, calls = _run(tree, source, stage, "--bulk")
+    assert proc.returncode == 2, proc.stderr
+    # `all --bulk` is refused earlier still (--bulk needs a named load or graph stage)
+    if stage == "load":
+        assert "does not support --bulk" in proc.stderr
+    assert calls == []

@@ -102,6 +102,10 @@ if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ]; }; then
+    # reg_record partitions carry their own indexes; the articles index group is not theirs.
+    die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
+fi
 if [ "$SKIP_GATE" = "1" ]; then
     [ "$SAMPLE" = "0" ] || die "--sample and --skip-gate cannot be used together" 2
     [ -n "$REASON" ] || die "--skip-gate requires --reason" 2

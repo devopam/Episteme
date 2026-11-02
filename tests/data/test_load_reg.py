@@ -4,12 +4,16 @@ pg-marked: runs against ``episteme_test`` only. The schema is built once per
 module (a rebuild costs minutes on the test disk); each test clears the reg tables.
 """
 
+import contextlib
 import json
+import os
 import zipfile
 from pathlib import Path
 
 import ijson
+import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from episteme.data.regulatory import load_reg
 from episteme.data.regulatory.feeds import Feed
@@ -44,19 +48,30 @@ def _clear_reg(conn):
     conn.commit()
 
 
+@pytest.fixture(scope="module")
+def _schema():
+    """Build the schema once for this module (a rebuild costs minutes on the test
+    disk). Its own connection: ``pg_conn`` is function-scoped. Same guard as
+    ``pg_conn``: only ``episteme_test``."""
+    dsn = os.environ.get("TEST_PG_DSN")
+    if not dsn:
+        pytest.skip("TEST_PG_DSN not set")
+    if conninfo_to_dict(dsn).get("dbname") != "episteme_test":
+        pytest.fail("TEST_PG_DSN does not target episteme_test; refusing to DROP SCHEMA")
+    conn = psycopg.connect(dsn, autocommit=False)
+    try:
+        _build_schema(conn)
+    finally:
+        conn.close()
+
+
 @pytest.fixture
-def db(pg_conn, monkeypatch, tmp_path):
+def db(_schema, pg_conn, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "processed"))
     from episteme.config import get_settings
 
     get_settings.cache_clear()
-    with pg_conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('episteme.reg_release')")
-        built = cur.fetchone()[0] is not None
-    pg_conn.commit()
-    if not built:
-        _build_schema(pg_conn)
     _clear_reg(pg_conn)
     yield pg_conn
     pg_conn.rollback()
@@ -303,3 +318,28 @@ def test_latest_release_prunes_to_one_partition(db, tmp_path):
         )
         plan = "\n".join(r[0] for r in cur.fetchall())
     assert plan.count("reg_record_ema_test") == 1
+
+
+def test_main_runs_feeds_end_to_end_and_exits_non_zero_for_a_short_feed(db, tmp_path, monkeypatch):
+    import episteme.ops.stop as stop
+    from episteme.data.db import connection as db_connection
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _ema_file(raw / "ema_orphan.json", [{"orphan_designation_url": f"u{i}"} for i in range(3)])
+    _ema_file(raw / "ema_pip.json", [{"pip_url": "u1"}], total=5)  # short: must fail
+    monkeypatch.setattr(db_connection, "admin_dsn_from_settings", lambda: os.environ["TEST_PG_DSN"])
+    monkeypatch.setattr(
+        stop,
+        "stage_guard",
+        lambda *a, **k: contextlib.nullcontext(type("H", (), {"exit_code": lambda s, rc: rc})()),
+    )
+    argv = ["--source", "ema", "--raw-dir", str(raw), "--only", "ema_orphan", "--only", "ema_pip"]
+    assert load_reg.main(argv) == 1
+    db.rollback()
+    assert load_reg.latest_release(db, "ema_orphan") is not None
+    assert load_reg.latest_release(db, "ema_pip") is None
+    assert _count(db, "SELECT count(*) FROM episteme.reg_record WHERE dataset = 'ema_orphan'") == 3
+    # resume: the loaded feed is skipped, the short feed fails again
+    assert load_reg.main(argv) == 1
+    assert _count(db, "SELECT count(*) FROM episteme.reg_release WHERE dataset = 'ema_orphan'") == 1
