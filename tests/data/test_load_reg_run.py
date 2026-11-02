@@ -252,6 +252,50 @@ def test_main_exits_zero_when_every_selected_feed_loads(main_env, env):
     assert env.calls == ["ema_orphan"]
 
 
+def _recall_run(monkeypatch, *, failed=(), feed="fda_enforcement", build=None):
+    from episteme.data.regulatory import recall_lots
+
+    built: list[str] = []
+
+    def fake_build(conn, release_id, *, run_id=None):
+        built.append(release_id)
+        if build is not None:
+            build()
+        return {"recalls": 1}
+
+    monkeypatch.setattr(recall_lots, "build_recall_lots", fake_build)
+    monkeypatch.setattr(load_reg, "latest_release", lambda conn, dataset: "r1")
+    monkeypatch.setattr(load_reg.audit_trail, "commit", lambda conn: conn.commit())
+    outcome = {"loaded": 1, "skipped": 0, "failed": list(failed)}
+    load_reg._refresh_recall_lots(FakeConn(), "openfda", [_feed(feed)], outcome, "r")
+    return built, outcome
+
+
+def test_a_good_enforcement_release_builds_its_recall_lots(env, monkeypatch):
+    built, outcome = _recall_run(monkeypatch)
+    assert built == ["r1"] and outcome["failed"] == []
+
+
+def test_a_failed_enforcement_release_builds_nothing(env, monkeypatch):
+    built, _ = _recall_run(monkeypatch, failed=["fda_enforcement"])
+    assert built == []
+
+
+def test_another_feed_builds_nothing(env, monkeypatch):
+    built, _ = _recall_run(monkeypatch, feed="fda_ndc")
+    assert built == []
+
+
+def test_a_failed_recall_lot_build_fails_the_run(env, monkeypatch):
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(load_reg.audit_trail, "rollback", lambda conn: conn.rollback())
+    built, outcome = _recall_run(monkeypatch, build=boom)
+    assert outcome["failed"] == ["recall_lot"]
+    assert env.failures[-1][0] == "recall_lot"
+
+
 def test_main_force_needs_a_reason():
     assert load_reg.main(["--source", "ema", "--force"]) == 2
 

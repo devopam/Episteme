@@ -648,6 +648,39 @@ def run_feeds(
     return {"loaded": loaded, "skipped": skipped, "failed": failed}
 
 
+def _refresh_recall_lots(
+    conn: psycopg.Connection, source: str, feeds: Sequence[Feed], outcome: dict, run_id: str
+) -> None:
+    """After a run that holds a good ``fda_enforcement``, rebuild its ``recall_lot`` rows, so that
+    a new release never reads as "no recalls". It runs last, so it sees this run's ``fda_ndc``,
+    and on a skip too, so that a re-run repairs a crash before this step. A failure is a failed
+    unit of the run. The import is here because ``recall_lots`` imports this module."""
+    from episteme.data.regulatory.recall_lots import RECALL_DATASET, build_recall_lots
+
+    if RECALL_DATASET in outcome["failed"] or all(f.name != RECALL_DATASET for f in feeds):
+        return
+    try:
+        release = latest_release(conn, RECALL_DATASET)
+        if release is None:
+            conn.rollback()
+            return
+        try:
+            with audit_trail.deferred_mirror(conn):
+                lots = build_recall_lots(conn, release, run_id=run_id)
+                audit_trail.commit(conn)
+        except BaseException:
+            audit_trail.rollback(conn)
+            raise
+        print("recall_lot " + " ".join(f"{k}={v}" for k, v in lots.items()))
+    except Exception as exc:  # noqa: BLE001 - reported, and the exit code carries it
+        print(f"FAIL recall_lot: {exc!r}")
+        try:
+            record_failure(source, "load", "recall_lot", repr(exc), run_id=run_id)
+        except Exception:  # noqa: BLE001 - the failure list below still carries it
+            _LOG.exception("could not record the failure of recall_lot")
+        outcome["failed"].append("recall_lot")
+
+
 def main(argv: list[str] | None = None) -> int:
     from episteme.data.db import connection as db_connection
     from episteme.data.db.guard import pool_kwargs
@@ -704,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
                     reason=args.reason,
                     run_id=run_id,
                 )
+                _refresh_recall_lots(conn, source, feeds, outcome, run_id)
                 if own_bracket:
                     failed = outcome["failed"]
                     audit_trail.record(

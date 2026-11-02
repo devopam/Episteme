@@ -32,6 +32,8 @@ NEW_TABLES = (
     "faers_quarter_totals",
     "faers_batch_coverage",
     "faers_batch_quarter",
+    "faers_moiety_quarter",
+    "faers_term_quarter",
     "recall_lot",
     "label_section",
     "label_substance",

@@ -43,6 +43,31 @@ def test_the_old_pattern_finds_old_signal_tables():
     assert not re.match(fg._OLD_RE, f"faers_report_old_{GEN}_y2020")
 
 
+def test_a_lock_failure_on_the_signal_rename_is_a_swap_error(monkeypatch):
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, query, params=None):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    def locked(cur, token):
+        raise psycopg.errors.LockNotAvailable("locked")
+
+    monkeypatch.setattr(fg, "_check_tables", lambda *a: None)
+    monkeypatch.setattr(fg, "_swap_signals", locked)
+    monkeypatch.setattr(fg.audit_trail, "rollback", lambda conn: None)
+    with pytest.raises(fg.GenerationSwapError, match="old signal tables still serve"):
+        fg.swap_live_signals(Conn(), GEN, {}, None)
+
+
 def test_entry_candidates_rank_annotation_then_substance_then_product():
     annotation = json.dumps({"substance_name": ["X"], "unii": ["U1", "U2"]})
     out = sg.entry_candidates(9, "Brand", "Alpha\\Beta; Gamma", annotation)
@@ -168,25 +193,26 @@ def _entry(conn, *keys):
     return entry
 
 
-def _report(conn, report_id, day, drugs=(), terms=()):
-    """One report. ``drugs``: ``(entry, role, batch_norm)``. ``terms``: term ids."""
+def _report(conn, report_id, day, drugs=(), terms=(), gen=""):
+    """One report. ``drugs``: ``(entry, role, batch_norm)``. ``terms``: term ids. ``gen``: the
+    suffix of a generation's tables, such as ``_gccc``."""
     year = day.year if day else None
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO episteme.faers_report (safetyreportid, receive_year, receive_date, "
+            f"INSERT INTO episteme.faers_report{gen} (safetyreportid, receive_year, receive_date, "
             "source_file) VALUES (%s, %s, %s, 'f')",
             (report_id, year, day),
         )
         for seq, (entry, role, batch) in enumerate(drugs, start=1):
             cur.execute(
-                "INSERT INTO episteme.faers_drug (safetyreportid, seq, receive_year, role, "
+                f"INSERT INTO episteme.faers_drug{gen} (safetyreportid, seq, receive_year, role, "
                 "drug_entry_id, batch_number, batch_norm, source_file) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, 'f')",
                 (report_id, seq, year, role, entry, batch, batch),
             )
         for seq, term in enumerate(terms, start=1):
             cur.execute(
-                "INSERT INTO episteme.faers_reaction (safetyreportid, seq, receive_year, "
+                f"INSERT INTO episteme.faers_reaction{gen} (safetyreportid, seq, receive_year, "
                 "term_id, source_file) VALUES (%s, %s, %s, %s, 'f')",
                 (report_id, seq, year, term),
             )
@@ -353,6 +379,130 @@ def test_a_term_in_two_cases_is_one_event_on_the_lowest_id(db):
         ("NAUSEA", "nausea"),
         ("Nausea", "nausea"),
     ]
+
+
+@pytest.mark.pg
+def test_denominators_give_a_hand_worked_two_by_two(db):
+    m, x = _substance(db, "alpha"), _substance(db, "gamma")
+    em, ex = _entry(db, m), _entry(db, x)
+    t, u = _term(db, "Nausea"), _term(db, "Rash")
+    day = date(2020, 2, 1)
+    _report(db, "1", day, [(em, "suspect", None)], [t])
+    _report(db, "2", day, [(em, "suspect", None)], [t])
+    _report(db, "3", day, [(em, "concomitant", None)], [u])
+    _report(db, "4", day, [(ex, "suspect", None)], [t])
+    _report(db, "5", day, [(ex, "suspect", None)], [u])
+    _report(db, "6", day, [(ex, "suspect", None)], [u])
+    _report(db, "7", day, [(_raw_entry(db, "mystery"), "suspect", None)], [])  # no drug, no term
+    out = _rebuild(db)
+    a = _all(
+        db,
+        "SELECT reports_any FROM episteme.faers_event_quarter "
+        "WHERE substance_key = %s AND term_id = %s",
+        (m, t),
+    )[0][0]
+    drug_total, drug_suspect = _all(
+        db,
+        "SELECT reports_any, reports_suspect FROM episteme.faers_moiety_quarter "
+        "WHERE substance_key = %s AND quarter = %s",
+        (m, Q1_2020),
+    )[0]
+    term_total = _all(
+        db, "SELECT reports FROM episteme.faers_term_quarter WHERE term_id = %s", (t,)
+    )[0][0]
+    reports, listed, with_reaction = _all(
+        db,
+        "SELECT reports, reports_listed, reports_with_reaction FROM episteme.faers_quarter_totals",
+    )[0]
+    assert (reports, listed, with_reaction) == (7, 6, 6)
+    assert out["reports_listed"] == 6 and out["reports_with_reaction"] == 6
+    b, c = drug_total - a, term_total - a
+    d = listed - a - b - c
+    assert (a, b, c, d) == (2, 1, 1, 2)
+    assert drug_suspect == 2
+    assert (a / (a + b)) / (c / (c + d)) == pytest.approx(2.0)  # PRR
+    assert (a * d) / (b * c) == pytest.approx(4.0)  # ROR
+
+
+@pytest.mark.pg
+def test_a_report_set_over_two_year_partitions(db):
+    a, b = _substance(db, "alpha"), _substance(db, "gamma")
+    ea, eb = _entry(db, a), _entry(db, b)
+    term = _term(db, "Nausea")
+    both = [(ea, "suspect", "LOT1"), (eb, "concomitant", None)]
+    _report(db, "1", date(2019, 12, 31), both, [term])
+    _report(db, "2", date(2020, 1, 1), both, [term])
+    _report(db, "3", date(2020, 2, 1), both, [term])
+    out = _rebuild(db)
+    assert out["reports"] == 3 and out["pair_rows"] == 4
+    q4_2019 = date(2019, 10, 1)
+    assert _all(db, "SELECT quarter, reports FROM episteme.faers_quarter_totals ORDER BY 1") == [
+        (q4_2019, 1),
+        (Q1_2020, 2),
+    ]
+    assert _all(
+        db,
+        "SELECT quarter, reports_any FROM episteme.faers_pair_quarter "
+        "WHERE substance_key_a = %s ORDER BY 1",
+        (a,),
+    ) == [(q4_2019, 1), (Q1_2020, 2)]
+    assert _all(db, "SELECT quarter, reports FROM episteme.faers_batch_quarter ORDER BY 1") == [
+        (q4_2019, 1),
+        (Q1_2020, 2),
+    ]
+    assert _all(db, "SELECT quarter, reports FROM episteme.faers_term_quarter ORDER BY 1") == [
+        (q4_2019, 1),
+        (Q1_2020, 2),
+    ]
+
+
+@pytest.mark.pg
+def test_a_lock_on_a_signal_table_stops_the_rename_and_the_old_ones_serve(db, monkeypatch):
+    monkeypatch.setenv("EPISTEME_FAERS_LOCK_TIMEOUT_S", "1")
+    from episteme.config import get_settings
+
+    get_settings.cache_clear()
+    a, b = _substance(db, "alpha"), _substance(db, "gamma")
+    ea, eb = _entry(db, a), _entry(db, b)
+    _report(db, "1", date(2020, 2, 1), [(ea, "suspect", None), (eb, "suspect", None)])
+    _rebuild(db)
+    _report(db, "2", date(2020, 5, 1), [(ea, "suspect", None), (eb, "suspect", None)])
+    reader = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=False)
+    try:
+        with reader.cursor() as cur:
+            cur.execute("SELECT count(*) FROM episteme.faers_pair_quarter")
+        with pytest.raises(fg.GenerationSwapError, match="old signal tables still serve"):
+            _rebuild(db)
+        db.rollback()
+    finally:
+        reader.rollback()
+        reader.close()
+    assert {r[2] for r in _pairs(db)} == {Q1_2020}
+    _rebuild(db)  # drops what the stopped rebuild left
+    assert {r[2] for r in _pairs(db)} == {Q1_2020, Q2_2020}
+    assert _generation_relations(db) == []
+    db.rollback()
+
+
+@pytest.mark.pg
+def test_a_live_signal_table_with_other_privileges_is_refused_before_the_copy(
+    db, tmp_path, monkeypatch
+):
+    from episteme.data.regulatory.faers import zip_load as fz
+
+    raw = tmp_path / "raw"
+    with db.cursor() as cur:
+        cur.execute("GRANT SELECT ON episteme.faers_pair_quarter TO PUBLIC")
+    db.commit()
+    monkeypatch.setattr(fz, "iter_reports", lambda _p: pytest.fail("the COPY started"))
+    try:
+        with pytest.raises(fl.GenerationError, match="owner or privileges"):
+            _run(db, tmp_path, [_zip(raw, "2020q1", [_zip_report("1", ["alpha"], "20200201")])])
+    finally:
+        db.rollback()
+        with db.cursor() as cur:
+            cur.execute("REVOKE SELECT ON episteme.faers_pair_quarter FROM PUBLIC")
+        db.commit()
 
 
 @pytest.mark.pg
@@ -539,6 +689,140 @@ def test_a_failed_build_is_cleaned_by_the_next_build(db, monkeypatch):
     fg._drop_generation(db, GEN)
 
 
+def _state_rows(conn, kind):
+    return _all(
+        conn, f"SELECT key FROM episteme.{fg.state_table(GEN)} WHERE kind = %s ORDER BY 1", (kind,)
+    )
+
+
+@pytest.mark.pg
+def test_a_failure_on_the_last_partition_keeps_the_finished_ones(db, monkeypatch):
+    a, b = _substance(db, "alpha"), _substance(db, "gamma")
+    ea, eb = _entry(db, a), _entry(db, b)
+    fg._create_generation(db, GEN, "a" * 64)
+    both = [(ea, "suspect", None), (eb, "suspect", None)]
+    _report(db, "1", date(2020, 2, 1), both, gen=f"_{GEN}")
+    _report(db, "2", date(2030, 2, 1), both, gen=f"_{GEN}")
+    real = sg._build_partition
+    calls = []
+
+    def fail_on_last(cur, leaves, new, cap):
+        name = leaves["faers_report"].as_string(cur)
+        calls.append(name)
+        if name.endswith('_y2030"'):
+            raise RuntimeError("stop")
+        return real(cur, leaves, new, cap)
+
+    monkeypatch.setattr(sg, "_build_partition", fail_on_last)
+    with pytest.raises(RuntimeError, match="stop"):
+        sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)
+    db.rollback()
+    finished = len(calls) - 1
+    assert len(_state_rows(db, "signals")) == finished
+    monkeypatch.setattr(sg, "_create_tables", lambda *a: pytest.fail("the tables were re-created"))
+
+    calls.clear()
+
+    def only_the_last(cur, leaves, new, cap):
+        calls.append(leaves["faers_report"].as_string(cur))
+        return real(cur, leaves, new, cap)
+
+    monkeypatch.setattr(sg, "_build_partition", only_the_last)
+    out = sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)
+    assert len(calls) == 1 and calls[0].endswith('_y2030"')
+    assert out["reports"] == 2 and out["pair_rows"] == 4  # the finished partition still counts
+    assert _all(db, f"SELECT count(*) FROM episteme.faers_pair_quarter_{GEN}") == [(4,)]
+    assert _state_rows(db, "phase") != []
+
+
+@pytest.mark.pg
+def test_a_failure_in_the_key_step_repeats_only_the_missing_keys(db, monkeypatch):
+    fg._create_generation(db, GEN, "a" * 64)
+    real = sg._add_primary_key
+    added = []
+
+    def fail_on_third(conn, table, name):
+        if len(added) == 2:
+            raise RuntimeError("stop")
+        added.append(table)
+        real(conn, table, name)
+
+    monkeypatch.setattr(sg, "_add_primary_key", fail_on_third)
+    with pytest.raises(RuntimeError, match="stop"):
+        sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)
+    db.rollback()
+    first = list(added)
+    added.clear()
+    monkeypatch.setattr(sg, "_add_primary_key", lambda c, t, n: (added.append(t), real(c, t, n)))
+    monkeypatch.setattr(
+        sg, "_build_partition", lambda *a: pytest.fail("a finished partition was built again")
+    )
+    monkeypatch.setattr(sg, "_create_tables", lambda *a: pytest.fail("the tables were re-created"))
+    sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)
+    assert not set(first) & set(added)
+    assert set(first) | set(added) == set(fg.SIGNAL_TABLES)
+    added.clear()
+    # A finished build returns at once.
+    assert sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)["pair_drug_cap"] == 30
+    assert added == []
+
+
+@pytest.mark.pg
+def test_another_cap_restarts_the_build(db):
+    a, b = _substance(db, "alpha"), _substance(db, "gamma")
+    both = [(_entry(db, a), "suspect", None), (_entry(db, b), "suspect", None)]
+    fg._create_generation(db, GEN, "a" * 64)
+    _report(db, "1", date(2020, 2, 1), both, gen=f"_{GEN}")
+    assert sg.rebuild_signals(db, pair_drug_cap=30, generation=GEN)["pair_rows"] == 2
+    assert sg.rebuild_signals(db, pair_drug_cap=1, generation=GEN)["pair_rows"] == 0
+    assert _all(db, f"SELECT count(*) FROM episteme.faers_pair_quarter_{GEN}") == [(0,)]
+
+
+@pytest.mark.pg
+def test_half_built_signals_never_swap_and_a_rerun_repeats_no_finished_work(
+    db, tmp_path, monkeypatch
+):
+    a, b = _substance(db, "alpha"), _substance(db, "gamma")
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_zip_report("1", ["alpha", "gamma"], "20200201")])
+    real_key, real_partition, real_bridge = (
+        sg._add_primary_key,
+        sg._build_partition,
+        fl.bridge_entries,
+    )
+
+    def fail(*args):
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(sg, "_add_primary_key", fail)
+    with pytest.raises(RuntimeError, match="stop"):
+        _run(db, tmp_path, [z], post_load=fl.build_signals)
+    db.rollback()
+    monkeypatch.setattr(sg, "_add_primary_key", real_key)
+    monkeypatch.setattr(sg, "_build_partition", lambda *a: pytest.fail("built again"))
+    monkeypatch.setattr(fl, "bridge_entries", lambda conn: pytest.fail("bridged again"))
+    out = _run(db, tmp_path, [z], post_load=fl.build_signals)
+    assert out["status"] == "swapped" and out["post_load"]["signals"]["pair_rows"] == 2
+    assert out["post_load"]["bridge"]["active_substance"] == 2
+    assert _pairs(db) == sorted([(a, b, Q1_2020, 1, 1), (b, a, Q1_2020, 1, 1)])
+    monkeypatch.setattr(sg, "_build_partition", real_partition)
+    monkeypatch.setattr(fl, "bridge_entries", real_bridge)
+
+    # A build that stopped, then a run with no post_load: the half-built tables must not go in.
+    z2 = _zip(raw, "2020q2", [_zip_report("2", ["alpha", "gamma"], "20200501")])
+    monkeypatch.setattr(sg, "_add_primary_key", fail)
+    with pytest.raises(RuntimeError, match="stop"):
+        _run(db, tmp_path, [z2], post_load=fl.build_signals)
+    db.rollback()
+    monkeypatch.setattr(sg, "_add_primary_key", real_key)
+    assert _pairs(db) != []
+    out = _run(db, tmp_path, [z2])
+    assert out["status"] == "swapped"
+    assert _pairs(db) == []
+    assert _generation_relations(db) == []
+    db.rollback()
+
+
 @pytest.mark.pg
 def test_a_live_rebuild_leaves_no_leftovers(db):
     a = _substance(db, "alpha")
@@ -622,6 +906,7 @@ def test_lot_match_needs_same_moiety_and_same_lot(db):
     assert out["recalls"] == 3 and out["recalls_no_lot"] == 1
     assert out["recalls_by_method"] == {"openfda": 3}
     assert out["recalls_no_substance"] == 1
+    assert out["recall_lots_built"] is True
     assert lot_matches(db, other)["matches"] == []
     db.rollback()
 
@@ -634,6 +919,55 @@ def test_no_match_still_reports_the_coverage(db):
     assert out["release_id"] is None and out["matches"] == []
     assert out["batch_coverage"] == {"drug_rows": 0, "with_batch": 0}
     assert out["recalls"] == 0
+    assert out["recall_lots_built"] is False
+
+
+@pytest.mark.pg
+def test_a_release_with_no_recall_lot_rows_says_so(db):
+    a = _substance(db, "alpha")
+    _feed_rows(db, "fda_enforcement", "r1", [("D-1", ["alpha"], None, _recall("D-1", "Lot AA1"))])
+    out = lot_matches(db, a)
+    db.rollback()
+    assert out["release_id"] == "r1" and out["recalls"] == 0
+    assert out["recall_lots_built"] is False
+    build_recall_lots(db, "r1")
+    db.commit()
+    out = lot_matches(db, a)
+    db.rollback()
+    assert out["recall_lots_built"] is True and out["recalls"] == 1
+
+
+@pytest.mark.pg
+def test_names_with_no_key_fall_through_to_the_next_route(db):
+    _substance(db, "alpha")
+    _feed_rows(db, "fda_ndc", "n1", [("p1", ["no such name"], ["005912435"], {})])
+    _feed_rows(
+        db,
+        "fda_enforcement",
+        "r1",
+        [
+            # openfda names and the NDC's names have no key, and the text has one.
+            (
+                "D-1",
+                ["unknown thing"],
+                None,
+                _recall("D-1", "Lot AA1", "NDC 0591-2435-15, Alpha Inj"),
+            ),
+            # Nothing has a key anywhere: it counts as no substance.
+            ("D-2", ["unknown thing"], None, _recall("D-2", "Lot AA2", "NDC 0591-2435-15, Inj")),
+        ],
+    )
+    counts = build_recall_lots(db, "r1")
+    db.commit()
+    rows = {
+        r[0]: (r[1], r[2])
+        for r in _all(
+            db, "SELECT recall_number, substance_names, substance_method FROM episteme.recall_lot"
+        )
+    }
+    assert rows["D-1"] == (["alpha"], "product_text")
+    assert rows["D-2"] == (None, None)
+    assert counts["no_substance"] == 1 and counts["by_method"] == {"product_text": 1}
 
 
 @pytest.mark.pg
@@ -659,6 +993,7 @@ def test_recall_substances_resolve_in_order(db):
     _substance(db, "alpha", unii="UA")
     _substance(db, "ibuprofen lysine")
     _substance(db, "gamma")
+    _substance(db, "beta")  # four letters: found through a route, and not in the text
     _substance(db, "abcd")  # shorter than 5: ignored
     _feed_rows(
         db,

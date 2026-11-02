@@ -3,7 +3,11 @@ database side is in ``test_faers_signals.py``. The examples are trimmed from rea
 
 import pytest
 
-from episteme.config import DEFAULT_FAERS_PAIR_DRUG_CAP, get_settings
+from episteme.config import (
+    DEFAULT_FAERS_PAIR_DRUG_CAP,
+    DEFAULT_RECALL_MAX_RANGE_LOTS,
+    get_settings,
+)
 from episteme.data.regulatory.normalize import PLACEHOLDER_LOTS, is_real_lot, norm_lot
 from episteme.data.regulatory.recall_lots import (
     extract_lots,
@@ -110,7 +114,7 @@ def test_explicit_range_expands_only_with_both_ends():
         "13-920452-0-2",
         "13-920452-0-3",
     ]
-    assert extract_lots("Lots 0098 thru 0101") == ["0098", "0099", "0100", "0101"]
+    assert extract_lots("Lots 00098 thru 00101") == ["00098", "00099", "00100", "00101"]
     assert extract_lots("Lots AB100 through") == ["AB100"]
     assert extract_lots("Lots AB100 through 12/25") == ["AB100"]
     # Other prefixes, or a range of absurd size: the two ends only, nothing invented.
@@ -226,8 +230,97 @@ def test_the_longest_match_wins_and_covers_its_words():
 
 
 def test_several_names_in_one_description():
-    grams = list(name_grams("Ibuprofen, in Sodium Chloride 0.9%, Bag"))
-    assert pick_names(grams, {"ibuprofen", "sodium chloride"}) == ["ibuprofen", "sodium chloride"]
+    grams = list(name_grams("Ibuprofen, with Calcium Gluconate 0.9%, Bag"))
+    assert pick_names(grams, {"ibuprofen", "calcium gluconate"}) == [
+        "ibuprofen",
+        "calcium gluconate",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "lots"),
+    [
+        ("Lot ABC123 500 mg", ["ABC123"]),
+        ("Lot 12345 250 mL", ["12345"]),
+        ("Lot 12345, 100 tablets", ["12345"]),
+        ("Lot 12345 123456 mg", ["12345"]),
+        ("Lot 12345 1-800-555-1212", ["12345"]),
+        ("Lot 12345 (800) 555-1212", ["12345"]),
+        ("Lot 12345, 555-1212", ["12345"]),
+        ("Lot AB12 Exp 2025", ["AB12"]),
+        ("Lot AB12 Exp 12.2025", ["AB12"]),
+        ("Lot AB12 Exp 12.31.25", ["AB12"]),
+        ("Lot AB12 Exp 20251231", ["AB12"]),
+        ("Lot AB12 Exp12/25", ["AB12"]),
+        ("Lot EXP123", ["EXP123"]),
+        ("Lot BUD1234", ["BUD1234"]),
+        ("Multiple lots 2020", []),
+        ("Various lots 12345", []),
+        ("Lot AB12 00536323307", ["AB12"]),
+        ("Lot AB12 1223048610", ["AB12"]),
+        ("Lot 2020", []),
+        ("Lot 9781", []),
+    ],
+)
+def test_probes_that_gave_false_lots(text, lots):
+    assert extract_lots(text) == lots
+
+
+@pytest.mark.parametrize(
+    ("text", "lots"),
+    [
+        ("Lots 100 - 200 mg", []),
+        ("Lots 12345 - 12400 mg", []),
+        ("Lots AB100-AB102", ["AB100", "AB101", "AB102"]),
+        ("Lots 12345-12347", ["12345", "12346", "12347"]),
+        ("Lots AB100-CD105", ["AB100-CD105"]),
+        ("Lots AB100-AB999999", ["AB100", "AB999999"]),
+        ("Lot 37-888833", ["37-888833"]),
+        ("Lot 123-456", ["123-456"]),
+        ("Lot 12216-2", ["12216-2"]),
+        ("Lot 1234/5678", []),
+        ("Lot 12345/67890", ["12345", "67890"]),
+        ("Lot AB12/CD34", ["AB12", "CD34"]),
+        ("Lot LD/120417", ["LD/120417"]),
+    ],
+)
+def test_range_and_separator_rules(text, lots):
+    assert extract_lots(text) == lots
+
+
+def test_the_range_limit_comes_from_the_settings(monkeypatch):
+    monkeypatch.setenv("EPISTEME_RECALL_MAX_RANGE_LOTS", "3")
+    get_settings.cache_clear()
+    assert extract_lots("Lots AB100 through AB105") == ["AB100", "AB105"]
+    assert extract_lots("Lots AB100 through AB102") == ["AB100", "AB101", "AB102"]
+    monkeypatch.delenv("EPISTEME_RECALL_MAX_RANGE_LOTS")
+    get_settings.cache_clear()
+    assert get_settings().recall_max_range_lots == DEFAULT_RECALL_MAX_RANGE_LOTS == 1000
+    get_settings.cache_clear()
+
+
+def test_reading_stops_at_the_maker():
+    text = "Gamma Tablets, Distributed by Sterile Water Labs, Silver Spring MD"
+    known = {"gamma", "water", "sterile water", "silver"}
+    assert pick_names(name_grams(text), known) == ["gamma"]
+    text = "Made in Silver Spring, Gamma"
+    assert pick_names(name_grams(text), known) == []
+    text = "Gamma, MFG BY: Silver Labs"
+    assert pick_names(name_grams(text), known) == ["gamma"]
+    text = "Gamma, Dist. by Silver Labs"
+    assert pick_names(name_grams(text), known) == ["gamma"]
+
+
+def test_a_vehicle_stays_only_when_it_is_the_only_name():
+    known = {"sodium chloride", "dextrose", "norepinephrine"}
+    assert pick_names(name_grams("0.9% Sodium Chloride Irrigation"), known) == ["sodium chloride"]
+    assert pick_names(name_grams("Norepinephrine 8 mg in 5% Dextrose, 250 mL"), known) == [
+        "norepinephrine"
+    ]
+    assert pick_names(name_grams("Sodium Chloride in Dextrose"), known) == [
+        "sodium chloride",
+        "dextrose",
+    ]
 
 
 def test_a_slash_joins_two_names():

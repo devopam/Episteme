@@ -1,7 +1,7 @@
 """FAERS signals: the bridge from dictionary entries to substances, and the signal tables.
 
-``bridge_entries`` fills ``faers_entry_substance``. ``rebuild_signals`` builds the five signal
-tables. All of it is exact counting on stored rows; no statistic is computed here.
+``bridge_entries`` fills ``faers_entry_substance``. ``rebuild_signals`` builds the signal tables.
+All of it is exact counting on stored rows; no statistic is computed here.
 
 **Bridge.** For each entry, the first of these that finds any substance wins, by exact
 match: the UNIIs of the annotation (``annotation``), the names of ``active_substance``
@@ -26,6 +26,9 @@ with no usable date is counted (``reports_no_date``) and left out.
 * ``faers_batch_coverage``: drug rows per moiety and quarter, and those with a real lot
   (``is_real_lot``). A combination entry counts once per moiety. Placeholders are counted apart.
 * ``faers_batch_quarter``: reports per moiety, real lot and quarter.
+* ``faers_moiety_quarter`` and ``faers_term_quarter``: the margins of a PRR or ROR, reports per
+  moiety and reports per case-folded term. With ``faers_quarter_totals.reports_listed`` and
+  ``reports_with_reaction``, a statistic can choose its universe.
 
 **Bounds.** One transaction per year partition. Reports get an integer id in a temporary
 table, and each report's moieties are one array, so pairs come from ``unnest`` with no join and
@@ -35,8 +38,13 @@ need no merge. The primary keys come last and sort the whole of each table once.
 **Where the tables go.** They are built under a token name (``faers_pair_quarter_<token>``).
 With ``generation``, the token is the generation, the rows come from its tables, and its swap
 renames them. With no generation, the rows come from the live tables, and the rename happens at
-once: the route after an improved bridge. A failed build leaves its tables, and the next build
-drops them first.
+once: the route after an improved bridge. A failed live build leaves its tables, and the next
+build drops them first.
+
+**Resume, on the generation route.** Each partition writes a ``signals`` progress row in its own
+transaction, and a re-run skips it. A table that has its primary key keeps it. A finished build
+writes ``SIGNALS_COMPLETE``, and ``_swap`` renames only such tables. Tables are dropped and
+created only when no partition has finished. A change of the pair cap restarts the build.
 
 Commits on ``conn``, which must be idle. Config comes from ``episteme.config``.
 """
@@ -56,13 +64,17 @@ from episteme.data.regulatory.faers.generation import (
     PARENTS,
     SCHEMA,
     SIGNAL_TABLES,
+    SIGNALS_COMPLETE,
     GenerationError,
     _children,
     _drop_old_leftovers,
     _drop_tables,
     _ident,
+    _put_state,
+    _read_state,
     generation_table,
     new_generation_id,
+    state_table,
     swap_live_signals,
 )
 from episteme.data.regulatory.normalize import PLACEHOLDER_LOTS, norm_name, split_names
@@ -79,7 +91,22 @@ _PRIMARY_KEYS = {
     "faers_quarter_totals": ("quarter",),
     "faers_batch_coverage": ("substance_key", "quarter"),
     "faers_batch_quarter": ("substance_key", "batch_norm", "quarter"),
+    "faers_moiety_quarter": ("substance_key", "quarter"),
+    "faers_term_quarter": ("term_id", "quarter"),
 }
+_COUNT_KEYS = (
+    "reports",
+    "reports_no_date",
+    "reports_listed",
+    "reports_with_reaction",
+    "reports_over_pair_cap",
+    "drug_rows",
+    "drug_rows_unbridged",
+    "real_batches",
+    "placeholder_batches",
+    "pair_rows",
+    "event_rows",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -341,22 +368,11 @@ def _build_partition(
     out["pair_rows"] = cur.rowcount
     cur.execute(
         sql.SQL(
-            "INSERT INTO {t} (quarter, reports, reports_over_pair_cap) "
-            "SELECT r.quarter, r.reports, COALESCE(o.over_cap, 0) "
-            "FROM (SELECT quarter, count(*) AS reports FROM _sig_report GROUP BY 1) r "
-            "LEFT JOIN (SELECT quarter, count(*) AS over_cap FROM _sig_listed "
-            "           WHERE cardinality(moieties) > %s::int GROUP BY 1) o USING (quarter)"
-        ).format(t=new["faers_quarter_totals"]),
-        (cap,),
+            "INSERT INTO {t} (substance_key, quarter, reports_suspect, reports_any) "
+            "SELECT moiety, quarter, count(*) FILTER (WHERE suspect), count(*) "
+            "FROM _sig_moiety GROUP BY 1, 2"
+        ).format(t=new["faers_moiety_quarter"])
     )
-    cur.execute(
-        "SELECT count(*), COALESCE(sum((cardinality(moieties) > %s::int)::int), 0) "
-        "FROM _sig_listed",
-        (cap,),
-    )
-    out["reports_listed"], out["reports_over_pair_cap"] = cur.fetchone()
-    cur.execute("SELECT count(*) FROM _sig_report")
-    out["reports"] = cur.fetchone()[0]
     cur.execute(
         sql.SQL(
             "CREATE TEMP TABLE _sig_reaction ON COMMIT DROP AS "
@@ -365,6 +381,39 @@ def _build_partition(
         ).format(x=leaves["faers_reaction"])
     )
     cur.execute("ANALYZE _sig_reaction")
+    cur.execute(
+        sql.SQL(
+            "INSERT INTO {t} (term_id, quarter, reports) "
+            "SELECT x.canon, r.quarter, count(*) "
+            "FROM _sig_reaction x JOIN _sig_report r USING (rid) GROUP BY 1, 2"
+        ).format(t=new["faers_term_quarter"])
+    )
+    cur.execute(
+        sql.SQL(
+            "INSERT INTO {t} (quarter, reports, reports_over_pair_cap, reports_listed, "
+            "reports_with_reaction) "
+            "SELECT r.quarter, r.reports, COALESCE(l.over_cap, 0), COALESCE(l.listed, 0), "
+            "COALESCE(x.with_reaction, 0) "
+            "FROM (SELECT quarter, count(*) AS reports FROM _sig_report GROUP BY 1) r "
+            "LEFT JOIN (SELECT quarter, count(*) AS listed, "
+            "           count(*) FILTER (WHERE cardinality(moieties) > %s::int) AS over_cap "
+            "           FROM _sig_listed GROUP BY 1) l USING (quarter) "
+            "LEFT JOIN (SELECT r2.quarter, count(DISTINCT x2.rid) AS with_reaction "
+            "           FROM _sig_reaction x2 JOIN _sig_report r2 USING (rid) GROUP BY 1) x "
+            "USING (quarter)"
+        ).format(t=new["faers_quarter_totals"]),
+        (cap,),
+    )
+    cur.execute("SELECT count(*) FROM _sig_report")
+    out["reports"] = cur.fetchone()[0]
+    cur.execute(
+        "SELECT count(*), COALESCE(sum((cardinality(moieties) > %s::int)::int), 0) "
+        "FROM _sig_listed",
+        (cap,),
+    )
+    out["reports_listed"], out["reports_over_pair_cap"] = cur.fetchone()
+    cur.execute("SELECT count(DISTINCT rid) FROM _sig_reaction")
+    out["reports_with_reaction"] = cur.fetchone()[0]
     cur.execute(
         sql.SQL(
             "INSERT INTO {t} (substance_key, term_id, quarter, reports_suspect, reports_any) "
@@ -376,69 +425,120 @@ def _build_partition(
     return out
 
 
-def _finish_tables(conn: psycopg.Connection, token: str) -> None:
-    """The primary keys and the statistics. One transaction per table."""
-    for table in SIGNAL_TABLES:
-        new = _ident(generation_table(table, token))
-        with conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("ALTER TABLE {t} ADD PRIMARY KEY ({cols})").format(
-                    t=new,
-                    cols=sql.SQL(", ").join(sql.Identifier(c) for c in _PRIMARY_KEYS[table]),
-                )
+def _has_primary_key(cur: psycopg.Cursor, table: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM pg_index WHERE indisprimary AND indrelid = to_regclass(%s::text)",
+        (f"{SCHEMA}.{table}",),
+    )
+    return cur.fetchone() is not None
+
+
+def _add_primary_key(conn: psycopg.Connection, table: str, name: str) -> None:
+    """The key of ``table`` on its token table ``name``, and its statistics, in one transaction,
+    so a table with a key is finished."""
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("ALTER TABLE {t} ADD PRIMARY KEY ({cols})").format(
+                t=_ident(name),
+                cols=sql.SQL(", ").join(sql.Identifier(c) for c in _PRIMARY_KEYS[table]),
             )
-            cur.execute(sql.SQL("ANALYZE {t}").format(t=new))
+        )
+        cur.execute(sql.SQL("ANALYZE {t}").format(t=_ident(name)))
+    conn.commit()
+
+
+def _finish_tables(conn: psycopg.Connection, token: str) -> None:
+    """The primary keys and the statistics, where absent. One transaction per table."""
+    for table in SIGNAL_TABLES:
+        name = generation_table(table, token)
+        with conn.cursor() as cur:
+            done = _has_primary_key(cur, name)
         conn.commit()
+        if not done:
+            _add_primary_key(conn, table, name)
+
+
+def _finished_partitions(
+    conn: psycopg.Connection, generation: str, cap: int
+) -> tuple[dict | None, dict[str, dict]]:
+    """``(the counts of a finished build, the counts per finished partition)``. Work done under
+    another cap does not count: its rows are cleared, and the build starts over."""
+    state = _read_state(conn, generation)
+    complete = state.get(SIGNALS_COMPLETE)
+    done = {key: stats for (kind, key), stats in state.items() if kind == "signals"}
+    caps = {stats.get("pair_drug_cap") for stats in done.values()}
+    if complete is not None:
+        caps.add(complete.get("pair_drug_cap"))
+    if caps <= {cap}:
+        return complete, done
+    _LOG.info("signal work under another pair cap (%s) is discarded: now %s", caps, cap)
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("DELETE FROM {t} WHERE kind = 'signals' OR (kind = %s AND key = %s)").format(
+                t=_ident(state_table(generation))
+            ),
+            SIGNALS_COMPLETE,
+        )
+    conn.commit()
+    return None, {}
 
 
 def rebuild_signals(
     conn: psycopg.Connection, *, pair_drug_cap: int, generation: str | None = None
 ) -> dict:
-    """Build the five signal tables; see the module docstring. Commits on ``conn``.
+    """Build the signal tables; see the module docstring. Commits on ``conn``.
 
     Returns counts: ``reports`` (dated), ``reports_no_date``, ``reports_listed`` (with a bridged
-    drug), ``reports_over_pair_cap``, ``drug_rows``, ``drug_rows_unbridged``, ``real_batches``,
-    ``placeholder_batches`` (drug rows), ``pair_rows``, ``event_rows``, ``terms_normalised``.
+    drug), ``reports_with_reaction``, ``reports_over_pair_cap``, ``drug_rows``,
+    ``drug_rows_unbridged``, ``real_batches``, ``placeholder_batches`` (drug rows), ``pair_rows``,
+    ``event_rows``, ``pair_drug_cap``.
     """
     token = generation or new_generation_id()
+    done: dict[str, dict] = {}
     if generation is None:
         _drop_old_leftovers(conn)
-    terms = _fill_term_norms(conn)
-    _create_tables(conn, token)
-    _create_maps(conn)
-    totals: Counter = Counter(terms_normalised=terms)
+    else:
+        complete, done = _finished_partitions(conn, generation, pair_drug_cap)
+        if complete is not None:
+            return complete
+    _fill_term_norms(conn)
+    if not done:
+        _create_tables(conn, token)
     sources = {p: generation_table(p, generation) if generation else p for p in PARENTS}
     new = {t: _ident(generation_table(t, token)) for t in SIGNAL_TABLES}
     with conn.cursor() as cur:
         suffixes = [s for s, _ in _children(cur, sources["faers_report"])]
     conn.commit()
+    pending = [s for s in suffixes if s not in done]
+    totals: Counter = Counter()
+    for stats in done.values():
+        totals.update({k: stats.get(k, 0) for k in _COUNT_KEYS})
+    if pending:
+        _create_maps(conn)
     try:
-        for suffix in suffixes:
+        for suffix in pending:
             leaves = {p: _ident(f"{sources[p]}{suffix}") for p in PARENTS}
             with conn.cursor() as cur:
-                totals += _build_partition(cur, leaves, new, pair_drug_cap)
+                counts = _build_partition(cur, leaves, new, pair_drug_cap)
+                if generation is not None:
+                    row = {k: counts[k] for k in _COUNT_KEYS}
+                    row["pair_drug_cap"] = pair_drug_cap
+                    _put_state(cur, generation, "signals", suffix, row)
             conn.commit()
+            totals.update(counts)
     except BaseException:
         conn.rollback()
         raise
-    _drop_maps(conn)
+    if pending:
+        _drop_maps(conn)
     _finish_tables(conn, token)
-    # Counter addition drops zeros; the callers read every key.
-    keys = (
-        "reports",
-        "reports_no_date",
-        "reports_listed",
-        "reports_over_pair_cap",
-        "drug_rows",
-        "drug_rows_unbridged",
-        "real_batches",
-        "placeholder_batches",
-        "pair_rows",
-        "event_rows",
-        "terms_normalised",
-    )
-    out = {k: totals[k] for k in keys}
+    out = {k: totals[k] for k in _COUNT_KEYS}
+    out["pair_drug_cap"] = pair_drug_cap
     if generation is None:
         swap_live_signals(conn, token, out, get_settings().run_id)
+    else:
+        with conn.cursor() as cur:
+            _put_state(cur, generation, *SIGNALS_COMPLETE, out)
+        conn.commit()
     _LOG.info("signal tables built under %s: %s", token, out)
     return out

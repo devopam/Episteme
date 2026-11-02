@@ -36,9 +36,13 @@ SIGNAL_TABLES = (
     "faers_quarter_totals",
     "faers_batch_coverage",
     "faers_batch_quarter",
+    "faers_moiety_quarter",
+    "faers_term_quarter",
 )
 GENERATION_RE = r"g[0-9a-f]{10}"
 _PARENT_RE = "(?:" + "|".join(PARENTS) + ")"
+# The progress row (kind, key) of a finished signal build.
+SIGNALS_COMPLETE = ("phase", "signals")
 _SIGNAL_RE = "(?:" + "|".join(SIGNAL_TABLES) + ")"
 _OLD_RE = f"^(?:{_PARENT_RE}|{_SIGNAL_RE})_old_{GENERATION_RE}$"
 _RANGE_BOUND = re.compile(r"FOR VALUES FROM \((-?\d+)\) TO \((-?\d+)\)")
@@ -354,7 +358,9 @@ def _drop_generation(conn: psycopg.Connection, generation: str) -> None:
 def _drop_old_generation(conn: psycopg.Connection, generation: str) -> bool:
     """Drop what the swap renamed. The new generation is live either way, so a failure
     does not fail the run; it warns, and says what to do."""
+    # A half-built signal table keeps its token name, so that goes as well.
     names = [old_table(t, generation) for t in (*PARENTS, *SIGNAL_TABLES)]
+    names += [generation_table(t, generation) for t in SIGNAL_TABLES]
     dropped = _drop_tables(conn, names)
     if not dropped:
         print(
@@ -542,6 +548,16 @@ def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
 def _check_access(cur: psycopg.Cursor, generation: str) -> None:
     """Readers keep their access through a swap only if the parents match."""
     _check_tables(cur, generation, (*PARENTS, *_built_signals(cur, generation)))
+    # New signal tables take the access of new parents, so a live signal table that differs
+    # would only show after hours of work. Refuse it now.
+    parents = _access(cur, PARENTS[0])
+    for table in SIGNAL_TABLES:
+        access = _access(cur, table)
+        if access != parents:
+            raise GenerationError(
+                f"{table} differs from {PARENTS[0]} in owner or privileges ({access} against "
+                f"{parents}); no swap could keep them. Repair the grants, and run again."
+            )
 
 
 def _check_tables(cur: psycopg.Cursor, generation: str, tables: Sequence[str]) -> None:
@@ -564,27 +580,44 @@ def _rename(cur: psycopg.Cursor, name: str, new_name: str) -> None:
     )
 
 
-def _built_signals(cur: psycopg.Cursor, token: str) -> list[str]:
-    """The signal tables built under ``token``: all of them, or none."""
-    built = [t for t in SIGNAL_TABLES if _relations(cur, f"^{generation_table(t, token)}$")]
-    if built and len(built) != len(SIGNAL_TABLES):
-        raise GenerationError(f"only some signal tables exist for {token}: {built}; no swap")
-    return built
+def _built_signals(cur: psycopg.Cursor, generation: str) -> list[str]:
+    """The signal tables of a generation, when its build finished: the progress table holds
+    ``SIGNALS_COMPLETE``. Tables with no such row are half-built, and do not count."""
+    cur.execute(
+        sql.SQL("SELECT 1 FROM {t} WHERE kind = %s AND key = %s").format(
+            t=_ident(state_table(generation))
+        ),
+        SIGNALS_COMPLETE,
+    )
+    if cur.fetchone() is None:
+        return []
+    missing = [
+        t for t in SIGNAL_TABLES if not _relations(cur, f"^{generation_table(t, generation)}$")
+    ]
+    if missing:
+        raise GenerationError(f"signal tables missing for {generation}: {missing}; no swap")
+    return list(SIGNAL_TABLES)
 
 
-def _swap_signals(cur: psycopg.Cursor, token: str) -> bool:
+def _swap_generation_signals(cur: psycopg.Cursor, generation: str) -> None:
+    """In the swap's transaction. With no finished build, empty the live signal tables, so
+    that old signals never sit beside new rows; half-built tables go with the old generation."""
+    if _built_signals(cur, generation):
+        _swap_signals(cur, generation)
+    else:
+        cur.execute(
+            sql.SQL("TRUNCATE {}").format(sql.SQL(", ").join(_ident(t) for t in SIGNAL_TABLES))
+        )
+
+
+def _swap_signals(cur: psycopg.Cursor, token: str) -> None:
     """In the caller's transaction: rename the signal tables of ``token`` in, and the live
-    ones to ``<table>_old_<token>``. With none built, empty the live ones instead, so that
-    old signals never sit beside new rows. ``True`` when new tables went in."""
+    ones to ``<table>_old_<token>``."""
     live = sql.SQL(", ").join(_ident(t) for t in SIGNAL_TABLES)
-    if not _built_signals(cur, token):
-        cur.execute(sql.SQL("TRUNCATE {}").format(live))
-        return False
     cur.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(live))
     for table in SIGNAL_TABLES:
         _rename(cur, table, old_table(table, token))
         _rename(cur, generation_table(table, token), table)
-    return True
 
 
 def swap_live_signals(
@@ -597,7 +630,7 @@ def swap_live_signals(
     try:
         with audit_trail.deferred_mirror(conn):
             with conn.cursor() as cur:
-                _check_tables(cur, token, _built_signals(cur, token))
+                _check_tables(cur, token, SIGNAL_TABLES)
                 cur.execute("SELECT set_config('lock_timeout', %s, true)", (f"{seconds}s",))
                 try:
                     _swap_signals(cur, token)
@@ -643,7 +676,7 @@ def _swap(
                             sql.SQL(", ").join(_ident(p) for p in PARENTS)
                         )
                     )
-                    _swap_signals(cur, generation)
+                    _swap_generation_signals(cur, generation)
                     for parent in PARENTS:
                         new = generation_table(parent, generation)
                         for suffix, _ in _children(cur, parent):

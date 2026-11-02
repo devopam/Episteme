@@ -18,7 +18,11 @@ first of these that gives a name, and records which in ``substance_method``:
 3. ``product_text``: word n-grams of up to 5 words from ``product_description``, normalised,
    looked up exactly against the ``name`` rows of ``substance_xref``. Names shorter than 5
    characters are ignored. At each position the longest match wins, and it covers its words.
-   This is exact matching. It reads the whole description, so a diluent counts too.
+   Reading stops at ``Manufactured by`` and similar words. A vehicle (``VEHICLE_NAMES``) goes
+   when another name remains. This is exact matching.
+
+A route whose names all have no key in ``substance_xref`` gives way to the next. A recall that
+no route ties to a key has NULL names, and counts in ``no_substance``.
 
 ``lot_matches`` joins recalls to FAERS batches: same moiety and same normalised lot. It always
 returns the coverage, because zero matches is when the coverage matters most.
@@ -36,6 +40,7 @@ from collections.abc import Iterable, Iterator
 import psycopg
 
 from episteme import audit_trail
+from episteme.config import get_settings
 from episteme.data.regulatory.load_reg import latest_release
 from episteme.data.regulatory.normalize import (
     PLACEHOLDER_LOTS,
@@ -49,10 +54,13 @@ from episteme.data.regulatory.normalize import (
 SCHEMA = "episteme"
 RECALL_DATASET = "fda_enforcement"
 NDC_DATASET = "fda_ndc"
-# A wider "X through Y" is more likely a typing error than a real list, so only its two ends
-# are kept. A data rule, not a tunable.
-_MAX_RANGE_LOTS = 1000
 _MIN_LOT_CHARS = 3
+# An all-digit token this short is too often an amount, a time or a year to be taken as a lot.
+_MIN_DIGIT_LOT_CHARS = 5
+# An all-digit token of these lengths has the shape of an NDC or a phone number.
+_NDC_DIGIT_LENGTHS = (10, 11)
+# An all-digit range "12345-12350" needs this width; a shorter pair is more likely one lot.
+_MIN_DIGIT_RANGE_WIDTH = 5
 _MAX_GRAM_WORDS = 5
 _MIN_NAME_CHARS = 5
 
@@ -61,8 +69,13 @@ _DATE_SHAPE = (
     r"|\d{1,2}/\d{2,4}"  # a typing error such as 12/018 is still no lot
     r"|(?:0?[1-9]|1[0-2])-(?:19\d{2}|20\d{2}|\d{2})"
     r"|(?:19|20)\d{2}[/-]\d{1,2}(?:[/-]\d{1,2})?"
+    r"|\d{1,2}\.\d{1,2}\.\d{2,4}"
+    r"|\d{1,2}\.\d{4}"
+    r"|(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"
 )
 _DATE = re.compile(rf"(?:{_DATE_SHAPE})")
+# "Exp12/25" is a date with its word glued on; "EXP123" is a lot.
+_GLUED_WORD = re.compile(r"(?:exp|bud)\.?", re.IGNORECASE)
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _MONTH_DATE = re.compile(
     rf"(?<![A-Za-z0-9])(?:\d{{1,2}}[\s-]*)?{_MONTH}\.?[\s,/-]*(?:\d{{1,2}},?\s+)?(?:\d{{4}}|\d{{2}})"
@@ -73,8 +86,8 @@ _MONTH_DATE = re.compile(
 _EXPIRY = re.compile(
     r"(?<![A-Za-z0-9])(?:expiration|expires?|expiry|exp"
     r"|beyond\s+use|bud|best\s+used\s+by|best\s+by|use\s+by|discard(?:\s+by|\s+after)?"
-    r"|retest)(?![A-Za-z])\.?(?:\s*dates?)?\s*[:.]?\s*"
-    rf"(?:(?:{_DATE_SHAPE})(?![0-9]))?",
+    r"|retest)(?![A-Za-z0-9])\.?(?:\s*dates?)?\s*[:.]?\s*"
+    rf"(?:(?:{_DATE_SHAPE}|(?:19|20)\d{{2}})(?![0-9A-Za-z]))?",
     re.IGNORECASE,
 )
 _OTHER_CODE = re.compile(
@@ -86,7 +99,8 @@ _KEYWORD = re.compile(
     r"(?:\s*(?:numbers?|num\b|no'?s?\b|codes?|#'?s?))*[\s#:.,;/-]*",
     re.IGNORECASE,
 )
-_ALL_BEFORE = re.compile(r"(?<![A-Za-z0-9])all\s*$", re.IGNORECASE)
+# "All lots", "Multiple lots": the words after the keyword do not name lots.
+_ALL_BEFORE = re.compile(r"(?<![A-Za-z0-9])(?:all|multiple|various)\s*$", re.IGNORECASE)
 _SPLIT = re.compile(r"[\s,;&]+|(?<![A-Za-z0-9])and(?![A-Za-z0-9])", re.IGNORECASE)
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@:/._+-]*")
 _NDC_SHAPE = re.compile(r"\d{4}-\d{4}-\d{2}|\d{5}-\d{3}-\d{2}|\d{5}-\d{4}-\d{1,2}")
@@ -95,6 +109,14 @@ _AMOUNT = re.compile(
     r"\d+(?:\.\d+)?-?(?:mg|mcg|kg|ml|oz|iu|ct|count|tablets?|capsules?|units?)|\d{1,3}[gl]",
     re.IGNORECASE,
 )
+# A plain number before one of these is an amount: "500 mg", "100 tablets".
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_UNIT_WORD = re.compile(
+    r"(?:mg|mcg|kg|g|ml|l|oz|iu|ct|count|tablets?|tabs?|capsules?|caps?|units?|vials?|bottles?"
+    r"|bags?|syringes?|ampules?|packs?|cartons?|boxes|tubes?)(?![A-Za-z])|%",
+    re.IGNORECASE,
+)
+_PHONE = re.compile(r"(?:1-)?\d{3}-\d{3}-\d{4}|\d{3}-\d{4}|\d{3}\.\d{3}\.\d{4}")
 _RANGE_WORDS = {"through", "thru", "to", "-"}
 _RANGE_END = re.compile(r"(.*?)(\d+)")
 _NDC_IN_TEXT = re.compile(
@@ -105,17 +127,54 @@ _NDC_11_DIGITS = re.compile(r"(?<![A-Za-z0-9])NDC[#:\s]*(\d{11})(?!\d)", re.IGNO
 # A slash joins ingredients: "Estradiol/Testosterone".
 _WORD_SPLIT = re.compile(r"[\s/]+")
 _WORD_EDGE = re.compile(r"^[^\w]+|[^\w%]+$")
+# The maker's name and address follow these words, and they hold no ingredient.
+_MAKER_WORDS = re.compile(
+    r"(?<![A-Za-z])(?:(?:re)?packaged|packed|manufactured|mfg|mfd|mfr|distributed|dist|marketed"
+    r"|made|produced|compounded|prepared|sold)[.,:]*\s+(?:by|for)(?![A-Za-z])"
+    r"|(?<![A-Za-z])made\s+in(?![A-Za-z])",
+    re.IGNORECASE,
+)
+# What a drug is dissolved in. A data rule, not a tunable: exact names, dropped from a
+# recall's text match only when another name remains, so that a recall of the vehicle itself
+# ("0.9% Sodium Chloride Irrigation") keeps it.
+VEHICLE_NAMES = frozenset(
+    {
+        "bacteriostatic water",
+        "dextrose",
+        "sodium chloride",
+        "sterile water",
+        "sterile water for injection",
+        "water",
+        "water for injection",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Lots (pure)
 # ---------------------------------------------------------------------------
+def _is_date(token: str) -> bool:
+    bare = _GLUED_WORD.match(token)
+    return bool(_DATE.fullmatch(token) or (bare and _DATE.fullmatch(token[bare.end() :])))
+
+
+def _is_amount_at(tokens: list[str], i: int) -> bool:
+    """Whether ``tokens[i]`` is a number with a unit word after it."""
+    return (
+        i + 1 < len(tokens)
+        and _NUMBER.fullmatch(tokens[i]) is not None
+        and _UNIT_WORD.match(tokens[i + 1]) is not None
+    )
+
+
 def _lot_shaped(token: str) -> bool:
     if not _TOKEN.fullmatch(token) or not any(c.isdigit() for c in token):
         return False
-    if token.count("/") > 1 or _DATE.fullmatch(token):
+    if token.count("/") > 1 or _is_date(token):
         return False
-    if _NDC_SHAPE.fullmatch(token) or _AMOUNT.fullmatch(token):
+    if _NDC_SHAPE.fullmatch(token) or _AMOUNT.fullmatch(token) or _PHONE.fullmatch(token):
+        return False
+    if token.isdigit() and (len(token) < _MIN_DIGIT_LOT_CHARS or len(token) in _NDC_DIGIT_LENGTHS):
         return False
     norm = norm_lot(token)
     return is_real_lot(norm) and len(norm) >= _MIN_LOT_CHARS and fits_index(norm)
@@ -127,45 +186,91 @@ def _expand(start: str, end: str) -> list[str] | None:
     if not first or not last or first.group(1) != last.group(1):
         return None
     low, high = first.group(2), last.group(2)
-    if not 0 < int(high) - int(low) < _MAX_RANGE_LOTS:
+    if not 0 < int(high) - int(low) < get_settings().recall_max_range_lots:
         return None
     width = len(low) if low.startswith("0") or len(low) == len(high) else 0
     prefix = first.group(1)
     return [f"{prefix}{n:0{width}d}" for n in range(int(low), int(high) + 1)]
 
 
+def _hyphen_ends(token: str) -> tuple[str, str] | None:
+    """The two ends of ``AB100-AB105``; ``None`` for one lot with a hyphen in it. Both ends need
+    one prefix and a numeric tail. With no prefix they need the same width and a rise, because
+    ``37-888833`` and ``123-456`` are ordinary lots."""
+    start, sep, end = token.partition("-")
+    if not sep or "-" in end:
+        return None
+    first, last = _RANGE_END.fullmatch(start), _RANGE_END.fullmatch(end)
+    if not first or not last or first.group(1) != last.group(1):
+        return None
+    if not first.group(1):
+        low, high = first.group(2), last.group(2)
+        if len(low) != len(high) or len(low) < _MIN_DIGIT_RANGE_WIDTH or int(high) <= int(low):
+            return None
+    return (start, end) if _lot_shaped(start) and _lot_shaped(end) else None
+
+
+def _range_lots(start: str, end: str) -> Iterator[tuple[str, str]]:
+    expanded = _expand(start, end)
+    if expanded is None:
+        yield start, "prefix"
+        yield end, "prefix"
+    else:
+        for lot in expanded:
+            yield lot, "range"
+
+
+def _list_tokens(segment: str) -> list[str]:
+    """The tokens of a list. A slash between two parts with digits separates two lots:
+    ``1234/5678``. ``LD/120417`` is one lot, and ``12/25`` a date."""
+    parts = _SPLIT.split(segment.replace("(", " ").replace(")", " "))
+    tokens: list[str] = []
+    for token in (p.strip(".:[]'\"") for p in parts):
+        left, slash, right = token.partition("/")
+        two = (
+            slash
+            and any(c.isdigit() for c in left)
+            and any(c.isdigit() for c in right)
+            and "/" not in right
+        )
+        if two and not _is_date(token):
+            tokens += [left, right]
+        elif token:
+            tokens.append(token)
+    return tokens
+
+
 def _segment_lots(segment: str) -> Iterator[tuple[str, str]]:
     """``(lot, method)`` of the list that follows one keyword."""
-    parts = _SPLIT.split(segment.replace("(", " ").replace(")", " "))
-    tokens = [t for t in (p.strip(".:[]'\"") for p in parts) if t]
+    tokens = _list_tokens(segment)
     seen_lot = False
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if _DATE.fullmatch(token):
+        if _is_date(token):
             if not seen_lot:
                 return  # a date where the lot should start: the format is not clear
             i += 1
             continue
-        if not _lot_shaped(token):
+        if _is_amount_at(tokens, i) or not _lot_shaped(token):
             return
         seen_lot = True
         follows = tokens[i + 1].lower() if i + 1 < len(tokens) else ""
         if follows in _RANGE_WORDS:
             end = tokens[i + 2] if i + 2 < len(tokens) else ""
+            if _is_amount_at(tokens, i + 2):
+                return  # "12345 - 12400 mg" is an amount, both ends of it
             if not _lot_shaped(end):
                 yield token, "prefix"
                 return
-            expanded = _expand(token, end)
-            if expanded is None:
-                yield token, "prefix"
-                yield end, "prefix"
-            else:
-                for lot in expanded:
-                    yield lot, "range"
+            yield from _range_lots(token, end)
             i += 3
             continue
-        yield token, "prefix"
+        ends = _hyphen_ends(token)
+        if ends is not None:
+            yield from _range_lots(*ends)
+        else:
+            yield token, "prefix"
         i += 1
 
 
@@ -226,7 +331,9 @@ def find_ndc_products(text: str | None) -> list[str]:
 
 def name_grams(description: str | None) -> Iterator[tuple[int, int, str]]:
     """``(word position, words, gram)`` of each n-gram that could be a name."""
-    raw_words = _WORD_SPLIT.split(description or "")
+    text = description or ""
+    maker = _MAKER_WORDS.search(text)
+    raw_words = _WORD_SPLIT.split(text[: maker.start()] if maker else text)
     words = [w for w in (_WORD_EDGE.sub("", raw) for raw in raw_words) if w]
     for pos in range(len(words)):
         for n in range(1, min(_MAX_GRAM_WORDS, len(words) - pos) + 1):
@@ -237,7 +344,8 @@ def name_grams(description: str | None) -> Iterator[tuple[int, int, str]]:
 
 def pick_names(grams: Iterable[tuple[int, int, str]], known: set[str]) -> list[str]:
     """The names in ``known``, left to right: the longest match at each position, which covers
-    its words, so ``metformin hydrochloride`` does not also give ``hydrochloride``."""
+    its words, so ``metformin hydrochloride`` does not also give ``hydrochloride``. A vehicle goes
+    when another name remains."""
     best: dict[int, tuple[int, str]] = {}
     for pos, n, gram in grams:
         if gram in known and n > best.get(pos, (0, ""))[0]:
@@ -250,7 +358,7 @@ def pick_names(grams: Iterable[tuple[int, int, str]], known: set[str]) -> list[s
         n, gram = best[pos]
         names[gram] = None
         covered = pos + n
-    return list(names)
+    return [n for n in names if n not in VEHICLE_NAMES] or list(names)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +384,17 @@ def _read_recalls(cur: psycopg.Cursor, release_id: str) -> list[dict]:
     ]
 
 
+def _names_with_a_key(cur: psycopg.Cursor, names: set[str]) -> set[str]:
+    """Those of ``names`` that ``substance_xref`` knows. A route whose names have no key gives
+    no route to a moiety, so the next route is tried."""
+    cur.execute(
+        f"SELECT DISTINCT id_value FROM {SCHEMA}.substance_xref "
+        "WHERE id_type = 'name' AND id_value = ANY(%s::text[])",
+        (sorted(names),),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
 def _resolve_uniis(cur: psycopg.Cursor, recalls: list[dict]) -> None:
     """Method ``openfda``: the record's names, or the preferred names of its UNIIs."""
     wanted = sorted({u for r in recalls if not r["names"] for u in r["uniis"]})
@@ -288,8 +407,12 @@ def _resolve_uniis(cur: psycopg.Cursor, recalls: list[dict]) -> None:
     for recall in recalls:
         if not recall["names"]:
             recall["names"] = sorted({names[u] for u in recall["uniis"] if u in names}) or None
-        if recall["names"]:
+    known = _names_with_a_key(cur, {n for r in recalls for n in r["names"] or ()})
+    for recall in recalls:
+        if known.intersection(recall["names"] or ()):
             recall["method"] = "openfda"
+        else:
+            recall["names"] = None
 
 
 def _resolve_ndcs(cur: psycopg.Cursor, recalls: list[dict]) -> None:
@@ -313,10 +436,11 @@ def _resolve_ndcs(cur: psycopg.Cursor, recalls: list[dict]) -> None:
     names: dict[str, set[str]] = {}
     for key, found in cur.fetchall():
         names.setdefault(key, set()).update(found)
+    known = _names_with_a_key(cur, set().union(*names.values()))
     for recall in recalls:
         if not recall["names"]:
             found = set().union(*(names.get(p, ()) for p in products[recall["recall_number"]]))
-            if found:
+            if known.intersection(found):
                 recall["names"], recall["method"] = sorted(found), "ndc"
 
 
@@ -348,7 +472,7 @@ def build_recall_lots(
     """Replace the ``recall_lot`` rows of one ``fda_enforcement`` release. The caller commits.
 
     Returns ``recalls``, ``with_lot``, ``no_lot``, ``lots``; ``by_method`` (recalls per
-    ``substance_method``) and ``no_substance`` (recalls with no route to a substance)."""
+    ``substance_method``) and ``no_substance`` (recalls whose names reach no substance key)."""
     with conn.transaction(), conn.cursor() as cur:
         recalls = _read_recalls(cur, release_id)
         for recall in recalls:
@@ -397,6 +521,8 @@ def lot_matches(conn: psycopg.Connection, moiety_key: int) -> dict:
     """Recalled lots of a moiety that FAERS batches name: same moiety, same normalised lot.
 
     Returns ``release_id`` (the latest ``fda_enforcement``, ``None`` when there is none);
+    ``recall_lots_built``, false when that release has no ``recall_lot`` rows, so that zero
+    recalls is not read as "no recall";
     ``matches``, each with ``recall_number``, ``lot_raw``, ``lot_norm``, ``method``,
     ``substance_method`` (how strong the link to the moiety is), ``reports``, ``first_quarter``,
     ``last_quarter``; ``batch_coverage`` (``drug_rows``, ``with_batch``, over all quarters);
@@ -413,6 +539,7 @@ def lot_matches(conn: psycopg.Connection, moiety_key: int) -> dict:
         drug_rows, with_batch = cur.fetchone()
         out: dict = {
             "release_id": release,
+            "recall_lots_built": False,
             "matches": [],
             "batch_coverage": {"drug_rows": drug_rows, "with_batch": with_batch},
             "recalls": 0,
@@ -422,6 +549,10 @@ def lot_matches(conn: psycopg.Connection, moiety_key: int) -> dict:
         }
         if release is None:
             return out
+        cur.execute(
+            f"SELECT EXISTS (SELECT 1 FROM {SCHEMA}.recall_lot WHERE release_id = %s)", (release,)
+        )
+        out["recall_lots_built"] = cur.fetchone()[0]
         cur.execute(
             f"SELECT DISTINCT x.id_value FROM {SCHEMA}.substance s "
             f"JOIN {SCHEMA}.substance_xref x ON x.substance_key = s.substance_key "

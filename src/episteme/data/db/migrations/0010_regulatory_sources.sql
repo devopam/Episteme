@@ -223,6 +223,28 @@ CREATE TABLE IF NOT EXISTS episteme.faers_quarter_totals (
     reports               integer NOT NULL,
     reports_over_pair_cap integer NOT NULL DEFAULT 0
 );
+-- reports_listed: reports with at least one bridged drug. reports_with_reaction: reports
+-- with at least one stored reaction term. The universes of a 2x2 statistic.
+ALTER TABLE episteme.faers_quarter_totals
+    ADD COLUMN IF NOT EXISTS reports_listed integer NOT NULL DEFAULT 0;
+ALTER TABLE episteme.faers_quarter_totals
+    ADD COLUMN IF NOT EXISTS reports_with_reaction integer NOT NULL DEFAULT 0;
+
+-- Margins of a PRR or ROR: reports per moiety, and reports per case-folded term.
+CREATE TABLE IF NOT EXISTS episteme.faers_moiety_quarter (
+    substance_key   bigint  NOT NULL,
+    quarter         date    NOT NULL,
+    reports_suspect integer NOT NULL,
+    reports_any     integer NOT NULL,
+    PRIMARY KEY (substance_key, quarter)
+);
+
+CREATE TABLE IF NOT EXISTS episteme.faers_term_quarter (
+    term_id bigint  NOT NULL,
+    quarter date    NOT NULL,
+    reports integer NOT NULL,
+    PRIMARY KEY (term_id, quarter)
+);
 
 CREATE TABLE IF NOT EXISTS episteme.faers_batch_coverage (
     substance_key bigint  NOT NULL,

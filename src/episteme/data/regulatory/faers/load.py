@@ -31,8 +31,8 @@ builds new tables and swaps them in:
    ``<parent>_old_<gen>_y2024``, renames the new ones to the plain names of migration 0010
    (``faers_drug``, ``faers_drug_y2024``), and drops the progress table. The signal tables
    built under ``<gen>`` swap in the same transaction, so a reader never sees new rows with
-   old signals; with none built, the live ones are emptied. A later transaction drops the
-   old generation and its signal tables. If a reader
+   old signals; with no finished build, the live ones are emptied. A later transaction drops
+   the old generation and its signal tables. If a reader
    holds a lock, the swap fails with ``GenerationSwapError``, the old generation keeps
    serving, and the built generation stays for the next run. The index names keep their
    ``<gen>`` token after the swap (``faers_drug_<gen>_y2024_sid``); the token is new for
@@ -211,7 +211,13 @@ def build_signals(conn: psycopg.Connection) -> dict:
     one unfinished generation. They swap with it."""
     generation = next(iter(unfinished_generations(conn)))
     conn.commit()
-    bridge = bridge_entries(conn)
+    state = _read_state(conn, generation)
+    bridge = state.get(("phase", "bridged"))
+    if bridge is None:  # a re-run keeps the map that its finished partitions were built on
+        bridge = bridge_entries(conn)
+        with conn.cursor() as cur:
+            _put_state(cur, generation, "phase", "bridged", bridge)
+        conn.commit()
     signals = rebuild_signals(
         conn, pair_drug_cap=get_settings().faers_pair_drug_cap, generation=generation
     )

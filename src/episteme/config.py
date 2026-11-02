@@ -120,6 +120,9 @@ DEFAULT_FAERS_MIN_LIVE_SHARE = 0.9
 DEFAULT_FAERS_PAIR_DRUG_CAP = 30
 # Dictionary entries that the FAERS bridge resolves in one transaction.
 DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
+# A wider "X through Y" in recall text is more likely a typing error than a real list, so
+# only its two ends are kept.
+DEFAULT_RECALL_MAX_RANGE_LOTS = 1000
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -290,6 +293,9 @@ class Settings:
     faers_pair_drug_cap: int = DEFAULT_FAERS_PAIR_DRUG_CAP
     # Entries per transaction of the FAERS bridge (EPISTEME_FAERS_BRIDGE_BATCH_ROWS).
     faers_bridge_batch_rows: int = DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+    # Most lots that one written range in recall text may expand to
+    # (EPISTEME_RECALL_MAX_RANGE_LOTS).
+    recall_max_range_lots: int = DEFAULT_RECALL_MAX_RANGE_LOTS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -428,6 +434,9 @@ def get_settings() -> Settings:
         ),
         faers_bridge_batch_rows=_get_positive_int_or_default(
             "EPISTEME_FAERS_BRIDGE_BATCH_ROWS", DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+        ),
+        recall_max_range_lots=_get_positive_int_or_default(
+            "EPISTEME_RECALL_MAX_RANGE_LOTS", DEFAULT_RECALL_MAX_RANGE_LOTS
         ),
         slice_max_bytes=_slice_max_bytes(),
     )
