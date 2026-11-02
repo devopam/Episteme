@@ -109,6 +109,10 @@ DEFAULT_EMA_DELAY_SECONDS = 2.0
 # Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
 # holds a long transaction on reg_record blocks it); then the feed fails.
 DEFAULT_REG_LOCK_TIMEOUT_S = 300
+# Seconds the FAERS loader waits for the lock of its generation swap, and of the drops
+# after it. New readers queue behind the waiting lock, so the wait is short; a failed run
+# keeps the built generation, and a re-run goes straight to the swap.
+DEFAULT_FAERS_LOCK_TIMEOUT_S = 60
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -270,6 +274,8 @@ class Settings:
     ema_delay_seconds: float = DEFAULT_EMA_DELAY_SECONDS
     # Seconds to wait for the reg_record partition DDL lock (EPISTEME_REG_LOCK_TIMEOUT_S).
     reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
+    # Seconds to wait for the FAERS generation swap's lock (EPISTEME_FAERS_LOCK_TIMEOUT_S).
+    faers_lock_timeout_s: int = DEFAULT_FAERS_LOCK_TIMEOUT_S
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -396,6 +402,9 @@ def get_settings() -> Settings:
         ),
         reg_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REG_LOCK_TIMEOUT_S", DEFAULT_REG_LOCK_TIMEOUT_S
+        ),
+        faers_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_FAERS_LOCK_TIMEOUT_S", DEFAULT_FAERS_LOCK_TIMEOUT_S
         ),
         slice_max_bytes=_slice_max_bytes(),
     )

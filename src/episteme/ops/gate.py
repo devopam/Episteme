@@ -83,6 +83,8 @@ STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
         # The regulatory reference feeds load through load_reg, not load_articles.
         ("ema", "load"): ("episteme.data.regulatory.load_reg", "ema/load_ema.sh"),
         ("openfda", "load"): ("episteme.data.regulatory.load_reg", "openfda/load_openfda.sh"),
+        # FAERS loads by generation, into its own typed tables.
+        ("openfda_faers", "load"): ("episteme.data.regulatory.faers.load", "openfda/load_faers.sh"),
     }
 )
 

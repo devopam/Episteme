@@ -93,7 +93,7 @@ if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
     # These load wrappers reach a Python module that has no --skip-unit.
     if [ "$STAGE" = "load" ]; then
         case "$SOURCE" in
-            europepmc_id_mappings|cdisc_ct|ema|openfda)
+            europepmc_id_mappings|cdisc_ct|ema|openfda|openfda_faers)
                 die "$SOURCE load does not support --skip-unit" 2 ;;
         esac
     fi
@@ -102,8 +102,9 @@ if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
-if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ]; }; then
-    # reg_record partitions carry their own indexes; the articles index group is not theirs.
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || [ "$SOURCE" = "openfda_faers" ]; }; then
+    # reg_record partitions and FAERS generations carry their own indexes; the articles
+    # index group is not theirs.
     die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
 fi
 if [ "$SKIP_GATE" = "1" ]; then
@@ -175,13 +176,18 @@ _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) retu
 REG_SOURCES="ema openfda"
 _is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# The FAERS generation loader (src/episteme/data/regulatory/faers/load.py).
+wpath_faers="$HERE/openfda/load_faers.sh"
+
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
 # cover, must be a plain error with a clean exit — never a dangling,
 # DB-dependent run_start with no matching run_end.
 # `corpus` is not a source token — it's the materialize-only alias handled in the
 # dispatch chain below (SOURCE == "corpus" arm). Let it past the WRAPPER lookup.
-if [ "$SOURCE" != "corpus" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
+# `openfda_faers` has no download wrapper of its own (`openfda download all_human`
+# fetches its zips): only its load stage is wired, so it passes the lookup too.
+if [ "$SOURCE" != "corpus" ] && [ "$SOURCE" != "openfda_faers" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
     die "unknown source '$SOURCE' (see scripts/data/_lib/check_prereqs.sh / the roadmap source list)" 3
 fi
 
@@ -189,6 +195,10 @@ case "$STAGE" in
     all|download|extract|load|graph|materialize|enrich|serialize) ;;
     *) usage ;;
 esac
+
+if [ "$SOURCE" = "openfda_faers" ] && [ "$STAGE" != "load" ]; then
+    die "openfda_faers: only 'load' is wired (the zips come from: $0 openfda download all_human)" 3
+fi
 
 # SP2 generalises SP3's C2: --dry-run is meaningful only for `download` (the
 # fetch wrappers have a real EPISTEME_DRY_RUN no-op). Every other stage writes
@@ -216,6 +226,8 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             if [ "$SOURCE" = "europepmc_id_mappings" ]; then
                 idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
                 [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
+            elif [ "$SOURCE" = "openfda_faers" ]; then
+                [ -f "$wpath_faers" ] || die "wrapper not found: $wpath_faers (not yet implemented?)" 3
             else
                 _is_lit "$SOURCE" || _is_structured "$SOURCE" || _is_reg "$SOURCE" \
                     || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured) or the regulatory feeds" 3
@@ -876,6 +888,8 @@ else
         load)
             if [ "$SOURCE" = "europepmc_id_mappings" ]; then
                 run_stage load bash "$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh" "${load_args[@]}"
+            elif [ "$SOURCE" = "openfda_faers" ]; then
+                run_stage load bash "$wpath_faers" "${load_args[@]}"
             else
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
             fi

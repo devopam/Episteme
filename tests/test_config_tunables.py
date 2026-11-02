@@ -26,11 +26,19 @@ def clean_settings(tmp_path, monkeypatch):
         "EPISTEME_LOAD_BATCH_BYTES",
         "EPISTEME_WRITE_BATCH_BYTES",
         "EPISTEME_PMC_BUCKET_IDS",
+        "EPISTEME_FAERS_LOCK_TIMEOUT_S",
     ):
         monkeypatch.delenv(key, raising=False)
     cfg.get_settings.cache_clear()
     yield monkeypatch
     cfg.get_settings.cache_clear()
+
+
+def test_faers_lock_timeout_default_and_override(clean_settings):
+    assert cfg.get_settings().faers_lock_timeout_s == 60
+    clean_settings.setenv("EPISTEME_FAERS_LOCK_TIMEOUT_S", "7")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().faers_lock_timeout_s == 7
 
 
 def test_tunables_default_to_todays_values(clean_settings):
