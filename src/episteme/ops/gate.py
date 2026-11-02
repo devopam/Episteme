@@ -80,6 +80,9 @@ STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
             "episteme.data.pubchem.serialize_pubchem",
             "pubchem/serialize_pubchem.sh",
         ),
+        # The regulatory reference feeds load through load_reg, not load_articles.
+        ("ema", "load"): ("episteme.data.regulatory.load_reg", "ema/load_ema.sh"),
+        ("openfda", "load"): ("episteme.data.regulatory.load_reg", "openfda/load_openfda.sh"),
     }
 )
 

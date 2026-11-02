@@ -93,7 +93,7 @@ if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
     # These load wrappers reach a Python module that has no --skip-unit.
     if [ "$STAGE" = "load" ]; then
         case "$SOURCE" in
-            europepmc_id_mappings|cdisc_ct)
+            europepmc_id_mappings|cdisc_ct|ema|openfda)
                 die "$SOURCE load does not support --skip-unit" 2 ;;
         esac
     fi
@@ -166,6 +166,11 @@ _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; 
 STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
 _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# Regulatory reference feeds: download, then load into episteme.reg_record (one
+# partition per release; src/episteme/data/regulatory/load_reg.py).
+REG_SOURCES="ema openfda"
+_is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
 # cover, must be a plain error with a clean exit — never a dangling,
@@ -208,8 +213,8 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
                 idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
                 [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
             else
-                _is_lit "$SOURCE" || _is_structured "$SOURCE" \
-                    || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured)" 3
+                _is_lit "$SOURCE" || _is_structured "$SOURCE" || _is_reg "$SOURCE" \
+                    || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured) or the regulatory feeds" 3
                 litw="$HERE/$SOURCE/load_$SOURCE.sh"
                 [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             fi
@@ -286,6 +291,8 @@ _chain_stages() { # the stages this run executes, in order (keep in step with th
         if [ "$SOURCE" = "mesh" ]; then echo graph; fi
     elif _is_lit "$SOURCE"; then
         echo download extract load graph
+    elif _is_reg "$SOURCE"; then
+        echo download load
     else
         echo download
     fi
@@ -890,6 +897,8 @@ else
                 run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
                 run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+            elif _is_reg "$SOURCE"; then
+                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
             else
                 log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi
