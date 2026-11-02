@@ -258,8 +258,8 @@ def test_several_names_in_one_description():
         ("Various lots 12345", []),
         ("Lot AB12 00536323307", ["AB12"]),
         ("Lot AB12 1223048610", ["AB12"]),
-        ("Lot 2020", []),
-        ("Lot 9781", []),
+        ("Lot 2020", ["2020"]),
+        ("Lot 9781", ["9781"]),
     ],
 )
 def test_probes_that_gave_false_lots(text, lots):
@@ -278,7 +278,7 @@ def test_probes_that_gave_false_lots(text, lots):
         ("Lot 37-888833", ["37-888833"]),
         ("Lot 123-456", ["123-456"]),
         ("Lot 12216-2", ["12216-2"]),
-        ("Lot 1234/5678", []),
+        ("Lot 1234/5678", ["1234"]),
         ("Lot 12345/67890", ["12345", "67890"]),
         ("Lot AB12/CD34", ["AB12", "CD34"]),
         ("Lot LD/120417", ["LD/120417"]),
@@ -286,6 +286,37 @@ def test_probes_that_gave_false_lots(text, lots):
 )
 def test_range_and_separator_rules(text, lots):
     assert extract_lots(text) == lots
+
+
+@pytest.mark.parametrize(
+    ("text", "lots"),
+    [
+        ("Lot 1223048610", ["1223048610"]),
+        ("Lot # 9781, 9782", ["9781"]),
+        ("Lot 9781 Exp 12/25", ["9781"]),
+        ("Lot 500 mg", []),
+        ("Lot 9781 mg", []),
+        ("Lot No. 1223048610", ["1223048610"]),
+        ("Lots: 9781", ["9781"]),
+        ("Lot 500", []),
+        ("Lot AB12 1223048610", ["AB12"]),
+        ("Lot #s: 4205, Exp 05/31/2026; 24229, 24233, Exp 07/31/2026.", ["4205", "24229", "24233"]),
+        (
+            "Lot #: 9781, BUD: 7/26/2017; 9784, BUD: 7/27/2017; 10061, BUD: 9/7/2017",
+            ["9781", "10061"],
+        ),
+        ("Lot # H001878 6/30/2022 68180-216-06  H002178 7/31/2022", ["H001878", "H002178"]),
+    ],
+)
+def test_the_token_after_the_keyword_and_skipped_tokens(text, lots):
+    assert extract_lots(text) == lots
+
+
+def test_a_word_ends_the_list_so_later_codes_in_prose_are_not_lots():
+    text = "lot number 37-74714, Made on 15 DEC 2014, CAPS Rx: 37-74714-0-12-R, Disp ID: 37-1124493"
+    assert extract_lots(text) == ["37-74714"]
+    text = "Pack Number: MDS70815; Lots 16LB2959; 173B1289  Pack Number: MDS70815H; Lots 17FB6679"
+    assert extract_lots(text) == ["16LB2959", "173B1289", "17FB6679"]
 
 
 def test_the_range_limit_comes_from_the_settings(monkeypatch):

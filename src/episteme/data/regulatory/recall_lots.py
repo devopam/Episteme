@@ -2,9 +2,12 @@
 
 ``extract_lots`` reads ``code_info``. It is conservative: a miss is reported as a gap, and a
 wrong lot is worse. A lot needs a keyword before it (``Lot``, ``Lots``, ``Batch``, with ``#``,
-``Number``, ``Code``). After the keyword it reads a list of lot-shaped tokens, and stops at the
-first other word. It removes expiry and use-by phrases, dates, NDC and UPC numbers, and item
-marks such as ``a)``. ``All lots ...`` gives nothing. A code with no keyword (a bare list,
+``Number``, ``Code``). After the keyword it reads a list of lot-shaped tokens. A refused token
+with a digit is skipped; the first word with no digit ends the list, and so does a number with a
+unit. Directly after the keyword, all digits are enough from 4 digits; later in the list, an
+all-digit token needs 5, and not 10 or 11. It removes expiry and use-by phrases, dates, NDC and
+UPC numbers, and item marks such as ``a)``. ``All lots ...`` gives nothing. A code with no
+keyword (a bare list,
 ``Pedigree:``, ``Rx #``) gives nothing, and the recall counts as having no lot. A range expands
 only when both ends are written, with one prefix and a numeric tail.
 
@@ -57,6 +60,8 @@ NDC_DATASET = "fda_ndc"
 _MIN_LOT_CHARS = 3
 # An all-digit token this short is too often an amount, a time or a year to be taken as a lot.
 _MIN_DIGIT_LOT_CHARS = 5
+# Directly after a keyword, all digits need only this many.
+_MIN_FIRST_DIGIT_LOT_CHARS = 4
 # An all-digit token of these lengths has the shape of an NDC or a phone number.
 _NDC_DIGIT_LENGTHS = (10, 11)
 # An all-digit range "12345-12350" needs this width; a shorter pair is more likely one lot.
@@ -240,20 +245,33 @@ def _list_tokens(segment: str) -> list[str]:
     return tokens
 
 
+def _first_token_lot(token: str) -> bool:
+    """The token directly after a keyword has the keyword as its evidence, so all digits are
+    enough: ``Lot 9781``, ``Lot 1223048610``."""
+    return token.isdigit() and len(token) >= _MIN_FIRST_DIGIT_LOT_CHARS and fits_index(token)
+
+
 def _segment_lots(segment: str) -> Iterator[tuple[str, str]]:
-    """``(lot, method)`` of the list that follows one keyword."""
+    """``(lot, method)`` of the list that follows one keyword. A refused token that holds a digit
+    is skipped, and the list goes on. A number with a unit ends it, and so does a word."""
     tokens = _list_tokens(segment)
     seen_lot = False
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if _is_date(token):
+        if _is_amount_at(tokens, i):
+            return
+        direct = i == 0 and _first_token_lot(token)
+        if not direct and _is_date(token):
             if not seen_lot:
                 return  # a date where the lot should start: the format is not clear
             i += 1
             continue
-        if _is_amount_at(tokens, i) or not _lot_shaped(token):
-            return
+        if not direct and not _lot_shaped(token):
+            if not any(c.isdigit() for c in token):
+                return  # prose: a later code such as "Rx: 37-74714-0-12-R" is no lot
+            i += 1
+            continue
         seen_lot = True
         follows = tokens[i + 1].lower() if i + 1 < len(tokens) else ""
         if follows in _RANGE_WORDS:
