@@ -25,11 +25,14 @@ builds new tables and swaps them in:
    reads the whole of its child tables to delete them.
 4. **Indexes** per partition, one transaction per partition, then ``ANALYZE`` of each
    parent (which also collects the parent-level statistics that autovacuum never does).
-5. **``post_load(conn)``,** when given, then the **swap**: one transaction under
-   ``lock_timeout`` (``EPISTEME_FAERS_LOCK_TIMEOUT_S``) renames the live parents and their
-   partitions to ``<parent>_old_<gen>`` and ``<parent>_old_<gen>_y2024``, renames the new
-   ones to the plain names of migration 0010 (``faers_drug``, ``faers_drug_y2024``), and
-   drops the progress table. A later transaction drops the old generation. If a reader
+5. **``post_load(conn)``,** when given (the CLI gives ``build_signals``), then the **swap**:
+   one transaction under ``lock_timeout`` (``EPISTEME_FAERS_LOCK_TIMEOUT_S``) renames the
+   live parents and their partitions to ``<parent>_old_<gen>`` and
+   ``<parent>_old_<gen>_y2024``, renames the new ones to the plain names of migration 0010
+   (``faers_drug``, ``faers_drug_y2024``), and drops the progress table. The signal tables
+   built under ``<gen>`` swap in the same transaction, so a reader never sees new rows with
+   old signals; with none built, the live ones are emptied. A later transaction drops the
+   old generation and its signal tables. If a reader
    holds a lock, the swap fails with ``GenerationSwapError``, the old generation keeps
    serving, and the built generation stays for the next run. The index names keep their
    ``<gen>`` token after the swap (``faers_drug_<gen>_y2024_sid``); the token is new for
@@ -76,9 +79,14 @@ others are counted (``duplicates_in_zip``).
 never swapped. They only grow and their ids stay stable, so ``faers_entry_substance`` stays
 valid. Their in-memory caches last for one zip.
 
+**Modules:** ``generation`` holds the names, the decision, the catalog, de-duplication,
+indexes and the swap; ``zip_load`` the COPY and the dictionaries; ``signals`` the bridge and
+the signal tables.
+
 **For ``post_load``:** it runs after the indexes and before the swap. A success is recorded,
-so a re-run does not repeat it; a failure is run again by the next run, so it must clean
-up after itself. The plain names still hold the old generation at that step, so it finds
+with the dict it returns (``post_load`` in the result and in the audit row), so a re-run does
+not repeat it; a failure is run again by the next run, so it must clean up after itself. The
+plain names still hold the old generation at that step, so it finds
 the new tables with ``unfinished_generations(conn)`` (one entry at that step) and
 ``generation_table(parent, generation)``.
 
@@ -148,8 +156,10 @@ from episteme.data.regulatory.faers.generation import (
     unfinished_generations,
 )
 from episteme.data.regulatory.faers.parse import FORMAT_VERSION
+from episteme.data.regulatory.faers.signals import bridge_entries, rebuild_signals
 from episteme.data.regulatory.faers.zip_load import Batch, _load_zip, _write_zip_marker
-from episteme.data.regulatory.load_reg import input_keys
+from episteme.data.regulatory.load_reg import input_keys, latest_release
+from episteme.data.regulatory.recall_lots import RECALL_DATASET, build_recall_lots
 from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
@@ -166,6 +176,7 @@ __all__ = [
     "GenerationSwapError",
     "InputSetError",
     "below_floor",
+    "build_signals",
     "check_input_set",
     "checkpoint_markers",
     "decide_generation",
@@ -195,6 +206,18 @@ def fingerprint(files: Iterable[tuple[Path, str]]) -> str:
     return hashlib.sha256(json.dumps([FORMAT_VERSION, sorted(rows)]).encode("utf-8")).hexdigest()
 
 
+def build_signals(conn: psycopg.Connection) -> dict:
+    """The ``post_load`` of the CLI: bridge new entries, then build the signal tables of the
+    one unfinished generation. They swap with it."""
+    generation = next(iter(unfinished_generations(conn)))
+    conn.commit()
+    bridge = bridge_entries(conn)
+    signals = rebuild_signals(
+        conn, pair_drug_cap=get_settings().faers_pair_drug_cap, generation=generation
+    )
+    return {"bridge": bridge, "signals": signals}
+
+
 def load_generation(
     conn: psycopg.Connection,
     zips: Sequence[Path],
@@ -202,7 +225,7 @@ def load_generation(
     raw_dir: Path,
     processed_dir: Path,
     run_id: str,
-    post_load: Callable[[psycopg.Connection], None] | None = None,
+    post_load: Callable[[psycopg.Connection], dict | None] | None = None,
     force: bool = False,
     override_reason: str | None = None,
     sample: bool = False,
@@ -309,10 +332,11 @@ def load_generation(
         _build_indexes(conn, generation)
     if post_load is not None and ("phase", "post_load") not in state:
         try:
-            post_load(conn)
+            stats = post_load(conn) or {}
             with conn.cursor() as cur:
-                _put_state(cur, generation, "phase", "post_load", {})
+                _put_state(cur, generation, "phase", "post_load", stats)
             conn.commit()
+            state["phase", "post_load"] = stats
         except BaseException:
             conn.rollback()
             raise
@@ -329,6 +353,7 @@ def load_generation(
         "duplicates_in_zip": read["duplicates_in_zip"],
         "duplicates_removed": removed["reports"],
         "duplicates_cross_year": cross["reports"],
+        "post_load": state.get(("phase", "post_load"), {}),
     }
     live_state = {"fingerprint": live, "reports": live_reports}
     _swap(conn, generation, inputs_fp, audit_counts, live_state, run_id)
@@ -420,8 +445,23 @@ def main(argv: list[str] | None = None) -> int:
                         override_reason=args.reason if args.allow_partial else None,
                         # Only run_pipeline.sh --sample selects the secondary database.
                         sample=settings.db_target == "secondary",
+                        post_load=build_signals,
                     )
                     print("done " + " ".join(f"{k}={v}" for k, v in result.items()))
+                    # Not part of the generation, and quick, so it runs on a "current" too.
+                    release = latest_release(conn, RECALL_DATASET)
+                    if release is None:
+                        conn.rollback()
+                        print(f"no latest {RECALL_DATASET} release: recall_lot not built")
+                    else:
+                        try:
+                            with audit_trail.deferred_mirror(conn):
+                                lots = build_recall_lots(conn, release, run_id=run_id)
+                                audit_trail.commit(conn)
+                        except BaseException:
+                            audit_trail.rollback(conn)
+                            raise
+                        print("recall_lot " + " ".join(f"{k}={v}" for k, v in lots.items()))
                 except Exception as exc:  # noqa: BLE001 - reported, and the exit code carries it
                     conn.rollback()
                     failure = str(exc) if isinstance(exc, GenerationError) else repr(exc)

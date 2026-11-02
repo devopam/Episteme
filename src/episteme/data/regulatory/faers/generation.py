@@ -29,9 +29,18 @@ _LOG = logging.getLogger(__name__)
 SCHEMA = "episteme"
 SOURCE = "openfda_faers"
 PARENTS = ("faers_report", "faers_drug", "faers_reaction")
+# Rebuilt per generation, and swapped with it (``signals.rebuild_signals``).
+SIGNAL_TABLES = (
+    "faers_pair_quarter",
+    "faers_event_quarter",
+    "faers_quarter_totals",
+    "faers_batch_coverage",
+    "faers_batch_quarter",
+)
 GENERATION_RE = r"g[0-9a-f]{10}"
 _PARENT_RE = "(?:" + "|".join(PARENTS) + ")"
-_OLD_RE = f"^{_PARENT_RE}_old_{GENERATION_RE}$"
+_SIGNAL_RE = "(?:" + "|".join(SIGNAL_TABLES) + ")"
+_OLD_RE = f"^(?:{_PARENT_RE}|{_SIGNAL_RE})_old_{GENERATION_RE}$"
 _RANGE_BOUND = re.compile(r"FOR VALUES FROM \((-?\d+)\) TO \((-?\d+)\)")
 _PART_NAME = re.compile(r"drug-event-(\d+)-of-(\d+)\.json\.zip")
 _QUARTER_NAME = re.compile(r"(\d{4})q([1-4])")
@@ -202,7 +211,7 @@ def below_floor(reports: int, live_reports: int, share: float) -> bool:
 def _relations(cur: psycopg.Cursor, pattern: str) -> list[str]:
     cur.execute(
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = %s AND c.relkind = 'p' AND c.relname ~ %s ORDER BY 1",
+        "WHERE n.nspname = %s AND c.relkind IN ('p', 'r') AND c.relname ~ %s ORDER BY 1",
         (SCHEMA, pattern),
     )
     return [r[0] for r in cur.fetchall()]
@@ -336,7 +345,8 @@ def _drop_tables(conn: psycopg.Connection, names: Sequence[str]) -> bool:
 
 
 def _drop_generation(conn: psycopg.Connection, generation: str) -> None:
-    names = [generation_table(p, generation) for p in PARENTS] + [state_table(generation)]
+    names = [generation_table(t, generation) for t in (*PARENTS, *SIGNAL_TABLES)]
+    names.append(state_table(generation))
     if not _drop_tables(conn, names):
         raise GenerationError(f"could not drop the unfinished generation {generation}")
 
@@ -344,7 +354,7 @@ def _drop_generation(conn: psycopg.Connection, generation: str) -> None:
 def _drop_old_generation(conn: psycopg.Connection, generation: str) -> bool:
     """Drop what the swap renamed. The new generation is live either way, so a failure
     does not fail the run; it warns, and says what to do."""
-    names = [old_table(p, generation) for p in PARENTS]
+    names = [old_table(t, generation) for t in (*PARENTS, *SIGNAL_TABLES)]
     dropped = _drop_tables(conn, names)
     if not dropped:
         print(
@@ -357,9 +367,14 @@ def _drop_old_generation(conn: psycopg.Connection, generation: str) -> bool:
 
 
 def _drop_old_leftovers(conn: psycopg.Connection) -> bool:
+    """What a swap left behind, and signal tables of a live rebuild that stopped: those
+    carry a token that no unfinished generation has."""
     with conn.cursor() as cur:
         names = _relations(cur, _OLD_RE)
+        built = _relations(cur, f"^{_SIGNAL_RE}_{GENERATION_RE}$")
+    keep = unfinished_generations(conn)
     conn.commit()
+    names += [name for name in built if name.rsplit("_", 1)[1] not in keep]
     return _drop_tables(conn, names)
 
 
@@ -526,7 +541,11 @@ def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
 
 def _check_access(cur: psycopg.Cursor, generation: str) -> None:
     """Readers keep their access through a swap only if the parents match."""
-    for parent in PARENTS:
+    _check_tables(cur, generation, (*PARENTS, *_built_signals(cur, generation)))
+
+
+def _check_tables(cur: psycopg.Cursor, generation: str, tables: Sequence[str]) -> None:
+    for parent in tables:
         live = _access(cur, parent)
         new = _access(cur, generation_table(parent, generation))
         if live != new:
@@ -543,6 +562,62 @@ def _rename(cur: psycopg.Cursor, name: str, new_name: str) -> None:
             t=_ident(name), new=sql.Identifier(new_name)
         )
     )
+
+
+def _built_signals(cur: psycopg.Cursor, token: str) -> list[str]:
+    """The signal tables built under ``token``: all of them, or none."""
+    built = [t for t in SIGNAL_TABLES if _relations(cur, f"^{generation_table(t, token)}$")]
+    if built and len(built) != len(SIGNAL_TABLES):
+        raise GenerationError(f"only some signal tables exist for {token}: {built}; no swap")
+    return built
+
+
+def _swap_signals(cur: psycopg.Cursor, token: str) -> bool:
+    """In the caller's transaction: rename the signal tables of ``token`` in, and the live
+    ones to ``<table>_old_<token>``. With none built, empty the live ones instead, so that
+    old signals never sit beside new rows. ``True`` when new tables went in."""
+    live = sql.SQL(", ").join(_ident(t) for t in SIGNAL_TABLES)
+    if not _built_signals(cur, token):
+        cur.execute(sql.SQL("TRUNCATE {}").format(live))
+        return False
+    cur.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(live))
+    for table in SIGNAL_TABLES:
+        _rename(cur, table, old_table(table, token))
+        _rename(cur, generation_table(table, token), table)
+    return True
+
+
+def swap_live_signals(
+    conn: psycopg.Connection, token: str, counts: dict, run_id: str | None
+) -> None:
+    """Rename signal tables built from the live generation in, in one transaction under the
+    lock timeout, then drop the old ones. Raises ``GenerationSwapError`` when a reader holds
+    a lock: the old tables keep serving."""
+    seconds = get_settings().faers_lock_timeout_s
+    try:
+        with audit_trail.deferred_mirror(conn):
+            with conn.cursor() as cur:
+                _check_tables(cur, token, _built_signals(cur, token))
+                cur.execute("SELECT set_config('lock_timeout', %s, true)", (f"{seconds}s",))
+                try:
+                    _swap_signals(cur, token)
+                except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
+                    raise GenerationSwapError(
+                        f"could not lock the FAERS signal tables within {seconds} s "
+                        "(EPISTEME_FAERS_LOCK_TIMEOUT_S). The old signal tables still serve."
+                    ) from exc
+            audit_trail.record(
+                "load_replace",
+                conn=conn,
+                object=f"{SOURCE} signals {token}",
+                new_value=counts,
+                run_id=run_id,
+            )
+            audit_trail.commit(conn)
+    except BaseException:
+        audit_trail.rollback(conn)
+        raise
+    _drop_tables(conn, [old_table(t, token) for t in SIGNAL_TABLES])
 
 
 def _swap(
@@ -568,6 +643,7 @@ def _swap(
                             sql.SQL(", ").join(_ident(p) for p in PARENTS)
                         )
                     )
+                    _swap_signals(cur, generation)
                     for parent in PARENTS:
                         new = generation_table(parent, generation)
                         for suffix, _ in _children(cur, parent):

@@ -115,6 +115,11 @@ DEFAULT_REG_LOCK_TIMEOUT_S = 300
 DEFAULT_FAERS_LOCK_TIMEOUT_S = 60
 # The FAERS loader refuses a new generation below this share of the live report count.
 DEFAULT_FAERS_MIN_LIVE_SHARE = 0.9
+# A report with more distinct moieties than this is left out of the FAERS pair counts, and
+# counted: pairs grow with the square of the count.
+DEFAULT_FAERS_PAIR_DRUG_CAP = 30
+# Dictionary entries that the FAERS bridge resolves in one transaction.
+DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -281,6 +286,10 @@ class Settings:
     # Lowest share of the live report count a new generation may have
     # (EPISTEME_FAERS_MIN_LIVE_SHARE).
     faers_min_live_share: float = DEFAULT_FAERS_MIN_LIVE_SHARE
+    # Most distinct moieties of a report in the pair counts (EPISTEME_FAERS_PAIR_DRUG_CAP).
+    faers_pair_drug_cap: int = DEFAULT_FAERS_PAIR_DRUG_CAP
+    # Entries per transaction of the FAERS bridge (EPISTEME_FAERS_BRIDGE_BATCH_ROWS).
+    faers_bridge_batch_rows: int = DEFAULT_FAERS_BRIDGE_BATCH_ROWS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -413,6 +422,12 @@ def get_settings() -> Settings:
         ),
         faers_min_live_share=_get_non_negative_float_or_default(
             "EPISTEME_FAERS_MIN_LIVE_SHARE", DEFAULT_FAERS_MIN_LIVE_SHARE
+        ),
+        faers_pair_drug_cap=_get_positive_int_or_default(
+            "EPISTEME_FAERS_PAIR_DRUG_CAP", DEFAULT_FAERS_PAIR_DRUG_CAP
+        ),
+        faers_bridge_batch_rows=_get_positive_int_or_default(
+            "EPISTEME_FAERS_BRIDGE_BATCH_ROWS", DEFAULT_FAERS_BRIDGE_BATCH_ROWS
         ),
         slice_max_bytes=_slice_max_bytes(),
     )

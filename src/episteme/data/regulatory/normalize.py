@@ -16,6 +16,26 @@ import unicodedata
 # is a page limit tied to the schema, not an operator choice.
 MAX_INDEX_TEXT_BYTES = 2000
 
+# Batch fields that say "no lot", in the form norm_lot gives. A data rule, not a tunable.
+# The two misspellings occur in the FAERS samples. A stored batch_norm keeps these values:
+# is_real_lot decides what counts as a lot.
+PLACEHOLDER_LOTS = frozenset(
+    {
+        "ASKU",
+        "NA",
+        "NI",
+        "NONE",
+        "NOTAVAILABLE",
+        "NOTKNOWN",
+        "NOTREPORTED",
+        "NOTSTATED",
+        "UNK",
+        "UNKNOWN",
+        "UNKNWON",
+        "UNKONWN",
+    }
+)
+
 _NAME_SEPARATORS = re.compile(r"[|;]")
 _SPACES = re.compile(r"\s+")
 _NDC_SEGMENTS = re.compile(r"^\d{1,5}-\d{1,4}-\d{1,2}$")
@@ -69,6 +89,11 @@ def norm_lot(s: str) -> str | None:
     """A lot or batch number as upper-case letters and digits only; ``None`` if empty."""
     v = re.sub(r"[^0-9A-Z]", "", unicodedata.normalize("NFKC", str(s)).upper())
     return v or None
+
+
+def is_real_lot(lot_norm: str | None) -> bool:
+    """Whether a ``norm_lot`` value names a lot, and is not a placeholder such as ``UNK``."""
+    return bool(lot_norm) and lot_norm not in PLACEHOLDER_LOTS
 
 
 def norm_product_key(s: str) -> str | None:
