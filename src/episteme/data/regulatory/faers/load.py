@@ -95,149 +95,94 @@ reads ``os.environ``.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
 import logging
-import re
 import sys
-import uuid
-from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple
 
 import ijson
 import psycopg
-from psycopg import sql
 from psycopg.pq import TransactionStatus
-from psycopg.types.json import Jsonb
 
 from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
-from episteme.data.regulatory.faers.parse import (
-    FORMAT_VERSION,
-    count_report,
-    iter_reports,
-    report_rows,
+from episteme.data.regulatory.faers.generation import (
+    GENERATION_RE,
+    INDEXES,
+    PARENTS,
+    SOURCE,
+    Decision,
+    GenerationError,
+    GenerationSwapError,
+    InputSetError,
+    _audit_override,
+    _build_indexes,
+    _check_access,
+    _check_rows,
+    _comment,
+    _create_generation,
+    _dedupe,
+    _drop_generation,
+    _drop_old_generation,
+    _drop_old_leftovers,
+    _live_reports,
+    _put_state,
+    _read_state,
+    _sum_stats,
+    _swap,
+    below_floor,
+    check_input_set,
+    decide_generation,
+    faers_zips,
+    generation_table,
+    leaf_table,
+    new_generation_id,
+    old_leaf_table,
+    old_table,
+    parse_bound,
+    state_table,
+    unfinished_generations,
 )
+from episteme.data.regulatory.faers.parse import FORMAT_VERSION
+from episteme.data.regulatory.faers.zip_load import Batch, _load_zip, _write_zip_marker
 from episteme.data.regulatory.load_reg import input_keys
-from episteme.data.regulatory.normalize import fits_index
 from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
 
-SCHEMA = "episteme"
-SOURCE = "openfda_faers"
-PARENTS = ("faers_report", "faers_drug", "faers_reaction")
-GENERATION_RE = r"g[0-9a-f]{10}"
-_PARENT_RE = "(?:" + "|".join(PARENTS) + ")"
-_OLD_RE = f"^{_PARENT_RE}_old_{GENERATION_RE}$"
-_RANGE_BOUND = re.compile(r"FOR VALUES FROM \((-?\d+)\) TO \((-?\d+)\)")
-_PART_NAME = re.compile(r"drug-event-(\d+)-of-(\d+)\.json\.zip")
-_QUARTER_NAME = re.compile(r"(\d{4})q([1-4])")
-# Part numbers or quarters shown in one refusal.
-_MAX_PARTS_SHOWN = 10
-
-# Per-partition indexes of spec 5.4, and the partial batch_norm index of its lot section.
-INDEXES: dict[str, tuple[tuple[str, str], ...]] = {
-    "faers_report": (("sid", "(safetyreportid)"),),
-    "faers_drug": (
-        ("entry", "(drug_entry_id)"),
-        ("sid", "(safetyreportid)"),
-        ("batched", "(drug_entry_id) WHERE batch_number IS NOT NULL"),
-        ("lot", "(batch_norm) WHERE batch_norm IS NOT NULL"),
-    ),
-    "faers_reaction": (("term", "(term_id)"), ("sid", "(safetyreportid)")),
-}
-
-_REPORT_COLUMNS = (
-    "safetyreportid",
-    "receive_year",
-    "receive_date",
-    "receipt_date",
-    "source_receive_date",
-    "version",
-    "serious",
-    "serious_death",
-    "serious_hospitalization",
-    "serious_life_threatening",
-    "serious_disabling",
-    "serious_congenital",
-    "serious_other",
-    "country",
-    "sex",
-    "age_years",
-    "weight_kg",
-)
-_DRUG_COLUMNS = (
-    "safetyreportid",
-    "seq",
-    "receive_year",
-    "role",
-    "batch_number",
-    "batch_norm",
-    "route",
-    "indication",
-)
-_REACTION_COLUMNS = ("safetyreportid", "seq", "receive_year", "outcome")
-# Estimated bytes of one row beyond its text.
-_ROW_OVERHEAD = 64
-
-
-class GenerationError(Exception):
-    """The generation cannot go live."""
-
-
-class GenerationSwapError(GenerationError):
-    """The swap could not take its lock. The old generation still serves."""
-
-
-class InputSetError(GenerationError):
-    """The input files are not a whole issue. Nothing was done."""
-
-
-# ---------------------------------------------------------------------------
-# Names and the resume decision (pure)
-# ---------------------------------------------------------------------------
-def new_generation_id() -> str:
-    return "g" + uuid.uuid4().hex[:10]
-
-
-def generation_table(parent: str, generation: str) -> str:
-    return f"{parent}_{generation}"
-
-
-def leaf_table(parent: str, generation: str, suffix: str) -> str:
-    return f"{parent}_{generation}{suffix}"
-
-
-def old_table(parent: str, generation: str) -> str:
-    return f"{parent}_old_{generation}"
-
-
-def old_leaf_table(parent: str, generation: str, suffix: str) -> str:
-    return f"{parent}_old_{generation}{suffix}"
-
-
-def state_table(generation: str) -> str:
-    return f"faers_gen_{generation}"
-
-
-def _ident(name: str) -> sql.Identifier:
-    return sql.Identifier(SCHEMA, name)
-
-
-def parse_bound(bound: str) -> tuple[int, int] | None:
-    """``(from, to)`` of a range partition's bound text; ``None`` for the default."""
-    if bound == "DEFAULT":
-        return None
-    match = _RANGE_BOUND.fullmatch(bound)
-    if not match:
-        raise ValueError(f"unexpected partition bound: {bound!r}")
-    return int(match.group(1)), int(match.group(2))
+# The names of this package's load stage, whichever module holds them.
+__all__ = [
+    "GENERATION_RE",
+    "INDEXES",
+    "PARENTS",
+    "SOURCE",
+    "Batch",
+    "Decision",
+    "GenerationError",
+    "GenerationSwapError",
+    "InputSetError",
+    "below_floor",
+    "check_input_set",
+    "checkpoint_markers",
+    "decide_generation",
+    "faers_zips",
+    "fingerprint",
+    "generation_table",
+    "input_keys",
+    "leaf_table",
+    "load_generation",
+    "main",
+    "new_generation_id",
+    "old_leaf_table",
+    "old_table",
+    "parse_bound",
+    "state_table",
+    "unfinished_generations",
+]
 
 
 def fingerprint(files: Iterable[tuple[Path, str]]) -> str:
@@ -248,746 +193,6 @@ def fingerprint(files: Iterable[tuple[Path, str]]) -> str:
         st = Path(path).stat()
         rows.append([key, st.st_size, st.st_mtime_ns])
     return hashlib.sha256(json.dumps([FORMAT_VERSION, sorted(rows)]).encode("utf-8")).hexdigest()
-
-
-class Decision(NamedTuple):
-    action: str  # "fresh", "resume" or "current"
-    generation: str | None  # the generation to resume
-    drop: list[str]  # the unfinished generations to drop
-
-
-def decide_generation(
-    inputs_fp: str, *, live: str | None, unfinished: Mapping[str, str | None], force: bool
-) -> Decision:
-    """What a run does; see the module docstring."""
-    if force:
-        return Decision("fresh", None, sorted(unfinished))
-    match = next((g for g, fp in sorted(unfinished.items()) if fp == inputs_fp), None)
-    drop = sorted(g for g in unfinished if g != match)
-    if match is not None:
-        return Decision("resume", match, drop)
-    return Decision("current" if live == inputs_fp else "fresh", None, drop)
-
-
-class Batch:
-    """The rows of one COPY round, up to about ``cap_bytes`` of row data."""
-
-    def __init__(self, cap_bytes: int) -> None:
-        self.cap_bytes = cap_bytes
-        self.clear()
-
-    def clear(self) -> None:
-        self.reports: list[dict] = []
-        self.drugs: list[dict] = []
-        self.reactions: list[dict] = []
-        self.bytes = 0
-
-    @staticmethod
-    def _size(row: dict) -> int:
-        return _ROW_OVERHEAD + sum(len(v) for v in row.values() if isinstance(v, str))
-
-    def add(self, report: dict, drugs: list[dict], reactions: list[dict]) -> None:
-        self.reports.append(report)
-        self.drugs.extend(drugs)
-        self.reactions.extend(reactions)
-        self.bytes += self._size(report)
-        self.bytes += sum(self._size(r) for r in drugs)
-        self.bytes += sum(self._size(r) for r in reactions)
-
-    @property
-    def full(self) -> bool:
-        return self.bytes >= self.cap_bytes
-
-
-def faers_zips(raw_dir: Path) -> list[Path]:
-    """The zips under ``<raw>/drug/event/``, in path order. Nothing else is read."""
-    base = Path(raw_dir) / "drug" / "event"
-    return sorted(p for p in base.rglob("*.zip") if p.is_file()) if base.is_dir() else []
-
-
-def _shown(parts: Iterable[int]) -> str:
-    listed = sorted(parts)
-    more = f" and {len(listed) - _MAX_PARTS_SHOWN} more" if len(listed) > _MAX_PARTS_SHOWN else ""
-    return ", ".join(map(str, listed[:_MAX_PARTS_SHOWN])) + more
-
-
-def _missing_quarters(folders: Iterable[str]) -> list[str]:
-    """The quarters absent between the earliest and the latest of ``folders``. A folder not
-    named like ``2020q1`` (openFDA's ``all_other``) is outside this check."""
-    present = set()
-    for folder in folders:
-        match = _QUARTER_NAME.fullmatch(folder)
-        if match:
-            present.add(int(match.group(1)) * 4 + int(match.group(2)) - 1)
-    if not present:
-        return []
-    absent = set(range(min(present), max(present) + 1)) - present
-    return [f"{n // 4}q{n % 4 + 1}" for n in sorted(absent)]
-
-
-def check_input_set(paths: Iterable[Path]) -> list[str]:
-    """The ways in which ``paths`` is not a whole issue, by name alone; empty when each
-    quarter (the parent folder) holds exactly ``1..N of N``, with one ``N``, and no quarter
-    is missing between the earliest and the latest present."""
-    paths = [Path(p) for p in paths]
-    problems: list[str] = []
-    absent = _missing_quarters(p.parent.name for p in paths)
-    if absent:
-        more = (
-            f" and {len(absent) - _MAX_PARTS_SHOWN} more" if len(absent) > _MAX_PARTS_SHOWN else ""
-        )
-        problems.append(f"missing quarters: {', '.join(absent[:_MAX_PARTS_SHOWN])}{more}")
-    quarters: dict[str, list[tuple[int, int]]] = {}
-    for path in paths:
-        match = _PART_NAME.fullmatch(path.name)
-        if match is None:
-            problems.append(f"{path.parent.name}/{path.name}: not an openFDA part name")
-            continue
-        parts = quarters.setdefault(path.parent.name, [])
-        parts.append((int(match.group(1)), int(match.group(2))))
-    for quarter, parts in sorted(quarters.items()):
-        totals = {total for _, total in parts}
-        if len(totals) > 1:
-            problems.append(f"{quarter}: several totals ({_shown(totals)}), so a stale issue")
-            continue
-        total = totals.pop()
-        numbers = [part for part, _ in parts]
-        missing = set(range(1, total + 1)) - set(numbers)
-        extra = set(numbers) - set(range(1, total + 1))
-        if missing or extra or len(numbers) != len(set(numbers)):
-            what = []
-            if missing:
-                what.append(f"missing parts {_shown(missing)}")
-            if extra:
-                what.append(f"parts above the total: {_shown(extra)}")
-            if len(numbers) != len(set(numbers)):
-                what.append("a part twice")
-            problems.append(f"{quarter}: of {total}, " + "; ".join(what))
-    return problems
-
-
-def below_floor(reports: int, live_reports: int, share: float) -> bool:
-    """Whether a new generation is too small to replace the live one. An empty live
-    generation sets no floor."""
-    return live_reports > 0 and reports < live_reports * share
-
-
-# ---------------------------------------------------------------------------
-# Catalog
-# ---------------------------------------------------------------------------
-def _relations(cur: psycopg.Cursor, pattern: str) -> list[str]:
-    cur.execute(
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = %s AND c.relkind = 'p' AND c.relname ~ %s ORDER BY 1",
-        (SCHEMA, pattern),
-    )
-    return [r[0] for r in cur.fetchall()]
-
-
-def _comment(cur: psycopg.Cursor, table: str) -> str | None:
-    cur.execute(
-        "SELECT obj_description(to_regclass(%s::text), 'pg_class')",
-        (f"{SCHEMA}.{table}",),
-    )
-    return cur.fetchone()[0]
-
-
-def unfinished_generations(conn: psycopg.Connection) -> dict[str, str | None]:
-    """generation -> fingerprint of the generations that were not swapped in."""
-    out: dict[str, str | None] = {}
-    with conn.cursor() as cur:
-        for name in _relations(cur, f"^faers_report_{GENERATION_RE}$"):
-            out[name.removeprefix("faers_report_")] = _comment(cur, name)
-    return out
-
-
-def _children(cur: psycopg.Cursor, parent: str) -> list[tuple[str, str]]:
-    """``(suffix, bound)`` of the partitions of ``parent``, for example ``_y2004``."""
-    cur.execute(
-        "SELECT c.relname, pg_get_expr(c.relpartbound, c.oid) "
-        "FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
-        "WHERE i.inhparent = to_regclass(%s::text) ORDER BY 1",
-        (f"{SCHEMA}.{parent}",),
-    )
-    out = []
-    for name, bound in cur.fetchall():
-        if not name.startswith(f"{parent}_"):
-            raise GenerationError(f"partition {name} does not start with {parent}_")
-        out.append((name[len(parent) :], bound))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Generation tables and progress
-# ---------------------------------------------------------------------------
-def _create_generation(conn: psycopg.Connection, generation: str, inputs_fp: str) -> None:
-    with conn.cursor() as cur:
-        for parent in PARENTS:
-            new = generation_table(parent, generation)
-            cur.execute(
-                sql.SQL(
-                    "CREATE TABLE {new} (LIKE {parent} INCLUDING ALL EXCLUDING INDEXES) "
-                    "PARTITION BY RANGE (receive_year)"
-                ).format(new=_ident(new), parent=_ident(parent))
-            )
-            for suffix, bound in _children(cur, parent):
-                values = parse_bound(bound)
-                spec = (
-                    sql.SQL("DEFAULT")
-                    if values is None
-                    else sql.SQL("FOR VALUES FROM ({}) TO ({})").format(
-                        sql.Literal(values[0]), sql.Literal(values[1])
-                    )
-                )
-                cur.execute(
-                    sql.SQL("CREATE TABLE {leaf} PARTITION OF {new} {spec}").format(
-                        leaf=_ident(leaf_table(parent, generation, suffix)),
-                        new=_ident(new),
-                        spec=spec,
-                    )
-                )
-        cur.execute(
-            sql.SQL("COMMENT ON TABLE {t} IS {fp}").format(
-                t=_ident(generation_table("faers_report", generation)), fp=sql.Literal(inputs_fp)
-            )
-        )
-        cur.execute(
-            sql.SQL(
-                "CREATE TABLE {t} (kind text NOT NULL, key text NOT NULL, stats jsonb NOT NULL, "
-                "PRIMARY KEY (kind, key))"
-            ).format(t=_ident(state_table(generation)))
-        )
-    conn.commit()
-
-
-def _read_state(conn: psycopg.Connection, generation: str) -> dict[tuple[str, str], dict]:
-    with conn.cursor() as cur:
-        cur.execute(
-            sql.SQL("SELECT kind, key, stats FROM {t}").format(t=_ident(state_table(generation)))
-        )
-        out = {(kind, key): stats for kind, key, stats in cur.fetchall()}
-    conn.commit()
-    return out
-
-
-def _put_state(cur: psycopg.Cursor, generation: str, kind: str, key: str, stats: dict) -> None:
-    cur.execute(
-        sql.SQL("INSERT INTO {t} (kind, key, stats) VALUES (%s, %s, %s)").format(
-            t=_ident(state_table(generation))
-        ),
-        (kind, key, Jsonb(stats)),
-    )
-
-
-def _sum_stats(state: dict[tuple[str, str], dict], kind: str) -> Counter:
-    total: Counter = Counter()
-    for (k, _), stats in state.items():
-        if k == kind:
-            total.update(stats)
-    return total
-
-
-def _drop_tables(conn: psycopg.Connection, names: Sequence[str]) -> bool:
-    """Drop ``names`` under the lock timeout. ``False``, with a warning, when that fails."""
-    if not names:
-        return True
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('lock_timeout', %s, true)",
-                (f"{get_settings().faers_lock_timeout_s}s",),
-            )
-            cur.execute(
-                sql.SQL("DROP TABLE IF EXISTS {}").format(
-                    sql.SQL(", ").join(_ident(n) for n in names)
-                )
-            )
-        conn.commit()
-    except psycopg.Error as exc:
-        with contextlib.suppress(psycopg.Error):
-            conn.rollback()
-        _LOG.warning("could not drop %s (the next run tries again): %r", ", ".join(names), exc)
-        return False
-    return True
-
-
-def _drop_generation(conn: psycopg.Connection, generation: str) -> None:
-    names = [generation_table(p, generation) for p in PARENTS] + [state_table(generation)]
-    if not _drop_tables(conn, names):
-        raise GenerationError(f"could not drop the unfinished generation {generation}")
-
-
-def _drop_old_generation(conn: psycopg.Connection, generation: str) -> bool:
-    """Drop what the swap renamed. The new generation is live either way, so a failure
-    does not fail the run; it warns, and says what to do."""
-    names = [old_table(p, generation) for p in PARENTS]
-    dropped = _drop_tables(conn, names)
-    if not dropped:
-        print(
-            f"WARNING: generation {generation} is live, but the old tables were not dropped "
-            f"and still use disk space: {', '.join(names)}. To retry, run the load again "
-            "when no transaction holds them: each run first drops what a swap left behind.",
-            file=sys.stderr,
-        )
-    return dropped
-
-
-def _drop_old_leftovers(conn: psycopg.Connection) -> bool:
-    with conn.cursor() as cur:
-        names = _relations(cur, _OLD_RE)
-    conn.commit()
-    return _drop_tables(conn, names)
-
-
-# ---------------------------------------------------------------------------
-# COPY of one zip
-# ---------------------------------------------------------------------------
-def _entry_md5(alias: str = "") -> str:
-    """The key expression of ``faers_drug_entry_uq`` (migration 0010), exactly."""
-    a = f"{alias}." if alias else ""
-    return (
-        f"md5(coalesce({a}product_name, '') || chr(31) || coalesce({a}active_substance, '') "
-        f"|| chr(31) || coalesce({a}annotation, ''))"
-    )
-
-
-def _entry_key(drug: dict) -> tuple[str | None, str | None, str | None]:
-    return (drug["product_name"], drug["active_substance"], drug["annotation"])
-
-
-def _create_stage(cur: psycopg.Cursor) -> None:
-    cur.execute(
-        "CREATE TEMP TABLE _faers_new_entry (k integer, product_name text, "
-        "active_substance text, annotation text) ON COMMIT DROP"
-    )
-    cur.execute("CREATE TEMP TABLE _faers_new_term (term text) ON COMMIT DROP")
-
-
-def _resolve_entries(cur: psycopg.Cursor, drugs: list[dict], cache: dict) -> None:
-    """Put the new combinations of ``drugs`` into the dictionary, and their ids in ``cache``."""
-    new = list(dict.fromkeys(k for k in map(_entry_key, drugs) if any(k) and k not in cache))
-    if not new:
-        return
-    cur.execute("TRUNCATE _faers_new_entry")
-    with cur.copy(
-        "COPY _faers_new_entry (k, product_name, active_substance, annotation) FROM STDIN"
-    ) as cp:
-        for i, key in enumerate(new):
-            cp.write_row((i, *key))
-    cur.execute("ANALYZE _faers_new_entry")
-    cur.execute(
-        f"INSERT INTO {SCHEMA}.faers_drug_entry (product_name, active_substance, annotation) "
-        "SELECT product_name, active_substance, annotation FROM _faers_new_entry "
-        f"ON CONFLICT (({_entry_md5()})) DO NOTHING"
-    )
-    cur.execute(
-        f"SELECT t.k, e.drug_entry_id FROM _faers_new_entry t "
-        f"JOIN {SCHEMA}.faers_drug_entry e ON {_entry_md5('e')} = {_entry_md5('t')}"
-    )
-    found = cur.fetchall()
-    if len(found) != len(new):
-        raise GenerationError(f"{len(new)} dictionary entries written, {len(found)} found")
-    for k, entry_id in found:
-        cache[new[k]] = entry_id
-
-
-def _usable_term(term: str | None) -> bool:
-    return bool(term) and fits_index(term)
-
-
-def _resolve_terms(cur: psycopg.Cursor, reactions: list[dict], cache: dict) -> None:
-    new = list(
-        dict.fromkeys(
-            r["term"] for r in reactions if _usable_term(r["term"]) and r["term"] not in cache
-        )
-    )
-    if not new:
-        return
-    cur.execute("TRUNCATE _faers_new_term")
-    with cur.copy("COPY _faers_new_term (term) FROM STDIN") as cp:
-        for term in new:
-            cp.write_row((term,))
-    cur.execute("ANALYZE _faers_new_term")
-    cur.execute(
-        f"INSERT INTO {SCHEMA}.faers_term (term) SELECT term FROM _faers_new_term "
-        "ON CONFLICT (term) DO NOTHING"
-    )
-    cur.execute(
-        f"SELECT t.term, e.term_id FROM _faers_new_term t "
-        f"JOIN {SCHEMA}.faers_term e ON e.term = t.term"
-    )
-    cache.update(cur.fetchall())
-
-
-def _copy_stmt(table: str, columns: Sequence[str]) -> sql.Composed:
-    return sql.SQL("COPY {t} ({cols}) FROM STDIN").format(
-        t=_ident(table), cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns)
-    )
-
-
-def _flush(
-    cur: psycopg.Cursor,
-    generation: str,
-    source_file: str,
-    batch: Batch,
-    entries: dict,
-    terms: dict,
-) -> None:
-    """One COPY round. The dictionaries first: the rows carry their ids."""
-    _resolve_entries(cur, batch.drugs, entries)
-    _resolve_terms(cur, batch.reactions, terms)
-    if batch.reports:
-        stmt = _copy_stmt(
-            generation_table("faers_report", generation), (*_REPORT_COLUMNS, "source_file")
-        )
-        with cur.copy(stmt) as cp:
-            for r in batch.reports:
-                cp.write_row((*(r[c] for c in _REPORT_COLUMNS), source_file))
-    if batch.drugs:
-        stmt = _copy_stmt(
-            generation_table("faers_drug", generation),
-            (*_DRUG_COLUMNS, "drug_entry_id", "source_file"),
-        )
-        with cur.copy(stmt) as cp:
-            for r in batch.drugs:
-                entry_id = entries.get(_entry_key(r))
-                cp.write_row((*(r[c] for c in _DRUG_COLUMNS), entry_id, source_file))
-    if batch.reactions:
-        stmt = _copy_stmt(
-            generation_table("faers_reaction", generation),
-            (*_REACTION_COLUMNS, "term_id", "source_file"),
-        )
-        with cur.copy(stmt) as cp:
-            for r in batch.reactions:
-                term_id = terms.get(r["term"])
-                cp.write_row((*(r[c] for c in _REACTION_COLUMNS), term_id, source_file))
-    batch.clear()
-
-
-def _load_zip(
-    conn: psycopg.Connection, generation: str, path: Path, key: str, run_id: str
-) -> dict[str, int]:
-    """Load one zip in one transaction. The caches and the id set last for this zip only."""
-    counts: Counter = Counter(
-        reports=0, drug_rows=0, reaction_rows=0, no_date=0, no_id=0, duplicates_in_zip=0
-    )
-    counts.update(long_terms=0, long_batches=0, long_ids=0)
-    entries: dict = {}
-    terms: dict = {}
-    seen: set[str] = set()
-    batch = Batch(get_settings().load_batch_bytes)
-    try:
-        with audit_trail.deferred_mirror(conn):
-            with conn.cursor() as cur:
-                _create_stage(cur)
-                for report in iter_reports(path):
-                    row, drugs, reactions = report_rows(report)
-                    report_id = row["safetyreportid"]
-                    if report_id is None:
-                        counts["no_id"] += 1
-                        continue
-                    if not fits_index(report_id):
-                        counts["long_ids"] += 1
-                        continue
-                    if report_id in seen:
-                        counts["duplicates_in_zip"] += 1
-                        continue
-                    seen.add(report_id)
-                    count_report(counts, row)
-                    counts["reports"] += 1
-                    counts["drug_rows"] += len(drugs)
-                    counts["reaction_rows"] += len(reactions)
-                    counts["long_terms"] += sum(
-                        1 for r in reactions if r["term"] and not _usable_term(r["term"])
-                    )
-                    counts["long_batches"] += sum(d["batch_norm_too_long"] for d in drugs)
-                    batch.add(row, drugs, reactions)
-                    if batch.full:
-                        _flush(cur, generation, key, batch, entries, terms)
-                _flush(cur, generation, key, batch, entries, terms)
-                _put_state(cur, generation, "zip", key, dict(counts))
-            audit_trail.record(
-                "load_commit",
-                conn=conn,
-                object=key,
-                rows_affected=counts["reports"],
-                run_id=run_id,
-            )
-            audit_trail.commit(conn)
-    except BaseException:
-        audit_trail.rollback(conn)
-        raise
-    return dict(counts)
-
-
-def _write_zip_marker(
-    processed_dir: Path, path: Path, key: str, generation: str, stats: dict
-) -> None:
-    """The marker of a zip this generation has loaded; a current one stays as it is."""
-    marker = checkpoint_markers.load_success_marker_path(processed_dir, SOURCE, key)
-    with contextlib.suppress(OSError, ValueError, AttributeError):
-        stored = json.loads(marker.read_text(encoding="utf-8")).get("stats", {})
-        if stored.get("generation") == generation:
-            return
-    st = path.stat()
-    checkpoint_markers.write_marker(
-        marker,
-        {
-            "source": SOURCE,
-            "source_file": key,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "stats": {**stats, "generation": generation, "file": [st.st_size, st.st_mtime_ns]},
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# De-duplication
-# ---------------------------------------------------------------------------
-def _remove_losers(
-    cur: psycopg.Cursor, scan: sql.Composable, targets: Sequence[sql.Composable]
-) -> dict[str, int]:
-    """Keep the winner of each id in ``scan``; delete the other copies from ``targets``
-    (report, drug, reaction). Returns the rows removed per table."""
-    out = {"reports": 0, "drug_rows": 0, "reaction_rows": 0}
-    cur.execute("DROP TABLE IF EXISTS pg_temp._faers_dups, pg_temp._faers_losers")
-    cur.execute(
-        sql.SQL(
-            "CREATE TEMP TABLE _faers_dups ON COMMIT DROP AS "
-            "SELECT safetyreportid FROM {scan} GROUP BY safetyreportid HAVING count(*) > 1"
-        ).format(scan=scan)
-    )
-    cur.execute("ANALYZE _faers_dups")
-    cur.execute(
-        sql.SQL(
-            "CREATE TEMP TABLE _faers_losers ON COMMIT DROP AS "
-            "SELECT safetyreportid, source_file FROM ("
-            "  SELECT r.safetyreportid, r.source_file, row_number() OVER ("
-            "    PARTITION BY r.safetyreportid "
-            "    ORDER BY r.version DESC NULLS LAST, r.receipt_date DESC NULLS LAST, "
-            "             r.source_file DESC) AS rn "
-            "  FROM {scan} r JOIN _faers_dups d USING (safetyreportid)"
-            ") ranked WHERE rn > 1"
-        ).format(scan=scan)
-    )
-    cur.execute("SELECT count(*) FROM _faers_losers")
-    if cur.fetchone()[0] == 0:
-        return out
-    cur.execute("ANALYZE _faers_losers")
-    for name, target in zip(out, targets, strict=True):
-        cur.execute(
-            sql.SQL(
-                "DELETE FROM {t} x USING _faers_losers l "
-                "WHERE x.safetyreportid = l.safetyreportid AND x.source_file = l.source_file"
-            ).format(t=target)
-        )
-        out[name] = cur.rowcount
-    return out
-
-
-def _dedupe(conn: psycopg.Connection, generation: str) -> None:
-    """Per year partition, then across partitions. One transaction each; a finished
-    partition has a progress row, so a re-run does not repeat it and keeps its counts."""
-    state = _read_state(conn, generation)
-    with conn.cursor() as cur:
-        suffixes = [s for s, _ in _children(cur, generation_table("faers_report", generation))]
-    conn.commit()
-    for suffix in suffixes:
-        if ("dedup", suffix) in state:
-            continue
-        with conn.cursor() as cur:
-            removed = _remove_losers(
-                cur,
-                _ident(leaf_table("faers_report", generation, suffix)),
-                [_ident(leaf_table(p, generation, suffix)) for p in PARENTS],
-            )
-            _put_state(cur, generation, "dedup", suffix, removed)
-        conn.commit()
-    if ("dedup_cross_year", "all") not in state:
-        with conn.cursor() as cur:
-            removed = _remove_losers(
-                cur,
-                _ident(generation_table("faers_report", generation)),
-                [_ident(generation_table(p, generation)) for p in PARENTS],
-            )
-            _put_state(cur, generation, "dedup_cross_year", "all", removed)
-        conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Indexes
-# ---------------------------------------------------------------------------
-def _build_indexes(conn: psycopg.Connection, generation: str) -> None:
-    """The indexes per partition, one transaction per partition, then ``ANALYZE``."""
-    for parent in PARENTS:
-        with conn.cursor() as cur:
-            suffixes = [s for s, _ in _children(cur, generation_table(parent, generation))]
-        conn.commit()
-        for leaf_suffix in suffixes:
-            leaf = leaf_table(parent, generation, leaf_suffix)
-            with conn.cursor() as cur:
-                for suffix, spec in INDEXES[parent]:
-                    cur.execute(
-                        sql.SQL("CREATE INDEX IF NOT EXISTS {idx} ON {t} {spec}").format(
-                            idx=sql.Identifier(f"{leaf}_{suffix}"),
-                            t=_ident(leaf),
-                            spec=sql.SQL(spec),
-                        )
-                    )
-            conn.commit()
-    with conn.cursor() as cur:
-        for parent in PARENTS:
-            cur.execute(
-                sql.SQL("ANALYZE {t}").format(t=_ident(generation_table(parent, generation)))
-            )
-        _put_state(cur, generation, "phase", "indexed", {})
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Checks and the swap
-# ---------------------------------------------------------------------------
-def _check_rows(conn: psycopg.Connection, generation: str, expected: int) -> dict[str, int]:
-    """Stop before the swap when the new generation is empty or short."""
-    with conn.cursor() as cur:
-        cur.execute(
-            sql.SQL("SELECT count(*) FROM {t}").format(
-                t=_ident(generation_table("faers_report", generation))
-            )
-        )
-        reports = cur.fetchone()[0]
-        cur.execute(
-            sql.SQL(
-                "SELECT count(*), count(*) FILTER (WHERE receive_year IS NULL) FROM {t}"
-            ).format(t=_ident(leaf_table("faers_report", generation, "_default")))
-        )
-        in_default, no_date = cur.fetchone()
-    conn.commit()
-    if reports == 0:
-        raise GenerationError("the new generation has no reports; it is not swapped in")
-    if reports != expected:
-        raise GenerationError(f"{reports} reports stored, {expected} expected; no swap")
-    return {"reports": reports, "reports_in_default": in_default, "reports_no_date": no_date}
-
-
-def _live_reports(conn: psycopg.Connection) -> int:
-    with conn.cursor() as cur:
-        cur.execute(sql.SQL("SELECT count(*) FROM {t}").format(t=_ident("faers_report")))
-        count = cur.fetchone()[0]
-    conn.commit()
-    return count
-
-
-def _audit_override(
-    conn: psycopg.Connection, what: str, reason: str, detail: dict, run_id: str
-) -> None:
-    audit_trail.record(
-        "force_override",
-        conn=conn,
-        object=f"{SOURCE} {what}",
-        new_value=detail,
-        reason=reason,
-        run_id=run_id,
-    )
-    conn.commit()
-
-
-def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
-    cur.execute(
-        "SELECT relowner::regrole::text, relacl::text[] FROM pg_class "
-        "WHERE oid = to_regclass(%s::text)",
-        (f"{SCHEMA}.{table}",),
-    )
-    owner, acl = cur.fetchone()
-    return owner, set(acl or ())
-
-
-def _check_access(cur: psycopg.Cursor, generation: str) -> None:
-    """Readers keep their access through a swap only if the parents match."""
-    for parent in PARENTS:
-        live = _access(cur, parent)
-        new = _access(cur, generation_table(parent, generation))
-        if live != new:
-            raise GenerationError(
-                f"{generation_table(parent, generation)} differs from {parent} in owner or "
-                f"privileges ({new} against {live}); no swap. Connect as the table owner, or "
-                "repair the grants, and run again with --force."
-            )
-
-
-def _rename(cur: psycopg.Cursor, name: str, new_name: str) -> None:
-    cur.execute(
-        sql.SQL("ALTER TABLE {t} RENAME TO {new}").format(
-            t=_ident(name), new=sql.Identifier(new_name)
-        )
-    )
-
-
-def _swap(
-    conn: psycopg.Connection,
-    generation: str,
-    inputs_fp: str,
-    counts: dict[str, int],
-    live: dict,
-    run_id: str,
-) -> None:
-    """Rename the generation in, in one transaction, under the lock timeout. The swap
-    drops the progress table, so its audit row keeps the counts (``counts``, and ``live``:
-    the fingerprint and report count of the generation that it replaces)."""
-    seconds = get_settings().faers_lock_timeout_s
-    try:
-        with audit_trail.deferred_mirror(conn):
-            with conn.cursor() as cur:
-                _check_access(cur, generation)
-                cur.execute("SELECT set_config('lock_timeout', %s, true)", (f"{seconds}s",))
-                try:
-                    cur.execute(
-                        sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
-                            sql.SQL(", ").join(_ident(p) for p in PARENTS)
-                        )
-                    )
-                    for parent in PARENTS:
-                        new = generation_table(parent, generation)
-                        for suffix, _ in _children(cur, parent):
-                            _rename(
-                                cur,
-                                f"{parent}{suffix}",
-                                old_leaf_table(parent, generation, suffix),
-                            )
-                        _rename(cur, parent, old_table(parent, generation))
-                        for suffix, _ in _children(cur, new):
-                            _rename(
-                                cur, leaf_table(parent, generation, suffix), f"{parent}{suffix}"
-                            )
-                        _rename(cur, new, parent)
-                except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
-                    raise GenerationSwapError(
-                        f"could not lock the live FAERS tables within {seconds} s "
-                        "(EPISTEME_FAERS_LOCK_TIMEOUT_S), or a deadlock stopped the swap: a "
-                        "transaction that reads them is still open. The old generation still "
-                        f"serves. Generation {generation} is complete: run the load again to "
-                        "swap it in."
-                    ) from exc
-                cur.execute(sql.SQL("DROP TABLE {t}").format(t=_ident(state_table(generation))))
-            audit_trail.record(
-                "load_replace",
-                conn=conn,
-                object=f"{SOURCE} {generation}",
-                rows_affected=counts["reports"],
-                old_value=live,
-                new_value={"generation": generation, "fingerprint": inputs_fp, **counts},
-                run_id=run_id,
-            )
-            audit_trail.commit(conn)
-    except BaseException:
-        audit_trail.rollback(conn)
-        raise
-    _LOG.info(
-        "swapped in %s: the parents and partitions now carry the plain names; the old "
-        "ones are %s; the index names keep the token",
-        generation,
-        old_table("faers_report", generation),
-    )
 
 
 def load_generation(

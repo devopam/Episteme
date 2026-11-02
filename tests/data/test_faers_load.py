@@ -15,7 +15,9 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
+from episteme.data.regulatory.faers import generation as fg
 from episteme.data.regulatory.faers import load as fl
+from episteme.data.regulatory.faers import zip_load as fz
 from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -372,13 +374,13 @@ class _FakeConn:
 
 
 def test_a_deadlock_in_the_swap_is_a_swap_error(monkeypatch):
-    monkeypatch.setattr(fl, "_check_access", lambda *a: None)
+    monkeypatch.setattr(fg, "_check_access", lambda *a: None)
     with pytest.raises(fl.GenerationSwapError, match="old generation still serves"):
         fl._swap(_FakeConn(), GEN_A, FP_A, {"reports": 1}, {"fingerprint": None, "reports": 0}, "r")
 
 
 def test_a_failed_old_generation_drop_prints_the_retry_action(monkeypatch, capsys):
-    monkeypatch.setattr(fl, "_drop_tables", lambda conn, names: False)
+    monkeypatch.setattr(fg, "_drop_tables", lambda conn, names: False)
     assert fl._drop_old_generation(None, GEN_A) is False
     err = capsys.readouterr().err
     assert "WARNING" in err and "run the load again" in err and GEN_A in err
@@ -541,7 +543,7 @@ def test_a_reader_lock_fails_the_swap_and_a_rerun_goes_straight_to_it(
     def must_not_read(_path):
         raise AssertionError("a finished zip was read again")
 
-    monkeypatch.setattr(fl, "iter_reports", must_not_read)
+    monkeypatch.setattr(fz, "iter_reports", must_not_read)
     monkeypatch.setattr(fl, "_build_indexes", lambda *a, **k: pytest.fail("indexes built twice"))
     out = _run(db, tmp_path, [z])
     assert out["status"] == "swapped" and out["zips_skipped"] == 1
@@ -563,7 +565,7 @@ def test_a_new_parent_with_other_privileges_is_refused_before_the_copy(db, tmp_p
     with db.cursor() as cur:
         cur.execute("GRANT SELECT ON episteme.faers_report TO PUBLIC")
     db.commit()
-    monkeypatch.setattr(fl, "iter_reports", lambda _p: pytest.fail("the COPY started"))
+    monkeypatch.setattr(fz, "iter_reports", lambda _p: pytest.fail("the COPY started"))
     try:
         with pytest.raises(fl.GenerationError, match="owner or"):
             _run(db, tmp_path, [_zip(raw, "2020q1", [_report("1")])])
@@ -698,14 +700,14 @@ def test_resume_skips_completed_zips(db, tmp_path, monkeypatch):
     raw = tmp_path / "raw"
     one = _zip(raw, "2020q1", [_report("1")])
     two = _zip(raw, "2020q2", [_report("2")])
-    real = fl.iter_reports
+    real = fz.iter_reports
 
     def fail_on_two(path):
         if path == two:
             raise RuntimeError("stop here")
         return real(path)
 
-    monkeypatch.setattr(fl, "iter_reports", fail_on_two)
+    monkeypatch.setattr(fz, "iter_reports", fail_on_two)
     with pytest.raises(RuntimeError, match="stop here"):
         _run(db, tmp_path, [one, two])
     db.rollback()
@@ -721,7 +723,7 @@ def test_resume_skips_completed_zips(db, tmp_path, monkeypatch):
         read.append(path)
         return real(path)
 
-    monkeypatch.setattr(fl, "iter_reports", spy)
+    monkeypatch.setattr(fz, "iter_reports", spy)
     out = _run(db, tmp_path, [one, two])
     assert read == [two]
     assert out["zips_skipped"] == 1 and out["zips_loaded"] == 1
@@ -734,19 +736,19 @@ def test_changed_inputs_start_fresh_and_drop_the_unfinished_generation(db, tmp_p
     raw = tmp_path / "raw"
     one = _zip(raw, "2020q1", [_report("1")])
     two = _zip(raw, "2020q2", [_report("2")])
-    real = fl.iter_reports
+    real = fz.iter_reports
 
     def fail_on_two(path):
         if path == two:
             raise RuntimeError("stop here")
         return real(path)
 
-    monkeypatch.setattr(fl, "iter_reports", fail_on_two)
+    monkeypatch.setattr(fz, "iter_reports", fail_on_two)
     with pytest.raises(RuntimeError):
         _run(db, tmp_path, [one, two])
     db.rollback()
     first = list(_unfinished(db))
-    monkeypatch.setattr(fl, "iter_reports", real)
+    monkeypatch.setattr(fz, "iter_reports", real)
 
     _zip(raw, "2020q2", [_report("2"), _report("3")])  # a new issue of the file
     out = _run(db, tmp_path, [one, two])
@@ -1035,19 +1037,19 @@ def test_a_new_format_version_does_not_resume_an_unfinished_generation(db, tmp_p
     raw = tmp_path / "raw"
     one = _zip(raw, "2020q1", [_report("1")])
     two = _zip(raw, "2020q2", [_report("2")])
-    real = fl.iter_reports
+    real = fz.iter_reports
 
     def fail_on_two(path):
         if path == two:
             raise RuntimeError("stop here")
         return real(path)
 
-    monkeypatch.setattr(fl, "iter_reports", fail_on_two)
+    monkeypatch.setattr(fz, "iter_reports", fail_on_two)
     with pytest.raises(RuntimeError):
         _run(db, tmp_path, [one, two])
     db.rollback()
     unfinished = list(_unfinished(db))
-    monkeypatch.setattr(fl, "iter_reports", real)
+    monkeypatch.setattr(fz, "iter_reports", real)
     monkeypatch.setattr(fl, "FORMAT_VERSION", fl.FORMAT_VERSION + 1)
     out = _run(db, tmp_path, [one, two])
     assert out["generation"] not in unfinished
@@ -1067,7 +1069,7 @@ def test_the_floor_refuses_a_small_issue_and_the_override_passes_it(db, tmp_path
     assert len(_unfinished(db)) == 1
 
     # The override resumes the built generation, and leaves an audit row with its reason.
-    monkeypatch.setattr(fl, "iter_reports", lambda _p: pytest.fail("a finished zip was read"))
+    monkeypatch.setattr(fz, "iter_reports", lambda _p: pytest.fail("a finished zip was read"))
     out = _run(db, tmp_path, [small], override_reason="FDA withdrew most reports")
     assert out["status"] == "swapped" and out["overrides"] == ["live floor"]
     assert _ids(db) == ["1"]
