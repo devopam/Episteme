@@ -86,6 +86,7 @@ from episteme.data.parallel import (  # noqa: E402
 )
 from episteme.data.pmc.buckets import (  # noqa: E402
     bucket_key,
+    check_bucket_width,
     group_by_bucket,
     key_and_rel,
     manifest_files,
@@ -702,6 +703,7 @@ def extract_pmc(
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
+    check_bucket_width(processed_dir)
 
     t_phase = time.monotonic()
     meta_files = discover_meta_files(raw_dir)

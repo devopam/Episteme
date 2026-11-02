@@ -241,8 +241,10 @@ class Settings:
     # Memory bounds of the load and the staging write, in bytes of row data.
     load_batch_bytes: int = DEFAULT_LOAD_BATCH_BYTES
     write_batch_bytes: int = DEFAULT_WRITE_BATCH_BYTES
-    # PMC ids per extract bucket. Changing it moves articles between buckets:
-    # the bucket markers and fingerprints no longer match, so every bucket rebuilds.
+    # PMC ids per extract bucket. Changing it moves articles between buckets, and
+    # the old parts, markers and loaded rows stay under their old keys. The extract
+    # records the width under _ops/pmc/ and refuses a run at another width until the
+    # old parts are retired (episteme.data.pmc.buckets.check_bucket_width).
     pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)

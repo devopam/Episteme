@@ -6,6 +6,8 @@ module names stay importable; the code reads the setting at the point of use.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import episteme.config as cfg
@@ -18,6 +20,8 @@ GB = 1024**3
 def clean_settings(tmp_path, monkeypatch):
     """No project .env (cwd has no pyproject.toml) and none of the tunables set."""
     monkeypatch.chdir(tmp_path)
+    for key in [k for k in os.environ if k.startswith("EPISTEME_SLICE_MAX_BYTES_")]:
+        monkeypatch.delenv(key)
     for key in (
         "EPISTEME_LOAD_BATCH_BYTES",
         "EPISTEME_WRITE_BATCH_BYTES",
