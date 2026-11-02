@@ -149,6 +149,7 @@ declare -A WRAPPER=(
     [hf_corpus]="hf_corpus/download_hf_corpus.sh"
     [dailymed]="dailymed/download_dailymed.sh"
     [openfda]="openfda/download_openfda.sh"
+    [ema]="ema/download_ema.sh"
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"

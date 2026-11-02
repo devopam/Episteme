@@ -104,6 +104,8 @@ def _get_positive_int_or_default(name: str, default: int) -> int:
 DEFAULT_LOAD_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_WRITE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_PMC_BUCKET_IDS = 50_000
+# Seconds to wait between two requests to EMA's site (feed and document downloads).
+DEFAULT_EMA_DELAY_SECONDS = 2.0
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -119,6 +121,21 @@ def _slice_max_bytes() -> dict[str, int]:
         if source and value:
             out[source] = value
     return out
+
+
+def _get_non_negative_float_or_default(name: str, default: float) -> float:
+    """A float >= 0; unset, invalid or negative logs a warning (when set) and gives ``default``."""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not value >= 0:  # also rejects nan
+        _LOG.warning("%s must be a number >= 0, got %r; using %s", name, raw, default)
+        return default
+    return value
 
 
 def _get_positive_int_or_none(name: str) -> int | None:
@@ -246,6 +263,8 @@ class Settings:
     # records the width under _ops/pmc/ and refuses a run at another width until the
     # old parts are retired (episteme.data.pmc.buckets.check_bucket_width).
     pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
+    # Seconds between two requests to EMA (EPISTEME_EMA_DELAY_SECONDS).
+    ema_delay_seconds: float = DEFAULT_EMA_DELAY_SECONDS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -367,8 +386,22 @@ def get_settings() -> Settings:
         pmc_bucket_ids=_get_positive_int_or_default(
             "EPISTEME_PMC_BUCKET_IDS", DEFAULT_PMC_BUCKET_IDS
         ),
+        ema_delay_seconds=_get_non_negative_float_or_default(
+            "EPISTEME_EMA_DELAY_SECONDS", DEFAULT_EMA_DELAY_SECONDS
+        ),
         slice_max_bytes=_slice_max_bytes(),
     )
+
+
+def source_url(name: str) -> str:
+    """Endpoint URL for a ``scripts/data/_lib/sources.env`` key (the real
+    environment and ``.env`` may override it). Raises ``ConfigError`` when the key
+    has no value. Feed config holds key names only; this is where a name becomes a URL."""
+    get_settings()  # loads sources.env once
+    value = _get(name)
+    if not value:
+        raise ConfigError(f"{name} is not set (add it to scripts/data/_lib/sources.env)")
+    return value
 
 
 def require_actor() -> str:

@@ -1,0 +1,195 @@
+# One entry per feed. A new dataset of a known format is a new entry here, a key in
+# scripts/data/_lib/sources.env and a gate rule; a new format is one parser.
+# url_key names a key of sources.env: no URL is allowed in this file.
+# Field names may be dotted paths into nested records.
+# record_key = [] means "no natural id": the loader hashes the whole row.
+
+[feeds.ema_medicines]
+url_key = "EMA_MEDICINES_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["ema_product_number"]
+substance_fields = ["active_substance", "international_non_proprietary_name_common_name"]
+product_fields = ["ema_product_number"]
+date_field = "marketing_authorisation_date"
+cadence = "monthly"
+
+[feeds.ema_post_authorisation]
+# ema_product_number repeats (152 rows, 133 products); medicine_url is unique in the 2026-11-02 sample.
+url_key = "EMA_POST_AUTHORISATION_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["medicine_url"]
+substance_fields = ["active_substance", "international_non_proprietary_name_common_name"]
+product_fields = ["ema_product_number"]
+date_field = "post_authorisation_opinion_date"
+cadence = "monthly"
+
+[feeds.ema_orphan]
+# eu_designation_number repeats (3,310 rows, 3,270 numbers); the url is unique in the 2026-11-02 sample.
+url_key = "EMA_ORPHAN_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["orphan_designation_url"]
+substance_fields = ["active_substance"]
+product_fields = ["related_ema_product_number"]
+date_field = "date_of_designation_or_refusal"
+cadence = "monthly"
+
+[feeds.ema_pip]
+# decision_number and pip_number repeat; the url is unique in the 2026-11-02 sample.
+url_key = "EMA_PIP_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["pip_url"]
+substance_fields = ["active_substance"]
+product_fields = []
+date_field = "decision_date"
+cadence = "monthly"
+
+[feeds.ema_psusa]
+# procedure_number repeats; the url is unique in the 2026-11-02 sample.
+url_key = "EMA_PSUSA_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["psusa_url"]
+substance_fields = ["active_substance", "active_substances_in_scope_of_procedure"]
+product_fields = []
+date_field = "first_published_date"
+cadence = "monthly"
+
+[feeds.ema_referrals]
+# reference_number repeats; the url is unique in the 2026-11-02 sample.
+url_key = "EMA_REFERRALS_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["referral_url"]
+substance_fields = ["international_non_proprietary_name_inn_common_name"]
+product_fields = []
+date_field = "procedure_start_date"
+cadence = "monthly"
+
+[feeds.ema_dhpc]
+url_key = "EMA_DHPC_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["dhpc_url"]
+substance_fields = ["active_substances"]
+product_fields = []
+date_field = "dissemination_date"
+cadence = "monthly"
+
+[feeds.ema_shortages]
+url_key = "EMA_SHORTAGES_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["shortage_url"]
+substance_fields = ["international_non_proprietary_name_inn_or_common_name"]
+product_fields = []
+date_field = "start_of_shortage_date"
+cadence = "monthly"
+
+[feeds.ema_mrl]
+url_key = "EMA_MRL_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["url"]
+substance_fields = ["active_substance"]
+product_fields = []
+date_field = "date_of_commission_implementing_decision"
+cadence = "monthly"
+
+[feeds.ema_herbal]
+# 251 rows but 204 distinct urls and meta.total_records = 204: the feed repeats rows. The loader counts and drops exact duplicates.
+url_key = "EMA_HERBAL_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["herbal_medicine_url"]
+substance_fields = ["latin_name", "botanical_name"]
+product_fields = []
+date_field = "date_added_to_the_inventory"
+cadence = "monthly"
+
+[feeds.ema_outside_eu]
+url_key = "EMA_OUTSIDE_EU_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["ema_opinion_number"]
+substance_fields = ["active_substance", "international_non_proprietary_name_inn_common_name"]
+product_fields = []
+date_field = "date_of_opinion"
+cadence = "monthly"
+
+[feeds.ema_article57]
+# No natural id: the loader hashes the row and drops exact duplicates. Substances are separated by |.
+url_key = "EMA_ARTICLE57_XLSX"
+format = "article57_xlsx"
+jurisdiction = "EU"
+record_key = []
+substance_fields = ["active_substance"]
+product_fields = ["product_name"]
+cadence = "monthly"
+
+[feeds.ema_epar_documents]
+# Document index, not substance data; the document text step reads it.
+url_key = "EMA_EPAR_DOCUMENTS_JSON"
+format = "ema_json"
+jurisdiction = "EU"
+record_key = ["id"]
+substance_fields = []
+product_fields = ["ema_product_number"]
+date_field = "first_published_date"
+cadence = "monthly"
+
+[feeds.fda_enforcement]
+# url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. code_info holds the lot numbers.
+url_key = "OPENFDA_CATALOG"
+format = "openfda_json"
+jurisdiction = "US"
+record_key = ["recall_number"]
+substance_fields = ["openfda.substance_name"]
+product_fields = ["openfda.product_ndc", "openfda.application_number"]
+date_field = "report_date"
+cadence = "monthly"
+
+[feeds.fda_ndc]
+# url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. Field names from the openFDA documentation; not yet checked on a downloaded file.
+url_key = "OPENFDA_CATALOG"
+format = "openfda_json"
+jurisdiction = "US"
+record_key = ["product_id"]
+substance_fields = ["generic_name", "active_ingredients.name"]
+product_fields = ["product_ndc", "packaging.package_ndc"]
+date_field = "marketing_start_date"
+cadence = "monthly"
+
+[feeds.fda_drugsfda]
+# url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. Field names from the openFDA documentation; not yet checked on a downloaded file.
+url_key = "OPENFDA_CATALOG"
+format = "openfda_json"
+jurisdiction = "US"
+record_key = ["application_number"]
+substance_fields = ["products.active_ingredients.name"]
+product_fields = ["application_number"]
+cadence = "monthly"
+
+[feeds.fda_orangebook]
+# url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. Products are nested. The key and field names are NOT verified against a downloaded file: with no key the loader hashes the row. Check on the first sample.
+url_key = "OPENFDA_CATALOG"
+format = "openfda_json"
+jurisdiction = "US"
+record_key = []
+substance_fields = ["products.ingredient"]
+product_fields = ["application_number"]
+cadence = "monthly"
+
+[feeds.fda_shortages]
+# url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. The key and field names are NOT verified against a downloaded file: with no key the loader hashes the row. Check on the first sample.
+url_key = "OPENFDA_CATALOG"
+format = "openfda_json"
+jurisdiction = "US"
+record_key = []
+substance_fields = ["generic_name"]
+product_fields = ["package_ndc"]
+date_field = "update_date"
+cadence = "monthly"
