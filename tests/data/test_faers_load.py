@@ -16,6 +16,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from episteme.data.regulatory.faers import load as fl
+from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = REPO_ROOT / "src/episteme/data/db/migrations"
@@ -49,8 +50,9 @@ def _report(
     return report
 
 
-def _zip(raw: Path, quarter: str, reports: list[dict], n: int = 1) -> Path:
-    path = raw / "drug" / "event" / quarter / f"drug-event-{n:04d}-of-0009.json.zip"
+def _zip(raw: Path, quarter: str, reports: list[dict], n: int = 1, of: int = 1) -> Path:
+    """A zip named as openFDA names it; by default the whole of its quarter."""
+    path = raw / "drug" / "event" / quarter / f"drug-event-{n:04d}-of-{of:04d}.json.zip"
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr(path.name.removesuffix(".zip"), json.dumps({"meta": {}, "results": reports}))
@@ -193,9 +195,138 @@ def test_no_inputs_is_refused(tmp_path):
         fl.load_generation(None, [], raw_dir=tmp_path, processed_dir=tmp_path, run_id="r")
 
 
-def test_main_with_no_files_and_force_without_reason(capsys):
+def test_main_refuses_force_without_a_reason(capsys):
     assert fl.main(["--force"]) == 2
     assert "--reason" in capsys.readouterr().err
+
+
+def test_main_refuses_allow_partial_without_a_reason(capsys):
+    assert fl.main(["--allow-partial"]) == 2
+    assert "--reason" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# pure: the input set and the floor
+# ---------------------------------------------------------------------------
+def _names(*names):
+    return [Path("raw/drug/event") / n for n in names]
+
+
+def test_a_complete_input_set_has_no_problems():
+    paths = _names(
+        "2020q1/drug-event-0001-of-0002.json.zip",
+        "2020q1/drug-event-0002-of-0002.json.zip",
+        "2020q2/drug-event-0001-of-0001.json.zip",
+    )
+    assert fl.check_input_set(paths) == []
+
+
+def test_a_missing_part_is_a_problem():
+    problems = fl.check_input_set(
+        _names(
+            "2020q1/drug-event-0001-of-0003.json.zip",
+            "2020q1/drug-event-0003-of-0003.json.zip",
+        )
+    )
+    assert len(problems) == 1
+    assert "2020q1" in problems[0] and "missing" in problems[0] and "2" in problems[0]
+
+
+def test_two_totals_in_one_quarter_are_a_problem():
+    # A stale file of the old issue next to the new issue.
+    problems = fl.check_input_set(
+        _names(
+            "2020q1/drug-event-0001-of-0001.json.zip",
+            "2020q1/drug-event-0001-of-0002.json.zip",
+            "2020q1/drug-event-0002-of-0002.json.zip",
+        )
+    )
+    assert len(problems) == 1
+    assert "2020q1" in problems[0] and "several totals" in problems[0]
+
+
+def test_a_part_above_its_total_and_an_unknown_name_are_problems():
+    problems = fl.check_input_set(
+        _names(
+            "2020q1/drug-event-0002-of-0001.json.zip",
+            "2020q2/notes.zip",
+        )
+    )
+    assert len(problems) == 2
+    assert any("2020q1" in p for p in problems) and any("notes.zip" in p for p in problems)
+
+
+def test_a_partial_input_set_is_refused_before_any_database_work(tmp_path):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")], 1, 2)
+    with pytest.raises(fl.InputSetError, match="--allow-partial"):
+        fl.load_generation(None, [z], raw_dir=raw, processed_dir=tmp_path, run_id="r")
+
+
+@pytest.mark.parametrize(
+    ("reports", "live", "share", "below"),
+    [
+        (89, 100, 0.9, True),
+        (90, 100, 0.9, False),
+        (1, 0, 0.9, False),  # no live generation, no floor
+        (100, 100, 1.0, False),
+    ],
+)
+def test_floor(reports, live, share, below):
+    assert fl.below_floor(reports, live, share) is below
+
+
+# ---------------------------------------------------------------------------
+# pure: the format version
+# ---------------------------------------------------------------------------
+def test_a_changed_format_version_changes_the_fingerprint(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "raw", "2020q1", [_report("1")])
+    first = fl.fingerprint([(z, "k")])
+    monkeypatch.setattr(fl, "FORMAT_VERSION", fl.FORMAT_VERSION + 1)
+    second = fl.fingerprint([(z, "k")])
+    assert first != second
+    # The unfinished generation is dropped, and the live one is not current.
+    d = fl.decide_generation(second, live=first, unfinished={GEN_A: first}, force=False)
+    assert (d.action, d.generation, d.drop) == ("fresh", None, [GEN_A])
+
+
+# ---------------------------------------------------------------------------
+# pure: the swap's errors, and the failed drop
+# ---------------------------------------------------------------------------
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, query, params=None):
+        if not isinstance(query, str):  # the composed LOCK TABLE
+            raise psycopg.errors.DeadlockDetected("deadlock")
+
+
+class _FakeConn:
+    def cursor(self):
+        return _FakeCursor()
+
+    def rollback(self):
+        pass
+
+    def commit(self):
+        pass
+
+
+def test_a_deadlock_in_the_swap_is_a_swap_error(monkeypatch):
+    monkeypatch.setattr(fl, "_check_access", lambda *a: None)
+    with pytest.raises(fl.GenerationSwapError, match="old generation still serves"):
+        fl._swap(_FakeConn(), GEN_A, FP_A, {"reports": 1}, {"fingerprint": None, "reports": 0}, "r")
+
+
+def test_a_failed_old_generation_drop_prints_the_retry_action(monkeypatch, capsys):
+    monkeypatch.setattr(fl, "_drop_tables", lambda conn, names: False)
+    assert fl._drop_old_generation(None, GEN_A) is False
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "run the load again" in err and GEN_A in err
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +450,7 @@ def test_generation_swap_is_atomic(db, reader, tmp_path, monkeypatch):
 def test_a_failed_zip_leaves_the_old_generation_serving(db, tmp_path, monkeypatch):
     raw = tmp_path / "raw"
     _run(db, tmp_path, [_zip(raw, "2020q1", [_report("old")])])
-    bad = raw / "drug" / "event" / "2020q2" / "drug-event-0001-of-0009.json.zip"
+    bad = raw / "drug" / "event" / "2020q2" / "drug-event-0001-of-0001.json.zip"
     bad.parent.mkdir(parents=True)
     with zipfile.ZipFile(bad, "w") as zf:
         zf.writestr("x.json", '{"results": [{"safetyreportid": "cut"')
@@ -392,14 +523,35 @@ def test_a_new_parent_with_other_privileges_is_refused_before_the_copy(db, tmp_p
 def test_parents_carry_the_plain_names_and_prune_after_a_swap(db, tmp_path):
     raw = tmp_path / "raw"
     access_before = _access(db)
-    out = _run(
-        db,
-        tmp_path,
-        [_zip(raw, "2020q1", [_report("r24", received="20240301", drugs=("X",))])],
-    )
+    report = _report("r24", received="20240301", receipt="20240302", drugs=("X",))
+    out = _run(db, tmp_path, [_zip(raw, "2020q1", [report])])
     assert out["old_generation_dropped"] is True
     assert _generation_relations(db) == []
     assert access_before == _access(db)
+
+    # A second generation: the plain names again, and only the new token on the indexes.
+    second = _run(db, tmp_path, [_zip(raw, "2020q2", [report])])
+    assert second["generation"] != out["generation"]
+    assert second["old_generation_dropped"] is True
+    assert _generation_relations(db) == []
+    assert access_before == _access(db)
+    index_names = {
+        r[0]
+        for r in _all(
+            db,
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'episteme' "
+            "AND tablename = 'faers_drug_y2024'",
+        )
+    }
+    assert index_names == {
+        f"faers_drug_{second['generation']}_y2024_{suffix}"
+        for suffix, _ in fl.INDEXES["faers_drug"]
+    }
+    assert _all(
+        db,
+        "SELECT count(*) FROM pg_indexes WHERE schemaname = 'episteme' AND indexname ~ %s",
+        (out["generation"],),
+    ) == [(0,)]
     db.rollback()
     leaf_names = _all(
         db,
@@ -457,7 +609,7 @@ def test_duplicate_id_across_two_year_partitions_keeps_one_copy(db, tmp_path):
     zips = [
         _zip(raw, "2020q1", [_report("x", version=1, received="20150101", drugs=("A",))]),
         _zip(raw, "2020q2", [_report("x", version=2, received="20200101", drugs=("B",))]),
-        _zip(raw, "2020q3", [_report("x", version=3, received=None, drugs=("C",))]),
+        _zip(raw, "2020q3", [_report("x", version=3, received=None, receipt=None, drugs=("C",))]),
     ]
     out = _run(db, tmp_path, zips)
     assert out["duplicates_cross_year"] == 2
@@ -480,7 +632,8 @@ def test_report_absent_from_new_issue_disappears(db, tmp_path):
     raw = tmp_path / "raw"
     _run(db, tmp_path, [_zip(raw, "2020q1", [_report("a"), _report("b")])])
     assert _ids(db) == ["a", "b"]
-    _run(db, tmp_path, [_zip(raw, "2020q2", [_report("a")])])
+    # A real withdrawal this large is below the floor, so it takes the override.
+    _run(db, tmp_path, [_zip(raw, "2020q2", [_report("a")])], override_reason="withdrawn")
     assert _ids(db) == ["a"]
     assert _all(db, "SELECT DISTINCT safetyreportid FROM episteme.faers_drug") == [("a",)]
 
@@ -642,7 +795,11 @@ def test_report_without_a_date_goes_to_the_default_partition_and_is_counted(db, 
     z = _zip(
         raw,
         "2020q1",
-        [_report("dated"), _report("none", received=None), _report("old", received="19990101")],
+        [
+            _report("dated"),
+            _report("none", received=None, receipt=None),
+            _report("old", received="19990101"),
+        ],
     )
     out = _run(db, tmp_path, [z])
     assert out["no_date"] == 1
@@ -704,7 +861,7 @@ def test_rows_are_typed_and_joined_through_the_dictionaries(db, tmp_path):
         "FROM episteme.faers_drug d JOIN episteme.faers_drug_entry e USING (drug_entry_id) "
         "WHERE d.safetyreportid = '26933255' ORDER BY d.seq",
     )
-    key = "drug__event__2026q2__drug-event-0001-of-0009.json.zip"
+    key = "drug__event__2026q2__drug-event-0001-of-0001.json.zip"
     assert rows[0] == (1, "suspect", "DUPIXENT", "DUPILUMAB", "5F841A", "5F841A", 2026, key)
     assert rows[1][1] == "concomitant"
     terms = _all(
@@ -762,4 +919,224 @@ def test_a_loaded_zip_writes_one_audit_row_and_the_swap_another(db, tmp_path):
     )
     assert rows[0][0] == "load_replace" and rows[0][2] == 1
     assert out["generation"] in str(rows[0][1])
+    old_value, new_value = _all(
+        db,
+        "SELECT old_value, new_value FROM episteme._audit "
+        "WHERE run_id = 't' AND event_type = 'load_replace' ORDER BY seq DESC LIMIT 1",
+    )[0]
+    assert old_value == {"fingerprint": None, "reports": 0}
+    assert new_value["generation"] == out["generation"]
+    assert new_value["reports"] == 1
+    for key in ("duplicates_removed", "duplicates_cross_year", "duplicates_in_zip", "no_date"):
+        assert new_value[key] == 0, key
     assert rows[1][0] == "load_commit" and rows[1][1].startswith("drug__event__2020q1__")
+
+
+@pytest.mark.pg
+def test_the_audit_row_of_a_swap_holds_the_old_generation_and_the_removals(db, tmp_path):
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report("a")])])
+    live_print = _all(db, "SELECT obj_description('episteme.faers_report'::regclass, 'pg_class')")
+    zips = [
+        _zip(raw, "2020q2", [_report("a", version=1)]),
+        _zip(raw, "2020q3", [_report("a", version=2), _report("n", received=None, receipt=None)]),
+    ]
+    _run(db, tmp_path, zips)
+    old_value, new_value = _all(
+        db,
+        "SELECT old_value, new_value FROM episteme._audit "
+        "WHERE run_id = 't' AND event_type = 'load_replace' ORDER BY seq DESC LIMIT 1",
+    )[0]
+    assert old_value == {"fingerprint": live_print[0][0], "reports": 1}
+    assert new_value["duplicates_removed"] == 1 and new_value["no_date"] == 1
+
+
+@pytest.mark.pg
+def test_stored_dates_are_the_first_receipt_and_both_raw_values(db, tmp_path):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2004q2", [_report("7547238-2", received="20110614", receipt="20040616")])
+    _run(db, tmp_path, [z])
+    rows = _all(
+        db,
+        "SELECT receive_year, receive_date::text, receipt_date::text, source_receive_date::text "
+        "FROM episteme.faers_report",
+    )
+    assert rows == [(2004, "2004-06-16", "2004-06-16", "2011-06-14")]
+
+
+@pytest.mark.pg
+def test_a_new_format_version_rebuilds_a_current_generation(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")])
+    first = _run(db, tmp_path, [z])
+    assert _run(db, tmp_path, [z])["status"] == "current"
+    monkeypatch.setattr(fl, "FORMAT_VERSION", fl.FORMAT_VERSION + 1)
+    again = _run(db, tmp_path, [z])
+    assert again["status"] == "swapped" and again["generation"] != first["generation"]
+
+
+@pytest.mark.pg
+def test_a_new_format_version_does_not_resume_an_unfinished_generation(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    one = _zip(raw, "2020q1", [_report("1")])
+    two = _zip(raw, "2020q2", [_report("2")])
+    real = fl.iter_reports
+
+    def fail_on_two(path):
+        if path == two:
+            raise RuntimeError("stop here")
+        return real(path)
+
+    monkeypatch.setattr(fl, "iter_reports", fail_on_two)
+    with pytest.raises(RuntimeError):
+        _run(db, tmp_path, [one, two])
+    db.rollback()
+    unfinished = list(_unfinished(db))
+    monkeypatch.setattr(fl, "iter_reports", real)
+    monkeypatch.setattr(fl, "FORMAT_VERSION", fl.FORMAT_VERSION + 1)
+    out = _run(db, tmp_path, [one, two])
+    assert out["generation"] not in unfinished
+    assert out["zips_loaded"] == 2 and out["zips_skipped"] == 0
+    assert _generation_relations(db) == []
+
+
+@pytest.mark.pg
+def test_the_floor_refuses_a_small_issue_and_the_override_passes_it(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report(str(i)) for i in range(10)])])
+    small = _zip(raw, "2020q2", [_report("1")])
+    with pytest.raises(fl.GenerationError, match="EPISTEME_FAERS_MIN_LIVE_SHARE"):
+        _run(db, tmp_path, [small])
+    db.rollback()
+    assert len(_ids(db)) == 10
+    assert len(_unfinished(db)) == 1
+
+    # The override resumes the built generation, and leaves an audit row with its reason.
+    monkeypatch.setattr(fl, "iter_reports", lambda _p: pytest.fail("a finished zip was read"))
+    out = _run(db, tmp_path, [small], override_reason="FDA withdrew most reports")
+    assert out["status"] == "swapped" and out["overrides"] == ["live floor"]
+    assert _ids(db) == ["1"]
+    rows = _all(
+        db,
+        "SELECT object, reason FROM episteme._audit WHERE event_type = 'force_override' "
+        "AND run_id = 't' ORDER BY seq DESC LIMIT 1",
+    )
+    assert rows[0][1] == "FDA withdrew most reports" and "floor" in rows[0][0]
+
+
+@pytest.mark.pg
+def test_the_share_comes_from_the_settings(db, tmp_path, monkeypatch):
+    monkeypatch.setenv("EPISTEME_FAERS_MIN_LIVE_SHARE", "0.05")
+    from episteme.config import get_settings
+
+    get_settings.cache_clear()
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report(str(i)) for i in range(10)])])
+    assert _run(db, tmp_path, [_zip(raw, "2020q2", [_report("1")])])["overrides"] == []
+
+
+@pytest.mark.pg
+def test_the_override_passes_a_partial_input_set_and_is_audited(db, tmp_path):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")], 1, 2)
+    out = _run(db, tmp_path, [z], override_reason="one file on purpose")
+    assert out["status"] == "swapped" and out["overrides"] == ["input set"]
+    rows = _all(
+        db,
+        "SELECT object, reason FROM episteme._audit WHERE event_type = 'force_override' "
+        "AND run_id = 't' ORDER BY seq DESC LIMIT 1",
+    )
+    assert rows[0][1] == "one file on purpose" and "input set" in rows[0][0]
+
+
+@pytest.mark.pg
+def test_a_sample_run_bypasses_both_checks_with_no_override(db, tmp_path):
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report(str(i)) for i in range(10)])])
+    z = _zip(raw, "2020q2", [_report("1")], 1, 2)
+    out = _run(db, tmp_path, [z], sample=True)
+    assert out["status"] == "swapped" and out["overrides"] == []
+    assert _ids(db) == ["1"]
+
+
+@pytest.mark.pg
+def test_long_batch_and_long_id_stop_nothing_and_are_counted(db, tmp_path):
+    raw = tmp_path / "raw"
+    long_batch = "A" * (MAX_INDEX_TEXT_BYTES + 1)
+    report = _report("1")
+    report["patient"]["drug"][0]["drugbatchnumb"] = long_batch
+    too_long_id = _report("9" * (MAX_INDEX_TEXT_BYTES + 1))
+    out = _run(db, tmp_path, [_zip(raw, "2020q1", [report, too_long_id])])
+    assert out["long_batches"] == 1 and out["long_ids"] == 1 and out["reports"] == 1
+    assert _ids(db) == ["1"]
+    assert _all(db, "SELECT length(batch_number), batch_norm FROM episteme.faers_drug") == [
+        (MAX_INDEX_TEXT_BYTES + 1, None)
+    ]
+
+
+@pytest.mark.pg
+def test_post_load_runs_after_the_indexes_and_a_failure_keeps_the_old_generation(
+    db, reader, tmp_path
+):
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report("old")])])
+    z = _zip(raw, "2020q2", [_report("new")])
+    calls = []
+
+    def callback(conn):
+        generation = next(iter(fl.unfinished_generations(conn)))
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname = 'episteme' AND tablename = %s",
+                (fl.leaf_table("faers_report", generation, "_y2020"),),
+            )
+            indexes = cur.fetchone()[0]
+            cur.execute(
+                psycopg.sql.SQL("SELECT safetyreportid FROM {}").format(
+                    psycopg.sql.Identifier(
+                        "episteme", fl.generation_table("faers_report", generation)
+                    )
+                )
+            )
+            built = cur.fetchall()
+        calls.append((indexes, built, _ids(reader)))
+        if len(calls) == 1:
+            with conn.cursor() as cur:  # work that the failure must undo
+                cur.execute("CREATE TABLE episteme.faers_post_load_probe (x int)")
+            raise RuntimeError("the callback failed")
+
+    with pytest.raises(RuntimeError, match="the callback failed"):
+        _run(db, tmp_path, [z], post_load=callback)
+    db.rollback()
+    assert calls == [(1, [("new",)], ["old"])]  # after the indexes, before the swap
+    assert _ids(reader) == ["old"]
+    assert _all(db, "SELECT to_regclass('episteme.faers_post_load_probe')") == [(None,)]
+    assert len(_unfinished(db)) == 1
+
+    out = _run(db, tmp_path, [z], post_load=callback)
+    assert out["status"] == "swapped" and out["zips_skipped"] == 1
+    assert len(calls) == 2
+    assert _ids(reader) == ["new"]
+
+
+@pytest.mark.pg
+def test_post_load_is_not_repeated_after_a_failed_swap(db, reader, tmp_path, monkeypatch):
+    monkeypatch.setenv("EPISTEME_FAERS_LOCK_TIMEOUT_S", "1")
+    from episteme.config import get_settings
+
+    get_settings.cache_clear()
+    raw = tmp_path / "raw"
+    _run(db, tmp_path, [_zip(raw, "2020q1", [_report("old")])])
+    z = _zip(raw, "2020q2", [_report("new")])
+    calls = []
+    reader.autocommit = False
+    with reader.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.faers_report")
+    with pytest.raises(fl.GenerationSwapError):
+        _run(db, tmp_path, [z], post_load=lambda conn: calls.append(1))
+    reader.rollback()
+    reader.autocommit = True
+    db.rollback()
+    _run(db, tmp_path, [z], post_load=lambda conn: calls.append(1))
+    assert calls == [1]
+    assert _ids(reader) == ["new"]

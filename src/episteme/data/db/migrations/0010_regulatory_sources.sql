@@ -98,8 +98,9 @@ CREATE INDEX IF NOT EXISTS substance_xref_substance_key_idx
 CREATE TABLE IF NOT EXISTS episteme.faers_report (
     safetyreportid            text NOT NULL,
     receive_year              integer,
-    receive_date              date,
-    receipt_date              date,
+    receive_date              date,  -- the first receipt: the earlier of the two below
+    receipt_date              date,  -- receiptdate as published
+    source_receive_date       date,  -- receivedate as published
     version                   integer,
     serious                   boolean,
     serious_death             boolean,
@@ -114,6 +115,9 @@ CREATE TABLE IF NOT EXISTS episteme.faers_report (
     weight_kg                 real,
     source_file               text
 ) PARTITION BY RANGE (receive_year);
+
+-- For a database that applied an earlier draft of this file.
+ALTER TABLE episteme.faers_report ADD COLUMN IF NOT EXISTS source_receive_date date;
 
 CREATE TABLE IF NOT EXISTS episteme.faers_drug (
     safetyreportid text NOT NULL,

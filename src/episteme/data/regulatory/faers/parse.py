@@ -9,10 +9,15 @@ One JSON shape covers all eras, but the field coverage differs. The rules:
 * **Seriousness.** ``'1'`` is yes and ``'2'`` is no. Old reports list a flag only when
   it is true, so a missing flag means no when the report has ``serious`` or any other
   seriousness field. A report with none of these fields is unknown (``None``).
-* **Dates.** ``YYYYMMDD`` only. Any other value gives ``None``. ``receive_year`` comes
-  from ``receivedate`` (``_receive_date`` is the one place that chooses it). A report
-  with no usable date has ``receive_year`` ``None``, so it goes to the default
-  partition, and ``count_report`` counts it.
+* **Dates.** ``YYYYMMDD`` only. Any other value gives ``None``. ``receive_date`` and
+  ``receive_year`` hold the first receipt: the earlier of ``receivedate`` and
+  ``receiptdate``, or the one that is usable (``_first_receipt`` is the one place that
+  chooses it). Up to 2012 ``receiptdate`` is usually the earlier, and from 2018
+  ``receivedate`` is. ``source_receive_date`` and ``receipt_date`` keep the published
+  values. A report with no usable date has ``receive_year`` ``None``, so it goes to the
+  default partition, and ``count_report`` counts it.
+* **Ids.** ``safetyreportid`` stays whole. The old-era suffix (``7547238-2``) is a check
+  digit, not a version.
 * **Active substance.** The published ``activesubstance``; else the annotation's
   ``substance_name`` values, sorted and joined with ``"; "`` (``split_names`` splits
   on that); else ``norm_name`` of the product name.
@@ -28,7 +33,11 @@ Codes stay as published: ``sex`` (``patientsex``), ``route``
 (``drugadministrationroute``) and ``outcome`` (``reactionoutcome``). ``role`` is
 decoded: ``1`` suspect, ``2`` concomitant, ``3`` interacting. Reaction terms stay as
 published, with their case. ``batch_number`` keeps the published text, and
-``batch_norm`` is ``norm_lot`` of it.
+``batch_norm`` is ``norm_lot`` of it, or ``None`` when that is too long to be an index key
+(``batch_norm_too_long``).
+
+``FORMAT_VERSION`` goes into the fingerprint of a generation. Raise it when the row output
+changes, so that no generation mixes two sets of rules.
 
 All text loses U+0000 and lone surrogates (PostgreSQL refuses them) and U+001F (the
 separator of the ``faers_drug_entry`` md5 key). Empty text becomes ``None``, as the
@@ -48,8 +57,10 @@ from typing import Any
 
 import ijson
 
-from episteme.data.regulatory.normalize import norm_lot, norm_name
+from episteme.data.regulatory.normalize import fits_index, norm_lot, norm_name
 
+# Raise when the rows that this module gives for one report change.
+FORMAT_VERSION = 1
 _ROLES = {"1": "suspect", "2": "concomitant", "3": "interacting"}
 _FLAG_VALUES = {"1": True, "2": False}
 # Row column -> source field. The source spells the congenital flag this way.
@@ -107,9 +118,9 @@ def _date(value: Any) -> date | None:
         return None
 
 
-def _receive_date(report: dict) -> date | None:
+def _first_receipt(received: date | None, receipt: date | None) -> date | None:
     """The date that sets ``receive_year`` and the signal quarter."""
-    return _date(report.get("receivedate"))
+    return min((d for d in (received, receipt) if d), default=None)
 
 
 def _int(value: Any) -> int | None:
@@ -192,6 +203,8 @@ def _drug_row(report_id: str | None, year: int | None, seq: int, drug: dict) -> 
     product = _text(drug.get("medicinalproduct"))
     annotation, annotated_names = _annotation(drug)
     batch = _text(drug.get("drugbatchnumb"))
+    batch_norm = norm_lot(batch) if batch else None
+    batch_too_long = batch_norm is not None and not fits_index(batch_norm)
     substance = (
         _published_substance(drug)
         or "; ".join(annotated_names)
@@ -206,7 +219,8 @@ def _drug_row(report_id: str | None, year: int | None, seq: int, drug: dict) -> 
         "active_substance": substance,
         "annotation": annotation,
         "batch_number": batch,
-        "batch_norm": norm_lot(batch) if batch else None,
+        "batch_norm": None if batch_too_long else batch_norm,
+        "batch_norm_too_long": batch_too_long,
         "route": _text(drug.get("drugadministrationroute")),
         "indication": _text(drug.get("drugindication")),
     }
@@ -219,7 +233,9 @@ def report_rows(report: dict) -> tuple[dict, list[dict], list[dict]]:
     loader turns these into ids. A report with no id has ``safetyreportid`` ``None``,
     and the loader skips and counts it."""
     report_id = _text(report.get("safetyreportid"))
-    received = _receive_date(report)
+    source_received = _date(report.get("receivedate"))
+    receipt = _date(report.get("receiptdate"))
+    received = _first_receipt(source_received, receipt)
     year = received.year if received else None
     patient = report.get("patient")
     if not isinstance(patient, dict):
@@ -230,7 +246,8 @@ def report_rows(report: dict) -> tuple[dict, list[dict], list[dict]]:
         "safetyreportid": report_id,
         "receive_year": year,
         "receive_date": received,
-        "receipt_date": _date(report.get("receiptdate")),
+        "receipt_date": receipt,
+        "source_receive_date": source_received,
         "version": _int(report.get("safetyreportversion")),
         **_seriousness(report),
         "country": (

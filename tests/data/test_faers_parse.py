@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from episteme.data.regulatory.faers import parse
+from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faers"
 
@@ -93,13 +94,42 @@ def test_a_report_with_a_date_is_not_counted_as_no_date():
     assert counts["no_date"] == 0
 
 
-def test_receive_year_comes_from_receivedate_not_receiptdate():
+def test_first_receipt_is_the_earlier_date_and_both_raw_values_stay():
     row, drugs, reactions = parse.report_rows(_by_id("2004q2", "7547238-2"))
-    assert row["receive_date"] == date(2011, 6, 14)
+    assert row["source_receive_date"] == date(2011, 6, 14)
     assert row["receipt_date"] == date(2004, 6, 16)
-    assert row["receive_year"] == 2011
-    assert {d["receive_year"] for d in drugs} == {2011}
-    assert {r["receive_year"] for r in reactions} == {2011}
+    assert row["receive_date"] == date(2004, 6, 16)
+    assert row["receive_year"] == 2004
+    assert {d["receive_year"] for d in drugs} == {2004}
+    assert {r["receive_year"] for r in reactions} == {2004}
+
+
+def test_first_receipt_takes_receivedate_when_it_is_the_earlier():
+    row, _, _ = parse.report_rows(
+        {"safetyreportid": "1", "receivedate": "20260616", "receiptdate": "20260626"}
+    )
+    assert row["receive_date"] == date(2026, 6, 16) and row["receive_year"] == 2026
+    assert row["receipt_date"] == date(2026, 6, 26)
+
+
+@pytest.mark.parametrize(
+    ("report", "first"),
+    [
+        ({"receiptdate": "20040616"}, date(2004, 6, 16)),
+        ({"receivedate": "20110614"}, date(2011, 6, 14)),
+        ({"receivedate": "bad", "receiptdate": "20040616"}, date(2004, 6, 16)),
+        ({"receivedate": "20110614", "receiptdate": "bad"}, date(2011, 6, 14)),
+        ({"receivedate": "bad", "receiptdate": "bad"}, None),
+    ],
+)
+def test_first_receipt_handles_a_missing_date(report, first):
+    row, _, _ = parse.report_rows({"safetyreportid": "1", **report})
+    assert row["receive_date"] == first
+    assert row["receive_year"] == (first.year if first else None)
+
+
+def test_old_era_id_keeps_its_check_digit():
+    assert parse.report_rows(_by_id("2004q2", "7547238-2"))[0]["safetyreportid"] == "7547238-2"
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +217,22 @@ def test_batch_number_kept_raw_and_normalised():
     assert drugs[2]["batch_number"] == "--" and drugs[2]["batch_norm"] is None
     real = parse.report_rows(_by_id("2026q2", "26933255"))[1][0]
     assert real["batch_number"] == "5F841A" and real["batch_norm"] == "5F841A"
+
+
+def test_a_batch_too_long_to_index_keeps_the_raw_text_only():
+    raw = "A" * (MAX_INDEX_TEXT_BYTES + 1)
+    report = {"safetyreportid": "1", "patient": {"drug": [{"drugbatchnumb": raw}]}}
+    drug = parse.report_rows(report)[1][0]
+    assert drug["batch_number"] == raw
+    assert drug["batch_norm"] is None
+    assert drug["batch_norm_too_long"] is True
+
+
+def test_a_batch_at_the_limit_is_normalised():
+    raw = "A" * MAX_INDEX_TEXT_BYTES
+    report = {"safetyreportid": "1", "patient": {"drug": [{"drugbatchnumb": raw}]}}
+    drug = parse.report_rows(report)[1][0]
+    assert drug["batch_norm"] == raw and drug["batch_norm_too_long"] is False
 
 
 def test_route_and_indication_are_kept_as_published():

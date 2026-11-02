@@ -48,7 +48,7 @@ from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.regulatory.load_reg import input_keys
-from episteme.data.regulatory.normalize import norm_name
+from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES, norm_name
 from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
@@ -56,10 +56,9 @@ _LOG = logging.getLogger(__name__)
 SCHEMA = "episteme"
 SOURCE = "openfda"
 DATASET = "fda_substance"
-# A btree entry must fit in a page (about 2.7 kB). A name longer than this (some
-# chemical names) is skipped and counted; it cannot be indexed in the xref key.
-# A constant, not a setting: it is a page limit tied to the schema, not an operator choice.
-MAX_NAME_BYTES = 2000
+# A name longer than this (some chemical names) is skipped and counted; it cannot be
+# indexed in the xref key.
+MAX_NAME_BYTES = MAX_INDEX_TEXT_BYTES
 _ATC_SYSTEM = "WHO-ATC"  # WHO-VATC holds the veterinary codes and is left out
 _RXCUI_SYSTEM = "RXCUI"
 _ACTIVE_MOIETY = "ACTIVE MOIETY"

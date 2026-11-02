@@ -113,6 +113,8 @@ DEFAULT_REG_LOCK_TIMEOUT_S = 300
 # after it. New readers queue behind the waiting lock, so the wait is short; a failed run
 # keeps the built generation, and a re-run goes straight to the swap.
 DEFAULT_FAERS_LOCK_TIMEOUT_S = 60
+# The FAERS loader refuses a new generation below this share of the live report count.
+DEFAULT_FAERS_MIN_LIVE_SHARE = 0.9
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -276,6 +278,9 @@ class Settings:
     reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
     # Seconds to wait for the FAERS generation swap's lock (EPISTEME_FAERS_LOCK_TIMEOUT_S).
     faers_lock_timeout_s: int = DEFAULT_FAERS_LOCK_TIMEOUT_S
+    # Lowest share of the live report count a new generation may have
+    # (EPISTEME_FAERS_MIN_LIVE_SHARE).
+    faers_min_live_share: float = DEFAULT_FAERS_MIN_LIVE_SHARE
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -405,6 +410,9 @@ def get_settings() -> Settings:
         ),
         faers_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_FAERS_LOCK_TIMEOUT_S", DEFAULT_FAERS_LOCK_TIMEOUT_S
+        ),
+        faers_min_live_share=_get_non_negative_float_or_default(
+            "EPISTEME_FAERS_MIN_LIVE_SHARE", DEFAULT_FAERS_MIN_LIVE_SHARE
         ),
         slice_max_bytes=_slice_max_bytes(),
     )

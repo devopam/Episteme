@@ -154,7 +154,7 @@ Too large for JSONB, and they need exact counts.
 | `faers_term` | `term_id` | reaction term as published |
 
 - `faers_report`, `faers_drug` and `faers_reaction`: `RANGE (receive_year)`, one partition per year, so recent-window queries prune old years. 2004 to now is 23 partitions, plus a default for a report with no usable date. Both child tables carry `receive_year` too.
-- `receive_year` comes from `receivedate`, the first receipt, which does not change across a report's versions. The signal quarter uses the same date (Claude's call).
+- `receive_year` and `receive_date` come from the first receipt: the earlier of `receivedate` and `receiptdate` (Owner, measured on 12,000 reports in each of five quarters: up to 2012 `receiptdate` is usually the earlier and lies in the file's own quarter; from 2018 `receivedate` is the earlier). Both published values stay. The signal quarter uses the same date.
 - Indexes per partition, built after the load: `faers_report (safetyreportid)`; `faers_drug (drug_entry_id)`; `faers_drug (safetyreportid)`; `faers_reaction (term_id)`; `faers_reaction (safetyreportid)`; partial `faers_drug (drug_entry_id) WHERE batch_number IS NOT NULL`.
 - **Era handling** is in one parser with explicit rules: a missing seriousness flag means "no" when the report has any flag or a non-serious marker (Claude's call, to be checked on the samples); a missing `active_substance` falls back to the annotation, then to the normalised product name.
 - **Latest copy only (Owner), by generation.** A refresh does not edit live tables. It builds a new generation of the three tables with no indexes:

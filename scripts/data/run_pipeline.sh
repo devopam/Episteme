@@ -16,7 +16,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -31,6 +31,7 @@ shift 2 || true
 require_env EPISTEME_ACTOR
 
 FORCE=0
+ALLOW_PARTIAL=0
 BULK=0
 SAMPLE=0
 SKIP_GATE=0
@@ -76,6 +77,9 @@ while [ $# -gt 0 ]; do
         # Run gated stages that have no valid pass (needs --reason): one
         # audited gate_override row per such stage.
         --skip-gate) SKIP_GATE=1; shift ;;
+        # openfda_faers load only: go on with a partial input set or below the live
+        # floor (needs --reason): one audited force_override row per check it passes.
+        --allow-partial) ALLOW_PARTIAL=1; shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -110,6 +114,13 @@ fi
 if [ "$SKIP_GATE" = "1" ]; then
     [ "$SAMPLE" = "0" ] || die "--sample and --skip-gate cannot be used together" 2
     [ -n "$REASON" ] || die "--skip-gate requires --reason" 2
+fi
+if [ "$ALLOW_PARTIAL" = "1" ]; then
+    [ "$SOURCE" = "openfda_faers" ] && [ "$STAGE" = "load" ] \
+        || die "--allow-partial is valid with openfda_faers load only" 2
+    [ -n "$REASON" ] || die "--allow-partial requires --reason" 2
+    # A sample run bypasses the checks anyway: it reads a slice on purpose.
+    [ "$SAMPLE" = "0" ] || die "--sample and --allow-partial cannot be used together" 2
 fi
 if [ "$SAMPLE" = "1" ]; then
     case "$STAGE" in
@@ -689,6 +700,10 @@ skip_reason=()
 extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
+if [ "$ALLOW_PARTIAL" = "1" ]; then
+    load_args+=(--allow-partial)
+    [ "$FORCE" = "1" ] || load_args+=(--reason "$REASON")
+fi
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force (plus --skip-unit NAME --reason R when skipping);

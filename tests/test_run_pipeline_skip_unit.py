@@ -144,6 +144,34 @@ def test_faers_wires_the_load_stage_only(tree, stage):
     assert calls == []
 
 
+def test_faers_allow_partial_is_forwarded_with_its_reason(tree):
+    proc, calls = _run(tree, "openfda_faers", "load", "--allow-partial", "--reason", "why")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh --allow-partial --reason why"]
+
+
+def test_faers_allow_partial_with_force_passes_the_reason_once(tree):
+    proc, calls = _run(
+        tree, "openfda_faers", "load", "--force", "--allow-partial", "--reason", "why"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh --force --reason why --allow-partial"]
+
+
+@pytest.mark.parametrize(
+    ("source", "stage", "args"),
+    [
+        ("openfda_faers", "load", ["--allow-partial"]),  # no reason
+        ("pubmed", "load", ["--allow-partial", "--reason", "r"]),  # not FAERS
+        ("openfda_faers", "load", ["--allow-partial", "--reason", "r", "--sample"]),
+    ],
+)
+def test_allow_partial_misuse_exits_2_and_runs_no_stage(tree, source, stage, args):
+    proc, calls = _run(tree, source, stage, *args)
+    assert proc.returncode == 2, proc.stderr
+    assert calls == []
+
+
 @pytest.mark.parametrize("source", ["ema", "openfda", "openfda_faers"])
 @pytest.mark.parametrize("stage", ["load", "all"])
 def test_bulk_is_rejected_for_the_regulatory_feeds(tree, source, stage):

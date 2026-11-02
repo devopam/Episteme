@@ -27,6 +27,7 @@ def clean_settings(tmp_path, monkeypatch):
         "EPISTEME_WRITE_BATCH_BYTES",
         "EPISTEME_PMC_BUCKET_IDS",
         "EPISTEME_FAERS_LOCK_TIMEOUT_S",
+        "EPISTEME_FAERS_MIN_LIVE_SHARE",
     ):
         monkeypatch.delenv(key, raising=False)
     cfg.get_settings.cache_clear()
@@ -39,6 +40,13 @@ def test_faers_lock_timeout_default_and_override(clean_settings):
     clean_settings.setenv("EPISTEME_FAERS_LOCK_TIMEOUT_S", "7")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().faers_lock_timeout_s == 7
+
+
+def test_faers_min_live_share_default_and_override(clean_settings):
+    assert cfg.get_settings().faers_min_live_share == 0.9
+    clean_settings.setenv("EPISTEME_FAERS_MIN_LIVE_SHARE", "0.5")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().faers_min_live_share == 0.5
 
 
 def test_tunables_default_to_todays_values(clean_settings):

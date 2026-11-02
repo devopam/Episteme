@@ -11,11 +11,21 @@ from __future__ import annotations
 import re
 import unicodedata
 
+# A btree entry must fit in a page (about 2.7 kB). Text longer than this cannot be an
+# index key, so a loader skips or blanks it, and counts it. A constant, not a setting: it
+# is a page limit tied to the schema, not an operator choice.
+MAX_INDEX_TEXT_BYTES = 2000
+
 _NAME_SEPARATORS = re.compile(r"[|;]")
 _SPACES = re.compile(r"\s+")
 _NDC_SEGMENTS = re.compile(r"^\d{1,5}-\d{1,4}-\d{1,2}$")
 _NDC_PRODUCT = re.compile(r"^\d{1,5}-\d{1,4}$")
 _APP_PREFIX = re.compile(r"^(?:ANDA|NDA|BLA)\s*", re.IGNORECASE)
+
+
+def fits_index(s: str) -> bool:
+    """Whether ``s`` is short enough to be a btree key (``MAX_INDEX_TEXT_BYTES``)."""
+    return len(s.encode("utf-8")) <= MAX_INDEX_TEXT_BYTES
 
 
 def norm_name(s: str) -> str:

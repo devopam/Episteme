@@ -1,6 +1,7 @@
 """Load FAERS by generation: readers never see a half-replaced state.
 
     python -m episteme.data.regulatory.faers.load [--raw-dir DIR] [--force --reason "..."]
+        [--allow-partial --reason "..."]
 
 FAERS is a full reissue, so a refresh does not edit the live tables. ``load_generation``
 builds new tables and swaps them in:
@@ -18,7 +19,7 @@ builds new tables and swaps them in:
    other copies go by ``(safetyreportid, source_file)`` from all three tables, and are
    counted. Only duplicated ids reach the sort, so the sort's temp space follows the
    duplicates, and the ``GROUP BY`` that finds them follows one partition. A last pass does
-   the same across partitions, for copies that disagree on ``receivedate``
+   the same across partitions, for copies that disagree on the first receipt
    (``duplicates_cross_year``). That pass is not bounded by a partition: its ``GROUP BY``
    reads all ids of the generation. No index exists yet, so any pass that finds losers
    reads the whole of its child tables to delete them.
@@ -34,10 +35,27 @@ builds new tables and swaps them in:
    ``<gen>`` token after the swap (``faers_drug_<gen>_y2024_sid``); the token is new for
    each generation, so index names never collide.
 
+**Refusals.** A swap replaces everything, and a report absent from the inputs disappears.
+So a partial or stale input set must not go live:
+
+* ``check_input_set``, on file names, before any work: each quarter must hold exactly
+  ``1..N of N``, with one ``N``. A download that stopped, ``--max-files``, and a stale
+  ``-of-0009`` next to a new ``-of-0010`` all fail it. A whole missing quarter does not, so:
+* ``below_floor``, before the indexes: a new generation below
+  ``EPISTEME_FAERS_MIN_LIVE_SHARE`` of the live report count stops. With no live
+  generation there is no floor. The built generation stays, so a re-run with the override
+  goes on from there.
+
+``override_reason`` (CLI: ``--allow-partial --reason``) passes both, and writes one
+``force_override`` audit row with its reason for each check that it passes. ``--force``
+alone does not. A sample run (``sample``; the CLI sets it on the secondary database, which
+only ``run_pipeline.sh --sample`` selects) reads a slice on purpose and skips both.
+
 **Resume: how a run decides** (``decide_generation``). The fingerprint is a SHA-256 of
-``input_key``, size and modification time of every input. It is stored as the table
-comment of the generation's ``faers_report`` parent, so it stays with the table through
-the swap.
+``FORMAT_VERSION`` (of ``parse``) and the ``input_key``, size and modification time of every
+input, so a change of the parser's rules can neither resume nor pass as current. It is
+stored as the table comment of the generation's ``faers_report`` parent, so it stays with
+the table through the swap.
 
 * An unfinished generation with this fingerprint: resume it. Zips with a progress row are
   skipped, and finished steps are not repeated.
@@ -97,9 +115,14 @@ from psycopg.types.json import Jsonb
 from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
-from episteme.data.regulatory.faers.parse import count_report, iter_reports, report_rows
+from episteme.data.regulatory.faers.parse import (
+    FORMAT_VERSION,
+    count_report,
+    iter_reports,
+    report_rows,
+)
 from episteme.data.regulatory.load_reg import input_keys
-from episteme.data.regulatory.load_substance import MAX_NAME_BYTES
+from episteme.data.regulatory.normalize import fits_index
 from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
@@ -111,6 +134,9 @@ GENERATION_RE = r"g[0-9a-f]{10}"
 _PARENT_RE = "(?:" + "|".join(PARENTS) + ")"
 _OLD_RE = f"^{_PARENT_RE}_old_{GENERATION_RE}$"
 _RANGE_BOUND = re.compile(r"FOR VALUES FROM \((-?\d+)\) TO \((-?\d+)\)")
+_PART_NAME = re.compile(r"drug-event-(\d+)-of-(\d+)\.json\.zip")
+# Part numbers shown in one refusal.
+_MAX_PARTS_SHOWN = 10
 
 # Per-partition indexes of spec 5.4, and the partial batch_norm index of its lot section.
 INDEXES: dict[str, tuple[tuple[str, str], ...]] = {
@@ -129,6 +155,7 @@ _REPORT_COLUMNS = (
     "receive_year",
     "receive_date",
     "receipt_date",
+    "source_receive_date",
     "version",
     "serious",
     "serious_death",
@@ -163,6 +190,10 @@ class GenerationError(Exception):
 
 class GenerationSwapError(GenerationError):
     """The swap could not take its lock. The old generation still serves."""
+
+
+class InputSetError(GenerationError):
+    """The input files are not a whole issue. Nothing was done."""
 
 
 # ---------------------------------------------------------------------------
@@ -207,12 +238,13 @@ def parse_bound(bound: str) -> tuple[int, int] | None:
 
 
 def fingerprint(files: Iterable[tuple[Path, str]]) -> str:
-    """SHA-256 over ``(input_key, size, mtime_ns)`` of the inputs, in key order."""
+    """SHA-256 over ``FORMAT_VERSION`` and ``(input_key, size, mtime_ns)`` of the inputs,
+    in key order."""
     rows = []
     for path, key in files:
         st = Path(path).stat()
         rows.append([key, st.st_size, st.st_mtime_ns])
-    return hashlib.sha256(json.dumps(sorted(rows)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps([FORMAT_VERSION, sorted(rows)]).encode("utf-8")).hexdigest()
 
 
 class Decision(NamedTuple):
@@ -268,6 +300,51 @@ def faers_zips(raw_dir: Path) -> list[Path]:
     """The zips under ``<raw>/drug/event/``, in path order. Nothing else is read."""
     base = Path(raw_dir) / "drug" / "event"
     return sorted(p for p in base.rglob("*.zip") if p.is_file()) if base.is_dir() else []
+
+
+def _shown(parts: Iterable[int]) -> str:
+    listed = sorted(parts)
+    more = f" and {len(listed) - _MAX_PARTS_SHOWN} more" if len(listed) > _MAX_PARTS_SHOWN else ""
+    return ", ".join(map(str, listed[:_MAX_PARTS_SHOWN])) + more
+
+
+def check_input_set(paths: Iterable[Path]) -> list[str]:
+    """The ways in which ``paths`` is not a whole issue, by file name alone; empty when each
+    quarter (the parent folder) holds exactly ``1..N of N``, with one ``N``."""
+    problems: list[str] = []
+    quarters: dict[str, list[tuple[int, int]]] = {}
+    for path in map(Path, paths):
+        match = _PART_NAME.fullmatch(path.name)
+        if match is None:
+            problems.append(f"{path.parent.name}/{path.name}: not an openFDA part name")
+            continue
+        parts = quarters.setdefault(path.parent.name, [])
+        parts.append((int(match.group(1)), int(match.group(2))))
+    for quarter, parts in sorted(quarters.items()):
+        totals = {total for _, total in parts}
+        if len(totals) > 1:
+            problems.append(f"{quarter}: several totals ({_shown(totals)}), so a stale issue")
+            continue
+        total = totals.pop()
+        numbers = [part for part, _ in parts]
+        missing = set(range(1, total + 1)) - set(numbers)
+        extra = set(numbers) - set(range(1, total + 1))
+        if missing or extra or len(numbers) != len(set(numbers)):
+            what = []
+            if missing:
+                what.append(f"missing parts {_shown(missing)}")
+            if extra:
+                what.append(f"parts above the total: {_shown(extra)}")
+            if len(numbers) != len(set(numbers)):
+                what.append("a part twice")
+            problems.append(f"{quarter}: of {total}, " + "; ".join(what))
+    return problems
+
+
+def below_floor(reports: int, live_reports: int, share: float) -> bool:
+    """Whether a new generation is too small to replace the live one. An empty live
+    generation sets no floor."""
+    return live_reports > 0 and reports < live_reports * share
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +492,21 @@ def _drop_generation(conn: psycopg.Connection, generation: str) -> None:
         raise GenerationError(f"could not drop the unfinished generation {generation}")
 
 
+def _drop_old_generation(conn: psycopg.Connection, generation: str) -> bool:
+    """Drop what the swap renamed. The new generation is live either way, so a failure
+    does not fail the run; it warns, and says what to do."""
+    names = [old_table(p, generation) for p in PARENTS]
+    dropped = _drop_tables(conn, names)
+    if not dropped:
+        print(
+            f"WARNING: generation {generation} is live, but the old tables were not dropped "
+            f"and still use disk space: {', '.join(names)}. To retry, run the load again "
+            "when no transaction holds them: each run first drops what a swap left behind.",
+            file=sys.stderr,
+        )
+    return dropped
+
+
 def _drop_old_leftovers(conn: psycopg.Connection) -> bool:
     with conn.cursor() as cur:
         names = _relations(cur, _OLD_RE)
@@ -475,7 +567,7 @@ def _resolve_entries(cur: psycopg.Cursor, drugs: list[dict], cache: dict) -> Non
 
 
 def _usable_term(term: str | None) -> bool:
-    return bool(term) and len(term.encode("utf-8")) <= MAX_NAME_BYTES
+    return bool(term) and fits_index(term)
 
 
 def _resolve_terms(cur: psycopg.Cursor, reactions: list[dict], cache: dict) -> None:
@@ -554,7 +646,7 @@ def _load_zip(
     counts: Counter = Counter(
         reports=0, drug_rows=0, reaction_rows=0, no_date=0, no_id=0, duplicates_in_zip=0
     )
-    counts["long_terms"] = 0
+    counts.update(long_terms=0, long_batches=0, long_ids=0)
     entries: dict = {}
     terms: dict = {}
     seen: set[str] = set()
@@ -569,6 +661,9 @@ def _load_zip(
                     if report_id is None:
                         counts["no_id"] += 1
                         continue
+                    if not fits_index(report_id):
+                        counts["long_ids"] += 1
+                        continue
                     if report_id in seen:
                         counts["duplicates_in_zip"] += 1
                         continue
@@ -580,6 +675,7 @@ def _load_zip(
                     counts["long_terms"] += sum(
                         1 for r in reactions if r["term"] and not _usable_term(r["term"])
                     )
+                    counts["long_batches"] += sum(d["batch_norm_too_long"] for d in drugs)
                     batch.add(row, drugs, reactions)
                     if batch.full:
                         _flush(cur, generation, key, batch, entries, terms)
@@ -749,6 +845,28 @@ def _check_rows(conn: psycopg.Connection, generation: str, expected: int) -> dic
     return {"reports": reports, "reports_in_default": in_default, "reports_no_date": no_date}
 
 
+def _live_reports(conn: psycopg.Connection) -> int:
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT count(*) FROM {t}").format(t=_ident("faers_report")))
+        count = cur.fetchone()[0]
+    conn.commit()
+    return count
+
+
+def _audit_override(
+    conn: psycopg.Connection, what: str, reason: str, detail: dict, run_id: str
+) -> None:
+    audit_trail.record(
+        "force_override",
+        conn=conn,
+        object=f"{SOURCE} {what}",
+        new_value=detail,
+        reason=reason,
+        run_id=run_id,
+    )
+    conn.commit()
+
+
 def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
     cur.execute(
         "SELECT relowner::regrole::text, relacl::text[] FROM pg_class "
@@ -781,9 +899,16 @@ def _rename(cur: psycopg.Cursor, name: str, new_name: str) -> None:
 
 
 def _swap(
-    conn: psycopg.Connection, generation: str, inputs_fp: str, reports: int, run_id: str
+    conn: psycopg.Connection,
+    generation: str,
+    inputs_fp: str,
+    counts: dict[str, int],
+    live: dict,
+    run_id: str,
 ) -> None:
-    """Rename the generation in, in one transaction, under the lock timeout."""
+    """Rename the generation in, in one transaction, under the lock timeout. The swap
+    drops the progress table, so its audit row keeps the counts (``counts``, and ``live``:
+    the fingerprint and report count of the generation that it replaces)."""
     seconds = get_settings().faers_lock_timeout_s
     try:
         with audit_trail.deferred_mirror(conn):
@@ -796,30 +921,36 @@ def _swap(
                             sql.SQL(", ").join(_ident(p) for p in PARENTS)
                         )
                     )
-                except psycopg.errors.LockNotAvailable as exc:
+                    for parent in PARENTS:
+                        new = generation_table(parent, generation)
+                        for suffix, _ in _children(cur, parent):
+                            _rename(
+                                cur,
+                                f"{parent}{suffix}",
+                                old_leaf_table(parent, generation, suffix),
+                            )
+                        _rename(cur, parent, old_table(parent, generation))
+                        for suffix, _ in _children(cur, new):
+                            _rename(
+                                cur, leaf_table(parent, generation, suffix), f"{parent}{suffix}"
+                            )
+                        _rename(cur, new, parent)
+                except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
                     raise GenerationSwapError(
                         f"could not lock the live FAERS tables within {seconds} s "
-                        "(EPISTEME_FAERS_LOCK_TIMEOUT_S): a transaction that reads them is "
-                        f"still open. The old generation still serves. Generation {generation} "
-                        "is complete: run the load again to swap it in."
+                        "(EPISTEME_FAERS_LOCK_TIMEOUT_S), or a deadlock stopped the swap: a "
+                        "transaction that reads them is still open. The old generation still "
+                        f"serves. Generation {generation} is complete: run the load again to "
+                        "swap it in."
                     ) from exc
-                for parent in PARENTS:
-                    new = generation_table(parent, generation)
-                    for suffix, _ in _children(cur, parent):
-                        _rename(
-                            cur, f"{parent}{suffix}", old_leaf_table(parent, generation, suffix)
-                        )
-                    _rename(cur, parent, old_table(parent, generation))
-                    for suffix, _ in _children(cur, new):
-                        _rename(cur, leaf_table(parent, generation, suffix), f"{parent}{suffix}")
-                    _rename(cur, new, parent)
                 cur.execute(sql.SQL("DROP TABLE {t}").format(t=_ident(state_table(generation))))
             audit_trail.record(
                 "load_replace",
                 conn=conn,
                 object=f"{SOURCE} {generation}",
-                rows_affected=reports,
-                new_value={"generation": generation, "fingerprint": inputs_fp},
+                rows_affected=counts["reports"],
+                old_value=live,
+                new_value={"generation": generation, "fingerprint": inputs_fp, **counts},
                 run_id=run_id,
             )
             audit_trail.commit(conn)
@@ -843,6 +974,8 @@ def load_generation(
     run_id: str,
     post_load: Callable[[psycopg.Connection], None] | None = None,
     force: bool = False,
+    override_reason: str | None = None,
+    sample: bool = False,
 ) -> dict:
     """Build a generation from ``zips`` and swap it in; see the module docstring.
 
@@ -850,23 +983,35 @@ def load_generation(
     ``current``), ``generation``, ``zips_loaded``, ``zips_skipped``,
     ``old_generation_dropped`` and, when swapped: ``reports_read``, ``drug_rows_read``,
     ``reaction_rows_read`` (after the id checks of each zip), ``reports``, ``drug_rows``,
-    ``reaction_rows`` (after de-duplication), ``no_date``, ``no_id``, ``long_terms``,
-    ``duplicates_in_zip``, ``duplicates_removed`` (all rows of ``faers_report`` removed),
+    ``reaction_rows`` (after de-duplication), ``no_date``, ``no_id``, ``long_ids``,
+    ``long_terms``, ``long_batches``, ``overrides`` (the checks ``override_reason``
+    passed), ``duplicates_in_zip``, ``duplicates_removed`` (all rows of ``faers_report`` removed),
     ``duplicates_cross_year`` (those removed across partitions), ``reports_in_default``,
     ``reports_no_date``.
 
-    Raises on a failure, and the old generation keeps serving: a zip that does not
-    parse, a failed ``post_load``, ``GenerationError`` from a check,
-    ``GenerationSwapError`` from the swap's lock.
+    Raises on a failure, and the old generation keeps serving: ``InputSetError`` for a
+    partial input set, a zip that does not parse, a failed ``post_load``,
+    ``GenerationError`` from a check, ``GenerationSwapError`` from the swap's lock.
     """
     paths = [Path(p) for p in zips]
     if not paths:
         raise ValueError("load_generation needs at least one input file")
     files = sorted(zip(input_keys(paths, raw_dir), paths, strict=True))
+    problems = [] if sample else check_input_set(paths)
+    if problems and override_reason is None:
+        raise InputSetError(
+            "the input files are not a whole issue: "
+            + "; ".join(problems)
+            + ". Finish the download and remove stale files, or pass --allow-partial --reason."
+        )
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise GenerationError("load_generation owns the transactions: the connection is not idle")
     inputs_fp = fingerprint((p, k) for k, p in files)
     _LOG.info("ijson backend: %s; %d zips", ijson.backend, len(files))
+    overrides: list[str] = []
+    if problems:
+        _audit_override(conn, "input set", override_reason, {"problems": problems}, run_id)
+        overrides.append("input set")
 
     leftovers_dropped = _drop_old_leftovers(conn)
     with conn.cursor() as cur:
@@ -916,6 +1061,19 @@ def load_generation(
     cross = _sum_stats(state, "dedup_cross_year")
     removed = in_year + cross
     checked = _check_rows(conn, generation, read["reports"] - removed["reports"])
+    live_reports = _live_reports(conn)
+    share = get_settings().faers_min_live_share
+    if not sample and below_floor(checked["reports"], live_reports, share):
+        detail = {"reports": checked["reports"], "live_reports": live_reports, "share": str(share)}
+        if override_reason is None:
+            raise GenerationError(
+                f"the new generation has {checked['reports']} reports, below {share} "
+                f"(EPISTEME_FAERS_MIN_LIVE_SHARE) of the {live_reports} live reports; no swap. "
+                f"Generation {generation} stays built: if this is right, run the load again "
+                "with --allow-partial --reason."
+            )
+        _audit_override(conn, "live floor", override_reason, detail, run_id)
+        overrides.append("live floor")
 
     if ("phase", "indexed") not in state:
         _build_indexes(conn, generation)
@@ -929,8 +1087,22 @@ def load_generation(
             conn.rollback()
             raise
 
-    _swap(conn, generation, inputs_fp, checked["reports"], run_id)
-    dropped = _drop_tables(conn, [old_table(p, generation) for p in PARENTS])
+    audit_counts = {
+        "reports": checked["reports"],
+        "reports_in_default": checked["reports_in_default"],
+        "reports_no_date": checked["reports_no_date"],
+        "no_date": read["no_date"],
+        "no_id": read["no_id"],
+        "long_ids": read["long_ids"],
+        "long_terms": read["long_terms"],
+        "long_batches": read["long_batches"],
+        "duplicates_in_zip": read["duplicates_in_zip"],
+        "duplicates_removed": removed["reports"],
+        "duplicates_cross_year": cross["reports"],
+    }
+    live_state = {"fingerprint": live, "reports": live_reports}
+    _swap(conn, generation, inputs_fp, audit_counts, live_state, run_id)
+    dropped = _drop_old_generation(conn, generation)
     return {
         "status": "swapped",
         "generation": generation,
@@ -942,13 +1114,8 @@ def load_generation(
         "reaction_rows_read": read["reaction_rows"],
         "drug_rows": read["drug_rows"] - removed["drug_rows"],
         "reaction_rows": read["reaction_rows"] - removed["reaction_rows"],
-        "no_date": read["no_date"],
-        "no_id": read["no_id"],
-        "long_terms": read["long_terms"],
-        "duplicates_in_zip": read["duplicates_in_zip"],
-        "duplicates_removed": removed["reports"],
-        "duplicates_cross_year": cross["reports"],
-        **checked,
+        "overrides": overrides,
+        **audit_counts,
     }
 
 
@@ -967,10 +1134,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--raw-dir", type=Path, default=None, help="default: <raw root>/openfda")
     parser.add_argument("--force", action="store_true", help="build a new generation in any case")
-    parser.add_argument("--reason", default=None, help="required with --force (audited)")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="go on with a partial input set or below the live floor",
+    )
+    parser.add_argument(
+        "--reason", default=None, help="required with --force and --allow-partial (audited)"
+    )
     args = parser.parse_args(argv)
     if args.force and not args.reason:
         print("error: --force requires --reason", file=sys.stderr)
+        return 2
+    if args.allow_partial and not args.reason:
+        print("error: --allow-partial requires --reason", file=sys.stderr)
         return 2
 
     settings = get_settings()
@@ -1010,6 +1187,9 @@ def main(argv: list[str] | None = None) -> int:
                         processed_dir=settings.processed_root,
                         run_id=run_id,
                         force=args.force,
+                        override_reason=args.reason if args.allow_partial else None,
+                        # Only run_pipeline.sh --sample selects the secondary database.
+                        sample=settings.db_target == "secondary",
                     )
                     print("done " + " ".join(f"{k}={v}" for k, v in result.items()))
                 except Exception as exc:  # noqa: BLE001 - reported, and the exit code carries it
