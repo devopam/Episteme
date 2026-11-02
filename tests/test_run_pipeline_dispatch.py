@@ -185,6 +185,19 @@ def test_pmc_non_download_dry_run_dies_3(tmp_path: Path) -> None:
     assert "--dry-run is supported on 'download' only" in proc.stderr
 
 
+def test_dailymed_has_extract_and_load_but_no_graph(tmp_path: Path) -> None:
+    # dailymed is a literature-style source (extract, load) whose label tables load
+    # with it: a graph stage is refused before the audit bracket, a dry run too.
+    proc = _run(["dailymed", "graph"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "graph is not wired" in proc.stderr
+    proc = _run(["dailymed", "extract", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "--dry-run is supported on 'download' only" in proc.stderr
+    for stage in ("extract", "load"):
+        assert (REPO_ROOT / "scripts" / "data" / "dailymed" / f"{stage}_dailymed.sh").is_file()
+
+
 def test_bookshelf_extract_dry_run_dies_3(tmp_path: Path) -> None:
     # SP2 PF-8.1: --dry-run rejected on every write stage, every source.
     proc = _run(["bookshelf", "extract", "--dry-run"], tmp_path, FAST_TIMEOUT)

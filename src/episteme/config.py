@@ -123,7 +123,28 @@ DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
 # A wider "X through Y" in recall text is more likely a typing error than a real list, so
 # only its two ends are kept.
 DEFAULT_RECALL_MAX_RANGE_LOTS = 1000
+# DailyMed label kinds the extract reads (EPISTEME_DAILYMED_KINDS, comma separated):
+# "prescription" (human Rx) and "otc" (human OTC). Animal, homeopathic and remainder
+# releases are not read.
+DAILYMED_KINDS = ("prescription", "otc")
+DEFAULT_DAILYMED_KINDS = DAILYMED_KINDS
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+
+
+def _dailymed_kinds() -> tuple[str, ...]:
+    """``EPISTEME_DAILYMED_KINDS``: a comma separated list of ``DAILYMED_KINDS``
+    names, without repeats, in the order of ``DAILYMED_KINDS``. Unset or empty:
+    the default. An unknown name raises ``ConfigError`` (a typo must not drop a kind)."""
+    raw = _get("EPISTEME_DAILYMED_KINDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_DAILYMED_KINDS
+    names = {n.strip().lower() for n in raw.split(",") if n.strip()}
+    unknown = sorted(names - set(DAILYMED_KINDS))
+    if unknown:
+        raise ConfigError(
+            f"EPISTEME_DAILYMED_KINDS names {unknown}; allowed: {', '.join(DAILYMED_KINDS)}"
+        )
+    return tuple(k for k in DAILYMED_KINDS if k in names)
 
 
 def _slice_max_bytes() -> dict[str, int]:
@@ -296,6 +317,8 @@ class Settings:
     # Most lots that one written range in recall text may expand to
     # (EPISTEME_RECALL_MAX_RANGE_LOTS).
     recall_max_range_lots: int = DEFAULT_RECALL_MAX_RANGE_LOTS
+    # DailyMed label kinds the extract reads (EPISTEME_DAILYMED_KINDS).
+    dailymed_kinds: tuple[str, ...] = DEFAULT_DAILYMED_KINDS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -438,6 +461,7 @@ def get_settings() -> Settings:
         recall_max_range_lots=_get_positive_int_or_default(
             "EPISTEME_RECALL_MAX_RANGE_LOTS", DEFAULT_RECALL_MAX_RANGE_LOTS
         ),
+        dailymed_kinds=_dailymed_kinds(),
         slice_max_bytes=_slice_max_bytes(),
     )
 

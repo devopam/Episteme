@@ -59,6 +59,7 @@ _EXTRACT_MODULES = {
     ),
     "apollo": ("episteme.data.apollo.extract_apollo", "apollo/extract_apollo.sh"),
     "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
+    "dailymed": ("episteme.data.dailymed.extract_dailymed", "dailymed/extract_dailymed.sh"),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
@@ -101,6 +102,7 @@ def stage_module(source: str, stage: str) -> tuple[str, str]:
 EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pubchem", "load"): ("episteme.data.pubchem.retire",),
     ("pmc", "load"): ("episteme.data.pmc.retire",),
+    ("dailymed", "load"): ("episteme.data.dailymed.retire",),
 }
 
 

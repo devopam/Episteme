@@ -176,7 +176,10 @@ declare -A WRAPPER=(
 # chain (dispatch to $HERE/<source>/<stage>_<source>.sh). Every other source is
 # download-only in SP2 (structured serialize = SP4). `_is_lit` gates the
 # extract/load/graph arms below.
-LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
+LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf dailymed"
+# dailymed has extract and load, and no graph stage (its label tables are loaded with it).
+NO_GRAPH_SOURCES="dailymed"
+_has_graph() { case " $NO_GRAPH_SOURCES " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
@@ -252,7 +255,7 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
         graph)
-            _is_lit "$SOURCE" || [ "$SOURCE" = "mesh" ] \
+            { _is_lit "$SOURCE" && _has_graph "$SOURCE"; } || [ "$SOURCE" = "mesh" ] \
                 || die "$SOURCE graph is not wired" 3
             litw="$HERE/$SOURCE/graph_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
@@ -317,7 +320,8 @@ _chain_stages() { # the stages this run executes, in order (keep in step with th
         echo download serialize load
         if [ "$SOURCE" = "mesh" ]; then echo graph; fi
     elif _is_lit "$SOURCE"; then
-        echo download extract load graph
+        echo download extract load
+        if _has_graph "$SOURCE"; then echo graph; fi
     elif _is_reg "$SOURCE"; then
         echo download load
     else
@@ -929,7 +933,9 @@ else
             elif _is_lit "$SOURCE"; then
                 run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
-                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                if _has_graph "$SOURCE"; then
+                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                fi
             elif _is_reg "$SOURCE"; then
                 run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
             else
