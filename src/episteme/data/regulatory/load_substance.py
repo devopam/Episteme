@@ -272,6 +272,13 @@ def resolve_names(conn: psycopg.Connection, names: Iterable[str], source: str) -
                 "CREATE TEMP TABLE _stg_distinct ON COMMIT DROP AS "
                 "SELECT DISTINCT name FROM _stg_names"
             )
+            # A re-resolved name loses this source's earlier rows first, so a name that
+            # moved does not stay on its old substance. Other sources' rows stay.
+            cur.execute(
+                f"DELETE FROM {SCHEMA}.substance_xref WHERE id_type = %s::text "
+                "AND source = %s::text AND id_value IN (SELECT name FROM _stg_distinct)",
+                (id_type, source),
+            )
             cur.execute(
                 f"INSERT INTO {SCHEMA}.substance_xref "
                 "(substance_key, id_type, id_value, method, confidence, source) "
@@ -329,6 +336,16 @@ def run_files(
     keys = input_keys(files, raw_dir)  # raises when two inputs share a key
     loaded = skipped = 0
     failed: list[str] = []
+    if len(files) > 1:
+        # The reload deletes this dataset's rows that the file lacks, so the file must be
+        # the whole dataset. Refuse before any write.
+        why = f"{len(files)} substance files found; the load needs exactly one: {keys}"
+        print(f"FAIL {DATASET}: {why}")
+        try:
+            record_failure(SOURCE, "load", DATASET, why, run_id=run_id)
+        except Exception:  # noqa: BLE001 - the failed list below still carries it
+            _LOG.exception("could not record the failure of %s", DATASET)
+        return {"loaded": 0, "skipped": 0, "failed": [DATASET]}
     if not files:
         print(f"FAIL {DATASET}: no input files under {raw_dir / 'other' / 'substance'}")
         failed.append(DATASET)

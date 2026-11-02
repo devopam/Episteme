@@ -190,6 +190,15 @@ def test_run_files_force_reloads_and_audits(tmp_path, monkeypatch):
     assert "force_override" in _Audit.calls
 
 
+def test_run_files_refuses_more_than_one_substance_file(tmp_path, monkeypatch, capsys):
+    raw = tmp_path / "raw" / "other" / "substance"
+    a, b = _zip(raw / "a.zip", [METFORMIN]), _zip(raw / "b.zip", [METFORMIN_HCL])
+    out, loads = _run(tmp_path, monkeypatch, [a, b])
+    assert out == {"loaded": 0, "skipped": 0, "failed": [ls.DATASET]}
+    assert loads == [] and _Audit.calls == []
+    assert "exactly one" in capsys.readouterr().out
+
+
 def test_inputs_with_one_input_key_stop_the_load(tmp_path):
     raw = tmp_path / "raw"
     a = _zip(tmp_path / "a" / "s.zip", [METFORMIN])  # both outside raw: key = s.zip
@@ -317,7 +326,7 @@ def test_combination_name_maps_to_two_substances(db, tmp_path):
     assert len(_keys(db, "name", "amlodipine/benazepril")) == 2
     out = ls.resolve_names(db, ["AMLODIPINE/BENAZEPRIL"], "ema")
     db.commit()
-    assert out == {"matched": 1, "unmatched": 0}
+    assert out == {"matched": 1, "unmatched": 0, "skipped_long": 0}
     assert len(_keys(db, "ema_name", "amlodipine/benazepril")) == 2
 
 
@@ -326,7 +335,7 @@ def test_unmatched_names_are_counted_not_guessed(db, tmp_path):
     _load(db, tmp_path, [ACETAMINOPHEN])
     out = ls.resolve_names(db, ["Paracetamol", "paracetamol ", "Parcetamol", "unknownium"], "faers")
     db.commit()
-    assert out == {"matched": 1, "unmatched": 2}
+    assert out == {"matched": 1, "unmatched": 2, "skipped_long": 0}
     assert _keys(db, "faers_name", "parcetamol") == []
     assert len(_keys(db, "faers_name", "paracetamol")) == 1
 
@@ -396,3 +405,22 @@ def test_two_records_with_one_unii_use_one_row(db, tmp_path):
             "ON m.substance_key = s.moiety_key WHERE s.unii = 'DUPDUPDUP1'"
         )
         assert cur.fetchall() == [("Named", "9100L32L2N")]  # first row with a name
+
+
+@pytest.mark.pg
+def test_resolve_names_again_drops_the_stale_row(db, tmp_path):
+    a = _rec("AAAAAAAAAA", ["Alpha", "shared"])
+    b = _rec("BBBBBBBBBB", ["Beta"])
+    _load(db, tmp_path, [a, b])
+    ls.resolve_names(db, ["shared"], "ema")
+    ls.resolve_names(db, ["beta"], "faers")
+    db.commit()
+    with db.cursor() as cur:
+        cur.execute("SELECT substance_key FROM episteme.substance WHERE unii = 'BBBBBBBBBB'")
+        b_key = cur.fetchone()[0]
+    # the reload moves "shared" from A to B
+    _load(db, tmp_path, [_rec("AAAAAAAAAA", ["Alpha"]), _rec("BBBBBBBBBB", ["Beta", "shared"])])
+    ls.resolve_names(db, ["shared"], "ema")
+    db.commit()
+    assert _keys(db, "ema_name", "shared") == [b_key]
+    assert len(_keys(db, "faers_name", "beta")) == 1  # another source's row stays
