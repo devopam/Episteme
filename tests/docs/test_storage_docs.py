@@ -166,6 +166,8 @@ def test_article_body_is_list_source_only():
         "article_body_pubmed",
         "article_body_apollo",
         "article_body_pubchem",
+        "article_body_dailymed",
+        "article_body_ema_epar",
     }
     assert re.search(
         r"CREATE TABLE episteme\.article_body \(.*?\) PARTITION BY LIST \(source\)",

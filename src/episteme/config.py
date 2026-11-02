@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -95,6 +95,30 @@ def _get_positive_int_or_default(name: str, default: int) -> int:
         _LOG.warning("%s must be an integer >= 1, got %r; using %d", name, raw, default)
         return default
     return value
+
+
+# Today's values of the tunables that used to be source constants. The old
+# module names (postgres_loader.LOAD_BATCH_BYTES, staging_writer.WRITE_BATCH_BYTES,
+# pmc.buckets.BUCKET_IDS) hold these same values; the code reads the setting at
+# the point of use, and a test may still patch the module name.
+DEFAULT_LOAD_BATCH_BYTES = 64 * 1024 * 1024
+DEFAULT_WRITE_BATCH_BYTES = 64 * 1024 * 1024
+DEFAULT_PMC_BUCKET_IDS = 50_000
+_SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+
+
+def _slice_max_bytes() -> dict[str, int]:
+    """Slice size caps set by ``EPISTEME_SLICE_MAX_BYTES_<SOURCE>`` (the source
+    name upper-cased) -> ``{source: bytes}``. A source with no key, or with an
+    invalid value (logged), is absent: the sample gate then uses its own cap."""
+    names = {k for k in (*_SOURCES, *os.environ) if k.startswith(_SLICE_CAP_PREFIX)}
+    out: dict[str, int] = {}
+    for name in sorted(names):
+        source = name[len(_SLICE_CAP_PREFIX) :].lower()
+        value = _get_positive_int_or_default(name, 0)
+        if source and value:
+            out[source] = value
+    return out
 
 
 def _get_positive_int_or_none(name: str) -> int | None:
@@ -214,6 +238,14 @@ class Settings:
     stop_file: Path | None = None
     # run_pipeline.sh --no-wait: a busy stage or advisory lock refuses (exit 75).
     no_wait: bool = False
+    # Memory bounds of the load and the staging write, in bytes of row data.
+    load_batch_bytes: int = DEFAULT_LOAD_BATCH_BYTES
+    write_batch_bytes: int = DEFAULT_WRITE_BATCH_BYTES
+    # PMC ids per extract bucket. Changing it moves articles between buckets:
+    # the bucket markers and fingerprints no longer match, so every bucket rebuilds.
+    pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
+    # Per-source sample slice caps, lower-case source name -> bytes.
+    slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
     def pg_dsn(self) -> str:
         return (
@@ -324,6 +356,16 @@ def get_settings() -> Settings:
         else None,
         # run_pipeline.sh --no-wait exports EPISTEME_NO_WAIT=1.
         no_wait=(_get("EPISTEME_NO_WAIT") or "").strip() == "1",
+        load_batch_bytes=_get_positive_int_or_default(
+            "EPISTEME_LOAD_BATCH_BYTES", DEFAULT_LOAD_BATCH_BYTES
+        ),
+        write_batch_bytes=_get_positive_int_or_default(
+            "EPISTEME_WRITE_BATCH_BYTES", DEFAULT_WRITE_BATCH_BYTES
+        ),
+        pmc_bucket_ids=_get_positive_int_or_default(
+            "EPISTEME_PMC_BUCKET_IDS", DEFAULT_PMC_BUCKET_IDS
+        ),
+        slice_max_bytes=_slice_max_bytes(),
     )
 
 

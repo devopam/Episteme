@@ -372,3 +372,15 @@ def test_concurrent_rebuilds_keep_every_loaded_part_name(tmp_path, raw, spawn_ch
     unit_dir = out / "_ops" / "pmc" / "retire_pending.d"
     assert sorted(p.name for p in unit_dir.glob("*.json")) == ["pmc_b0000.json", "pmc_b0001.json"]
     assert not parts_retire.retire_pending_path(out, "pmc").exists()
+
+
+def test_prologue_phases_are_logged(tmp_path, raw, capfd):
+    """The discover, group and manifest INFO lines reach the run log (stderr)
+    when the stage runs through ``_main``."""
+    _article(raw, 1)
+    rc = pmc._main(["--raw-dir", str(raw), "--processed-dir", str(tmp_path / "out")])
+    assert rc == 0
+    err = capfd.readouterr().err
+    assert "discover: 1 metadata files" in err
+    assert "group: 1 buckets" in err
+    assert "manifests: 1 written" in err

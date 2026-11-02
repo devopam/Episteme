@@ -9,6 +9,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from episteme import config
 from episteme.data import article_schema
 from episteme.data.article_schema import ARTICLE_COLUMNS
 from episteme.ops.profile import default_batch_rows
@@ -22,7 +23,16 @@ WRITE_BATCH_ROWS = default_batch_rows()
 # 50,000-row batch held ~3 GB and three workers exhausted a 16 GB machine).
 # Peak memory per writer is a small multiple of it (Python strings, the column
 # lists and the Arrow arrays).
-WRITE_BATCH_BYTES = 64 * 1024 * 1024
+# The cap is ``config.Settings.write_batch_bytes`` (EPISTEME_WRITE_BATCH_BYTES), read at
+# the point of use. This name keeps today's value and stays importable; a value
+# other than the default, set on the module (tests), wins over the setting.
+WRITE_BATCH_BYTES = config.DEFAULT_WRITE_BATCH_BYTES
+
+
+def _write_batch_bytes() -> int:
+    if WRITE_BATCH_BYTES != config.DEFAULT_WRITE_BATCH_BYTES:
+        return WRITE_BATCH_BYTES
+    return config.get_settings().write_batch_bytes
 
 
 def rows_to_columnar(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
@@ -120,11 +130,10 @@ def _row_chars(row: dict[str, Any]) -> int:
 def _batches(rows: Iterable[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
     """Batches of at most ``batch_size`` rows that also end once the characters
     of their string values (``_row_chars``, a proxy for bytes) reach
-    ``WRITE_BATCH_BYTES`` (read at call time, so tests can shrink
-    it). A batch never goes over the cap: a row that would take it over ends
-    the batch first, so a row over the cap is a batch of its own. Rows are
-    never dropped or reordered."""
-    cap = WRITE_BATCH_BYTES
+    the write cap (``_write_batch_bytes``, read at call time). A batch never goes
+    over the cap: a row that would take it over ends the batch first, so a row over
+    the cap is a batch of its own. Rows are never dropped or reordered."""
+    cap = _write_batch_bytes()
     batch: list[dict[str, Any]] = []
     size = 0
     for row in rows:

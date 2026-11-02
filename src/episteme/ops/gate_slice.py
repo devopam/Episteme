@@ -348,6 +348,15 @@ SLICES: dict[str, SliceSpec] = {
 }
 
 
+def max_bytes_of(source: str) -> int:
+    """The size cap of a source's slice: ``EPISTEME_SLICE_MAX_BYTES_<SOURCE>`` when
+    set, else the spec's own cap."""
+    from episteme.config import get_settings
+
+    spec = _spec(source)
+    return get_settings().slice_max_bytes.get(source, spec.max_bytes)
+
+
 def _spec(source: str) -> SliceSpec:
     try:
         return SLICES[source]
@@ -411,10 +420,9 @@ def prepare(
             shutil.rmtree(dest_root)
         dest_root.mkdir(parents=True)
         built = spec.build(raw, dest_root)
-        if built["bytes"] > spec.max_bytes:
-            raise SliceError(
-                f"{source}: slice is {built['bytes']} bytes, over the cap of {spec.max_bytes}"
-            )
+        cap = max_bytes_of(source)
+        if built["bytes"] > cap:
+            raise SliceError(f"{source}: slice is {built['bytes']} bytes, over the cap of {cap}")
         result = {**built, "linked": 0, "copied": len(built["files"])}
         meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
@@ -423,8 +431,9 @@ def prepare(
     if missing:
         raise FileNotFoundError(f"selected file is missing: {missing[0]}")
     total = sum(_size(p) for p in files)
-    if total > spec.max_bytes:
-        raise SliceError(f"{source}: slice is {total} bytes, over the cap of {spec.max_bytes}")
+    cap = max_bytes_of(source)
+    if total > cap:
+        raise SliceError(f"{source}: slice is {total} bytes, over the cap of {cap}")
 
     meta_path.unlink(missing_ok=True)
     if dest_root.exists():

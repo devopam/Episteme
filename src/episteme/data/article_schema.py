@@ -66,6 +66,8 @@ SOURCES = (
     "ontologies",
     "openalex",
     "cdisc_ct",
+    "dailymed",
+    "ema_epar",
 )
 
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")

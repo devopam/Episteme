@@ -817,16 +817,28 @@ def _main(argv: list[str] | None = None) -> int:
     print(f"schema={SCHEMA_VERSION} source={SOURCE}")
     print(f"raw_dir={raw_dir.resolve()} workers={workers}")
 
-    res = extract_pmc(
-        raw_dir,
-        processed_dir,
-        max_files=args.max_files,
-        force=args.force,
-        workers=workers,
-        verbose=args.verbose,
-        skip_units=args.skip_unit,
-        skip_reason=args.reason,
-    )
+    # Nothing configures logging for a stage run, so the INFO lines of the
+    # prologue (discover, group, manifests) went nowhere. Send this module's
+    # lines to stderr, which the run log captures, for the length of the run.
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    old_level = _LOG.level
+    _LOG.addHandler(handler)
+    _LOG.setLevel(logging.INFO)
+    try:
+        res = extract_pmc(
+            raw_dir,
+            processed_dir,
+            max_files=args.max_files,
+            force=args.force,
+            workers=workers,
+            verbose=args.verbose,
+            skip_units=args.skip_unit,
+            skip_reason=args.reason,
+        )
+    finally:
+        _LOG.removeHandler(handler)
+        _LOG.setLevel(old_level)
 
     # inputs == 0 after --skip-unit dropped every file is a clean run (R8).
     if res["inputs"] == 0 and not args.skip_unit:

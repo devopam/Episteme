@@ -14,9 +14,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from episteme import config
 from episteme.data import checkpoint_markers
 
-BUCKET_IDS: int = 50_000
+# The bucket width is ``config.Settings.pmc_bucket_ids`` (EPISTEME_PMC_BUCKET_IDS), read
+# at the point of use. This name keeps today's value and stays importable; a
+# value other than the default, set on the module (tests), wins over the setting.
+BUCKET_IDS: int = config.DEFAULT_PMC_BUCKET_IDS
+
+
+def bucket_ids() -> int:
+    if BUCKET_IDS != config.DEFAULT_PMC_BUCKET_IDS:
+        return BUCKET_IDS
+    return config.get_settings().pmc_bucket_ids
+
 
 _META_RE = re.compile(r"^PMC(\d+)\.(\d+)\.json$")
 
@@ -30,7 +41,7 @@ def parse_meta_name(name: str) -> tuple[int, int] | None:
 
 
 def bucket_of(pmc_id: int) -> int:
-    return pmc_id // BUCKET_IDS
+    return pmc_id // bucket_ids()
 
 
 def bucket_key(bucket: int) -> str:
