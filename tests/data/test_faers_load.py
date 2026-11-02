@@ -256,6 +256,61 @@ def test_a_part_above_its_total_and_an_unknown_name_are_problems():
     assert any("2020q1" in p for p in problems) and any("notes.zip" in p for p in problems)
 
 
+def test_a_missing_quarter_between_the_first_and_the_last_is_a_problem():
+    problems = fl.check_input_set(
+        _names(
+            "2019q4/drug-event-0001-of-0001.json.zip",
+            "2020q1/drug-event-0001-of-0001.json.zip",
+            "2020q4/drug-event-0001-of-0001.json.zip",
+        )
+    )
+    assert len(problems) == 1
+    assert "missing quarters" in problems[0]
+    assert "2020q2" in problems[0] and "2020q3" in problems[0]
+
+
+def test_quarters_are_continuous_across_a_year_and_in_any_input_order():
+    paths = _names(
+        "2021q1/drug-event-0001-of-0001.json.zip",
+        "2020q4/drug-event-0001-of-0001.json.zip",
+    )
+    assert fl.check_input_set(paths) == []
+
+
+def test_a_folder_that_is_not_a_quarter_is_outside_the_continuity_check():
+    paths = _names(
+        "2020q1/drug-event-0001-of-0001.json.zip",
+        "all_other/drug-event-0001-of-0001.json.zip",
+        "2020q2/drug-event-0001-of-0001.json.zip",
+    )
+    assert fl.check_input_set(paths) == []
+
+
+def test_a_missing_quarter_is_refused_and_names_the_override(tmp_path):
+    raw = tmp_path / "raw"
+    zips = [_zip(raw, "2020q1", [_report("1")]), _zip(raw, "2020q3", [_report("2")])]
+    with pytest.raises(fl.InputSetError, match="2020q2.*--allow-partial"):
+        fl.load_generation(None, zips, raw_dir=raw, processed_dir=tmp_path, run_id="r")
+
+
+def test_a_sample_run_skips_the_quarter_check(tmp_path):
+    raw = tmp_path / "raw"
+    zips = [_zip(raw, "2004q1", [_report("1")]), _zip(raw, "2026q2", [_report("2")])]
+
+    class Stop(Exception):
+        pass
+
+    class Conn:  # the first database step after the input check
+        @property
+        def info(self):
+            raise Stop
+
+    with pytest.raises(Stop):
+        fl.load_generation(
+            Conn(), zips, raw_dir=raw, processed_dir=tmp_path, run_id="r", sample=True
+        )
+
+
 def test_a_partial_input_set_is_refused_before_any_database_work(tmp_path):
     raw = tmp_path / "raw"
     z = _zip(raw, "2020q1", [_report("1")], 1, 2)
@@ -1140,3 +1195,18 @@ def test_post_load_is_not_repeated_after_a_failed_swap(db, reader, tmp_path, mon
     _run(db, tmp_path, [z], post_load=lambda conn: calls.append(1))
     assert calls == [1]
     assert _ids(reader) == ["new"]
+
+
+@pytest.mark.pg
+def test_the_override_passes_a_missing_quarter_and_is_audited(db, tmp_path):
+    raw = tmp_path / "raw"
+    zips = [_zip(raw, "2020q1", [_report("1")]), _zip(raw, "2020q3", [_report("2")])]
+    out = _run(db, tmp_path, zips, override_reason="FDA has no 2020q2 file")
+    assert out["status"] == "swapped" and out["overrides"] == ["input set"]
+    assert _ids(db) == ["1", "2"]
+    rows = _all(
+        db,
+        "SELECT new_value, reason FROM episteme._audit WHERE event_type = 'force_override' "
+        "AND run_id = 't' ORDER BY seq DESC LIMIT 1",
+    )
+    assert "2020q2" in str(rows[0][0]) and rows[0][1] == "FDA has no 2020q2 file"

@@ -39,8 +39,10 @@ builds new tables and swaps them in:
 So a partial or stale input set must not go live:
 
 * ``check_input_set``, on file names, before any work: each quarter must hold exactly
-  ``1..N of N``, with one ``N``. A download that stopped, ``--max-files``, and a stale
-  ``-of-0009`` next to a new ``-of-0010`` all fail it. A whole missing quarter does not, so:
+  ``1..N of N``, with one ``N``, and the quarter folders must be continuous from the
+  earliest present to the latest present. A download that stopped, ``--max-files``, a
+  stale ``-of-0009`` next to a new ``-of-0010``, and a quarter missing in between all fail
+  it. A quarter missing at either end does not, so:
 * ``below_floor``, before the indexes: a new generation below
   ``EPISTEME_FAERS_MIN_LIVE_SHARE`` of the live report count stops. With no live
   generation there is no floor. The built generation stays, so a re-run with the override
@@ -135,7 +137,8 @@ _PARENT_RE = "(?:" + "|".join(PARENTS) + ")"
 _OLD_RE = f"^{_PARENT_RE}_old_{GENERATION_RE}$"
 _RANGE_BOUND = re.compile(r"FOR VALUES FROM \((-?\d+)\) TO \((-?\d+)\)")
 _PART_NAME = re.compile(r"drug-event-(\d+)-of-(\d+)\.json\.zip")
-# Part numbers shown in one refusal.
+_QUARTER_NAME = re.compile(r"(\d{4})q([1-4])")
+# Part numbers or quarters shown in one refusal.
 _MAX_PARTS_SHOWN = 10
 
 # Per-partition indexes of spec 5.4, and the partial batch_norm index of its lot section.
@@ -308,12 +311,34 @@ def _shown(parts: Iterable[int]) -> str:
     return ", ".join(map(str, listed[:_MAX_PARTS_SHOWN])) + more
 
 
+def _missing_quarters(folders: Iterable[str]) -> list[str]:
+    """The quarters absent between the earliest and the latest of ``folders``. A folder not
+    named like ``2020q1`` (openFDA's ``all_other``) is outside this check."""
+    present = set()
+    for folder in folders:
+        match = _QUARTER_NAME.fullmatch(folder)
+        if match:
+            present.add(int(match.group(1)) * 4 + int(match.group(2)) - 1)
+    if not present:
+        return []
+    absent = set(range(min(present), max(present) + 1)) - present
+    return [f"{n // 4}q{n % 4 + 1}" for n in sorted(absent)]
+
+
 def check_input_set(paths: Iterable[Path]) -> list[str]:
-    """The ways in which ``paths`` is not a whole issue, by file name alone; empty when each
-    quarter (the parent folder) holds exactly ``1..N of N``, with one ``N``."""
+    """The ways in which ``paths`` is not a whole issue, by name alone; empty when each
+    quarter (the parent folder) holds exactly ``1..N of N``, with one ``N``, and no quarter
+    is missing between the earliest and the latest present."""
+    paths = [Path(p) for p in paths]
     problems: list[str] = []
+    absent = _missing_quarters(p.parent.name for p in paths)
+    if absent:
+        more = (
+            f" and {len(absent) - _MAX_PARTS_SHOWN} more" if len(absent) > _MAX_PARTS_SHOWN else ""
+        )
+        problems.append(f"missing quarters: {', '.join(absent[:_MAX_PARTS_SHOWN])}{more}")
     quarters: dict[str, list[tuple[int, int]]] = {}
-    for path in map(Path, paths):
+    for path in paths:
         match = _PART_NAME.fullmatch(path.name)
         if match is None:
             problems.append(f"{path.parent.name}/{path.name}: not an openFDA part name")
