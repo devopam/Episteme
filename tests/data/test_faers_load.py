@@ -362,9 +362,36 @@ def test_a_reader_lock_fails_the_swap_and_a_rerun_goes_straight_to_it(
     assert _ids(db) == ["new"]
 
 
+def _access(conn):
+    return _all(
+        conn,
+        "SELECT relname, relowner::regrole::text, relacl::text[] FROM pg_class "
+        "WHERE oid IN ('episteme.faers_report'::regclass, 'episteme.faers_drug'::regclass, "
+        "'episteme.faers_reaction'::regclass) ORDER BY 1",
+    )
+
+
+@pytest.mark.pg
+def test_a_new_parent_with_other_privileges_is_refused_before_the_copy(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    with db.cursor() as cur:
+        cur.execute("GRANT SELECT ON episteme.faers_report TO PUBLIC")
+    db.commit()
+    monkeypatch.setattr(fl, "iter_reports", lambda _p: pytest.fail("the COPY started"))
+    try:
+        with pytest.raises(fl.GenerationError, match="owner or"):
+            _run(db, tmp_path, [_zip(raw, "2020q1", [_report("1")])])
+    finally:
+        db.rollback()
+        with db.cursor() as cur:
+            cur.execute("REVOKE SELECT ON episteme.faers_report FROM PUBLIC")
+        db.commit()
+
+
 @pytest.mark.pg
 def test_parents_carry_the_plain_names_and_prune_after_a_swap(db, tmp_path):
     raw = tmp_path / "raw"
+    access_before = _access(db)
     out = _run(
         db,
         tmp_path,
@@ -372,6 +399,7 @@ def test_parents_carry_the_plain_names_and_prune_after_a_swap(db, tmp_path):
     )
     assert out["old_generation_dropped"] is True
     assert _generation_relations(db) == []
+    assert access_before == _access(db)
     db.rollback()
     leaf_names = _all(
         db,

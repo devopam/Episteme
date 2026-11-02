@@ -16,9 +16,12 @@ builds new tables and swaps them in:
    copies of one id, the highest version wins, then the latest ``receiptdate``, then the
    latest file (the largest ``source_file``); a missing version or date ranks lowest. The
    other copies go by ``(safetyreportid, source_file)`` from all three tables, and are
-   counted. Only duplicated ids reach the sort, so temp space follows the duplicates, not
-   the partition. A last pass does the same across partitions, for copies that disagree on
-   ``receivedate`` (``duplicates_cross_year``).
+   counted. Only duplicated ids reach the sort, so the sort's temp space follows the
+   duplicates, and the ``GROUP BY`` that finds them follows one partition. A last pass does
+   the same across partitions, for copies that disagree on ``receivedate``
+   (``duplicates_cross_year``). That pass is not bounded by a partition: its ``GROUP BY``
+   reads all ids of the generation. No index exists yet, so any pass that finds losers
+   reads the whole of its child tables to delete them.
 4. **Indexes** per partition, one transaction per partition, then ``ANALYZE`` of each
    parent (which also collects the parent-level statistics that autovacuum never does).
 5. **``post_load(conn)``,** when given, then the **swap**: one transaction under
@@ -62,7 +65,11 @@ the new tables with ``unfinished_generations(conn)`` (one entry at that step) an
 ``load_generation`` owns the transactions of its connection, so the connection must be
 idle when it is called. The loader creates and renames tables, so the CLI connects as the
 table owner (``episteme_sys_admin``); the schema's default privileges then cover the new
-tables. Config comes from ``episteme.config``; this module never reads ``os.environ``.
+tables. The swap replaces the parents, so a new parent must have the owner and privileges
+of the live one: ``_check_access`` refuses a difference before the COPY and again before
+the swap. A view or foreign key on a live parent would follow the rename to the old
+generation, so none may exist. Config comes from ``episteme.config``; this module never
+reads ``os.environ``.
 """
 
 from __future__ import annotations
@@ -742,6 +749,29 @@ def _check_rows(conn: psycopg.Connection, generation: str, expected: int) -> dic
     return {"reports": reports, "reports_in_default": in_default, "reports_no_date": no_date}
 
 
+def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
+    cur.execute(
+        "SELECT relowner::regrole::text, relacl::text[] FROM pg_class "
+        "WHERE oid = to_regclass(%s::text)",
+        (f"{SCHEMA}.{table}",),
+    )
+    owner, acl = cur.fetchone()
+    return owner, set(acl or ())
+
+
+def _check_access(cur: psycopg.Cursor, generation: str) -> None:
+    """Readers keep their access through a swap only if the parents match."""
+    for parent in PARENTS:
+        live = _access(cur, parent)
+        new = _access(cur, generation_table(parent, generation))
+        if live != new:
+            raise GenerationError(
+                f"{generation_table(parent, generation)} differs from {parent} in owner or "
+                f"privileges ({new} against {live}); no swap. Connect as the table owner, or "
+                "repair the grants, and run again with --force."
+            )
+
+
 def _rename(cur: psycopg.Cursor, name: str, new_name: str) -> None:
     cur.execute(
         sql.SQL("ALTER TABLE {t} RENAME TO {new}").format(
@@ -758,6 +788,7 @@ def _swap(
     try:
         with audit_trail.deferred_mirror(conn):
             with conn.cursor() as cur:
+                _check_access(cur, generation)
                 cur.execute("SELECT set_config('lock_timeout', %s, true)", (f"{seconds}s",))
                 try:
                     cur.execute(
@@ -859,6 +890,11 @@ def load_generation(
     generation = decision.generation or new_generation_id()
     if decision.action == "fresh":
         _create_generation(conn, generation, inputs_fp)
+    try:
+        with conn.cursor() as cur:
+            _check_access(cur, generation)  # before hours of COPY
+    finally:
+        conn.rollback()
     _LOG.info("generation %s: %s", generation, decision.action)
 
     state = _read_state(conn, generation)
