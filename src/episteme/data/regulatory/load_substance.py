@@ -58,6 +58,7 @@ SOURCE = "openfda"
 DATASET = "fda_substance"
 # A btree entry must fit in a page (about 2.7 kB). A name longer than this (some
 # chemical names) is skipped and counted; it cannot be indexed in the xref key.
+# A constant, not a setting: it is a page limit tied to the schema, not an operator choice.
 MAX_NAME_BYTES = 2000
 _ATC_SYSTEM = "WHO-ATC"  # WHO-VATC holds the veterinary codes and is left out
 _RXCUI_SYSTEM = "RXCUI"
@@ -82,11 +83,11 @@ def moiety_of(record: dict) -> str | None:
     """The UNII of the active moiety of ``record``: the first ``ACTIVE MOIETY``
     relationship whose related UNII differs from the record's own, else the record's
     own UNII (``None`` when it has none)."""
-    own = record.get("unii") or None
+    own = _unii(record.get("unii"))
     for rel in record.get("relationships") or []:
         if rel.get("type") != _ACTIVE_MOIETY:
             continue
-        related = (rel.get("related_substance") or {}).get("unii")
+        related = _unii((rel.get("related_substance") or {}).get("unii"))
         if related and related != own:
             return related
     return own
@@ -94,6 +95,11 @@ def moiety_of(record: dict) -> str | None:
 
 def _clean(value: Any) -> str:
     return str(value).replace("\x00", "").strip()
+
+
+def _unii(value: Any) -> str | None:
+    """A UNII without NUL and outer space; ``None`` when nothing is left."""
+    return _clean(value) or None if value is not None else None
 
 
 def preferred_name(record: dict) -> str | None:
@@ -129,8 +135,11 @@ def record_xrefs(record: dict) -> tuple[list[tuple[str, str]], int]:
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+# One row per UNII. When a UNII appears twice, the first stage row with a name wins, and
+# the name and the moiety always come from that same row.
 _SUB = (
-    "(SELECT unii, id_value AS preferred_name, aux AS moiety_unii FROM _stg WHERE id_type = '_sub')"
+    "(SELECT DISTINCT ON (unii) unii, id_value AS preferred_name, aux AS moiety_unii "
+    "FROM _stg WHERE id_type = '_sub' ORDER BY unii, (id_value IS NULL), seq)"
 )
 _METHOD_SQL = "CASE x.id_type WHEN 'name' THEN 'normalised_name' ELSE 'exact_code' END"
 
@@ -140,7 +149,8 @@ def load_substances(conn: psycopg.Connection, path: Path, *, run_id: str) -> dic
     ``records``, ``no_unii`` (records with no UNII, skipped), ``substances``
     (distinct UNIIs in the file), ``moiety_stubs`` (moieties with no record of their
     own), ``multi_moiety`` (records with several distinct active moieties),
-    ``long_names`` (skipped), ``xref_added`` (new rows)."""
+    ``long_names`` (skipped), ``xref_added`` (new rows), ``xref_removed`` (rows of this
+    dataset that are no longer in the file)."""
     stats = {"records": 0, "no_unii": 0, "multi_moiety": 0, "long_names": 0}
     with conn.transaction():
         with conn.cursor() as cur:
@@ -148,18 +158,19 @@ def load_substances(conn: psycopg.Connection, path: Path, *, run_id: str) -> dic
             # id_type '_sub' carries (preferred name, moiety UNII); the others are xrefs.
             cur.execute("DROP TABLE IF EXISTS pg_temp._stg")
             cur.execute(
-                "CREATE TEMP TABLE _stg (unii text, id_type text, id_value text, aux text) "
+                "CREATE TEMP TABLE _stg (unii text, id_type text, id_value text, aux text, "
+                "seq bigserial) "
                 "ON COMMIT DROP"
             )
-            with cur.copy("COPY _stg FROM STDIN") as cp:
+            with cur.copy("COPY _stg (unii, id_type, id_value, aux) FROM STDIN") as cp:
                 for rec in iter_substances(path):
                     stats["records"] += 1
-                    unii = _clean(rec.get("unii") or "")
+                    unii = _unii(rec.get("unii"))
                     if not unii:
                         stats["no_unii"] += 1
                         continue
                     moieties = {
-                        (r.get("related_substance") or {}).get("unii")
+                        _unii((r.get("related_substance") or {}).get("unii"))
                         for r in rec.get("relationships") or []
                         if r.get("type") == _ACTIVE_MOIETY
                     } - {None, unii}
@@ -173,7 +184,7 @@ def load_substances(conn: psycopg.Connection, path: Path, *, run_id: str) -> dic
                         cp.write_row((unii, id_type, id_value, None))
             cur.execute(
                 f"INSERT INTO {SCHEMA}.substance (unii, preferred_name) "
-                f"SELECT DISTINCT ON (unii) unii, preferred_name FROM {_SUB} sub ORDER BY unii "
+                f"SELECT DISTINCT ON (unii) unii, preferred_name FROM {_SUB} sub "
                 "ON CONFLICT (unii) WHERE unii IS NOT NULL DO UPDATE SET "
                 "preferred_name = COALESCE(EXCLUDED.preferred_name, substance.preferred_name)"
             )
@@ -186,10 +197,15 @@ def load_substances(conn: psycopg.Connection, path: Path, *, run_id: str) -> dic
                 "ON CONFLICT (unii) WHERE unii IS NOT NULL DO NOTHING"
             )
             stats["moiety_stubs"] = cur.rowcount
+            # Every moiety UNII is looked up by its own UNII, record or not.
+            cur.execute(
+                "INSERT INTO _stg (unii, id_type, id_value) "
+                f"SELECT DISTINCT moiety_unii, 'unii', moiety_unii FROM {_SUB} sub "
+                "WHERE moiety_unii IS NOT NULL"
+            )
             cur.execute(
                 f"UPDATE {SCHEMA}.substance s SET moiety_key = m.substance_key "
-                f"FROM (SELECT DISTINCT ON (unii) unii, moiety_unii FROM {_SUB} sub "
-                "      ORDER BY unii) st "
+                f"FROM {_SUB} st "
                 f"JOIN {SCHEMA}.substance m ON m.unii = st.moiety_unii "
                 "WHERE s.unii = st.unii AND s.moiety_key IS DISTINCT FROM m.substance_key"
             )
@@ -208,6 +224,17 @@ def load_substances(conn: psycopg.Connection, path: Path, *, run_id: str) -> dic
                 (DATASET,),
             )
             stats["xref_added"] = cur.rowcount
+            # A reload replaces this dataset's rows: one that is gone from the file goes
+            # (a dropped or reassigned name would otherwise look like a combination).
+            # Rows of other sources, and every substance row and key, stay.
+            cur.execute(
+                f"DELETE FROM {SCHEMA}.substance_xref r WHERE r.source = %s::text AND NOT EXISTS "
+                f"(SELECT 1 FROM _stg x JOIN {SCHEMA}.substance s ON s.unii = x.unii "
+                "WHERE x.id_type <> '_sub' AND s.substance_key = r.substance_key "
+                "AND x.id_type = r.id_type AND x.id_value = r.id_value)",
+                (DATASET,),
+            )
+            stats["xref_removed"] = cur.rowcount
         audit_trail.record(
             "load_commit",
             conn=conn,
@@ -222,18 +249,25 @@ def resolve_names(conn: psycopg.Connection, names: Iterable[str], source: str) -
     """Map ``names`` (from ``source``, e.g. ``ema``) to substances by exact normalised
     match against the ``name`` rows. Each match adds a ``<source>_name`` xref row
     (method ``normalised_name``); a name that matches several substances (a
-    combination) adds a row for each. Returns ``{"matched", "unmatched"}``, counted in
-    distinct normalised names. Nothing is guessed; the caller commits."""
+    combination) adds a row for each. Returns ``{"matched", "unmatched",
+    "skipped_long"}``: distinct normalised names, except that a name longer than
+    ``MAX_NAME_BYTES`` counts once per occurrence, as unmatched and in ``skipped_long``.
+    Nothing is guessed; the caller commits."""
     id_type = f"{source}_name"
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS pg_temp._stg_names, pg_temp._stg_distinct")
             cur.execute("CREATE TEMP TABLE _stg_names (name text) ON COMMIT DROP")
+            skipped_long = 0
             with cur.copy("COPY _stg_names FROM STDIN") as cp:
                 for raw in names:
                     n = norm_name(_clean(raw or ""))
-                    if n and len(n.encode("utf-8")) <= MAX_NAME_BYTES:
-                        cp.write_row((n,))
+                    if not n:
+                        continue
+                    if len(n.encode("utf-8")) > MAX_NAME_BYTES:
+                        skipped_long += 1
+                        continue
+                    cp.write_row((n,))
             cur.execute(
                 "CREATE TEMP TABLE _stg_distinct ON COMMIT DROP AS "
                 "SELECT DISTINCT name FROM _stg_names"
@@ -254,7 +288,12 @@ def resolve_names(conn: psycopg.Connection, names: Iterable[str], source: str) -
                 "count(*) FROM _stg_distinct d"
             )
             matched, total = cur.fetchone()
-    return {"matched": matched, "unmatched": total - matched}
+    # A name too long to index cannot match: it is counted as unmatched (and apart).
+    return {
+        "matched": matched,
+        "unmatched": total - matched + skipped_long,
+        "skipped_long": skipped_long,
+    }
 
 
 # ---------------------------------------------------------------------------

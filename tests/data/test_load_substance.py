@@ -4,6 +4,7 @@ The unmarked tests are pure. The pg-marked tests run against ``episteme_test`` o
 the schema is built once per module and each test clears the substance tables.
 """
 
+import contextlib
 import json
 import os
 import zipfile
@@ -107,6 +108,86 @@ def test_record_xrefs_codes_and_names():
 def test_record_xrefs_skips_names_too_long_to_index():
     pairs, skipped = ls.record_xrefs(_rec("U", ["x" * (ls.MAX_NAME_BYTES + 1), "ok"]))
     assert pairs == [("name", "ok")] and skipped == 1
+
+
+def test_moiety_of_cleans_both_sides():
+    rec = _rec(
+        "ABC", ["x"], extra_rels=[{"type": "ACTIVE MOIETY", "related_substance": {"unii": " ABC "}}]
+    )
+    assert ls.moiety_of({**rec, "unii": " ABC\x00"}) == "ABC"
+
+
+class _Audit:
+    """Stands in for ``audit_trail`` in ``run_files`` (no database)."""
+
+    calls: list = []
+
+    @staticmethod
+    @contextlib.contextmanager
+    def deferred_mirror(conn):
+        yield
+
+    @staticmethod
+    def record(event, **kw):
+        _Audit.calls.append(event)
+
+    @staticmethod
+    def commit(conn):
+        pass
+
+    @staticmethod
+    def rollback(conn):
+        pass
+
+
+def _run(tmp_path, monkeypatch, files, *, force=False):
+    loads = []
+    _Audit.calls = []
+    monkeypatch.setattr(ls, "audit_trail", _Audit)
+    monkeypatch.setattr(
+        ls,
+        "load_substances",
+        lambda conn, path, *, run_id: (
+            loads.append(path)
+            or {
+                "records": 1,
+                "substances": 1,
+                "no_unii": 0,
+                "moiety_stubs": 0,
+                "multi_moiety": 0,
+                "long_names": 0,
+                "xref_added": 1,
+            }
+        ),
+    )
+    out = ls.run_files(
+        None, files, tmp_path / "raw", tmp_path / "proc", force=force, reason="why", run_id="r"
+    )
+    return out, loads
+
+
+def test_run_files_skips_a_file_with_a_matching_marker(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "raw" / "other" / "substance" / "s.zip", [METFORMIN])
+    first, loads = _run(tmp_path, monkeypatch, [z])
+    assert first == {"loaded": 1, "skipped": 0, "failed": []} and loads == [z]
+    again, loads = _run(tmp_path, monkeypatch, [z])
+    assert again == {"loaded": 0, "skipped": 1, "failed": []} and loads == []
+
+
+def test_run_files_reloads_when_the_file_changed(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "raw" / "other" / "substance" / "s.zip", [METFORMIN])
+    _run(tmp_path, monkeypatch, [z])
+    _zip(z, [METFORMIN, METFORMIN_HCL])
+    out, loads = _run(tmp_path, monkeypatch, [z])
+    assert out["loaded"] == 1 and loads == [z]
+
+
+def test_run_files_force_reloads_and_audits(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "raw" / "other" / "substance" / "s.zip", [METFORMIN])
+    _run(tmp_path, monkeypatch, [z])
+    out, loads = _run(tmp_path, monkeypatch, [z], force=True)
+    assert out == {"loaded": 1, "skipped": 0, "failed": []} and loads == [z]
+    assert "force_override" in _Audit.calls
 
 
 def test_inputs_with_one_input_key_stop_the_load(tmp_path):
@@ -254,3 +335,64 @@ def test_unmatched_names_are_counted_not_guessed(db, tmp_path):
 def test_record_without_unii_is_skipped_and_counted(db, tmp_path):
     out = _load(db, tmp_path, [_rec("", ["nameless"]), METFORMIN])
     assert out["no_unii"] == 1 and out["substances"] == 1
+
+
+@pytest.mark.pg
+def test_long_names_are_counted_as_unmatched(db, tmp_path):
+    _load(db, tmp_path, [ACETAMINOPHEN])
+    out = ls.resolve_names(db, ["paracetamol", "x" * (ls.MAX_NAME_BYTES + 1)], "ema")
+    db.commit()
+    assert out == {"matched": 1, "unmatched": 1, "skipped_long": 1}
+
+
+@pytest.mark.pg
+def test_reload_drops_gone_rows_and_keeps_keys(db, tmp_path):
+    old_salt = _rec(
+        "786Z46389E",
+        ["Metformin hydrochloride", "OldName"],
+        moiety="9100L32L2N",
+        codes=[("RXCUI", "111")],
+    )
+    _load(db, tmp_path, [METFORMIN, old_salt, _rec("CCCCCCCCCC", ["Other"])])
+    ls.resolve_names(db, ["OldName"], "ema")
+    db.commit()
+    with db.cursor() as cur:
+        cur.execute("SELECT unii, substance_key FROM episteme.substance")
+        keys = dict(cur.fetchall())
+    new_salt = _rec("786Z46389E", ["Metformin hydrochloride"], moiety="CCCCCCCCCC")
+    out = _load(db, tmp_path, [METFORMIN, new_salt, _rec("CCCCCCCCCC", ["Other", "OldName"])])
+    assert out["xref_removed"] >= 2
+    # OldName now belongs to CCCCCCCCCC only; the dropped RxCUI is gone; no false combination
+    assert _keys(db, "name", "oldname") == [keys["CCCCCCCCCC"]]
+    assert _keys(db, "rxcui", "111") == []
+    with db.cursor() as cur:
+        cur.execute("SELECT unii, substance_key FROM episteme.substance")
+        assert dict(cur.fetchall()) == keys
+        cur.execute(
+            "SELECT m.unii FROM episteme.substance s JOIN episteme.substance m "
+            "ON m.substance_key = s.moiety_key WHERE s.unii = '786Z46389E'"
+        )
+        assert cur.fetchone()[0] == "CCCCCCCCCC"
+        # rows of other sources survive a reload
+        cur.execute("SELECT count(*) FROM episteme.substance_xref WHERE source = 'ema'")
+        assert cur.fetchone()[0] == 1
+
+
+@pytest.mark.pg
+def test_moiety_stub_is_found_by_its_unii(db, tmp_path):
+    _load(db, tmp_path, [METFORMIN_HCL])
+    assert len(_keys(db, "unii", "9100L32L2N")) == 1
+
+
+@pytest.mark.pg
+def test_two_records_with_one_unii_use_one_row(db, tmp_path):
+    first = _rec("DUPDUPDUP1", [], moiety="9100L32L2N")  # no name
+    second = _rec("DUPDUPDUP1", ["Named"], moiety="9100L32L2N")
+    third = _rec("DUPDUPDUP1", ["Third"], moiety="OTHEROTHER")
+    _load(db, tmp_path, [first, second, third])
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT s.preferred_name, m.unii FROM episteme.substance s JOIN episteme.substance m "
+            "ON m.substance_key = s.moiety_key WHERE s.unii = 'DUPDUPDUP1'"
+        )
+        assert cur.fetchall() == [("Named", "9100L32L2N")]  # first row with a name
