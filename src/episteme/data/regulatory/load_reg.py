@@ -337,6 +337,29 @@ def _create_partitions(cur: psycopg.Cursor, dataset: str, release_id: str) -> tu
     return leaf, existed
 
 
+def _create_partitions_with_timeout(
+    cur: psycopg.Cursor, dataset: str, release_id: str
+) -> tuple[str, bool]:
+    """``_create_partitions`` under ``lock_timeout`` (``EPISTEME_REG_LOCK_TIMEOUT_S``). A
+    reader that holds an open transaction on ``reg_record`` blocks the DDL; after the
+    timeout the feed fails with a clear reason instead of waiting for ever. The
+    session's earlier ``lock_timeout`` is put back afterwards."""
+    seconds = get_settings().reg_lock_timeout_s
+    cur.execute("SELECT current_setting('lock_timeout')")
+    previous = cur.fetchone()[0]
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (f"{seconds}s",))
+    try:
+        out = _create_partitions(cur, dataset, release_id)
+    except psycopg.errors.LockNotAvailable as exc:
+        raise _Invalid(
+            f"could not lock reg_record for the partition DDL within {seconds} s "
+            "(EPISTEME_REG_LOCK_TIMEOUT_S); a transaction that reads reg_record is "
+            "still open"
+        ) from exc
+    cur.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
+    return out
+
+
 def _build_indexes(cur: psycopg.Cursor, leaf: str) -> None:
     table = _ident(leaf)
     for suffix, create in (
@@ -428,7 +451,7 @@ def load_release(
     try:
         with conn.transaction():  # a savepoint when the caller is mid-transaction
             with conn.cursor() as cur:
-                leaf, existed = _create_partitions(cur, feed.name, release_id)
+                leaf, existed = _create_partitions_with_timeout(cur, feed.name, release_id)
                 _copy_rows(cur, leaf, feed, release_id, prep, files)
                 total = _check_counts(feed, paths, prep)
                 if prep.stats["conflicts"]:

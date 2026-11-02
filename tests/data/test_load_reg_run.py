@@ -261,3 +261,43 @@ def test_markers_live_under_the_processed_root(main_env, env):
     load_reg.main(["--source", "ema", "--only", "ema_orphan"])
     found = list(Path(env.processed).rglob("*.json")) + list(Path(env.processed).rglob("*.ok"))
     assert any("ema_orphan__" in str(p) for p in found)
+
+
+def test_reg_lock_timeout_setting(monkeypatch):
+    import episteme.config as cfg
+
+    monkeypatch.delenv("EPISTEME_REG_LOCK_TIMEOUT_S", raising=False)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().reg_lock_timeout_s == 300
+    monkeypatch.setenv("EPISTEME_REG_LOCK_TIMEOUT_S", "7")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().reg_lock_timeout_s == 7
+    monkeypatch.setenv("EPISTEME_REG_LOCK_TIMEOUT_S", "0")  # invalid: back to the default
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().reg_lock_timeout_s == 300
+    cfg.get_settings.cache_clear()
+
+
+def test_lock_timeout_wraps_only_the_partition_ddl_and_turns_into_a_failed_reason(monkeypatch):
+    import psycopg.errors
+
+    seen = []
+
+    class Cur:
+        def __init__(self):
+            self.row = None
+
+        def execute(self, q, params=None):
+            seen.append((q, params))
+            self.row = ("0",)
+
+        def fetchone(self):
+            return self.row
+
+    def blocked(cur, dataset, release_id):
+        raise psycopg.errors.LockNotAvailable("x")
+
+    monkeypatch.setattr(load_reg, "_create_partitions", blocked)
+    with pytest.raises(load_reg._Invalid, match="EPISTEME_REG_LOCK_TIMEOUT_S"):
+        load_reg._create_partitions_with_timeout(Cur(), "d", "r")
+    assert any("set_config" in q and p == ("300s",) for q, p in seen)

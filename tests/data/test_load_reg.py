@@ -340,6 +340,35 @@ def test_main_runs_feeds_end_to_end_and_exits_non_zero_for_a_short_feed(db, tmp_
     assert load_reg.latest_release(db, "ema_orphan") is not None
     assert load_reg.latest_release(db, "ema_pip") is None
     assert _count(db, "SELECT count(*) FROM episteme.reg_record WHERE dataset = 'ema_orphan'") == 3
+    db.rollback()  # an idle-in-transaction read would block the DDL of the next main
     # resume: the loaded feed is skipped, the short feed fails again
     assert load_reg.main(argv) == 1
+    db.rollback()
     assert _count(db, "SELECT count(*) FROM episteme.reg_release WHERE dataset = 'ema_orphan'") == 1
+    db.rollback()
+
+
+def test_open_read_transaction_makes_the_feed_fail_not_hang(db, tmp_path, monkeypatch):
+    from episteme.config import get_settings
+
+    monkeypatch.setenv("EPISTEME_REG_LOCK_TIMEOUT_S", "1")
+    get_settings.cache_clear()
+    feed = _feed()
+    f = _ema_file(tmp_path / "a.json", _rows(2))
+    reader = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=False)
+    try:
+        with reader.cursor() as cur:
+            cur.execute("SELECT count(*) FROM episteme.reg_record")  # holds the lock
+        res = load_reg.load_release(db, feed, f, "2026-11", run_id="r")
+        db.commit()
+        assert res["status"] == "failed" and "reg_record" in res["reason"]
+        assert load_reg.latest_release(db, feed.name) is None
+        _, leaf = load_reg.partition_names(feed.name, "2026-11")
+        assert _count(db, "SELECT count(*) FROM pg_class WHERE relname = %s", leaf) == 0
+    finally:
+        reader.rollback()
+        reader.close()
+    # the reader is gone: the same feed now loads
+    res = load_reg.load_release(db, feed, f, "2026-11", run_id="r")
+    db.commit()
+    assert res["status"] == "loaded"

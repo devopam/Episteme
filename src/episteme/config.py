@@ -106,6 +106,9 @@ DEFAULT_WRITE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_PMC_BUCKET_IDS = 50_000
 # Seconds to wait between two requests to EMA's site (feed and document downloads).
 DEFAULT_EMA_DELAY_SECONDS = 2.0
+# Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
+# holds a long transaction on reg_record blocks it); then the feed fails.
+DEFAULT_REG_LOCK_TIMEOUT_S = 300
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -265,6 +268,8 @@ class Settings:
     pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
     # Seconds between two requests to EMA (EPISTEME_EMA_DELAY_SECONDS).
     ema_delay_seconds: float = DEFAULT_EMA_DELAY_SECONDS
+    # Seconds to wait for the reg_record partition DDL lock (EPISTEME_REG_LOCK_TIMEOUT_S).
+    reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -388,6 +393,9 @@ def get_settings() -> Settings:
         ),
         ema_delay_seconds=_get_non_negative_float_or_default(
             "EPISTEME_EMA_DELAY_SECONDS", DEFAULT_EMA_DELAY_SECONDS
+        ),
+        reg_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_REG_LOCK_TIMEOUT_S", DEFAULT_REG_LOCK_TIMEOUT_S
         ),
         slice_max_bytes=_slice_max_bytes(),
     )
