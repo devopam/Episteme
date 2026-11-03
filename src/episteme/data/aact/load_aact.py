@@ -7,8 +7,11 @@ AACT is reference data: one full snapshot per release, looked up, never trained 
 ``articles`` rows). Design: ``docs/superpowers/specs/2026-11-03-beta-data-completion-design.md``
 sections 4 and 9.
 
-**Release.** The release id is the ``YYYYMMDD`` at the start of the zip name
-(``20261103_export_ctgov.zip``), checked as a date. The release loads into the schema
+**Release.** The release id comes from the zip name, checked as a date and written
+``YYYYMMDD``: the date at the start of the owner's download (``20261103_export_ctgov.zip``),
+or the date of the scripted download (``flatfiles_2026-11-03.zip`` or
+``flatfiles_20261103.zip``, from ``download_aact.sh``). Two zips that give one release id are
+refused. The release loads into the schema
 ``aact_r<YYYYMMDD>``: one table per ``.txt`` member, with the columns of the member's header
 row, all ``text``. ``studies`` also gets a typed ``date`` copy (``<column>_as_date``) of each
 column that the dictionary types as ``date``; an empty or bad date is NULL there and is
@@ -21,7 +24,8 @@ counted per column. The schema ``aact`` holds one view per table of the latest r
 NULL. NUL characters are removed and counted. A row with another width than the header stops
 the table, with the member name and the line number. ``csv.field_size_limit`` is raised to
 ``MAX_FIELD_CHARS`` and no further: an unbalanced quote then fails the table instead of
-reading a whole member into one field.
+reading a whole member into one field. The limit is process-wide (``csv`` keeps one value
+for the interpreter), so other CSV readers in the same process see the raised limit too.
 
 **Dictionary.** The file header drives the columns. Columns only in the file, columns only in
 the dictionary, deprecated columns that are loaded, and dictionary tables missing from the zip
@@ -39,8 +43,11 @@ dictionary date (``dictionary.DICTIONARY_DATE``) is recorded with the release.
    it commits with the rows. A re-run skips each table whose state row holds this input's
    fingerprint, and resumes at the first table not done.
 2. **Indexes** (``CREATE INDEX IF NOT EXISTS``, a transaction per table): ``nct_id`` on every
-   table that has it, and ``EXTRA_INDEXES``. A column with a value too long for a btree key
-   (``MAX_INDEX_TEXT_BYTES``) gets no index, and is reported. Then ``ANALYZE``.
+   table that has it, and ``EXTRA_INDEXES``. An ``EXTRA_INDEXES`` column is free text, so its
+   index is on the expression ``left(col, INDEX_PREFIX_CHARS)`` (500 characters, at most 2000
+   bytes, under the btree key limit): one long value cannot stop the index. A query must
+   compare ``left(col, 500)`` to use it (``WHERE left(name, 500) = left(%s, 500)``). Then
+   ``ANALYZE``.
 3. **Row checks.** ``studies`` must be in the zip; its rows must equal its distinct
    ``nct_id``; a table with zero rows fails; in each other table with ``nct_id``, the share of
    rows whose ``nct_id`` is NULL or not in ``studies`` must be at most
@@ -60,15 +67,25 @@ dictionary date (``dictionary.DICTIONARY_DATE``) is recorded with the release.
 
 A failed check returns ``status`` ``failed``, records a ``failed`` ``reg_release`` row when the
 release has none, and leaves the previous release serving. The partial release schema stays;
-a re-run resumes it. Code never drops a finished release schema (the runbook says how).
+a re-run resumes it. Code never drops the schema of another release id (the runbook says
+how). A read or database error after the tables also records the ``failed`` row, then
+raises.
 
 **Repeats.** A finished release (its ``_release`` state row) with the same input fingerprint
 is ``skipped``. The same release id with another fingerprint is ``refused`` unless ``force``
-with a ``reason`` (one ``force_override`` audit row). A forced reload renames the finished
-schema to ``aact_r<id>_prev_<UTC time>``: the views are bound to the tables, not to the
-name, so the old release keeps serving until the new one switches in. The renamed schema is
-left in place. A forced reload of an unfinished schema keeps it and resumes: its tables
-with this input's fingerprint are reused, the others reload.
+with a ``reason`` (one ``force_override`` audit row). The fingerprint is the ``input_key``,
+size and modification time of the zip, not its content hash (hashing 2.4 GiB on every run is
+slow): a copied or touched zip reads as other input and is refused, which is safe, and
+``--force --reason`` recovers. A release id older than the latest release
+(``latest_release``) is ``refused`` too unless forced: it would switch the views back.
+
+A forced reload renames the finished schema to ``aact_r<id>_prev_<UTC time>``: the views are
+bound to the tables, not to the name, so the old release keeps serving until the new one
+switches in. After a good switch, the ``aact_r<id>_prev_*`` schemas of this same release id
+are dropped (a replaced copy of this release, not an older release) and listed in
+``dropped_schemas``; after a failed switch they stay and keep serving. A forced reload of an
+unfinished schema keeps it and resumes: its tables with this input's fingerprint are reused,
+the others reload.
 
 The loader creates schemas, tables and views, so the CLI connects as the owner
 (``episteme_sys_admin``). Config comes from ``episteme.config``; this module never reads
@@ -108,8 +125,7 @@ from episteme.data.regulatory.load_reg import (
     latest_release,
     release_loaded,
 )
-from episteme.data.regulatory.load_substance import resolve_names
-from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES, norm_name
+from episteme.data.regulatory.load_substance import resolve_key, resolve_names
 from episteme.ops.failure import record_failure
 
 _LOG = logging.getLogger(__name__)
@@ -142,11 +158,22 @@ EXTRA_INDEXES: dict[str, tuple[str, ...]] = {
     "browse_interventions": ("mesh_term",),
     INTERVENTION_SUBSTANCE: ("substance_key",),
 }
-# Estimated bytes of one row beyond its text.
+# The text columns of EXTRA_INDEXES are indexed on left(col, INDEX_PREFIX_CHARS): at most
+# 4 bytes a character, so 2000 bytes, under the btree key limit (about 2700 bytes).
+INDEX_PREFIX_CHARS = 500
+# Columns that hold no free text: indexed whole.
+_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key"})
+# Estimated bytes of one row beyond its text, and of one field (the Python str object).
 _ROW_OVERHEAD = 64
+_FIELD_OVERHEAD = 50
 _NAME_RE = re.compile(r"[a-z_][a-z0-9_]*\Z")
-_RELEASE_RE = re.compile(r"(\d{8})(?=[_.])")
-_ZIP_NAME_RE = re.compile(r"\d{8}_.+\.zip\Z", re.IGNORECASE)
+# <YYYYMMDD>_*.zip (owner download) or flatfiles_<YYYY-MM-DD|YYYYMMDD>.zip (download_aact.sh).
+_RELEASE_RES = (
+    re.compile(r"(\d{4})(\d{2})(\d{2})_.*\.zip\Z", re.IGNORECASE),
+    re.compile(r"(\d{4})(\d{2})(\d{2})\.zip\Z", re.IGNORECASE),
+    re.compile(r"flatfiles_(\d{4})-(\d{2})-(\d{2})\.zip\Z", re.IGNORECASE),
+    re.compile(r"flatfiles_(\d{4})(\d{2})(\d{2})\.zip\Z", re.IGNORECASE),
+)
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _MAX_IDENT = 63
 
@@ -159,17 +186,28 @@ class _Invalid(Exception):
 # Names (pure)
 # ---------------------------------------------------------------------------
 def release_id_from_zip(path: Path) -> str:
-    """The ``YYYYMMDD`` at the start of the zip name, checked as a date. ``ValueError``
-    when the name does not start with one."""
+    """The release id (``YYYYMMDD``) of a zip name, checked as a date:
+    ``<YYYYMMDD>_*.zip`` (the owner's download, ``20261103_export_ctgov.zip``) or
+    ``flatfiles_<YYYY-MM-DD>.zip`` / ``flatfiles_<YYYYMMDD>.zip`` (``download_aact.sh``).
+    ``ValueError`` for another name or a date that does not exist."""
     name = Path(path).name
-    m = _RELEASE_RE.match(name)
-    if not m:
-        raise ValueError(f"{name}: the name does not start with a YYYYMMDD release date")
-    try:
-        datetime.strptime(m.group(1), "%Y%m%d")
-    except ValueError as exc:
-        raise ValueError(f"{name}: {m.group(1)} is not a date") from exc
-    return m.group(1)
+    for pattern in _RELEASE_RES:
+        m = pattern.match(name)
+        if m:
+            release_id = "".join(m.groups())
+            try:
+                datetime.strptime(release_id, "%Y%m%d")
+            except ValueError as exc:
+                raise ValueError(f"{name}: {release_id} is not a date") from exc
+            return release_id
+    raise ValueError(
+        f"{name}: not an AACT release zip (<YYYYMMDD>_*.zip or flatfiles_<YYYY-MM-DD>.zip)"
+    )
+
+
+def is_release_name(name: str) -> bool:
+    """Whether ``name`` has the form of a release zip (the date is not checked)."""
+    return any(p.match(name) for p in _RELEASE_RES)
 
 
 def schema_name(release_id: str) -> str:
@@ -209,14 +247,14 @@ def fingerprint(zip_path: Path, key: str) -> str:
 
 
 def release_zips(raw_dir: Path) -> list[Path]:
-    """The release zips under ``raw_dir`` (``<YYYYMMDD>_*.zip``, a valid date), in release
-    order, then path order. Other zips (``flatfiles_*``, ``postgres_*``) are not releases."""
+    """The release zips under ``raw_dir`` (``release_id_from_zip`` names, a valid date), in
+    release order, then path order. Other zips (``postgres_*``) are not releases."""
     base = Path(raw_dir)
     if not base.is_dir():
         return []
     out: list[tuple[str, Path]] = []
     for p in base.rglob("*.zip"):
-        if not p.is_file() or not _ZIP_NAME_RE.match(p.name):
+        if not p.is_file() or not is_release_name(p.name):
             continue
         try:
             out.append((release_id_from_zip(p), p))
@@ -227,16 +265,22 @@ def release_zips(raw_dir: Path) -> list[Path]:
 
 def find_release_zip(raw_dir: Path, zips: Sequence[Path]) -> Path:
     """The zip of the newest release among ``zips``. ``FileNotFoundError`` when there is
-    none; ``ValueError`` when two zips hold the newest release id."""
+    none; ``ValueError`` when two zips give one release id (whichever release)."""
     if not zips:
-        raise FileNotFoundError(f"no <YYYYMMDD>_*.zip release under {raw_dir}")
+        raise FileNotFoundError(
+            f"no AACT release zip (<YYYYMMDD>_*.zip or flatfiles_<YYYY-MM-DD>.zip) under {raw_dir}"
+        )
     by_id: dict[str, list[Path]] = {}
     for p in zips:
         by_id.setdefault(release_id_from_zip(p), []).append(Path(p))
+    for release_id, paths in sorted(by_id.items()):
+        if len(paths) > 1:
+            keys = sorted(input_key(p, raw_dir) for p in paths)
+            raise ValueError(
+                f"release {release_id} has {len(keys)} zips: {', '.join(keys)}; they would load "
+                "as one release. Keep one of them (or pass --zip PATH)"
+            )
     newest = max(by_id)
-    if len(by_id[newest]) > 1:
-        keys = sorted(input_key(p, raw_dir) for p in by_id[newest])
-        raise ValueError(f"release {newest} has {len(keys)} zips: {keys}; keep one")
     return by_id[newest][0]
 
 
@@ -396,6 +440,12 @@ class RowShaper:
         return tuple(out)
 
 
+def row_size(row: Sequence[str]) -> int:
+    """Estimated memory of one buffered row, in bytes: its text, plus ``_FIELD_OVERHEAD``
+    per field (the str object) and ``_ROW_OVERHEAD`` per row (the tuple)."""
+    return _ROW_OVERHEAD + sum(len(v) + _FIELD_OVERHEAD for v in row)
+
+
 def compare_tables(tables: Sequence[str], dictionary: dict[str, list[dict]]) -> dict:
     """Tables of the dictionary missing from the zip, and tables of the zip that the
     dictionary does not know. Reported, never fatal."""
@@ -475,6 +525,7 @@ def _prepare_schema(
     with conn.cursor() as cur:
         exists = _schema_exists(cur, ctx.schema)
         finished = _finished_fp(cur, ctx.schema) if exists else None
+    latest = latest_release(conn, DATASET)
     conn.rollback()
     out: dict[str, Any] = {"action": "load"}
     if not force:
@@ -489,6 +540,15 @@ def _prepare_schema(
             }
         elif finished == ctx.fp and release_loaded(conn, DATASET, ctx.release_id):
             out = {"action": "skip"}
+        elif latest is not None and ctx.release_id < latest:
+            out = {
+                "action": "refuse",
+                "reason": (
+                    f"release {ctx.release_id} is older than the latest release {latest}; it "
+                    "would switch the aact views back. To load it anyway, run the load again "
+                    'with --force --reason "<why>"'
+                ),
+            }
         return out
     if not reason:
         raise ValueError("force requires a reason (audited)")
@@ -499,6 +559,7 @@ def _prepare_schema(
                 conn=conn,
                 object=f"{DATASET} {ctx.release_id}",
                 reason=reason,
+                new_value={"latest_release": latest, "finished": finished is not None},
                 run_id=ctx.run_id,
             )
             with conn.cursor() as cur:
@@ -591,7 +652,7 @@ def _load_table(conn: psycopg.Connection, ctx: _Ctx, member: str) -> dict:
                         shaper.stats["blank_lines"] += 1
                         continue
                     batch.append(shaper.shape(row, line=line))
-                    size += _ROW_OVERHEAD + sum(len(v) for v in row)
+                    size += row_size(row)
                     if size >= ctx.batch_bytes:
                         _copy(cur, stmt, batch)
                         batch, size = [], 0
@@ -683,37 +744,43 @@ def _columns(conn: psycopg.Connection, schema: str) -> dict[str, list[str]]:
     return out
 
 
+def index_plan(table: str, columns: Sequence[str]) -> list[tuple[str, int | None]]:
+    """The indexes of one release table: ``(column, prefix)``, where ``prefix`` is the
+    ``left(col, prefix)`` length of a free-text column and ``None`` for a column indexed
+    whole (``nct_id``, ``substance_key``). Only columns the table has."""
+    have = set(columns)
+    wanted = (["nct_id"] if "nct_id" in have else []) + [
+        c for c in EXTRA_INDEXES.get(table, ()) if c in have
+    ]
+    return [(c, None if c in _WHOLE_INDEX_COLUMNS else INDEX_PREFIX_CHARS) for c in wanted]
+
+
+def index_statement(schema: str, table: str, column: str, prefix: int | None) -> sql.Composed:
+    """``CREATE INDEX IF NOT EXISTS`` of one ``index_plan`` entry."""
+    if prefix is None:
+        key: sql.Composable = sql.Identifier(column)
+    else:
+        key = sql.SQL("left({c}, {n})").format(c=sql.Identifier(column), n=sql.Literal(prefix))
+    return sql.SQL("CREATE INDEX IF NOT EXISTS {i} ON {t} ({k})").format(
+        i=sql.Identifier(index_name(table, column)), t=_t(schema, table), k=key
+    )
+
+
 def _build_indexes(conn: psycopg.Connection, schema: str, tables: Sequence[str]) -> list[str]:
-    """Indexes and ``ANALYZE``, a transaction per table. Returns the ``table.column`` whose
-    index was not built (a value too long for a btree key)."""
+    """Indexes (``index_plan``) and ``ANALYZE``, a transaction per table. Returns the
+    indexes as ``table.column`` or ``table.left(column, n)``."""
     cols = _columns(conn, schema)
-    skipped: list[str] = []
+    built: list[str] = []
     for table in tables:
-        have = set(cols.get(table, []))
-        wanted = (["nct_id"] if "nct_id" in have else []) + [
-            c for c in EXTRA_INDEXES.get(table, ()) if c in have
-        ]
         with conn.cursor() as cur:
-            for column in wanted:
-                if column != "nct_id":
-                    cur.execute(
-                        sql.SQL("SELECT coalesce(max(octet_length({c})), 0) FROM {t}").format(
-                            c=sql.Identifier(column), t=_t(schema, table)
-                        )
-                    )
-                    if cur.fetchone()[0] > MAX_INDEX_TEXT_BYTES:
-                        skipped.append(f"{table}.{column}")
-                        continue
-                cur.execute(
-                    sql.SQL("CREATE INDEX IF NOT EXISTS {i} ON {t} ({c})").format(
-                        i=sql.Identifier(index_name(table, column)),
-                        t=_t(schema, table),
-                        c=sql.Identifier(column),
-                    )
+            for column, prefix in index_plan(table, cols.get(table, [])):
+                cur.execute(index_statement(schema, table, column, prefix))
+                built.append(
+                    f"{table}.{column}" if prefix is None else f"{table}.left({column}, {prefix})"
                 )
             cur.execute(sql.SQL("ANALYZE {}").format(_t(schema, table)))
         conn.commit()
-    return skipped
+    return built
 
 
 def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> dict:
@@ -795,7 +862,7 @@ def _resolve_interventions(conn: psycopg.Connection, ctx: _Ctx) -> dict:
                 cur.execute("CREATE TEMP TABLE _aact_name_map (raw text, norm text) ON COMMIT DROP")
                 with cur.copy("COPY _aact_name_map (raw, norm) FROM STDIN") as cp:
                     for raw in names:
-                        n = norm_name(raw.replace("\x00", "").strip())
+                        n = resolve_key(raw)
                         if n:
                             cp.write_row((raw, n))
                 cur.execute("ANALYZE _aact_name_map")
@@ -950,6 +1017,40 @@ def _record_failed(conn: psycopg.Connection, release_id: str) -> None:
     conn.commit()
 
 
+def _drop_replaced(conn: psycopg.Connection, ctx: _Ctx) -> list[str]:
+    """After a good switch: drop the ``aact_r<id>_prev_<time>`` schemas of this release id
+    (copies that a forced reload replaced; no view reads them any more). The schemas of other
+    release ids are never dropped. One transaction under ``lock_timeout``; returns the
+    names dropped."""
+    pattern = rf"^{re.escape(ctx.schema)}_prev_[0-9]{{14}}$"
+    try:
+        with audit_trail.deferred_mirror(conn):
+            with conn.cursor() as cur:
+                _set_lock_timeout(cur)
+                cur.execute(
+                    "SELECT nspname FROM pg_namespace WHERE nspname ~ %s ORDER BY 1", (pattern,)
+                )
+                names = [r[0] for r in cur.fetchall()]
+                for name in names:
+                    cur.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
+            if names:
+                audit_trail.record(
+                    "load_replace",
+                    conn=conn,
+                    object=f"{DATASET} {ctx.release_id}",
+                    old_value={"dropped_schemas": names},
+                    reason="replaced copy of the same release, after a forced reload",
+                    run_id=ctx.run_id,
+                )
+            audit_trail.commit(conn)
+    except BaseException:
+        audit_trail.rollback(conn)
+        raise
+    for name in names:
+        _LOG.info("dropped the replaced schema %s", name)
+    return names
+
+
 def load_release(
     conn: psycopg.Connection,
     zip_path: Path,
@@ -966,10 +1067,13 @@ def load_release(
     for the last two), ``release_id``, ``schema``, ``source_file``, ``dictionary_date`` and,
     after a load: ``rows`` (studies), ``tables`` (``{table: {"rows", "stats"}}``),
     ``tables_loaded``, ``tables_skipped``, ``dictionary`` (``missing_from_zip``,
-    ``not_in_dictionary``), ``orphans``, ``orphan_shares``, ``indexes_skipped``, ``names``
+    ``not_in_dictionary``), ``orphans``, ``orphan_shares``, ``indexes``, ``names``
     (``resolve_names`` counts and intervention coverage), ``previous_release`` and, after a
-    forced reload of a finished release, ``previous_schema``. A read or parse error raises;
-    the previous release keeps serving and a re-run resumes.
+    forced reload of a finished release, ``previous_schema``, and ``dropped_schemas`` (the
+    replaced ``_prev_`` copies of this release dropped after the switch; ``drop_error`` when
+    that step failed, which does not fail the load). A read or parse error raises; the
+    previous release keeps serving and a re-run resumes. A database error after the tables
+    first records the ``failed`` registry row, then raises.
     """
     if force and not reason:
         raise ValueError("force requires a reason (audited)")
@@ -1038,7 +1142,7 @@ def load_release(
         },
     )
     try:
-        result["indexes_skipped"] = _build_indexes(conn, ctx.schema, order)
+        result["indexes"] = _build_indexes(conn, ctx.schema, order)
         result.update(_check_rows(conn, ctx, state))
         names = _resolve_interventions(conn, ctx)
         result["names"] = names
@@ -1051,7 +1155,7 @@ def load_release(
             "dictionary": {k: v for k, v in result["dictionary"].items() if k != "columns"},
             "tables": {t: s["rows"] for t, s in state.items()},
             "orphans": result["orphans"],
-            "indexes_skipped": result["indexes_skipped"],
+            "indexes": result["indexes"],
             "names": names,
         }
         _switch(conn, ctx, [*order, INTERVENTION_SUBSTANCE], summary)
@@ -1059,7 +1163,19 @@ def load_release(
         _record_failed(conn, release_id)
         result.update(status="failed", reason=str(exc))
         return result
-    result.update(status="loaded", rows=result["studies"])
+    except (psycopg.Error, OSError, ValueError):
+        try:
+            _record_failed(conn, release_id)
+        except psycopg.Error:
+            _LOG.exception("could not record the failed release %s", release_id)
+        raise
+    result.update(status="loaded", rows=result["studies"], dropped_schemas=[])
+    try:
+        result["dropped_schemas"] = _drop_replaced(conn, ctx)
+    except psycopg.Error as exc:
+        conn.rollback()
+        result["drop_error"] = repr(exc)
+        _LOG.warning("release %s loaded, but its replaced schemas stay: %r", release_id, exc)
     return result
 
 
@@ -1125,7 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
                             f"tables_loaded={result['tables_loaded']} "
                             f"tables_skipped={result['tables_skipped']} "
                             f"missing_from_zip={result['dictionary']['missing_from_zip']} "
-                            f"indexes_skipped={result['indexes_skipped']} "
+                            f"indexes={len(result['indexes'])} "
                             f"names_matched={names.get('matched')} "
                             f"names_unmatched={names.get('unmatched')} "
                             f"interventions_matched={names.get('interventions_matched')}/"
@@ -1136,6 +1252,15 @@ def main(argv: list[str] | None = None) -> int:
                                 else ""
                             )
                         )
+                        for name in result.get("dropped_schemas") or []:
+                            print(
+                                f"dropped {name} (replaced copy of release {result['release_id']})"
+                            )
+                        if result.get("drop_error"):
+                            print(
+                                f"WARN {SOURCE}: the replaced schemas of release "
+                                f"{result['release_id']} stay: {result['drop_error']}"
+                            )
                 except Exception as exc:  # noqa: BLE001 - reported, and the exit code carries it
                     conn.rollback()
                     failure = repr(exc)

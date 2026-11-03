@@ -58,7 +58,18 @@ def _dictionary(rows: list[tuple[str, str, str]]) -> dict[str, list[dict]]:
 def test_release_id_from_zip_name(tmp_path):
     assert la.release_id_from_zip(Path(ZIP_NAME)) == "20261103"
     assert la.release_id_from_zip(tmp_path / "sub" / "20240229_export_ctgov.zip") == "20240229"
-    for bad in ("20261340_export_ctgov.zip", "export_ctgov.zip", "2026110_x.zip", "x20261103.zip"):
+    # The names download_aact.sh writes.
+    assert la.release_id_from_zip(Path("flatfiles_2026-11-03.zip")) == "20261103"
+    assert la.release_id_from_zip(Path("flatfiles_20261103.zip")) == "20261103"
+    for bad in (
+        "20261340_export_ctgov.zip",
+        "export_ctgov.zip",
+        "2026110_x.zip",
+        "x20261103.zip",
+        "flatfiles_2026-02-30.zip",
+        "flatfiles_2026-11.zip",
+        "postgres_2026-11-03.zip",
+    ):
         with pytest.raises(ValueError):
             la.release_id_from_zip(Path(bad))
     assert la.schema_name("20261103") == "aact_r20261103"
@@ -206,15 +217,28 @@ def test_two_zips_of_one_release_are_refused(tmp_path):
     raw = tmp_path / "raw"
     with pytest.raises(ValueError):
         la.find_release_zip(raw, [raw / "x" / ZIP_NAME, raw / "y" / "20261103_other.zip"])
+    # The owner's download and the scripted one of the same day: one release, two zips.
+    hand = _zip(raw / ZIP_NAME, {"studies.txt": "nct_id\n"})
+    scripted = _zip(raw / "flatfiles_2026-11-03.zip", {"studies.txt": "nct_id\n"})
+    with pytest.raises(ValueError, match=r"release 20261103 has 2 zips.*flatfiles_2026-11-03"):
+        la.find_release_zip(raw, la.release_zips(raw))
+    assert set(la.release_zips(raw)) == {hand, scripted}
+    # Also when the doubled release is not the newest.
+    _zip(raw / "flatfiles_2026-12-01.zip", {"studies.txt": "nct_id\n"})
+    with pytest.raises(ValueError, match="20261103"):
+        la.find_release_zip(raw, la.release_zips(raw))
 
 
 def test_find_release_zip_takes_the_newest_release(tmp_path):
     raw = tmp_path / "raw"
     old = _zip(raw / "20261001_export_ctgov.zip", {"studies.txt": "nct_id\n"})
     new = _zip(raw / ZIP_NAME, {"studies.txt": "nct_id\n"})
-    _zip(raw / "flatfiles_2026-11-04.zip", {"studies.txt": "nct_id\n"})
+    _zip(raw / "postgres_2026-11-04.zip", {"x.txt": "a\n"})  # the database dump: not a release
     assert la.release_zips(raw) == [old, new]
     assert la.find_release_zip(raw, la.release_zips(raw)) == new
+    scripted = _zip(raw / "flatfiles_2026-11-04.zip", {"studies.txt": "nct_id\n"})
+    assert la.release_zips(raw) == [old, new, scripted]
+    assert la.find_release_zip(raw, la.release_zips(raw)) == scripted
     with pytest.raises(FileNotFoundError):
         la.find_release_zip(raw, [])
 
@@ -225,6 +249,39 @@ def test_index_names_fit_and_differ():
     b = la.index_name(long_table, "name")
     assert a != b and len(a.encode()) <= 63 and len(b.encode()) <= 63
     assert la.index_name("studies", "nct_id") == "studies_nct_id_idx"
+
+
+def test_text_indexes_use_a_prefix_so_no_value_is_too_long():
+    assert la.index_plan("interventions", ["id", "nct_id", "name"]) == [
+        ("nct_id", None),
+        ("name", la.INDEX_PREFIX_CHARS),
+    ]
+    assert la.index_plan("intervention_substance", ["nct_id", "substance_key"]) == [
+        ("nct_id", None),
+        ("substance_key", None),
+    ]
+    assert la.index_plan("conditions", ["id", "name"]) == []  # no such columns, no index
+    # 500 characters of up to 4 bytes stay under the btree key limit (about 2700 bytes).
+    assert la.INDEX_PREFIX_CHARS * 4 <= 2700
+    text = la.index_statement("aact_r20261103", "interventions", "name", 500).as_string(None)
+    assert text == (
+        'CREATE INDEX IF NOT EXISTS "interventions_name_idx" ON '
+        '"aact_r20261103"."interventions" (left("name", 500))'
+    )
+    whole = la.index_statement("aact_r20261103", "studies", "nct_id", None).as_string(None)
+    assert whole.endswith('"aact_r20261103"."studies" ("nct_id")')
+
+
+def test_row_size_counts_each_field():
+    assert la.row_size(["ab", "", "c"]) == 64 + 3 + 3 * 50
+
+
+def test_name_map_uses_the_resolve_names_key():
+    from episteme.data.regulatory import load_substance as ls
+
+    assert la.resolve_key is ls.resolve_key
+    assert ls.resolve_key("  Metformin\x00  HYDROCHLORIDE ") == "metformin hydrochloride"
+    assert ls.resolve_key(None) == ""
 
 
 def test_read_dictionary_packaged_copy():
@@ -436,6 +493,17 @@ def test_release_loads_and_views_switch(db, tmp_path):
         )
     }
     assert {"studies_nct_id_idx", "interventions_name_idx", "conditions_downcase_name_idx"} <= idx
+    defs = dict(
+        _all(
+            db,
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = %s",
+            ("aact_r20261103",),
+        )
+    )
+    # pg_get_indexdef writes the function as "left"(name, 500).
+    assert "left" in defs["interventions_name_idx"]
+    assert "(name, 500)" in defs["interventions_name_idx"]
+    assert "left(" not in defs["studies_nct_id_idx"]
     # The next release switches the views; the old release schema stays.
     out2 = _load(
         db,
@@ -471,8 +539,12 @@ def test_repeat_release_skips_or_refuses(db, tmp_path):
         _load(db, tmp_path, changed, force=True)  # --force needs a reason
     forced = _load(db, tmp_path, changed, force=True, reason="corrected snapshot")
     assert forced["status"] == "loaded", forced
-    assert forced["previous_schema"].startswith("aact_r20261103_prev_")
+    prev = forced["previous_schema"]
+    assert prev.startswith("aact_r20261103_prev_")
     assert _all(db, "SELECT count(*) FROM aact.conditions") == [(3,)]
+    # The replaced copy of the same release is dropped after the good switch.
+    assert forced["dropped_schemas"] == [prev]
+    assert _all(db, "SELECT to_regnamespace(%s) IS NULL", (prev,)) == [(True,)]
     assert _all(
         db,
         "SELECT count(*) FROM episteme._audit WHERE event_type = 'force_override' "
@@ -487,6 +559,64 @@ def test_forced_reload_that_fails_keeps_the_old_release_serving(db, tmp_path):
     out = _load(db, tmp_path, broken, force=True, reason="test")
     assert out["status"] == "failed" and "conditions" in out["reason"]
     assert _all(db, "SELECT count(*) FROM aact.conditions") == [(2,)]
+    # No good switch: the renamed copy stays, and still serves.
+    assert _all(db, "SELECT to_regnamespace(%s) IS NOT NULL", (out["previous_schema"],)) == [
+        (True,)
+    ]
+
+
+@pytest.mark.pg
+def test_replaced_copies_of_other_releases_are_kept(db, tmp_path):
+    """Only the _prev_ schemas of the release just switched in are dropped."""
+    assert _load(db, tmp_path)["status"] == "loaded"
+    with db.cursor() as cur:
+        cur.execute("CREATE SCHEMA aact_r20250101_prev_20250102000000")
+        cur.execute("CREATE SCHEMA aact_r20250101")
+    db.commit()
+    changed = _members(**{"conditions.txt": CONDITIONS + "3|NCT00000003|Gout|gout\n"})
+    forced = _load(db, tmp_path, changed, force=True, reason="corrected snapshot")
+    assert forced["status"] == "loaded", forced
+    assert len(forced["dropped_schemas"]) == 1
+    assert _all(
+        db,
+        "SELECT to_regnamespace('aact_r20250101_prev_20250102000000') IS NOT NULL, "
+        "to_regnamespace('aact_r20250101') IS NOT NULL",
+    ) == [(True, True)]
+
+
+@pytest.mark.pg
+def test_older_release_is_refused_unless_forced(db, tmp_path):
+    assert _load(db, tmp_path, name="20261201_export_ctgov.zip")["status"] == "loaded"
+    older = _load(db, tmp_path)  # 20261103
+    assert older["status"] == "refused" and "older" in older["reason"], older
+    assert "--force" in older["reason"]
+    from episteme.data.regulatory.load_reg import latest_release
+
+    assert latest_release(db, "aact") == "20261201"
+    db.rollback()
+    forced = _load(db, tmp_path, force=True, reason="roll back to the 3 Nov snapshot")
+    assert forced["status"] == "loaded", forced
+    assert latest_release(db, "aact") == "20261103"
+    db.rollback()
+    assert _all(
+        db,
+        "SELECT count(*) FROM episteme._audit WHERE event_type = 'force_override' "
+        "AND reason = 'roll back to the 3 Nov snapshot'",
+    ) == [(1,)]
+
+
+@pytest.mark.pg
+def test_database_error_after_the_tables_records_a_failed_release(db, tmp_path, monkeypatch):
+    def boom(conn, ctx):
+        raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(la, "_resolve_interventions", boom)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        _load(db, tmp_path)
+    assert _all(
+        db, "SELECT status, is_latest FROM episteme.reg_release WHERE dataset = 'aact'"
+    ) == [("failed", False)]
+    assert _all(db, "SELECT to_regclass('aact.studies')") == [(None,)]
 
 
 @pytest.mark.pg
