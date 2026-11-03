@@ -10,7 +10,10 @@ full data. For production use ``EPISTEME_DB_MODE=read-only``: the settings route
 (``episteme.config``, the DB-mode guard) is the same as for the loaders.
 
 It writes nothing. The connection and its transaction are read only, and ``EXPLAIN``
-without ``ANALYZE`` does not run the statement. ``enable_seqscan`` is turned off inside the
+without ``ANALYZE`` does not run the statement. One data probe runs (two ``SELECT EXISTS``,
+in ``read_params``): whether ``label_substance`` holds a UNII, and whether any label joins
+``substance`` through it. Check 4 fails when labels exist and none joins (the plan would be
+right and the answer empty). ``enable_seqscan`` is turned off inside the
 transaction (``SET LOCAL``), so a small sample table does not hide an index plan: the check
 asks whether the index can serve the query, not whether the planner prefers it on tiny data.
 
@@ -89,6 +92,9 @@ class Params:
     window_a: tuple[date, date]  # [start, end) of the first window
     window_b: tuple[date, date]
     years: tuple[int, int]  # the last two years, first and last
+    # The data probe of check 4: label_substance holds a UNII; one of them joins substance.
+    labels_present: bool = False
+    label_join_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -182,11 +188,15 @@ def v_batch_rows(plan: Any, p: Params) -> list[str]:
 
 
 def q_label_interactions(p: Params) -> sql.Composable:
+    """No fact table stores a resolved key (spec 5.3): the moiety's substances, their UNIIs,
+    the labels that carry them, the interactions section."""
     return sql.SQL(
-        "SELECT sec.article_id, sec.start_offset, sec.end_offset FROM {ls} ls "
+        "SELECT sec.article_id, sec.start_offset, sec.end_offset FROM {s} s "
+        "JOIN {ls} ls ON ls.unii = s.unii "
         "JOIN {sec} sec ON sec.article_id = ls.article_id AND sec.loinc_code = {loinc} "
-        "WHERE ls.substance_key = {k}"
+        "WHERE s.moiety_key = {k}"
     ).format(
+        s=sql.Identifier(SCHEMA, "substance"),
         ls=sql.Identifier(SCHEMA, "label_substance"),
         sec=sql.Identifier(SCHEMA, "label_section"),
         loinc=sql.Literal("34073-7"),
@@ -194,14 +204,29 @@ def q_label_interactions(p: Params) -> sql.Composable:
     )
 
 
+# The probe of check 4, run once in ``read_params``.
+LABELS_PRESENT_SQL = (
+    f"SELECT EXISTS (SELECT 1 FROM {SCHEMA}.label_substance WHERE unii IS NOT NULL)"
+)
+LABEL_JOIN_SQL = (
+    f"SELECT EXISTS (SELECT 1 FROM {SCHEMA}.label_substance ls "
+    f"JOIN {SCHEMA}.substance s ON s.unii = ls.unii WHERE s.moiety_key IS NOT NULL)"
+)
+
+
 def v_label_interactions(plan: Any, p: Params) -> list[str]:
     rels = set(plan_relations(plan))
     out = []
-    if not {"label_substance", "label_section"} <= rels:
-        out.append("does not go from label_substance to label_section")
+    if not {"substance", "label_substance", "label_section"} <= rels:
+        out.append("does not go from substance through label_substance (unii) to label_section")
     extra = sorted(r for r in rels if r.startswith(("articles", "article_body")))
     if extra:
         out.append(f"reads the text tables ({', '.join(extra)}); the sections are offsets")
+    if p.labels_present and not p.label_join_present:
+        out.append(
+            "label_substance holds UNIIs, but none joins substance.unii (is the FDA substance "
+            "data loaded in this database?); the query would return no row"
+        )
     return out
 
 
@@ -304,6 +329,8 @@ def read_params(conn: psycopg.Connection, args: argparse.Namespace) -> Params:
             (args.dataset, release),
             default=["aspirin"],
         )
+        labels_present = bool(_scalar(cur, LABELS_PRESENT_SQL, default=False))
+        label_join_present = labels_present and bool(_scalar(cur, LABEL_JOIN_SQL, default=False))
         known = args.release_id is None or _scalar(
             cur,
             f"SELECT 1 FROM {SCHEMA}.reg_release WHERE dataset = %s AND release_id = %s",
@@ -327,6 +354,8 @@ def read_params(conn: psycopg.Connection, args: argparse.Namespace) -> Params:
         window_a=(date(year - 2, 1, 1), date(year - 1, 1, 1)),
         window_b=(date(year - 1, 1, 1), date(year + 1, 1, 1)),
         years=(year - 1, year),
+        labels_present=labels_present,
+        label_join_present=label_join_present,
     )
 
 

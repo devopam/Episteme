@@ -305,7 +305,7 @@ def test_sidecar_offsets_point_into_the_stored_body_text(raw, out):
         ("AAAAAAAAAA", "active_ingredient", "xml"),
         ("BBBBBBBBBB", "active_moiety", "xml"),
     }
-    assert [s["ndc_product"] for s in subs if s["ndc_product"]] == ["11111-222"]
+    assert [s["ndc_product"] for s in subs if s["ndc_product"]] == ["111110222"]  # 9 digits
 
 
 def test_the_row_follows_the_contract(raw, out):

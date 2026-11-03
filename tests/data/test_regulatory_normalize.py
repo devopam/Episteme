@@ -16,6 +16,7 @@ from episteme.data.regulatory.normalize import (
     norm_lot,
     norm_name,
     norm_ndc,
+    norm_ndc_product,
     norm_product_key,
     split_names,
 )
@@ -71,6 +72,21 @@ def test_split_names_on_article57_separator():
     assert split_names("A | B;C ||  ") == ["A", "B", "C"]
     assert split_names("single") == ["single"]
     assert split_names("") == []
+
+
+def test_norm_ndc_product_is_9_digits_from_any_ndc_form():
+    assert norm_ndc_product("12345-678") == "123450678"
+    assert norm_ndc_product("0093-7214") == "000937214"
+    assert norm_ndc_product("0093-7214-01") == "000937214"  # the package segment goes
+    assert norm_ndc_product("00093721401") == "000937214"
+    assert norm_ndc_product("000937214") == "000937214"
+    assert norm_ndc_product("abc") is None
+    assert norm_ndc_product("1234567890") is None
+
+
+def test_label_ndc_and_fda_ndc_product_keys_join():
+    # A label's NDC product (DailyMed sidecar) and fda_ndc's product_ndc give one key.
+    assert norm_ndc_product("0093-7214") == norm_product_key("0093-7214")
 
 
 def test_norm_product_key():

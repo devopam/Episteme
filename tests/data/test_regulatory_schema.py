@@ -165,3 +165,32 @@ def test_text_sources_have_their_own_partitions(db):
         cur.execute("INSERT INTO episteme.articles (id, source) VALUES ('dailymed:1', 'dailymed')")
         cur.execute("SELECT tableoid::regclass::text FROM episteme.articles")
         assert cur.fetchone()[0] == "episteme.articles_dailymed"
+
+
+def _label_substance_columns(cur):
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'episteme' "
+        "AND table_name = 'label_substance' ORDER BY ordinal_position"
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
+def test_label_substance_stores_no_resolved_key_and_indexes_unii(db):
+    with db.cursor() as cur:
+        assert _label_substance_columns(cur) == ["article_id", "unii", "ndc_product"]
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'episteme' "
+            "AND indexname = 'label_substance_unii_idx'"
+        )
+        assert "(unii)" in cur.fetchone()[0]
+        # A database that applied the earlier draft loses the column on a re-apply.
+        cur.execute("ALTER TABLE episteme.label_substance ADD COLUMN substance_key bigint")
+        cur.execute(
+            "CREATE INDEX label_substance_substance_key_idx "
+            "ON episteme.label_substance (substance_key)"
+        )
+        cur.execute(MIGRATION_0010.read_text(encoding="utf-8"))
+        assert _label_substance_columns(cur) == ["article_id", "unii", "ndc_product"]
+        cur.execute("SELECT to_regclass('episteme.label_substance_substance_key_idx')")
+        assert cur.fetchone()[0] is None
+    db.commit()

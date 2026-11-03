@@ -197,7 +197,7 @@ def test_a_part_loads_its_labels_and_offsets_point_into_the_stored_text(db, tmp_
             "SELECT DISTINCT unii FROM episteme.label_substance WHERE unii IS NOT NULL ORDER BY 1"
         )
         assert [r[0] for r in cur.fetchall()] == ["AAAAAAAAAA", "BBBBBBBBBB"]
-        cur.execute("SELECT count(*) FROM episteme.label_substance WHERE ndc_product = '12345-678'")
+        cur.execute("SELECT count(*) FROM episteme.label_substance WHERE ndc_product = '123450678'")
         assert cur.fetchone()[0] == 2
 
 
@@ -278,3 +278,81 @@ def test_a_label_that_moves_to_another_part_leaves_no_duplicate_label_rows(
             cur.execute(f"SELECT count(*) FROM episteme.{table} WHERE article_id = %s", (moved,))
             n = cur.fetchone()[0]
             assert n == (1 if table == "label_section" else 3), (table, n)
+
+
+def test_sidecar_ndc_products_are_9_digit_keys():
+    parsed = {"sections": [], "substances": [], "ndcs": ["12345-678", "0093-7214", "x-y"]}
+    rows = labels.sidecar_rows("dailymed:a", parsed)
+    assert [r["ndc_product"] for r in rows] == ["123450678", "000937214", "x-y"]
+
+
+def test_migration_0010_label_substance_has_no_resolved_key_and_a_lock_timeout():
+    text = (MIGRATIONS / "0010_regulatory_sources.sql").read_text(encoding="utf-8")
+    create = text.split("CREATE TABLE IF NOT EXISTS episteme.label_substance", 1)[1]
+    create = create.split(");", 1)[0]
+    assert "substance_key" not in create
+    assert "DROP COLUMN IF EXISTS substance_key" in text
+    assert "label_substance (unii)" in text
+    begin = text.index("BEGIN;")
+    assert text.index("SET LOCAL lock_timeout = '60s';") < text.index("CREATE TABLE", begin)
+
+
+def test_replace_labels_copies_one_table_at_a_time(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    shard = tmp_path / "staging" / "dailymed" / "dailymed_bab__part00001.parquet"
+    shard.parent.mkdir(parents=True)
+    pq.write_table(pa.table({"id": ["dailymed:a"]}), shard)
+    labels.write_sidecar(
+        tmp_path,
+        "dailymed_bab__part00001",
+        [
+            {
+                "article_id": "dailymed:a",
+                "kind": "section",
+                "loinc_code": "1",
+                "title": "t",
+                "start_offset": 0,
+                "end_offset": 1,
+            },
+            {"article_id": "dailymed:a", "kind": "substance", "unii": "U1"},
+            {"article_id": "dailymed:a", "kind": "substance", "unii": "U1"},
+            {"article_id": "dailymed:a", "kind": "substance", "ndc_product": "123450678"},
+        ],
+    )
+    events: list = []
+
+    class Copy:
+        def __init__(self, sql):
+            self.sql = sql
+
+        def __enter__(self):
+            assert events.count("open") == events.count("close"), "two COPYs at once"
+            events.append("open")
+            return self
+
+        def __exit__(self, *exc):
+            events.append("close")
+            return False
+
+        def write_row(self, row):
+            events.append((self.sql.split()[1], tuple(row)))
+
+    class Cur(_Cursor):
+        def copy(self, sql):
+            return Copy(sql)
+
+    class Conn(_Conn):
+        def cursor(self):
+            return Cur(self.log)
+
+    out = labels.replace_labels(Conn(), shard)
+    assert out == {"label_sections": 1, "label_substances": 2}
+    rows = [e for e in events if isinstance(e, tuple)]
+    assert rows == [
+        ("episteme.label_section", ("dailymed:a", "1", "t", 0, 1)),
+        ("episteme.label_substance", ("dailymed:a", "U1", None)),
+        ("episteme.label_substance", ("dailymed:a", None, "123450678")),
+    ]
+    assert [e for e in events if isinstance(e, str)] == ["open", "close", "open", "close"]

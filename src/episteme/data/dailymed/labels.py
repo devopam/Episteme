@@ -15,7 +15,10 @@ One row of the sidecar is either a section or a substance (``kind``):
   ``active_moiety`` or ``active_ingredient``, and ``method`` ``xml``: the active
   moiety is read from the XML, not derived) or ``ndc_product``. These go to
   ``episteme.label_substance``; the table has no role column, so a UNII is stored
-  once per article, and ``substance_key`` stays NULL until the substance link is built.
+  once per article. No resolved substance key is stored (spec 5.3): a query joins
+  ``label_substance.unii`` to ``substance.unii`` and its ``moiety_key``. ``ndc_product``
+  is the 9-digit labeler-product key (``normalize.norm_ndc_product``), as in the
+  ``product_keys`` of ``fda_ndc``; a value that is not an NDC product is kept as it is.
 
 ``replace_labels`` runs inside the transaction of the shard's load: it deletes the
 label rows of the part (by the ``source_file`` of its articles) and copies the
@@ -28,6 +31,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+
+from episteme.data.regulatory.normalize import norm_ndc_product
 
 SIDECAR_DIR = "dailymed_labels"
 SIDECAR_SUFFIX = ".labels.parquet"
@@ -83,8 +88,12 @@ def sidecar_rows(article_id: str, parsed: dict[str, Any]) -> list[dict[str, Any]
                 "method": "xml",
             }
         )
+    seen: set[str] = set()
     for ndc in parsed["ndcs"]:
-        rows.append({"article_id": article_id, "kind": "substance", "ndc_product": ndc})
+        product = norm_ndc_product(ndc) or str(ndc).strip()
+        if product and product not in seen:
+            seen.add(product)
+            rows.append({"article_id": article_id, "kind": "substance", "ndc_product": product})
     return rows
 
 
@@ -158,35 +167,41 @@ def replace_labels(conn, shard: Path) -> dict[str, int]:
         delete_labels(cur, [shard.stem])
         for table in ("label_section", "label_substance"):
             cur.execute(f"DELETE FROM episteme.{table} WHERE article_id = ANY(%s)", (ids,))
-        with (
-            cur.copy(
-                "COPY episteme.label_section "
-                "(article_id, loinc_code, title, start_offset, end_offset) FROM STDIN"
-            ) as sec_copy,
-            cur.copy(
-                "COPY episteme.label_substance "
-                "(article_id, substance_key, unii, ndc_product) FROM STDIN"
-            ) as sub_copy,
-            pq.ParquetFile(side, pre_buffer=False) as pf,
-        ):
-            for rb in pf.iter_batches(batch_size=_COPY_BATCH_ROWS):
-                for r in rb.to_pylist():
-                    if r["kind"] == "section":
-                        sec_copy.write_row(
-                            (
-                                r["article_id"],
-                                r["loinc_code"],
-                                r["title"],
-                                r["start_offset"],
-                                r["end_offset"],
-                            )
-                        )
-                        n_sections += 1
-                    else:
-                        key = (r["article_id"], r["unii"], r["ndc_product"])
-                        if key in seen:  # a UNII is one row, whatever its role
-                            continue
-                        seen.add(key)
-                        sub_copy.write_row((r["article_id"], None, r["unii"], r["ndc_product"]))
-                        n_substances += 1
+        # One COPY at a time per connection: the sidecar is read twice, once per table.
+        with cur.copy(
+            "COPY episteme.label_section "
+            "(article_id, loinc_code, title, start_offset, end_offset) FROM STDIN"
+        ) as sec_copy:
+            for r in _sidecar_rows(side, "section"):
+                sec_copy.write_row(
+                    (
+                        r["article_id"],
+                        r["loinc_code"],
+                        r["title"],
+                        r["start_offset"],
+                        r["end_offset"],
+                    )
+                )
+                n_sections += 1
+        with cur.copy(
+            "COPY episteme.label_substance (article_id, unii, ndc_product) FROM STDIN"
+        ) as sub_copy:
+            for r in _sidecar_rows(side, "substance"):
+                key = (r["article_id"], r["unii"], r["ndc_product"])
+                if key in seen:  # a UNII is one row, whatever its role
+                    continue
+                seen.add(key)
+                sub_copy.write_row(key)
+                n_substances += 1
     return {"label_sections": n_sections, "label_substances": n_substances}
+
+
+def _sidecar_rows(side: Path, kind: str):
+    """The rows of one ``kind`` of a sidecar, in batches of ``_COPY_BATCH_ROWS``."""
+    import pyarrow.parquet as pq
+
+    with pq.ParquetFile(side, pre_buffer=False) as pf:
+        for rb in pf.iter_batches(batch_size=_COPY_BATCH_ROWS):
+            for r in rb.to_pylist():
+                if (r["kind"] == "section") == (kind == "section"):
+                    yield r

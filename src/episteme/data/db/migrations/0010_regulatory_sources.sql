@@ -36,6 +36,10 @@
 
 BEGIN;
 
+-- The partition DDL below takes ACCESS EXCLUSIVE locks on articles and article_body.
+-- Fail after 60 s instead of queueing every reader behind a long wait (runbook 2.3).
+SET LOCAL lock_timeout = '60s';
+
 -- ---------------------------------------------------------------------------
 -- 5.2 reg_release (registry) and reg_record (all reference feeds)
 -- ---------------------------------------------------------------------------
@@ -304,14 +308,17 @@ CREATE TABLE IF NOT EXISTS episteme.label_section (
 CREATE INDEX IF NOT EXISTS label_section_article_loinc_idx
     ON episteme.label_section (article_id, loinc_code);
 
+-- No resolved substance key (spec 5.3: no fact table stores one). A query joins
+-- label_substance.unii -> substance.unii -> moiety_key. ndc_product is the 9-digit
+-- labeler-product key (an 11-digit key is a package).
 CREATE TABLE IF NOT EXISTS episteme.label_substance (
     article_id    text   NOT NULL,
-    substance_key bigint,
     unii          text,
     ndc_product   text
 );
-CREATE INDEX IF NOT EXISTS label_substance_substance_key_idx
-    ON episteme.label_substance (substance_key);
+-- For a database that applied an earlier draft of this file (drops its index too).
+ALTER TABLE episteme.label_substance DROP COLUMN IF EXISTS substance_key;
 CREATE INDEX IF NOT EXISTS label_substance_article_idx ON episteme.label_substance (article_id);
+CREATE INDEX IF NOT EXISTS label_substance_unii_idx ON episteme.label_substance (unii);
 
 COMMIT;

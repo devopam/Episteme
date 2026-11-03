@@ -109,15 +109,71 @@ def test_batch_rows_must_prune_by_year_and_use_the_partial_index(cp, params):
     assert any("partial batch index" in p for p in cp.v_batch_rows(no_index, params))
 
 
-def test_label_interactions_go_from_label_substance_to_label_section(cp, params):
+def test_label_interactions_go_from_substance_through_unii_to_label_section(cp, params):
     good = plan(
-        scan("label_substance", "label_substance_substance_key_idx"),
+        scan("substance", "substance_moiety_key_idx"),
+        scan("label_substance", "label_substance_unii_idx"),
         scan("label_section", "label_section_article_loinc_idx"),
     )
     assert cp.v_label_interactions(good, params) == []
     assert cp.v_label_interactions(plan(scan("label_section")), params)
-    text = plan(scan("label_substance"), scan("label_section"), scan("article_body_dailymed"))
+    # Without substance the query reads a stored key, which no fact table holds (spec 5.3).
+    assert cp.v_label_interactions(plan(scan("label_substance"), scan("label_section")), params)
+    text = plan(
+        scan("substance"),
+        scan("label_substance"),
+        scan("label_section"),
+        scan("article_body_dailymed"),
+    )
     assert any("text tables" in p for p in cp.v_label_interactions(text, params))
+
+
+def test_label_query_joins_unii_and_stores_no_key(cp, params):
+    text = cp.q_label_interactions(params).as_string(None)
+    assert "ls.unii = s.unii" in text and "s.moiety_key = 7" in text
+    assert "substance_key" not in text
+
+
+def test_label_check_fails_when_labels_exist_and_none_joins(cp, params):
+    from dataclasses import replace
+
+    good = plan(scan("substance"), scan("label_substance"), scan("label_section"))
+    empty_join = replace(params, labels_present=True, label_join_present=False)
+    problems = cp.v_label_interactions(good, empty_join)
+    assert any("none joins substance.unii" in p for p in problems)
+    joined = replace(params, labels_present=True, label_join_present=True)
+    assert cp.v_label_interactions(good, joined) == []
+    # With no labels at all (no DailyMed load yet) there is nothing to join.
+    assert cp.v_label_interactions(good, params) == []
+
+
+def test_read_params_probes_the_label_join(cp):
+    import argparse
+
+    answers = {cp.LABELS_PRESENT_SQL: True, cp.LABEL_JOIN_SQL: False}
+
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, query, args=()):
+            self.row = (answers.get(query, "2026-11" if "release_id" in query else None),)
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    args = argparse.Namespace(
+        dataset="fda_ndc", release_id=None, moiety_key=None, other_moiety_key=None
+    )
+    p = cp.read_params(Conn(), args)
+    assert p.labels_present is True and p.label_join_present is False
 
 
 def test_xref_view_uses_both_indexes(cp, params):

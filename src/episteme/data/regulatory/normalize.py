@@ -75,6 +75,23 @@ def norm_ndc(s: str) -> str | None:
     return None
 
 
+def norm_ndc_product(s: str) -> str | None:
+    """The 9-digit labeler-product key of an NDC (5 + 4 digits, zero-padded): from a
+    ``labeler-product`` code, from a full ``labeler-product-package`` NDC, from 11 digits
+    (the first 9) or from 9 digits. ``None`` when ``s`` is none of these. A product key
+    has 9 digits; a package key (``norm_ndc``) has 11."""
+    v = str(s).strip()
+    if _NDC_PRODUCT.match(v):
+        labeler, product = v.split("-")
+        return labeler.zfill(5) + product.zfill(4)
+    full = norm_ndc(v)
+    if full:
+        return full[:9]
+    if re.fullmatch(r"\d{9}", v):
+        return v
+    return None
+
+
 def norm_application_number(s: str) -> str | None:
     """An FDA application number without its ``NDA``/``ANDA``/``BLA`` prefix, digits
     only (leading zeros kept); ``None`` when no digits remain or letters are left."""
