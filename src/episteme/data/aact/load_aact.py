@@ -67,7 +67,8 @@ is ``skipped``. The same release id with another fingerprint is ``refused`` unle
 with a ``reason`` (one ``force_override`` audit row). A forced reload renames the finished
 schema to ``aact_r<id>_prev_<UTC time>``: the views are bound to the tables, not to the
 name, so the old release keeps serving until the new one switches in. The renamed schema is
-left in place. A forced reload of an unfinished schema drops it (it never served).
+left in place. A forced reload of an unfinished schema keeps it and resumes: its tables
+with this input's fingerprint are reused, the others reload.
 
 The loader creates schemas, tables and views, so the CLI connects as the owner
 (``episteme_sys_admin``). Config comes from ``episteme.config``; this module never reads
@@ -470,8 +471,7 @@ def _prepare_schema(
     conn: psycopg.Connection, ctx: _Ctx, *, force: bool, reason: str | None
 ) -> dict:
     """Decide what to do with the release schema. Returns ``{"action": "skip" | "refuse" |
-    "load", ...}``; a forced reload renames a finished schema (or drops an unfinished one)
-    first. Commits."""
+    "load", ...}``; a forced reload renames a finished schema first. Commits."""
     with conn.cursor() as cur:
         exists = _schema_exists(cur, ctx.schema)
         finished = _finished_fp(cur, ctx.schema) if exists else None
@@ -512,11 +512,8 @@ def _prepare_schema(
                             )
                         )
                         out["previous_schema"] = prev
-                    elif exists:
-                        # Unfinished: no view ever read from it.
-                        cur.execute(
-                            sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(ctx.schema))
-                        )
+                    # An unfinished schema stays: its tables with this input's fingerprint
+                    # are reused, the others reload (a forced sample run can still resume).
                 except psycopg.errors.LockNotAvailable as exc:
                     raise _Invalid(
                         f"could not lock schema {ctx.schema} within {seconds} s "
