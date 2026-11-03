@@ -531,7 +531,8 @@ def test_a_pdf_with_no_text_is_failed_and_counted(raw, out):
     # The count reaches the sample gate.
     ex._write_failed_inputs(out, res)
     listed = json.loads((out / "_ops" / "ema_epar" / "failed_inputs.json").read_text("utf-8"))
-    assert listed["failed_inputs"] == 1
+    # A document with no text is told apart: the empty-text rule sees its row.
+    assert listed["failed_inputs"] == 0 and listed["no_text"] == 1
 
 
 def test_a_broken_or_oversize_pdf_is_failed_and_does_not_stop_the_bucket(raw, out, monkeypatch):

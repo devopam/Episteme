@@ -136,6 +136,7 @@ _KNOWN_KEYS = {
     "parts_within_caps",
     "meta_total_equals_rows",
     "min_xref_coverage_pct",
+    "min_counts",
 }
 
 
@@ -324,6 +325,10 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(f"{rule}: a feed holds a different number of rows than its meta total")
         elif rule == "min_xref_coverage_pct":
             fails += _per_key_min(measures, rule, "xref_coverage_pct", limit)
+        elif rule == "min_counts":
+            # A named count that the run produced (signal rows, reports): none may be missing
+            # or below its minimum, so a build that made nothing cannot pass.
+            fails += _per_key_min(measures, rule, "counts", limit)
     return fails
 
 
@@ -554,6 +559,24 @@ def _connect():
         yield conn
 
 
+# Sources whose run record gets a snapshot of the database temp counter before and after.
+_TEMP_SOURCES = ("openfda_faers",)
+
+
+def _db_temp_bytes() -> int | None:
+    """``pg_stat_database.temp_bytes`` of the configured database now, or None when it
+    cannot be read (the measure then fails closed: a rule on it sees no value)."""
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT temp_bytes FROM pg_stat_database WHERE datname = current_database()"
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except Exception:  # noqa: BLE001 - a missing snapshot must not stop the stage
+        return None
+
+
 def _tree_rss(proc: Any, known: dict[int, Any] | None = None) -> int:
     """Summed RSS (bytes) of ``proc`` and all its descendants, now. Each
     descendant seen is also added to ``known`` (pid -> psutil.Process), so a
@@ -600,6 +623,15 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
 # writes this file under its ops folder; ``gate run`` reads it (opt-in). It
 # lives here, not in checkpoint_markers, so no stage code hash depends on it.
 FAILED_INPUTS_FILE = "failed_inputs.json"
+
+
+def _read_failed_extra(processed_root: Path, source: str, key: str) -> int | None:
+    """An extra count of ``failed_inputs.json`` (ema_epar: ``no_text``), or None."""
+    try:
+        path = Path(processed_root) / "_ops" / source / FAILED_INPUTS_FILE
+        return int(json.loads(path.read_text(encoding="utf-8"))[key])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def read_failed_inputs(processed_root: Path, source: str, run_id: str | None) -> int | None:
@@ -659,6 +691,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (KeyError, RuntimeError, OSError) as exc:
             _err(f"gate run: could not hash {args.source} {args.stage}: {exc}")
             return 1
+    # FAERS: the signal build runs as SQL on the server, outside the process tree that
+    # peak_rss_mb measures. Its temp use is the change of the database counter.
+    temp_before = _db_temp_bytes() if args.source in _TEMP_SOURCES else None
     t0 = time.monotonic()
     try:
         child = subprocess.Popen(cmd)
@@ -719,6 +754,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # with a stop exit code. That is an interrupted run too.
     if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if args.source in _TEMP_SOURCES:
+        record["db_temp_bytes_before"] = temp_before
+        record["db_temp_bytes_after"] = _db_temp_bytes()
     if args.source:
         # Opt-in: a stage that counts failed inputs beyond its exit code (pmc:
         # failed articles) writes failed_inputs.json for this run id.
@@ -857,6 +895,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
             else sample_root / "02_processed" / "staging" / source
         )
         measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+        no_text = _read_failed_extra(sample_root / "02_processed", source, "no_text")
+        if no_text is not None:
+            measures["no_text_documents"] = no_text
         # The caps that wrote the parts, not the caps of the profile now.
         caps, cap_failures = _sample_part_caps(source, sample_root)
         if caps is None:

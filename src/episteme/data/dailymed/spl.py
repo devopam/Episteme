@@ -222,7 +222,7 @@ def _substances(root: Any) -> list[dict[str, str]]:
     return found
 
 
-def _ndc_products(root: Any) -> list[str]:
+def ndc_products(root: Any) -> list[str]:
     out: list[str] = []
     for code in _codes(root, NDC_OID):
         product = "-".join(code.split("-")[:2])
@@ -321,5 +321,5 @@ def parse_spl(xml: bytes) -> dict[str, Any]:
         "sections": sections,
         "uniis": uniis,
         "substances": substances,
-        "ndcs": _ndc_products(root),
+        "ndcs": ndc_products(root),
     }

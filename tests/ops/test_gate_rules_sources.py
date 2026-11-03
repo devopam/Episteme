@@ -281,7 +281,45 @@ def test_dailymed_and_epar_extract_rules():
     assert dm["max_failed_inputs"] == 0 and dm["parts_within_caps"] is True
     epar = gate.load_rules("ema_epar")["extract"]
     assert epar["allowed_licenses"] == ["permissive"]
+    # no_text (a scan) is told apart and not counted as failed, so no other failure is hidden.
+    assert epar["max_failed_inputs"] == 0
     # A scan of an image-only PDF is a failed input (no_text) or an empty row: both are counted.
     assert "max_empty_text_pct" in epar
     for rules in (dm, epar):
         assert rules["max_peak_rss_mb"] <= 4096
+
+
+def _faers_measures(**over):
+    base = {
+        "rows": 10,
+        "failed_inputs": 0,
+        "peak_rss_mb": 100,
+        "duplicate_ids": 0,
+        "xref_coverage_pct": {"faers_drug_entry": 50.0},
+        "counts": {
+            "faers_reports": 100,
+            "signal_pair_rows": 10,
+            "signal_event_rows": 10,
+            "largest_year_reports": 100,
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_a_faers_signal_build_that_made_nothing_fails():
+    rules = gate.load_rules("openfda_faers")["load"]
+    assert gate.evaluate(_faers_measures(), rules) == []
+    for key in ("faers_reports", "signal_pair_rows", "signal_event_rows", "largest_year_reports"):
+        assert key in rules["min_counts"]
+        counts = {**_faers_measures()["counts"], key: 0}
+        fails = gate.evaluate(_faers_measures(counts=counts), rules)
+        assert any("min_counts" in f and key in f for f in fails), key
+        gone = {k: v for k, v in counts.items() if k != key}
+        assert any(
+            key in f and "missing" in f for f in gate.evaluate(_faers_measures(counts=gone), rules)
+        )
+    assert any(
+        "min_counts" in f
+        for f in gate.evaluate({k: v for k, v in _faers_measures().items() if k != "counts"}, rules)
+    )

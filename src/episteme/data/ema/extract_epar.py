@@ -766,10 +766,13 @@ def extract_epar(
 
 
 def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
-    """Tell the sample gate how many inputs failed: failed buckets plus failed documents
-    (a document with no text counts here and keeps its ``empty`` row)."""
-    failed = int(res.get("failed") or 0) + int(res.get("failed_docs_count") or 0)
-    bucket_parts.write_failed_inputs(processed_dir, SOURCE, failed)
+    """Tell the sample gate how many inputs failed: failed buckets plus failed documents,
+    not counting the documents with no text (a scan keeps its ``empty`` row, which the
+    empty-text rule sees). Those are told apart as ``no_text``, so the gate reports them
+    without letting them hide another failure."""
+    no_text = int((res.get("failed_by_reason") or {}).get("no_text") or 0)
+    failed = int(res.get("failed") or 0) + int(res.get("failed_docs_count") or 0) - no_text
+    bucket_parts.write_failed_inputs(processed_dir, SOURCE, failed, no_text=no_text)
 
 
 def _main(argv: list[str] | None = None) -> int:

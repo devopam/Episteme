@@ -137,9 +137,9 @@ FAILED_INPUTS_FILE = "failed_inputs.json"
 BUCKET_PREFIX_CHARS = 2
 LICENSE_RAW = "U.S. government work: DailyMed (NLM) / FDA structured product labeling"
 
-_RELEASE_RE = re.compile(r"^dm_spl_release_human_(rx|otc)_part(\d+)\.zip$")
+RELEASE_RE = re.compile(r"^dm_spl_release_human_(rx|otc)_part(\d+)\.zip$")
 _UPDATE_RE = re.compile(r"^dm_spl_(monthly|weekly|daily)_update_.+\.zip$")
-_RELEASE_KIND = {"rx": "prescription", "otc": "otc"}
+RELEASE_KIND = {"rx": "prescription", "otc": "otc"}
 
 _WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 _FAILED_LABELS_LISTED = 100
@@ -218,9 +218,9 @@ def discover_outer_zips(raw_dir: Path, release_kinds: tuple[str, ...]) -> list[P
         name = p.name
         if "indexing" in name:
             continue
-        m = _RELEASE_RE.match(name)
+        m = RELEASE_RE.match(name)
         if m:
-            if _RELEASE_KIND[m.group(1)] in release_kinds:
+            if RELEASE_KIND[m.group(1)] in release_kinds:
                 found.append(p)
         elif _UPDATE_RE.match(name):
             found.append(p)
@@ -228,7 +228,7 @@ def discover_outer_zips(raw_dir: Path, release_kinds: tuple[str, ...]) -> list[P
     return found
 
 
-def _wanted_member(info: zipfile.ZipInfo, release_kinds: tuple[str, ...]) -> bool:
+def wanted_member(info: zipfile.ZipInfo, release_kinds: tuple[str, ...]) -> bool:
     name = info.filename
     return (
         not info.is_dir()
@@ -237,7 +237,7 @@ def _wanted_member(info: zipfile.ZipInfo, release_kinds: tuple[str, ...]) -> boo
     )
 
 
-def _xml_name(zf: zipfile.ZipFile) -> str:
+def xml_name(zf: zipfile.ZipFile) -> str:
     names = [
         i.filename for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(".xml")
     ]
@@ -247,12 +247,12 @@ def _xml_name(zf: zipfile.ZipFile) -> str:
 
 
 def _identity(inner: zipfile.ZipFile) -> tuple[str, int]:
-    with inner.open(_xml_name(inner)) as f:
+    with inner.open(xml_name(inner)) as f:
         return spl.read_identity(f)
 
 
 @contextlib.contextmanager
-def _inner_zip(outer: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[zipfile.ZipFile]:
+def inner_zip(outer: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[zipfile.ZipFile]:
     """The inner zip ``info`` of an outer zip.
 
     A STORED outer member is opened as a seekable stream: the inner central directory
@@ -304,11 +304,11 @@ def scan_zips(
             scan.unreadable_outers.append(f"{scan.outer_keys[oi]}: {e}")
             continue
         with zf:
-            infos = [i for i in zf.infolist() if _wanted_member(i, release_kinds)]
+            infos = [i for i in zf.infolist() if wanted_member(i, release_kinds)]
             infos.sort(key=lambda i: i.header_offset)
             for info in infos:
                 try:
-                    with _inner_zip(zf, info) as inner:
+                    with inner_zip(zf, info) as inner:
                         set_id, version = _identity(inner)
                 except Exception as e:  # noqa: BLE001 - one label; transient ones stop the run
                     if is_transient(e):
@@ -360,9 +360,9 @@ def release_part_gaps(outers: list[Path]) -> list[str]:
     share guard is what catches that."""
     nums: dict[str, set[int]] = {}
     for p in outers:
-        m = _RELEASE_RE.match(p.name)
+        m = RELEASE_RE.match(p.name)
         if m:
-            nums.setdefault(_RELEASE_KIND[m.group(1)], set()).add(int(m.group(2)))
+            nums.setdefault(RELEASE_KIND[m.group(1)], set()).add(int(m.group(2)))
     gaps = []
     for kind in sorted(nums):
         missing = [n for n in range(1, max(nums[kind]) + 1) if n not in nums[kind]]
@@ -496,8 +496,8 @@ def _iter_outer(
         ordered.sort(key=lambda t: t[0])
         for _off, entry, info in ordered:
             try:
-                with _inner_zip(zf, info) as inner:
-                    xml = inner.read(_xml_name(inner))
+                with inner_zip(zf, info) as inner:
+                    xml = inner.read(xml_name(inner))
             except Exception as e:  # noqa: BLE001
                 if is_transient(e):
                     raise

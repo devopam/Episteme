@@ -129,10 +129,25 @@ def test_faers_slice_without_a_quarter_is_refused(tmp_path):
         gate_slice._select_faers(raw)
 
 
-def test_faers_slice_is_registered_and_its_cap_follows_the_year(tmp_path):
+def test_faers_slice_is_registered_on_the_openfda_folder_with_a_32_gb_default_cap():
     spec = gate_slice.SLICES["openfda_faers"]
     assert spec.raw_subpath == Path("openfda")
-    assert spec.max_bytes >= 4 * gate_slice.GB  # the cap holds a whole year of zips
+    assert spec.max_bytes == 32 * gate_slice.GB  # the whole raw set is about 105 GB
+
+
+def test_faers_slice_over_its_cap_is_refused_and_names_the_key(tmp_path, monkeypatch):
+    raw_root = tmp_path / "raw"
+    _faers(raw_root / "openfda", "2012q3", 1, 1, 100)
+    processed = tmp_path / "proc"
+    sample_root = processed / "_sample" / "openfda_faers"
+    monkeypatch.setenv("EPISTEME_SLICE_MAX_BYTES_OPENFDA_FAERS", "10")
+    import episteme.config as cfg
+
+    cfg.get_settings.cache_clear()
+    with pytest.raises(gate_slice.SliceError) as exc:
+        gate_slice.prepare("openfda_faers", raw_root, sample_root, processed_root=processed)
+    assert "over the cap of 10" in str(exc.value)
+    assert "EPISTEME_SLICE_MAX_BYTES_OPENFDA_FAERS" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +299,38 @@ def test_dailymed_slice_without_a_release_is_refused(tmp_path):
     raw = tmp_path / "raw" / "dailymed"
     raw.mkdir(parents=True)
     with pytest.raises(gate_slice.SliceError, match="dailymed"):
+        gate_slice.SLICES["dailymed"].build(raw, tmp_path / "slice")
+
+
+def test_dailymed_slice_skips_a_corrupt_xml_candidate_and_counts_it(tmp_path):
+    raw = tmp_path / "raw" / "dailymed"
+    _outer(
+        raw / "dm_spl_release_human_rx_part1.zip",
+        {
+            "prescription/20240101_a1.zip": _inner(
+                b"<document><not closed",
+            ),
+            "prescription/20240101_a2.zip": _inner(_xml(_sid(2), padding=2_000, products=3)),
+        },
+    )
+    _outer(
+        raw / "dm_spl_release_human_otc_part1.zip", {"otc/20240101_c1.zip": _inner(_xml(_sid(5)))}
+    )
+    meta = gate_slice.SLICES["dailymed"].build(raw, tmp_path / "slice")
+    assert meta["skipped_candidates"] == 1
+    assert meta["labels"]["prescription"] == ["prescription/20240101_a2.zip"]
+
+
+def test_dailymed_slice_with_only_corrupt_candidates_is_refused(tmp_path):
+    raw = tmp_path / "raw" / "dailymed"
+    _outer(
+        raw / "dm_spl_release_human_rx_part1.zip",
+        {"prescription/20240101_a1.zip": _inner(b"<document><not closed")},
+    )
+    _outer(
+        raw / "dm_spl_release_human_otc_part1.zip", {"otc/20240101_c1.zip": _inner(_xml(_sid(5)))}
+    )
+    with pytest.raises(gate_slice.SliceError, match="no readable prescription label"):
         gate_slice.SLICES["dailymed"].build(raw, tmp_path / "slice")
 
 

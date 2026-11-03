@@ -1,6 +1,6 @@
 {
   "extract": {
-    "max_failed_inputs": 1,
+    "max_failed_inputs": 0,
     "max_duplicate_ids": 0,
     "max_duplicate_ids_in_shard": 0,
     "max_empty_text_pct": 20.0,

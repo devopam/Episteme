@@ -70,8 +70,10 @@ def test_plan_readers_walk_nested_nodes(cp):
 def test_a_latest_release_query_must_read_one_partition(cp, params):
     one = plan(scan("reg_record_fda_ndc_a1b2c3_2026_11_deadbeef"))
     assert cp.v_latest_release(one, params) == []
-    none = plan()  # every partition pruned
-    assert cp.v_latest_release(none, params) == []
+    # Pruned to nothing is not "one partition": the release does not exist.
+    none = plan()
+    problems = cp.v_latest_release(none, params)
+    assert problems and "no reg_record partition" in problems[0] and "2026-11" in problems[0]
     many = plan(
         scan("reg_record_fda_ndc_a1b2c3_2026_10_deadbeef"),
         scan("reg_record_fda_ndc_a1b2c3_2026_11_deadbeef"),
@@ -153,6 +155,50 @@ def test_the_script_writes_nothing_and_has_no_url():
     assert "http://" not in text and "https://" not in text and "os.environ" not in text
 
 
+def _params(cp, release_id: str):
+    return cp.Params(
+        dataset="fda_ndc",
+        release_id=release_id,
+        moiety_key=1,
+        other_moiety_key=2,
+        names=("aspirin",),
+        window_a=(date(2023, 1, 1), date(2024, 1, 1)),
+        window_b=(date(2024, 1, 1), date(2026, 1, 1)),
+        years=(2025, 2026),
+    )
+
+
+@pytest.mark.pg
+def test_check_1_needs_a_real_release_partition(cp, pg_conn):
+    """A real release partition with rows prunes to exactly one leaf; an unknown release
+    prunes to nothing and fails with a clear message. All inside one transaction that is
+    rolled back."""
+    from episteme.data.regulatory import load_reg
+
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('episteme.reg_record')")
+        if cur.fetchone()[0] is None:
+            pytest.skip("episteme_test is not migrated to 0010")
+    release = "2099-gate"
+    try:
+        with pg_conn.cursor() as cur:
+            load_reg._create_partitions(cur, "fda_ndc", release)
+            cur.execute(
+                "INSERT INTO episteme.reg_record "
+                "(dataset, release_id, record_key, substance_names, payload, source_file) "
+                "VALUES ('fda_ndc', %s, 'k1', ARRAY['aspirin'], '{}', 'f.zip')",
+                (release,),
+            )
+        plan, _ = cp.explain(pg_conn, cp.q_latest_release(_params(cp, release)))
+        assert cp.v_latest_release(plan, _params(cp, release)) == []
+        missing = _params(cp, "2099-not-a-release")
+        plan, _ = cp.explain(pg_conn, cp.q_latest_release(missing))
+        problems = cp.v_latest_release(plan, missing)
+        assert problems and "no reg_record partition" in problems[0]
+    finally:
+        pg_conn.rollback()
+
+
 @pytest.mark.pg
 def test_the_checks_run_on_the_test_database(cp, pg_conn):
     with pg_conn.cursor() as cur:
@@ -163,17 +209,7 @@ def test_the_checks_run_on_the_test_database(cp, pg_conn):
             pytest.skip("episteme_test is not migrated to 0010")
     pg_conn.rollback()
     pg_conn.read_only = True
-    params = cp.Params(
-        dataset="fda_ndc",
-        release_id="none",
-        moiety_key=1,
-        other_moiety_key=2,
-        names=("aspirin",),
-        window_a=(date(2023, 1, 1), date(2024, 1, 1)),
-        window_b=(date(2024, 1, 1), date(2026, 1, 1)),
-        years=(2025, 2026),
-    )
-    results = cp.run_checks(pg_conn, params)
+    results = cp.run_checks(pg_conn, _params(cp, "none"))
     assert len(results) == 6
     for _check, shown, _problems in results:
         assert shown

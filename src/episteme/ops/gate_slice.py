@@ -408,7 +408,13 @@ def _build_dailymed(raw: Path, dest: Path) -> dict:
     the ``DAILYMED_SIZE_CANDIDATES`` largest inner zips), the label with the most products
     (among the ``DAILYMED_PRODUCT_CANDIDATES`` largest XMLs) and one OTC label (the median
     by inner zip size). The inner zips and their member names are copied unchanged, so a
-    label keeps its ``label_key`` and its id. The outer zips are named ``..._part1``."""
+    label keeps its ``label_key`` and its id. The outer zips are named ``..._part1``.
+
+    Each outer zip is opened once and kept open for the whole build. A candidate whose inner
+    zip or XML cannot be read is skipped and counted (``skipped_candidates``); the build
+    stops with ``SliceError`` only when no readable prescription label remains."""
+    import contextlib
+
     from defusedxml import ElementTree as ET  # noqa: N817
 
     from episteme.config import get_settings
@@ -416,72 +422,87 @@ def _build_dailymed(raw: Path, dest: Path) -> dict:
     from episteme.data.dailymed import spl
 
     kinds = get_settings().dailymed_kinds
-    outers = [p for p in dm.discover_outer_zips(raw, kinds) if dm._RELEASE_RE.match(p.name)]
-    # (inner zip bytes, outer zip, member name), by kind.
-    entries: dict[str, list[tuple[int, Path, str]]] = {k: [] for k in kinds}
-    for outer in outers:
-        kind = dm._RELEASE_KIND[dm._RELEASE_RE.match(outer.name).group(1)]
-        with zipfile.ZipFile(outer) as zf:
+    outers = [p for p in dm.discover_outer_zips(raw, kinds) if dm.RELEASE_RE.match(p.name)]
+    skipped = 0
+    with contextlib.ExitStack() as stack:
+        opened: dict[Path, zipfile.ZipFile] = {
+            p: stack.enter_context(zipfile.ZipFile(p)) for p in outers
+        }
+        # (inner zip bytes, outer zip, member name), by kind.
+        entries: dict[str, list[tuple[int, Path, str]]] = {k: [] for k in kinds}
+        for outer, zf in opened.items():
+            kind = dm.RELEASE_KIND[dm.RELEASE_RE.match(outer.name).group(1)]
             for info in zf.infolist():
-                if dm._wanted_member(info, (kind,)):
+                if dm.wanted_member(info, (kind,)):
                     entries[kind].append((info.file_size, outer, info.filename))
-    empty = [k for k in kinds if not entries[k]]
-    if empty:
-        raise SliceError(f"dailymed: no {', '.join(empty)} label in a full release under {raw}")
+        empty = [k for k in kinds if not entries[k]]
+        if empty:
+            raise SliceError(f"dailymed: no {', '.join(empty)} label in a full release under {raw}")
 
-    chosen: dict[str, list[tuple[Path, str]]] = {k: [] for k in kinds}
+        def read_xml(outer_path: Path, member: str) -> bytes:
+            zf = opened[outer_path]
+            with dm.inner_zip(zf, zf.getinfo(member)) as inner:
+                return inner.read(dm.xml_name(inner))
 
-    def xml_bytes_of(outer_path: Path, member: str) -> int:
-        with zipfile.ZipFile(outer_path) as zf, dm._inner_zip(zf, zf.getinfo(member)) as inner:
-            return inner.getinfo(dm._xml_name(inner)).file_size
+        def xml_bytes_of(outer_path: Path, member: str) -> int:
+            zf = opened[outer_path]
+            with dm.inner_zip(zf, zf.getinfo(member)) as inner:
+                return inner.getinfo(dm.xml_name(inner)).file_size
 
-    def read_xml(outer_path: Path, member: str) -> bytes:
-        with zipfile.ZipFile(outer_path) as zf, dm._inner_zip(zf, zf.getinfo(member)) as inner:
-            return inner.read(dm._xml_name(inner))
+        chosen: dict[str, list[tuple[Path, str]]] = {k: [] for k in kinds}
+        if "prescription" in kinds:
+            rank = sorted(entries["prescription"], key=lambda e: (-e[0], e[1].name, e[2]))
+            sized: list[tuple[int, Path, str]] = []
+            for _bytes, outer_path, member in rank[:DAILYMED_SIZE_CANDIDATES]:
+                try:
+                    sized.append((xml_bytes_of(outer_path, member), outer_path, member))
+                except (ValueError, zipfile.BadZipFile, KeyError, OSError):
+                    skipped += 1  # an unreadable label is not a candidate
+            sized.sort(key=lambda e: (-e[0], e[1].name, e[2]))
+            best: tuple[int, Path, str] | None = None
+            best_products = -1
+            readable: list[tuple[int, Path, str]] = []
+            for entry in sized[:DAILYMED_PRODUCT_CANDIDATES]:
+                try:
+                    root = ET.fromstring(read_xml(entry[1], entry[2]))
+                except (ET.ParseError, ValueError, zipfile.BadZipFile, KeyError, OSError):
+                    skipped += 1  # a corrupt XML among the candidates
+                    continue
+                readable.append(entry)
+                n = len(spl.ndc_products(root))
+                if n > best_products:
+                    best, best_products = entry, n
+            if not readable:
+                raise SliceError(
+                    f"dailymed: no readable prescription label under {raw} "
+                    f"({skipped} candidate(s) skipped)"
+                )
+            picks = [readable[0]]
+            if best is not None and best not in picks:
+                picks.append(best)
+            chosen["prescription"] = [(e[1], e[2]) for e in picks]
+        if "otc" in kinds:
+            ranked = sorted(entries["otc"], key=lambda e: (e[0], e[1].name, e[2]))
+            mid = ranked[(len(ranked) - 1) // 2]
+            chosen["otc"] = [(mid[1], mid[2])]
 
-    if "prescription" in kinds:
-        rank = sorted(entries["prescription"], key=lambda e: (-e[0], e[1].name, e[2]))
-        sized: list[tuple[int, Path, str]] = []
-        for _bytes, outer_path, member in rank[:DAILYMED_SIZE_CANDIDATES]:
-            try:
-                xml_bytes = xml_bytes_of(outer_path, member)
-            except (ValueError, zipfile.BadZipFile, KeyError):
-                continue  # an unreadable label is not a candidate
-            sized.append((xml_bytes, outer_path, member))
-        if not sized:
-            raise SliceError(f"dailymed: no readable prescription label under {raw}")
-        sized.sort(key=lambda e: (-e[0], e[1].name, e[2]))
-        picks = [sized[0]]
-        best: tuple[int, Path, str] | None = None
-        best_products = -1
-        for entry in sized[:DAILYMED_PRODUCT_CANDIDATES]:
-            root = ET.fromstring(read_xml(entry[1], entry[2]))
-            n = len(spl._ndc_products(root))
-            if n > best_products:
-                best, best_products = entry, n
-        if best is not None and best not in picks:
-            picks.append(best)
-        chosen["prescription"] = [(e[1], e[2]) for e in picks]
-    if "otc" in kinds:
-        ranked = sorted(entries["otc"], key=lambda e: (e[0], e[1].name, e[2]))
-        mid = ranked[(len(ranked) - 1) // 2]
-        chosen["otc"] = [(mid[1], mid[2])]
-
-    names = {"prescription": "rx", "otc": "otc"}
-    files: list[str] = []
-    for kind in kinds:
-        out = dest / f"dm_spl_release_human_{names[kind]}_part1.zip"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as dst:
-            for outer_path, member in sorted(chosen[kind], key=lambda t: (t[0].name, t[1])):
-                with zipfile.ZipFile(outer_path) as src:
-                    dst.writestr(member, src.read(member), compress_type=zipfile.ZIP_STORED)
-        files.append(out.name)
+        names = {"prescription": "rx", "otc": "otc"}
+        files: list[str] = []
+        for kind in kinds:
+            out = dest / f"dm_spl_release_human_{names[kind]}_part1.zip"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as dst:
+                for outer_path, member in sorted(chosen[kind], key=lambda t: (t[0].name, t[1])):
+                    dst.writestr(
+                        member, opened[outer_path].read(member), compress_type=zipfile.ZIP_STORED
+                    )
+            files.append(out.name)
     return {
         "files": files,
         "inputs": list(files),
         "bytes": sum((dest / f).stat().st_size for f in files),
         "labels": {k: [m for _, m in chosen[k]] for k in kinds},
+        "skipped_candidates": skipped,
     }
 
 
@@ -595,9 +616,15 @@ SLICES: dict[str, SliceSpec] = {
     ),
     "ema": SliceSpec("ema", 1 * GB, _select_ema, Path("ema")),
     "openfda": SliceSpec("openfda", 2 * GB, _select_openfda, Path("openfda")),
-    # A year of recent quarters is large: the cap holds the largest year whole (spec 7).
-    "openfda_faers": SliceSpec("openfda_faers", 8 * GB, _select_faers, Path("openfda")),
+    # The whole raw set is about 105 GB over 90 quarters: the largest year plus the other
+    # picks is far above 8 GB. Override with EPISTEME_SLICE_MAX_BYTES_OPENFDA_FAERS.
+    "openfda_faers": SliceSpec("openfda_faers", 32 * GB, _select_faers, Path("openfda")),
 }
+
+
+def _cap_key(source: str) -> str:
+    """The environment key that sets the slice cap of ``source``."""
+    return f"EPISTEME_SLICE_MAX_BYTES_{source.upper()}"
 
 
 def max_bytes_of(source: str) -> int:
@@ -674,7 +701,10 @@ def prepare(
         built = spec.build(raw, dest_root)
         cap = max_bytes_of(source)
         if built["bytes"] > cap:
-            raise SliceError(f"{source}: slice is {built['bytes']} bytes, over the cap of {cap}")
+            raise SliceError(
+                f"{source}: slice is {built['bytes']} bytes, over the cap of {cap}; raise the "
+                f"cap with {_cap_key(source)}"
+            )
         result = {**built, "linked": 0, "copied": len(built["files"])}
         meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
@@ -685,7 +715,10 @@ def prepare(
     total = sum(_size(p) for p in files)
     cap = max_bytes_of(source)
     if total > cap:
-        raise SliceError(f"{source}: slice is {total} bytes, over the cap of {cap}")
+        raise SliceError(
+            f"{source}: slice is {total} bytes, over the cap of {cap}; raise the cap with "
+            f"{_cap_key(source)}"
+        )
 
     meta_path.unlink(missing_ok=True)
     if dest_root.exists():

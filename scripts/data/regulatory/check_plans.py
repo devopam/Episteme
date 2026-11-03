@@ -43,7 +43,6 @@ from psycopg import sql  # noqa: E402
 
 SCHEMA = "episteme"
 RAW_FAERS_TABLES = ("faers_report", "faers_drug", "faers_reaction")
-PLACEHOLDER = 0
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +112,13 @@ def q_latest_release(p: Params) -> sql.Composable:
 
 def v_latest_release(plan: Any, p: Params) -> list[str]:
     leaves = _under(plan_relations(plan), "reg_record")
+    if not leaves:
+        # Pruning to nothing is not pruning to one: the release has no partition, or the
+        # values name nothing that exists.
+        return [
+            f"reads no reg_record partition: dataset {p.dataset!r} release {p.release_id!r} "
+            "has no partition (is the release id real?); expected exactly 1"
+        ]
     if len(leaves) > 1:
         return [f"reads {len(leaves)} reg_record partitions ({', '.join(leaves)}); expected 1"]
     return []
@@ -298,9 +304,18 @@ def read_params(conn: psycopg.Connection, args: argparse.Namespace) -> Params:
             (args.dataset, release),
             default=["aspirin"],
         )
+        known = args.release_id is None or _scalar(
+            cur,
+            f"SELECT 1 FROM {SCHEMA}.reg_release WHERE dataset = %s AND release_id = %s",
+            (args.dataset, args.release_id),
+        )
     if release is None:
         raise SystemExit(
             f"no latest release for dataset {args.dataset!r}: load it first, or pass --release-id"
+        )
+    if not known:
+        raise SystemExit(
+            f"release {args.release_id!r} of dataset {args.dataset!r} is not in reg_release"
         )
     year = newest.year
     return Params(

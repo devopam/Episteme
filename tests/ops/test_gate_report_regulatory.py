@@ -31,6 +31,68 @@ def test_source_measures_are_per_source():
     assert callable(gate_report.measure_staging) and callable(gate_report.measure_load)
 
 
+def test_temp_bytes_of_the_run_is_the_change_between_two_snapshots():
+    assert (
+        gate_report.temp_bytes_run({"db_temp_bytes_before": 100, "db_temp_bytes_after": 350}) == 250
+    )
+    assert gate_report.temp_bytes_run({"db_temp_bytes_before": 5, "db_temp_bytes_after": 5}) == 0
+    # A reset of the statistics between the snapshots cannot give a negative use.
+    assert gate_report.temp_bytes_run({"db_temp_bytes_before": 9, "db_temp_bytes_after": 2}) == 0
+    assert (
+        gate_report.temp_bytes_run({"db_temp_bytes_before": None, "db_temp_bytes_after": 2}) is None
+    )
+    assert gate_report.temp_bytes_run({}) is None
+
+
+def test_gate_run_snapshots_the_temp_counter_for_faers_only(tmp_path, monkeypatch):
+    import sys
+
+    from episteme.ops import gate as gate_mod
+
+    values = iter([1000, 4000])
+    monkeypatch.setattr(gate_mod, "_db_temp_bytes", lambda: next(values))
+    monkeypatch.setattr(gate_mod, "code_hash", lambda s, st: "c")
+    monkeypatch.setattr(gate_mod, "rules_hash", lambda s: "r")
+    rec = tmp_path / "rec.json"
+    rc = gate_mod.main(
+        [
+            "run",
+            "--record",
+            str(rec),
+            "--source",
+            "openfda_faers",
+            "--stage",
+            "load",
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+    data = json.loads(rec.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert (data["db_temp_bytes_before"], data["db_temp_bytes_after"]) == (1000, 4000)
+    assert gate_report.temp_bytes_run(data) == 3000
+    # Another source gets no snapshot.
+    rec2 = tmp_path / "rec2.json"
+    gate_mod.main(
+        [
+            "run",
+            "--record",
+            str(rec2),
+            "--source",
+            "ema",
+            "--stage",
+            "load",
+            "--",
+            sys.executable,
+            "-c",
+            "pass",
+        ]
+    )
+    assert "db_temp_bytes_before" not in json.loads(rec2.read_text(encoding="utf-8"))
+
+
 def test_run_record_measures():
     rec = {"elapsed_s": 12.5, "rc": 0, "peak_rss_mb": 321.0}
     assert gate_report.record_measures(rec) == {
@@ -125,7 +187,8 @@ def test_measure_faers_reads_the_live_generation(pg_conn):
             "duplicate_ids",
             "largest_year",
             "xref_coverage_pct",
-            "db_temp_bytes_total",
+            "db_temp_bytes_run",
+            "counts",
         ):
             assert key in m
         assert set(m["xref_coverage_pct"]) <= {"faers_drug_entry"}

@@ -343,9 +343,11 @@ def record_measures(record: dict) -> dict:
 
 
 def _rows_of_run(cur: Any, run_id: str | None) -> int | None:
-    """The rows that this run's load audit rows report. 0 for a run that loaded nothing (a
-    marker or fingerprint said the data was current): ``min_rows`` then fails, so a pass
-    never certifies data from an earlier run. None without a run id."""
+    """The sum of ``rows_affected`` over this run's load audit rows. It is an event sum, not a
+    row count: the recall_lot rows and the per-zip and per-generation rows are in it too. It
+    only tells whether the run did work: 0 for a run that loaded nothing (a marker or
+    fingerprint said the data was current), so ``min_rows`` fails and a pass never certifies
+    data from an earlier run. Never raise ``min_rows`` above 1 from it. None without a run id."""
     if not run_id:
         return None
     cur.execute(
@@ -424,14 +426,26 @@ def measure_reg(conn: Any, source: str, *, raw_dir: Path, run_id: str | None, re
     return out
 
 
+def temp_bytes_run(record: dict) -> int | None:
+    """The temp bytes the database wrote during the run: the change of
+    ``pg_stat_database.temp_bytes`` between the snapshots that ``gate run`` took before and
+    after the stage. None when a snapshot is missing."""
+    before, after = record.get("db_temp_bytes_before"), record.get("db_temp_bytes_after")
+    if before is None or after is None:
+        return None
+    return max(0, int(after) - int(before))
+
+
 def measure_faers(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) -> dict:
     """Measures of ``openfda_faers`` after a sample load: the live generation's rows, the
     duplicate report ids (the de-duplication leaves none), the years it spans and the
     largest year, the signal rows, the share of drug entries that the bridge links to a
     substance (``xref_coverage_pct["faers_drug_entry"]``), and
-    ``db_temp_bytes_total`` (``pg_stat_database.temp_bytes``: cumulative since the
-    statistics were reset, so reset them on the sample database before the run to read
-    the temp use of the run, including the signal build). Peak memory is in the run record."""
+    ``db_temp_bytes_run``, the temp bytes the database wrote during the run (the change of
+    ``pg_stat_database.temp_bytes`` between snapshots of ``gate run``; includes the signal
+    build). ``peak_rss_mb`` is the client process tree only: the signal build is SQL on the
+    server, whose memory is bounded by ``work_mem`` and is not measured here. ``counts``
+    holds the counts that ``min_counts`` reads, so a build that made nothing fails."""
     out: dict[str, Any] = {}
     with conn.cursor() as cur:
         out["rows"] = _rows_of_run(cur, run_id)
@@ -469,9 +483,13 @@ def measure_faers(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict)
         out["xref_coverage_pct"] = {
             "faers_drug_entry": _pct(int(linked), int(entries)) if entries else None
         }
-        cur.execute("SELECT temp_bytes FROM pg_stat_database WHERE datname = current_database()")
-        row = cur.fetchone()
-        out["db_temp_bytes_total"] = int(row[0]) if row else None
+    out["db_temp_bytes_run"] = temp_bytes_run(record)
+    out["counts"] = {
+        "faers_reports": out["faers_reports"],
+        "signal_pair_rows": out["signal_pair_rows"],
+        "signal_event_rows": out["signal_event_rows"],
+        "largest_year_reports": out["largest_year_reports"],
+    }
     out.update(record_measures(record))
     return out
 
