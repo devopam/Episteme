@@ -342,10 +342,11 @@ def test_an_empty_substance_table_is_refused_before_any_work_even_in_a_sample(
                 run_id="r",
                 post_load=lambda conn: {},
                 sample=sample,
+                check_signals=True,
             )
 
 
-def test_the_substance_check_needs_a_post_load(tmp_path, monkeypatch):
+def test_the_substance_check_runs_only_with_check_signals(tmp_path, monkeypatch):
     raw = tmp_path / "raw"
     z = _zip(raw, "2020q1", [_report("1")])
 
@@ -357,8 +358,15 @@ def test_the_substance_check_needs_a_post_load(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fl, "substance_empty", lambda conn: pytest.fail("checked"))
     monkeypatch.setattr(fl, "_drop_old_leftovers", stop)
-    with pytest.raises(Stop):
-        fl.load_generation(_IdleConn(), [z], raw_dir=raw, processed_dir=tmp_path, run_id="r")
+    with pytest.raises(Stop):  # a post_load alone (as in the tests) does not turn it on
+        fl.load_generation(
+            _IdleConn(),
+            [z],
+            raw_dir=raw,
+            processed_dir=tmp_path,
+            run_id="r",
+            post_load=lambda conn: {},
+        )
 
 
 def test_an_empty_substance_table_passes_with_the_override_and_is_audited(tmp_path, monkeypatch):
@@ -384,6 +392,7 @@ def test_an_empty_substance_table_passes_with_the_override_and_is_audited(tmp_pa
             run_id="r",
             post_load=lambda conn: {},
             override_reason="why",
+            check_signals=True,
         )
     assert audits == ["empty substance"]
 
@@ -434,6 +443,7 @@ def test_main_passes_force_to_the_bridge_as_redo(tmp_path, monkeypatch):
     seen = []
 
     def fake_load(conn, zips, **kw):
+        assert kw["check_signals"] is True  # production always checks the signals
         seen.append(kw["post_load"])
         return {"status": "current"}
 
@@ -1340,12 +1350,12 @@ def test_a_run_with_an_empty_substance_table_is_refused(db, tmp_path):
     db.commit()
     z = _zip(tmp_path / "raw", "2020q1", [_report("1")])
     with pytest.raises(fl.GenerationError, match="substance is empty"):
-        _run(db, tmp_path, [z], post_load=fl.build_signals)
+        _run(db, tmp_path, [z], post_load=fl.build_signals, check_signals=True)
     db.rollback()
     assert _generation_relations(db) == []  # refused before any table was built
     db.rollback()
     with pytest.raises(fl.GenerationError, match="substance is empty"):
-        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True)
+        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True, check_signals=True)
     db.rollback()
 
 

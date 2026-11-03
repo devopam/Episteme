@@ -431,3 +431,17 @@ def test_an_ema_release_resolves_its_names_in_its_own_transaction(db, tmp_path):
     assert counts["matched"] == 1 and counts["unmatched"] == 1
     stats = json.loads(next(processed.rglob("*.ok")).read_text("utf-8"))["stats"]
     assert stats["names"]["matched"] == 1
+
+
+def test_a_marker_made_for_episteme_test_is_not_used_for_episteme(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    feed = _feed()
+    _ema_file(raw / "ema_test.json", _rows(2))
+    processed = tmp_path / "processed"
+    assert _run_feeds(db, [feed], raw, processed)["loaded"] == 1  # the real episteme_test
+    # The same files, the same rows, another database name: its marker is missing.
+    monkeypatch.setattr(load_reg, "database_name", lambda conn: "episteme")
+    assert _run_feeds(db, [feed], raw, processed)["loaded"] == 1
+    assert _run_feeds(db, [feed], raw, processed)["skipped"] == 1
+    assert len(list(processed.rglob("*.ok"))) == 2

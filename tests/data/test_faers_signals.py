@@ -854,10 +854,17 @@ def test_signals_that_bridge_nothing_are_not_swapped_in_even_in_a_sample(db, tmp
     raw = tmp_path / "raw"
     z = _zip(raw, "2020q1", [_zip_report("1", ["nothing", "unknown"], "20200201")])
     with pytest.raises(fl.GenerationError, match="bridge matched no drug entry.*0 rows"):
-        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True)
+        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True, check_signals=True)
     db.rollback()
     assert _all(db, "SELECT count(*) FROM episteme.faers_report") == [(0,)]
-    out = _run(db, tmp_path, [z], post_load=fl.build_signals, override_reason="known gap")
+    out = _run(
+        db,
+        tmp_path,
+        [z],
+        post_load=fl.build_signals,
+        override_reason="known gap",
+        check_signals=True,
+    )
     assert out["status"] == "swapped" and "empty signals" in out["overrides"]
     db.rollback()
 

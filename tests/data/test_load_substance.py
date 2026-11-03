@@ -470,3 +470,21 @@ def test_a_marker_with_an_empty_xref_table_loads_again(db, tmp_path):
     db.commit()
     assert run()["loaded"] == 1
     assert len(_keys(db, "name", "metformin")) == 1
+
+
+@pytest.mark.pg
+def test_a_marker_made_for_episteme_test_is_not_used_for_episteme(db, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    z = _zip(raw / "other" / "substance" / "s.zip", [METFORMIN])
+    proc = tmp_path / "proc"
+
+    def run():
+        out = ls.run_files(db, [z], raw, proc, force=False, reason=None, run_id="t")
+        db.rollback()
+        return out
+
+    assert run()["loaded"] == 1  # the real episteme_test
+    monkeypatch.setattr(ls, "database_name", lambda conn: "episteme")
+    assert run()["loaded"] == 1  # the rows are there, but this database's marker is not
+    assert run()["skipped"] == 1
+    assert len(list(proc.rglob("*.ok"))) == 2

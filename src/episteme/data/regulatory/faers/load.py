@@ -51,7 +51,7 @@ So a partial or stale input set must not go live:
   generation there is no floor. The built generation stays, so a re-run with the override
   goes on from there.
 
-* With a ``post_load`` (the CLI always gives one): ``substance_empty``, before any work, refuses
+* With ``check_signals`` (the CLI always sets it): ``substance_empty``, before any work, refuses
   a database with no ``substance`` row (the signals would be empty), and ``signal_problems``,
   before the swap, refuses signals whose bridge tied no drug row of the generation or whose
   ``faers_pair_quarter`` would have no row. A load into ``episteme_test`` must never leave
@@ -275,8 +275,13 @@ def load_generation(
     force: bool = False,
     override_reason: str | None = None,
     sample: bool = False,
+    check_signals: bool = False,
 ) -> dict:
     """Build a generation from ``zips`` and swap it in; see the module docstring.
+
+    ``check_signals`` (the CLI sets it, with ``build_signals`` as ``post_load``) turns on
+    the empty-substance and empty-signal refusals; it needs a ``post_load`` that returns the
+    counts of ``build_signals``.
 
     Commits on ``conn``, which must be idle. Returns ``status`` (``swapped`` or
     ``current``), ``generation``, ``zips_loaded``, ``zips_skipped``,
@@ -313,7 +318,7 @@ def load_generation(
         overrides.append("input set")
     # The signals need substances. A sample run does not skip this: an empty substance
     # table in the target database would swap in empty signals.
-    if post_load is not None and substance_empty(conn):
+    if check_signals and substance_empty(conn):
         if override_reason is None:
             raise GenerationError(
                 "episteme.substance is empty in this database: load the FDA substance data "
@@ -397,7 +402,7 @@ def load_generation(
         except BaseException:
             conn.rollback()
             raise
-    if post_load is not None:
+    if check_signals:
         # Not bypassed by a sample run: empty signals must never swap in silently.
         signal_issues = signal_problems(state.get(("phase", "post_load")) or {})
         if signal_issues:
@@ -518,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
                         sample=settings.db_target == "secondary",
                         # --force re-bridges every entry, so a corrected link reaches FAERS.
                         post_load=functools.partial(build_signals, redo=args.force),
+                        check_signals=True,
                     )
                     print("done " + " ".join(f"{k}={v}" for k, v in result.items()))
                     # Not part of the generation, and quick, so it runs on a "current" too.
