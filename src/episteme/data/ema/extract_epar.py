@@ -40,6 +40,16 @@ keeps the bucket's parts and marker (as DailyMed holds a bucket); the next run t
 A listed document that was never downloaded is skipped and counted as failed
 (``not_downloaded``).
 
+**SmPC sections.** For a ``product-information`` document, ``smpc.smpc_sections`` reads the
+SmPC headings of Annex I in the stored ``body_text`` and the part gets a label sidecar
+(``staging/ema_epar_labels/<part>.labels.parquet``, sections only, see
+``dailymed.labels``); the load writes it to ``label_section`` in the transaction of the
+shard. A document where no heading is found gets no rows; ``documents_with_sections`` and
+``documents_without_sections`` count the ``product-information`` documents with and without
+rows (in the bucket marker and in the summary). The section-rule version
+(``smpc.SMPC_RULE_VERSION``) is part of the fingerprint of ``product-information``
+documents only, so a new rule extracts those again and no other type.
+
 **Guards** (refuse before anything is written; ``--force --reason`` overrides them, with a
 ``force_override`` audit row; a run under a ``_sample`` processed root skips them): the feed
 holds as many rows as its ``meta.total_records``, and the share of the previously known
@@ -89,7 +99,8 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     write_marker,
     write_run_manifest,
 )
-from episteme.data.ema import download_epar  # noqa: E402
+from episteme.data.dailymed import labels  # noqa: E402
+from episteme.data.ema import download_epar, smpc  # noqa: E402
 from episteme.data.parallel import (  # noqa: E402
     default_workers,
     record_first_failure,
@@ -107,6 +118,8 @@ _LOG = logging.getLogger(__name__)
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 SOURCE = "ema_epar"
+# The document type whose Annex I is read for SmPC sections.
+SECTION_DOC_TYPE = "product-information"
 # File name the sample gate reads (``gate.FAILED_INPUTS_FILE``; a test keeps them equal).
 FAILED_INPUTS_FILE = "failed_inputs.json"
 # EMA reuse terms (docs/02-data-sources.md): reuse allowed, commercial and non-commercial, with
@@ -292,6 +305,19 @@ def row_from_document(entry: dict[str, Any], text: str) -> dict[str, Any]:
     return out
 
 
+def _section_rows(
+    row: dict[str, Any], entry: dict[str, Any], counts: dict[str, int]
+) -> list[dict[str, Any]]:
+    """The label sidecar rows (``kind`` ``section``) of one row, and the document counts.
+    Only ``product-information`` documents are read; the others give no rows and are not
+    counted."""
+    if entry.get("type") != SECTION_DOC_TYPE:
+        return []
+    found = smpc.smpc_sections(row["body_text"] or "")
+    counts["with" if found else "without"] += 1
+    return [{"article_id": row["id"], "kind": "section", **s} for s in found]
+
+
 # ---------------------------------------------------------------------------
 # Plan: documents -> buckets, against the earlier manifests
 # ---------------------------------------------------------------------------
@@ -339,7 +365,7 @@ def _fingerprint_row(e: dict[str, Any]) -> list[Any]:
             e["url"],
         ]
     )
-    return [
+    row = [
         e["id"],
         e["last_updated"],
         e["key"],
@@ -347,6 +373,9 @@ def _fingerprint_row(e: dict[str, Any]) -> list[Any]:
         e["sha256"],
         hashlib.sha256(meta.encode("utf-8")).hexdigest()[:16],
     ]
+    if e["type"] == SECTION_DOC_TYPE:
+        row.append(smpc.SMPC_RULE_VERSION)  # a new section rule extracts these documents again
+    return row
 
 
 def _read_manifests(processed_dir: Path) -> dict[int, list[dict]]:
@@ -380,7 +409,9 @@ def _write_manifests(processed_dir: Path, by_bucket: dict[int, list[dict]]) -> d
 
 
 def _delete_all_parts(processed_dir: Path, key: str) -> None:
-    bucket_parts.delete_all_parts(processed_dir, SOURCE, key)
+    """Delete every part of bucket ``key``, the label sidecars too."""
+    side_dir = labels.sidecar_path(processed_dir, "x", SOURCE).parent
+    bucket_parts.delete_all_parts(processed_dir, SOURCE, key, (side_dir,))
 
 
 def _retire_vanished_buckets(processed_dir: Path, live: set[int]) -> int:
@@ -491,6 +522,8 @@ def process_bucket(
                     "reason": "success_marker",
                     "failed_docs_count": int(done.get("failed_docs_count") or 0),
                     "failed_by_reason": dict(done.get("failed_by_reason") or {}),
+                    "documents_with_sections": int(done.get("documents_with_sections") or 0),
+                    "documents_without_sections": int(done.get("documents_without_sections") or 0),
                 }
             if is_success(processed_dir, SOURCE, key):
                 _LOG.warning("%s: an input changed since the bucket completed; written again", key)
@@ -520,6 +553,7 @@ def process_bucket(
         cap_rows, cap_bytes = _part_caps()
         failed: list[dict[str, str]] = []
         by_reason: Counter[str] = Counter()
+        sections = {"with": 0, "without": 0}
 
         def _doc_failed(entry: dict, reason: str, exc: BaseException) -> None:
             by_reason[reason] += 1
@@ -534,7 +568,7 @@ def process_bucket(
                 exc=exc if reason == "unexpected_error" else None,
             )
 
-        def _bucket_rows() -> Iterator[tuple[dict[str, Any], list]]:
+        def _bucket_rows() -> Iterator[tuple[dict[str, Any], list[dict[str, Any]]]]:
             for entry in entries:
                 path = raw_dir / entry["rel"]
                 try:
@@ -559,7 +593,14 @@ def process_bucket(
                     _doc_failed(entry, "no_text", ValueError("the PDF has no extractable text"))
                 else:
                     failed_marker_path(processed_dir, SOURCE, entry["key"]).unlink(missing_ok=True)
-                yield row, []
+                yield row, _section_rows(row, entry, sections)
+
+        def _sidecar(psf: str, side: list[dict[str, Any]]) -> dict[str, Any]:
+            # The sidecar follows the shard it belongs to; the load refuses a shard
+            # without one, and the bucket marker (after the last part) says the extract
+            # is whole.
+            labels.write_sidecar(processed_dir, psf, side, SOURCE)
+            return {"label_rows": len(side)}
 
         n, n_rows, status_counts = bucket_parts.write_parts(
             _bucket_rows(),
@@ -569,6 +610,7 @@ def process_bucket(
             cap_rows=cap_rows,
             cap_bytes=cap_bytes,
             batch_rows=_WRITE_BATCH_ROWS,
+            after_shard=_sidecar,
             progress=progress,
         )
 
@@ -581,6 +623,8 @@ def process_bucket(
             "failed_docs": failed,
             "failed_docs_count": sum(by_reason.values()),
             "failed_by_reason": dict(by_reason),
+            "documents_with_sections": sections["with"],
+            "documents_without_sections": sections["without"],
             "part_rows": cap_rows,
             "part_bytes": cap_bytes,
             "extract_status_counts": dict(status_counts),
@@ -648,9 +692,10 @@ def extract_epar(
     ``max_files`` limits the number of buckets of the run; ``skip_units`` take bucket keys.
     Returns ``{"inputs", "ok", "failed", "held_buckets", "rows", "buckets", "documents",
     "withdrawn_docs", "retired_buckets", "failed_docs_count", "failed_by_reason",
-    "not_downloaded", "refused_rows", "duplicate_ids"}``. ``force_reason`` with ``force``
-    overrides the guards. Raises ``EparScanError`` when the feed is missing or lists no
-    wanted document, ``EparGuardError`` when a guard refuses."""
+    "documents_with_sections", "documents_without_sections", "not_downloaded",
+    "refused_rows", "duplicate_ids"}``. ``force_reason`` with ``force`` overrides the guards.
+    Raises ``EparScanError`` when the feed is missing or lists no wanted document,
+    ``EparGuardError`` when a guard refuses."""
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     settings = get_settings()
@@ -802,6 +847,10 @@ def extract_epar(
         "retired_buckets": retired_buckets,
         "failed_docs_count": sum(by_reason.values()),
         "failed_by_reason": dict(by_reason),
+        "documents_with_sections": sum(int(r.get("documents_with_sections") or 0) for r in results),
+        "documents_without_sections": sum(
+            int(r.get("documents_without_sections") or 0) for r in results
+        ),
         "not_downloaded": n_missing,
         "refused_rows": int(feed_stats.get("refused_url", 0))
         + int(feed_stats.get("refused_id", 0)),

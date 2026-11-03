@@ -52,7 +52,8 @@ class _Conn:
 def test_pre_load_runs_only_for_dailymed(monkeypatch):
     calls: list[Path] = []
 
-    def fake(conn, shard):
+    def fake(conn, source, shard):
+        assert source == "dailymed"
         calls.append(shard)
         return {"label_sections": 3, "label_substances": 2}
 
@@ -63,7 +64,7 @@ def test_pre_load_runs_only_for_dailymed(monkeypatch):
         "label_substances": 2,
     }
     assert calls == [shard]
-    for other in ("pmc", "pubmed", "pubchem", "bookshelf", "cdisc_ct", "ema_epar"):
+    for other in ("pmc", "pubmed", "pubchem", "bookshelf", "cdisc_ct", "fda_ndc"):
         assert load_articles._pre_load(object(), other, shard) == {}
     assert calls == [shard]  # no other source reached the label step
 
@@ -86,7 +87,7 @@ def test_a_shard_without_a_sidecar_is_refused(tmp_path):
     shard.parent.mkdir(parents=True)
     shard.write_bytes(b"x")
     with pytest.raises(FileNotFoundError, match="sidecar"):
-        labels.replace_labels(_Conn(), shard)
+        labels.replace_labels(_Conn(), "dailymed", shard)
 
 
 def test_retire_deletes_label_rows_for_dailymed_only(monkeypatch):
@@ -121,7 +122,11 @@ def _schema():
             cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
             cur.execute((REPO_ROOT / "src/episteme/data/db/extensions.sql").read_text("utf-8"))
             cur.execute((REPO_ROOT / "src/episteme/data/db/schema.sql").read_text("utf-8"))
-            for name in ("0002_container_and_book_parts.sql", "0010_regulatory_sources.sql"):
+            for name in (
+                "0002_container_and_book_parts.sql",
+                "0010_regulatory_sources.sql",
+                "0011_label_section_ordinal.sql",
+            ):
                 cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         conn.commit()
     finally:
@@ -137,8 +142,10 @@ def db(_schema, pg_conn, monkeypatch, tmp_path):
     get_settings.cache_clear()
     with pg_conn.cursor() as cur:
         cur.execute("TRUNCATE episteme.label_section, episteme.label_substance")
-        cur.execute("DELETE FROM episteme.article_body WHERE source IN ('dailymed', 'pmc')")
-        cur.execute("DELETE FROM episteme.articles WHERE source IN ('dailymed', 'pmc')")
+        cur.execute(
+            "DELETE FROM episteme.article_body WHERE source IN ('dailymed', 'pmc', 'ema_epar')"
+        )
+        cur.execute("DELETE FROM episteme.articles WHERE source IN ('dailymed', 'pmc', 'ema_epar')")
     pg_conn.commit()
     yield pg_conn
 
@@ -349,7 +356,7 @@ def test_replace_labels_copies_one_table_at_a_time(tmp_path):
         def cursor(self):
             return Cur(self.log)
 
-    out = labels.replace_labels(Conn(), shard)
+    out = labels.replace_labels(Conn(), "dailymed", shard)
     assert out == {"label_sections": 1, "label_substances": 2}
     rows = [e for e in events if isinstance(e, tuple)]
     assert rows == [
