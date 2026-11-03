@@ -872,3 +872,41 @@ def test_run_maps_a_signal_exit_to_the_shell_stop_code(tmp_path, monkeypatch):
     assert rc == 143
     data = json.loads(rec.read_text(encoding="utf-8"))
     assert data["rc"] == 143 and data["child_rc"] == -15 and data["interrupted"] is True
+
+
+# --- the feed config in the run record (ema, openfda, ema_epar) ---------------
+
+
+@pytest.mark.parametrize(
+    ("source", "feed", "other"),
+    [
+        ("ema", "ema_medicines", "fda_ndc"),
+        ("openfda", "fda_ndc", "ema_medicines"),
+        ("ema_epar", "ema_epar_documents", "ema_medicines"),
+    ],
+)
+def test_run_record_holds_the_feed_config_of_the_stage(tmp_path, monkeypatch, source, feed, other):
+    import hashlib
+
+    from episteme.data.regulatory.feeds import FEEDS_PATH
+
+    monkeypatch.setattr(gate, "code_hash", lambda s, st, **kw: "c")
+    monkeypatch.setattr(gate, "rules_hash", lambda s: "r")
+    monkeypatch.setattr(gate, "_db_temp_bytes", lambda: None)
+    rec = tmp_path / "rec.json"
+    argv = ["run", "--record", str(rec), "--source", source, "--stage", "load"]
+    assert gate.main([*argv, "--", sys.executable, "-c", "pass"]) == 0
+    feeds = json.loads(rec.read_text(encoding="utf-8"))["feeds"]
+    want = hashlib.sha256(FEEDS_PATH.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    assert feeds["file"] == "feeds.toml" and feeds["sha256"] == want
+    assert feed in feeds["entries"] and other not in feeds["entries"]
+    assert feeds["entries"][feed]["url_key"]
+
+
+def test_run_record_of_another_source_has_no_feed_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "code_hash", lambda s, st, **kw: "c")
+    monkeypatch.setattr(gate, "rules_hash", lambda s: "r")
+    rec = tmp_path / "rec.json"
+    argv = ["run", "--record", str(rec), "--source", SRC, "--stage", "extract"]
+    assert gate.main([*argv, "--", sys.executable, "-c", "pass"]) == 0
+    assert "feeds" not in json.loads(rec.read_text(encoding="utf-8"))

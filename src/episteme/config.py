@@ -144,6 +144,11 @@ DEFAULT_EPAR_MAX_WITHDRAWN_SHARE = 0.1
 # Changing it moves documents between buckets: the extract records the width under
 # _ops/ema_epar/ and refuses a run at another width.
 DEFAULT_EPAR_BUCKET_IDS = 8000
+# Sources that never enter the training corpus, whatever their licence subset. The owner's
+# design splits the data: publications train the model; regulatory reference data (labels,
+# EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
+# programme-design.md). A policy, not a tunable: no environment key.
+CORPUS_EXCLUDED_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -344,6 +349,8 @@ class Settings:
     epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
     epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
     epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
+    # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
+    corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 

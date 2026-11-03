@@ -58,6 +58,10 @@ class Retryable(RuntimeError):
     """A failed or incomplete download that one more try may fix."""
 
 
+class TooLarge(RuntimeError):
+    """The body is over the byte cap of ``download_to``. Not retried: it can never fit."""
+
+
 def ema_feeds(feeds: dict[str, Feed]) -> list[Feed]:
     """The feeds this stage downloads: the ones that have a file of their own on EMA's site."""
     return [f for f in feeds.values() if f.format in _EXT]
@@ -98,11 +102,17 @@ def download_to(
     label: str,
     tmp: Path,
     check: Callable[[Path], dict[str, Any]],
+    *,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """One request into ``tmp``, then ``check(tmp)`` proves the bytes are a whole file
     and returns stats. Raises ``FeedVerificationError`` (status 200 with HTML, or a body
     that starts like HTML) or ``Retryable``. ``check`` may raise either too; this is the
-    one place the EMA feeds and the EPAR documents share their transfer rules."""
+    one place the EMA feeds and the EPAR documents share their transfer rules.
+
+    With ``max_bytes``, a body over the cap raises ``TooLarge``: at once when
+    ``Content-Length`` says so, else as soon as the stream passes the cap (the caller
+    deletes ``tmp``). The EMA feeds pass no cap."""
     try:
         resp = session.get(url, stream=True, timeout=_CONNECT_READ_TIMEOUT)
     except (requests.RequestException, OSError) as exc:
@@ -117,6 +127,9 @@ def download_to(
                 f"{label}: EMA answered status 200 with HTML, not data: "
                 "its human-verification page; the stage stops"
             )
+        declared_len = str(resp.headers.get("Content-Length") or "")
+        if max_bytes is not None and declared_len.isdigit() and int(declared_len) > max_bytes:
+            raise TooLarge(f"{label}: {declared_len} bytes declared, over the cap of {max_bytes}")
         size = 0
         first = True
         with open(tmp, "wb") as out:
@@ -131,8 +144,10 @@ def download_to(
                                 f"{label}: EMA answered with an HTML body, not data: "
                                 "its human-verification page; the stage stops"
                             )
-                    out.write(chunk)
                     size += len(chunk)
+                    if max_bytes is not None and size > max_bytes:
+                        raise TooLarge(f"{label}: over the cap of {max_bytes} bytes; stopped")
+                    out.write(chunk)
             except (requests.RequestException, OSError) as exc:
                 raise Retryable(f"transfer failed after {size} bytes: {exc}") from exc
             out.flush()

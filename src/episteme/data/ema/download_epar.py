@@ -14,6 +14,10 @@ the bytes; a re-run skips a document whose file and marker are there and whose
 ``last_updated_date`` is unchanged, and downloads again (replacing the file) when it
 changed.
 
+A document over ``EPISTEME_EPAR_MAX_BYTES`` (the cap the extract reads to) is stopped as
+soon as the declared length or the stream passes the cap: the partial file is deleted, the
+document gets a failed marker (``over_limit``), it is not retried, and the others go on.
+
 EMA answers automated requests with a human-verification page under some conditions. Only
 status 200 with HTML (or any 200 body that is not a PDF) is that page: it is never retried.
 The stage writes a failed marker and stops with ``FeedVerificationError``, keeps every file
@@ -50,6 +54,7 @@ from episteme.data.regulatory.download_ema import (
     ATTEMPTS,
     FeedVerificationError,
     Retryable,
+    TooLarge,
     download_to,
 )
 from episteme.data.regulatory.feeds import load_feeds
@@ -206,6 +211,7 @@ def fetch_documents(
     settings = get_settings()
     processed_root = Path(processed_root) if processed_root else settings.processed_root
     delay = settings.ema_delay_seconds if delay_s is None else delay_s
+    max_bytes = settings.epar_max_bytes
     prefix = source_url(PREFIX_KEY)
     session = session or requests.Session()
 
@@ -241,7 +247,12 @@ def fetch_documents(
             requests_made += 1
             try:
                 stats = download_to(
-                    session, d["document_url"], f"document {d['id']}", tmp, _check_pdf
+                    session,
+                    d["document_url"],
+                    f"document {d['id']}",
+                    tmp,
+                    _check_pdf,
+                    max_bytes=max_bytes,
                 )
             except FeedVerificationError as exc:
                 tmp.unlink(missing_ok=True)
@@ -254,6 +265,21 @@ def fetch_documents(
                     exc=exc,
                 )
                 raise
+            except TooLarge as exc:
+                # Over EPISTEME_EPAR_MAX_BYTES: the extract would not read it either. Not
+                # retried; the other documents go on.
+                tmp.unlink(missing_ok=True)
+                last_error = str(exc)
+                mark_failed(
+                    processed_root,
+                    MARKER_SOURCE,
+                    key,
+                    error_class="over_limit",
+                    message=last_error,
+                    stats={"max_bytes": max_bytes},
+                )
+                result["failed"][d["id"]] = last_error
+                break
             except Retryable as exc:
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)

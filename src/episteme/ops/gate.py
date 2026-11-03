@@ -563,6 +563,20 @@ def _connect():
 _TEMP_SOURCES = ("openfda_faers",)
 
 
+def _feeds_record(source: str | None) -> dict | None:
+    """The feed config of a reference-feed stage (``feeds.feeds_record``), read at the run
+    start: ``feeds.toml`` is data, outside the code hash, so its values go into the record.
+    ``None`` for another source. A read error is recorded, not raised."""
+    from episteme.data.regulatory.feeds import FEED_SOURCES, feeds_record
+
+    if source not in FEED_SOURCES:
+        return None
+    try:
+        return feeds_record(source)
+    except (OSError, ValueError) as exc:
+        return {"error": f"could not read feeds.toml: {exc}"}
+
+
 def _db_temp_bytes() -> int | None:
     """``pg_stat_database.temp_bytes`` of the configured database now, or None when it
     cannot be read (the measure then fails closed: a rule on it sees no value)."""
@@ -691,6 +705,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (KeyError, RuntimeError, OSError) as exc:
             _err(f"gate run: could not hash {args.source} {args.stage}: {exc}")
             return 1
+    feeds = _feeds_record(args.source)
     # FAERS: the signal build runs as SQL on the server, outside the process tree that
     # peak_rss_mb measures. Its temp use is the change of the database counter.
     temp_before = _db_temp_bytes() if args.source in _TEMP_SOURCES else None
@@ -754,6 +769,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # with a stop exit code. That is an interrupted run too.
     if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if feeds is not None:
+        record["feeds"] = feeds
     if args.source in _TEMP_SOURCES:
         record["db_temp_bytes_before"] = temp_before
         record["db_temp_bytes_after"] = _db_temp_bytes()

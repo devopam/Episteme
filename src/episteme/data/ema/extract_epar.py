@@ -34,6 +34,9 @@ removed with its parts when it was the last), and ``parts_retire`` deletes the r
 parts that had been loaded, with an audit row. The decision reads the feed and the earlier
 manifests, never the files on disk. A known document whose file is missing holds its bucket
 (not rewritten, listed in ``held_buckets``): its row is not dropped for a missing file.
+So does a known document that had a row and changed since, when its new file cannot be read:
+``process_bucket`` reads such documents first, before it deletes a part, and on a failure
+keeps the bucket's parts and marker (as DailyMed holds a bucket); the next run tries again.
 A listed document that was never downloaded is skipped and counted as failed
 (``not_downloaded``).
 
@@ -92,6 +95,7 @@ from episteme.data.parallel import (  # noqa: E402
     record_first_failure,
     run_per_file,
 )
+from episteme.data.regulatory.feeds import feeds_record  # noqa: E402
 from episteme.data.staging_writer import WRITE_BATCH_ROWS  # noqa: E402
 from episteme.ops.profile import get_profile  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
@@ -411,6 +415,47 @@ def _is_sample(processed_dir: Path) -> bool:
     return bucket_parts.is_sample(processed_dir)
 
 
+def _had_row(processed_dir: Path, doc_key: str) -> bool:
+    """Whether the last extract of a document gave it a row: no failed marker, or one for
+    ``no_text`` (that document keeps an ``empty`` row)."""
+    try:
+        payload = json.loads(
+            failed_marker_path(processed_dir, SOURCE, doc_key).read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("error_class") == "no_text"
+
+
+def _changed_known_failure(
+    entries: list[dict], done_inputs: list, raw_dir: Path, processed_dir: Path
+) -> str | None:
+    """Why the bucket must be held, or ``None``. A document that the bucket's last run wrote
+    as a row, and whose content changed since, is read first, before any part is deleted. If
+    it fails (a transient error is raised, not held), rewriting the bucket would drop its row,
+    so the bucket keeps its parts and its marker, as DailyMed holds a bucket. The marker's
+    inputs no longer match the manifest, so the next run tries again."""
+    before = {row[0]: row for row in done_inputs if isinstance(row, list) and row}
+    for entry in entries:
+        old = before.get(entry["id"])
+        if old is None or old == _fingerprint_row(entry) or not _had_row(processed_dir, old[2]):
+            continue
+        path = raw_dir / entry["rel"]
+        try:
+            if not path.is_file() or path.stat().st_size != entry["size"]:
+                raise OSError("the file changed or went missing since the plan")
+            pdf_text(path)
+        except Exception as e:  # noqa: BLE001 - a transient error is raised below
+            if is_transient(e):
+                raise
+            return f"{entry['key']} changed and cannot be read ({type(e).__name__}: {e})"
+        finally:
+            gc.collect()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # One bucket
 # ---------------------------------------------------------------------------
@@ -436,8 +481,8 @@ def process_bucket(
         key = str(manifest["key"])
         n_bucket = int(manifest["bucket"])
         fingerprint = manifest["fingerprint"]
+        done = bucket_parts.read_bucket_marker(processed_dir, SOURCE, key)
         if not force:
-            done = bucket_parts.read_bucket_marker(processed_dir, SOURCE, key)
             if done is not None and done["inputs"] == fingerprint:
                 failed_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
                 return {
@@ -449,13 +494,30 @@ def process_bucket(
                 }
             if is_success(processed_dir, SOURCE, key):
                 _LOG.warning("%s: an input changed since the bucket completed; written again", key)
+        raw_dir = Path(raw_dir)
+        entries: list[dict] = manifest["documents"]
+        check_keys(entries)
+        if done is not None:
+            why = _changed_known_failure(entries, done["inputs"], raw_dir, processed_dir)
+            if why is not None:
+                mark_failed(
+                    processed_dir,
+                    SOURCE,
+                    key,
+                    error_class="held_bucket",
+                    message=f"bucket not rewritten: {why}",
+                )
+                return {
+                    "source_file": key,
+                    "skipped": False,
+                    "ok": False,
+                    "held": True,
+                    "error": why,
+                }
         success_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
         _delete_all_parts(processed_dir, key)
 
         cap_rows, cap_bytes = _part_caps()
-        raw_dir = Path(raw_dir)
-        entries: list[dict] = manifest["documents"]
-        check_keys(entries)
         failed: list[dict[str, str]] = []
         by_reason: Counter[str] = Counter()
 
@@ -729,7 +791,10 @@ def extract_epar(
         "inputs": len(keys),
         "ok": sum(1 for r in results if r.get("ok")),
         "failed": sum(1 for r in results if not r.get("ok") and not r.get("skipped")) + len(held),
-        "held_buckets": [bucket_key(n) for n in sorted(held)],
+        "held_buckets": sorted(
+            [bucket_key(n) for n in held]
+            + [str(r["source_file"]) for r in results if r.get("held")]
+        ),
         "rows": sum(int(r.get("n_rows") or 0) for r in results if r.get("ok")),
         "buckets": len(keys),
         "documents": len(docs),
@@ -755,6 +820,8 @@ def extract_epar(
                 "workers": workers,
                 "force": force,
                 "bucket_ids": width,
+                # feeds.toml is data, outside the code hash: its values go into the record.
+                "feeds": feeds_record(SOURCE),
             },
             totals={
                 **summary,

@@ -53,7 +53,7 @@ from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.checkpoint_markers import input_key
-from episteme.data.regulatory.feeds import Feed, load_feeds
+from episteme.data.regulatory.feeds import Feed, source_feeds
 from episteme.data.regulatory.normalize import (
     fits_index,
     norm_name,
@@ -67,11 +67,6 @@ _LOG = logging.getLogger(__name__)
 
 SCHEMA = "episteme"
 SOURCES = ("ema", "openfda")
-# Feed formats per CLI source.
-_SOURCE_FORMATS = {
-    "ema": ("ema_json", "article57_xlsx"),
-    "openfda": ("openfda_json",),
-}
 # Formats whose file states its own row total: format -> reader of that total.
 EXPECTED_TOTAL: dict[str, Callable[[Path], int | None]] = {"ema_json": ema_total}
 _NAME_STEM = 16
@@ -601,7 +596,7 @@ def _fingerprint(files: Sequence[tuple[Path, str]]) -> list[list]:
 def select_feeds(source: str, only: Sequence[str] | None) -> list[Feed]:
     """The configured feeds of ``source``, narrowed by ``--only``; ``ValueError`` names
     an ``--only`` entry that is not a feed of this source."""
-    feeds = [f for f in load_feeds().values() if f.format in _SOURCE_FORMATS[source]]
+    feeds = source_feeds(source)
     if only:
         unknown = sorted(set(only) - {f.name for f in feeds})
         if unknown:

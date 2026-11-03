@@ -301,3 +301,31 @@ def test_all_human_mode_is_unchanged_and_excludes_substance(tmp_path):
         "https://x.test/drug/label/a.json.zip",
         "https://x.test/drug/ndc/b.json.zip",
     ]
+
+
+def test_source_feeds_split_the_config_by_stage():
+    from episteme.data.regulatory.feeds import source_feeds
+
+    ema = {f.name for f in source_feeds("ema")}
+    openfda = {f.name for f in source_feeds("openfda")}
+    epar = [f.name for f in source_feeds("ema_epar")]
+    assert "ema_medicines" in ema and "ema_article57" in ema and "fda_ndc" not in ema
+    assert openfda == {f for f in openfda if f.startswith("fda_")} and "fda_ndc" in openfda
+    assert epar == ["ema_epar_documents"]
+    assert source_feeds("pubmed") == []
+
+
+def test_feeds_record_holds_the_hash_and_the_parsed_entries(tmp_path):
+    from episteme.data.regulatory.feeds import FEEDS_PATH, feeds_record
+
+    lf = FEEDS_PATH.read_bytes().replace(b"\r\n", b"\n")
+    (tmp_path / "lf.toml").write_bytes(lf)
+    (tmp_path / "crlf.toml").write_bytes(lf.replace(b"\n", b"\r\n"))
+    a = feeds_record("openfda", tmp_path / "lf.toml")
+    b = feeds_record("openfda", tmp_path / "crlf.toml")
+    assert a["sha256"] == b["sha256"]  # line endings do not change the record
+    fields = list(a["entries"]["fda_ndc"]["product_fields"])
+    assert fields == ["product_ndc", "packaging.package_ndc"]
+    changed = lf.replace(b'cadence = "monthly"', b'cadence = "weekly"', 1)
+    (tmp_path / "changed.toml").write_bytes(changed)
+    assert feeds_record("openfda", tmp_path / "changed.toml")["sha256"] != a["sha256"]

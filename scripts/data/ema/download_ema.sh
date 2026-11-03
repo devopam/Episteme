@@ -20,4 +20,8 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "ema: python not found (set PYTHON=/path/to/python)"
 
+# run_pipeline.sh passes --dry-run as EPISTEME_DRY_RUN=1: turn it into the flag, so a
+# dry run never downloads.
+[ "${EPISTEME_DRY_RUN:-0}" = "1" ] && set -- --dry-run "$@"
+
 exec "$PY" -m episteme.data.regulatory.download_ema "$@"

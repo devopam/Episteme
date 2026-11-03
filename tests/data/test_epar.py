@@ -323,6 +323,36 @@ def test_max_files_limits_the_fetches(dlenv):
     assert out["fetched"] == ["1", "2"]
 
 
+def test_a_document_over_the_byte_cap_is_stopped_failed_and_not_retried(dlenv, monkeypatch):
+    big = make_pdf(["x" * 400])
+    _env(monkeypatch, "EPISTEME_EPAR_MAX_BYTES", len(big) - 1)
+    a, b, c = doc(1), doc(2), doc(3)
+    s = _session(
+        (a, [FakeResp(big, 200, "application/pdf")]),  # Content-Length says it is too big
+        (b, [FakeResp(big, 200, "application/pdf", cl=False)]),  # only the stream says so
+        (c, [_pdf_resp("small")]),
+    )
+    out = dl.fetch_documents(dlenv["raw"], [a, b, c], session=s, **dlenv["kw"])
+    assert out["fetched"] == ["3"] and set(out["failed"]) == {"1", "2"}
+    assert "cap" in out["failed"]["1"] and "cap" in out["failed"]["2"]
+    assert s.calls.count(a["document_url"]) == 1  # not retried: it can never fit
+    assert s.calls.count(b["document_url"]) == 1
+    for i in ("1", "2"):
+        assert not (dlenv["raw"] / "epar" / f"{i}.pdf").exists()
+        marker = failed_marker_path(dlenv["proc"], dl.MARKER_SOURCE, f"epar__{i}.pdf")
+        assert json.loads(marker.read_text("utf-8"))["error_class"] == "over_limit"
+    assert not list((dlenv["raw"] / "epar").glob(".*"))  # no partial file left
+
+
+def test_the_ema_feeds_have_no_byte_cap():
+    import inspect
+
+    from episteme.data.regulatory import download_ema
+
+    assert inspect.signature(download_ema.download_to).parameters["max_bytes"].default is None
+    assert "max_bytes" not in inspect.getsource(download_ema._download_once)
+
+
 def test_the_delay_is_a_setting(dlenv, monkeypatch):
     _env(monkeypatch, "EPISTEME_EMA_DELAY_SECONDS", 7)
     a, b = doc(1), doc(2)
@@ -580,6 +610,53 @@ def test_a_complete_bucket_is_skipped_and_a_changed_document_rewrites_only_its_b
     _feed(raw, [doc(1, name="Renamed"), doc(12, updated="2026-09-09T00:00:00Z")])
     assert ex.extract_epar(raw, out)["rows"] == 1
     assert _rows(out, "ema_epar_b0000__part00001")[0]["title"] == "Renamed"
+
+
+def test_a_known_document_that_changed_and_fails_holds_its_bucket(raw, out):
+    _setup(raw, [1, 2])
+    ex.extract_epar(raw, out)
+    part = out / "staging" / "ema_epar" / "ema_epar_b0000__part00001.parquet"
+    before = part.read_bytes()
+    # Document 2 changes, and its new file cannot be read.
+    _feed(raw, [doc(1), doc(2, updated="2026-09-09T00:00:00Z")])
+    _pdf(raw, 2, data=b"%PDF-1.4\nbroken now, and longer than before")
+    res = ex.extract_epar(raw, out)
+    assert res["held_buckets"] == ["ema_epar_b0000"] and res["failed"] == 1
+    assert part.read_bytes() == before  # the old part, and so the old row, stay
+    assert {r["id"] for r in _rows(out, "ema_epar_b0000__part00001")} == {
+        "ema_epar:1",
+        "ema_epar:2",
+    }
+    assert success_marker_path(out, "ema_epar", "ema_epar_b0000").is_file()
+    held = json.loads(failed_marker_path(out, "ema_epar", "ema_epar_b0000").read_text("utf-8"))
+    assert held["error_class"] == "held_bucket" and "epar__2.pdf" in held["message"]
+    # The fixed file: the bucket is written again and the hold is gone.
+    _pdf(raw, 2, "Revised text of document 2.")
+    res = ex.extract_epar(raw, out)
+    assert res["held_buckets"] == [] and res["failed"] == 0 and res["rows"] == 2
+    assert not failed_marker_path(out, "ema_epar", "ema_epar_b0000").is_file()
+    texts = {r["id"]: r["body_text"] for r in _rows(out, "ema_epar_b0000__part00001")}
+    assert "Revised text" in texts["ema_epar:2"]
+
+
+def test_a_document_that_had_no_row_does_not_hold_its_bucket(raw, out):
+    _setup(raw, [1, 2])
+    _pdf(raw, 2, data=b"%PDF-1.4\nbroken")
+    ex.extract_epar(raw, out)
+    _feed(raw, [doc(1), doc(2, updated="2026-09-09T00:00:00Z")])
+    _pdf(raw, 2, data=b"%PDF-1.4\nstill broken, other bytes")
+    res = ex.extract_epar(raw, out)
+    assert res["held_buckets"] == [] and res["failed_by_reason"] == {"pdf_parse_error": 1}
+
+
+def test_the_run_manifest_records_the_feed_config(raw, out):
+    _setup(raw, [3])
+    ex.extract_epar(raw, out)
+    (manifest,) = (out / "_ops" / "ema_epar" / "runs").glob("run_*.json")
+    feeds = json.loads(manifest.read_text("utf-8"))["config"]["feeds"]
+    assert feeds["file"] == "feeds.toml" and len(feeds["sha256"]) == 64
+    assert list(feeds["entries"]) == ["ema_epar_documents"]
+    assert feeds["entries"]["ema_epar_documents"]["document_types"] == list(TYPES)
 
 
 def test_force_writes_again(raw, out):
