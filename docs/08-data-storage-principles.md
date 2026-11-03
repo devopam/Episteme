@@ -115,12 +115,12 @@ Notes on what is and is not code-backed:
 | `episteme._audit` | `RANGE (recorded_at)` monthly plus `DEFAULT` | Append-only hash-chained audit trail |
 | `episteme.reg_release` | none (migration 0010) | One row per `(dataset, release_id)` with `rows`, `status` and `is_latest`; a unique partial index allows one latest release per dataset |
 | `episteme.reg_record` | `LIST (dataset)`, then `LIST (release_id)` (migration 0010; a loader creates the partitions) | Reference-feed records of EMA and openFDA: `record_key`, `substance_names`, `product_keys`, `event_date`, `payload` (`jsonb`), `source_file`. A query names `dataset` and `release_id` as values, so the plan reads one leaf |
-| `episteme.substance`, `episteme.substance_xref` | none (migration 0010) | One row per UNII with its `moiety_key`; cross-references by `id_type` (`unii`, `name`, `rxcui`, `atc`, and `<source>_name` for EMA and FAERS names). Keys are never reused |
+| `episteme.substance`, `episteme.substance_xref` | none (migration 0010) | One row per UNII with its `moiety_key`; cross-references by `id_type` (`unii`, `name`, `rxcui`, `atc`, and `ema_name` for EMA names; FAERS has its own bridge, `faers_entry_substance`). Keys are never reused |
 | `episteme.faers_report`, `episteme.faers_drug`, `episteme.faers_reaction` | `RANGE (receive_year)`, one partition per year 2004 to 2030 plus `DEFAULT` (migration 0010) | FAERS typed rows. The parents hold no index; the loader builds them per generation, builds the next generation in new tables and swaps it in |
 | `episteme.faers_drug_entry`, `episteme.faers_entry_substance`, `episteme.faers_term` | none (migration 0010) | Dictionaries that live across generations: drug entries, their bridge to substances, reaction terms |
 | `episteme.faers_pair_quarter`, `faers_event_quarter`, `faers_quarter_totals`, `faers_moiety_quarter`, `faers_term_quarter`, `faers_batch_coverage`, `faers_batch_quarter` | none (migration 0010) | Signal tables, rebuilt per generation and swapped with it. `substance_key` holds a moiety key |
 | `episteme.recall_lot` | none (migration 0010) | Lots read from the free text of `fda_enforcement`, by release |
-| `episteme.label_section`, `episteme.label_substance` | none (migration 0010) | DailyMed label sections (offsets into `body_text`, no text copy) and the substances of each label |
+| `episteme.label_section`, `episteme.label_substance` | none (migration 0010) | DailyMed label sections (offsets into `body_text`, no text copy) and the substances of each label: `unii` and `ndc_product` (the 9-digit labeler-product key; a package key has 11). No resolved substance key is stored: a query joins `label_substance.unii` to `substance.unii` and its `moiety_key` |
 
 ## 7. Implementation Phasing (shipped state)
 

@@ -130,7 +130,8 @@ Design: `superpowers/specs/2026-11-02-regulatory-sources-design.md`. Stages and 
 Notes:
 
 - `cdisc_bc` and `cdisc_usdm` rules are unchanged (section 2.6).
-- Rights for EPAR text and DailyMed text in the training corpus: Claude's reading is that the EMA notice allows reuse with credit and that DailyMed labels are public. The owner confirms before a corpus build.
+- **Not in the training corpus.** DailyMed labels and EMA EPAR text are reference data: they are looked up, not trained on (owner's design, `docs/superpowers/specs/2026-10-28-end-consumer-programme-design.md`). `corpus materialize` leaves out the sources in the config list `corpus_excluded_sources` (`dailymed`, `ema_epar`), although their rows carry `subset = commercial`.
+- Rights for EPAR text and DailyMed text, if a later decision puts them in the training corpus: Claude's reading is that the EMA notice allows reuse with credit and that DailyMed labels are public. The owner confirms before such a build.
 - Veterinary, device and food endpoints of openFDA, PMS, SPOR and CTIS are not wired; the model takes them as new `feeds.toml` entries.
 
 ### 2.3 Open or semi-open terminologies & units

@@ -1,6 +1,6 @@
 # Regulatory sources: DailyMed, openFDA and EMA in one pluggable model
 
-Status: draft for review, 2026-11-02.
+Status: approved, 2026-11-02.
 Parents: `2026-10-28-end-consumer-programme-design.md` (this is project 3, slices 1 and 2) and `2026-10-19-pipeline-operating-standard-design.md` (bounded units, resume, samples, one heavy job at a time).
 
 Notation: **Owner** marks a decision the project owner made. **Claude's call** marks a choice the owner has not yet confirmed.
