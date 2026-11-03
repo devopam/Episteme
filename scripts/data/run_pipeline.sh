@@ -719,6 +719,11 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
+# dailymed: --force --reason overrides its extract guards (audited); the reason rides along
+# once (skip_reason already holds it when --skip-unit is used).
+if [ "$SOURCE" = "dailymed" ] && [ "$FORCE" = "1" ] && [ "${#skip_args[@]}" -eq 0 ]; then
+    lit_extract_args+=(--reason "$REASON")
+fi
 lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
 # SP4 structured `serialize` wrappers accept --max-files N and --force (plus

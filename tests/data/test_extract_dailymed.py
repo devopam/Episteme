@@ -30,6 +30,22 @@ from ._dailymed_fixtures import (
 BIG = 10**12
 
 
+@pytest.fixture(autouse=True)
+def _settings_cache():
+    from episteme.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _share(monkeypatch, value: float) -> None:
+    from episteme.config import get_settings
+
+    monkeypatch.setenv("EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE", str(value))
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def raw(tmp_path: Path) -> Path:
     r = tmp_path / "raw"
@@ -74,17 +90,17 @@ def _bucket_marker(out: Path, key: str) -> dict:
 S_AB, S_AB2, S_0F = set_id("ab", 1), set_id("ab", 2), set_id("0f", 3)
 
 
-def test_iter_labels_streams_zips_of_zips(raw):
+def test_the_scan_reads_zips_of_zips(raw):
     outer_zip(
         raw / "dm_spl_release_human_rx_part1.zip",
         {_name("prescription", S_AB): _inner(S_AB), _name("prescription", S_0F): _inner(S_0F)},
     )
-    got = dict(dm.iter_labels(raw, ("prescription", "otc")))
-    assert len(got) == 2
-    for key, xml in got.items():
-        assert key.startswith("dm_spl_release_human_rx_part1.zip__prescription__")
-        assert xml.startswith(b"<?xml")  # the XML only, not the zip nor an image
-    assert {spl.parse_spl(x)["set_id"] for x in got.values()} == {S_AB, S_0F}
+    scan = dm.scan_zips(raw, ("prescription", "otc"))
+    assert set(scan.winners) == {S_AB, S_0F}
+    assert scan.outer_rels == ["dm_spl_release_human_rx_part1.zip"]
+    assert scan.n_failed == 0 and not scan.unreadable_outers
+    version, oi, member, _crc, _size = scan.winners[S_AB]
+    assert (version, oi) == (1, 0) and member == _name("prescription", S_AB)
 
 
 def test_newest_version_per_set_id_wins(raw, out):
@@ -368,7 +384,8 @@ def test_a_second_run_skips_done_buckets_and_a_changed_input_rewrites(raw, out, 
     assert _rows(out, "dailymed_bab__part00001")[0]["source_record_id"].endswith(".2")
 
 
-def test_a_withdrawn_label_is_retired_through_the_pending_file(raw, out):
+def test_a_withdrawn_label_is_retired_through_the_pending_file(raw, out, monkeypatch):
+    _share(monkeypatch, 1.0)  # one of two labels leaves; the guard is tested below
     kinds = ("prescription", "otc")
     zpath = raw / "dm_spl_release_human_rx_part1.zip"
     outer_zip(
@@ -444,7 +461,7 @@ def test_reads_inside_a_bucket_follow_the_order_of_the_outer_zip(raw, out, monke
         {_name("prescription", s, f"2024010{i}"): _inner(s) for i, s in enumerate(sids)},
     )
     order: list[str] = []
-    real = zipfile.ZipFile.read
+    real = zipfile.ZipFile.open
 
     def spy(self, name, *a, **k):
         n = name if isinstance(name, str) else name.filename
@@ -454,7 +471,7 @@ def test_reads_inside_a_bucket_follow_the_order_of_the_outer_zip(raw, out, monke
 
     dm.extract_dailymed(raw, out, release_kinds=("prescription", "otc"))
     order.clear()
-    monkeypatch.setattr(zipfile.ZipFile, "read", spy)
+    monkeypatch.setattr(zipfile.ZipFile, "open", spy)
     dm.extract_dailymed(raw, out, force=True, release_kinds=("prescription", "otc"))
     # The scan and then the bucket each read in the order of the file (the dates in the
     # names run with the offsets), and each reads every inner zip once.
@@ -495,3 +512,218 @@ def test_the_gate_knows_the_dailymed_stages():
         "episteme.data.load_articles",
         "episteme.data.dailymed.retire",
     ]
+
+
+# ---------------------------------------------------------------------------
+# fix round 1
+# ---------------------------------------------------------------------------
+def _read_bytes(monkeypatch) -> list[int]:
+    """Count the bytes that the zip layer reads from the files (the shared file object)."""
+    total = [0]
+    real = zipfile._SharedFile.read
+
+    def spy(self, n=-1):
+        data = real(self, n)
+        total[0] += len(data)
+        return data
+
+    monkeypatch.setattr(zipfile._SharedFile, "read", spy)
+    return total
+
+
+def test_images_are_not_read_from_a_stored_outer_zip(raw, monkeypatch):
+    big = 2_000_000
+    inner = inner_zip(spl_xml(S_AB), image_bytes=big)
+    outer_zip(raw / "dm_spl_release_human_rx_part1.zip", {_name("prescription", S_AB): inner})
+    total = _read_bytes(monkeypatch)
+    scan = dm.scan_zips(raw, ("prescription", "otc"))
+    assert S_AB in scan.winners
+    assert 0 < total[0] < 200_000  # the XML head and the directories, not the 2 MB image
+
+
+def test_a_compressed_outer_zip_is_read_whole(raw, monkeypatch):
+    # A deflated outer member cannot be sought without decompressing it: it is read once.
+    big = 300_000
+    inner = inner_zip(spl_xml(S_AB), image_bytes=big)
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip",
+        {_name("prescription", S_AB): inner},
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    total = _read_bytes(monkeypatch)
+    scan = dm.scan_zips(raw, ("prescription", "otc"))
+    assert S_AB in scan.winners and not scan.n_failed
+    assert total[0] >= big
+
+
+def test_bucket_reads_of_a_stored_outer_zip_skip_the_images(raw, out, monkeypatch):
+    inner = inner_zip(spl_xml(S_AB), image_bytes=2_000_000)
+    outer_zip(raw / "dm_spl_release_human_rx_part1.zip", {_name("prescription", S_AB): inner})
+    total = _read_bytes(monkeypatch)
+    res = dm.extract_dailymed(raw, out, release_kinds=("prescription", "otc"))
+    assert res["rows"] == 1
+    assert total[0] < 600_000  # scan + bucket: two XML reads, never the image
+
+
+def test_a_missing_release_part_refuses_before_anything_is_written(raw, out, monkeypatch):
+    kinds = ("prescription", "otc")
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip", {_name("prescription", S_AB): _inner(S_AB)}
+    )
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part3.zip", {_name("prescription", S_0F): _inner(S_0F)}
+    )
+    with pytest.raises(dm.DailymedGuardError, match=r"prescription: release part\(s\) \[2\]"):
+        dm.extract_dailymed(raw, out, release_kinds=kinds)
+    assert not (out / "_ops").exists() and not (out / "staging").exists()
+    # --force alone does not override; --force --reason does, with an audit row.
+    with pytest.raises(dm.DailymedGuardError):
+        dm.extract_dailymed(raw, out, force=True, release_kinds=kinds)
+    audited: list[tuple[str, str]] = []
+    monkeypatch.setattr(dm, "_audit_override", lambda reason, what: audited.append((reason, what)))
+    res = dm.extract_dailymed(
+        raw, out, force=True, force_reason="part 2 is lost", release_kinds=kinds
+    )
+    assert res["rows"] == 2
+    assert audited and audited[0][0] == "part 2 is lost" and "[2]" in audited[0][1]
+
+
+def test_contiguous_parts_and_update_only_dirs_pass(raw, out):
+    kinds = ("prescription", "otc")
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip", {_name("prescription", S_AB): _inner(S_AB)}
+    )
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part2.zip", {_name("prescription", S_0F): _inner(S_0F)}
+    )
+    outer_zip(
+        raw / "dm_spl_release_human_otc_part1.zip",
+        {_name("otc", set_id("cd", 1)): _inner(set_id("cd", 1))},
+    )
+    assert dm.extract_dailymed(raw, out, release_kinds=kinds)["rows"] == 3
+    assert dm.release_part_gaps([]) == []
+
+
+def test_a_sample_root_skips_the_guards(raw, tmp_path):
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part3.zip", {_name("prescription", S_AB): _inner(S_AB)}
+    )
+    sample_out = tmp_path / "_sample" / "dailymed" / "02_processed"
+    res = dm.extract_dailymed(raw, sample_out, release_kinds=("prescription", "otc"))
+    assert res["rows"] == 1
+
+
+def _ten(raw: Path, n: int) -> None:
+    sids = [set_id("ab", i) for i in range(1, n + 1)]
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip",
+        {_name("prescription", s): _inner(s) for s in sids},
+    )
+
+
+def test_too_many_withdrawn_labels_refuse_and_the_override_works(raw, out, monkeypatch):
+    kinds = ("prescription", "otc")
+    _ten(raw, 10)
+    # No earlier state: no limit.
+    assert dm.extract_dailymed(raw, out, release_kinds=kinds)["rows"] == 10
+    # One of ten is 10 percent: at the limit, allowed.
+    _ten(raw, 9)
+    assert dm.extract_dailymed(raw, out, release_kinds=kinds)["withdrawn_labels"] == 1
+    # Two of nine are over it: refused, and nothing changes.
+    _ten(raw, 7)
+    manifest = out / "_ops" / "dailymed" / "buckets" / "dailymed_bab.json"
+    before = manifest.read_text(encoding="utf-8")
+    with pytest.raises(dm.DailymedGuardError, match="2 of 9 known labels"):
+        dm.extract_dailymed(raw, out, release_kinds=kinds)
+    assert manifest.read_text(encoding="utf-8") == before
+    assert len(_rows(out, "dailymed_bab__part00001")) == 9
+    # The override, audited.
+    audited: list[tuple[str, str]] = []
+    monkeypatch.setattr(dm, "_audit_override", lambda reason, what: audited.append((reason, what)))
+    res = dm.extract_dailymed(
+        raw, out, force=True, force_reason="two withdrawn", release_kinds=kinds
+    )
+    assert (res["withdrawn_labels"], res["rows"]) == (2, 7)
+    assert audited and "2 of 9" in audited[0][1]
+
+
+def test_the_share_limit_is_a_setting(monkeypatch):
+    from episteme.config import get_settings
+
+    assert get_settings().dailymed_max_withdrawn_share == 0.1
+    _share(monkeypatch, 0.25)
+    assert get_settings().dailymed_max_withdrawn_share == 0.25
+
+
+def test_a_known_label_that_cannot_be_read_holds_its_bucket(raw, out):
+    kinds = ("prescription", "otc")
+    z = raw / "dm_spl_release_human_rx_part1.zip"
+    good = {
+        _name("prescription", S_AB): _inner(S_AB),
+        _name("prescription", S_AB2): _inner(S_AB2),
+        _name("prescription", S_0F): _inner(S_0F),
+    }
+    outer_zip(z, good)
+    dm.extract_dailymed(raw, out, release_kinds=kinds)
+    # The next release holds a corrupt copy of S_AB and no other copy.
+    outer_zip(z, {**good, _name("prescription", S_AB): b"damaged in the download"})
+    res = dm.extract_dailymed(raw, out, release_kinds=kinds)
+    assert res["held_buckets"] == ["dailymed_bab"] and res["failed"] == 1
+    assert res["failed_labels_count"] == 1 and res["withdrawn_labels"] == 0
+    # The earlier parts and manifest stay: the row of S_AB is not dropped or retired.
+    assert {r["id"] for r in _rows(out, "dailymed_bab__part00001")} == {
+        f"dailymed:{S_AB}",
+        f"dailymed:{S_AB2}",
+    }
+    manifest = out / "_ops" / "dailymed" / "buckets" / "dailymed_bab.json"
+    assert len(json.loads(manifest.read_text("utf-8"))["labels"]) == 2
+    assert parts_retire.read_retire_pending(out, "dailymed") == []
+    assert failed_marker_path(out, "dailymed", "dailymed_bab").is_file()
+    _write = dm._write_failed_inputs
+    _write(out, res)
+    assert (
+        json.loads((out / "_ops" / "dailymed" / "failed_inputs.json").read_text("utf-8"))[
+            "failed_inputs"
+        ]
+        == 2
+    )
+    # The other bucket was not held. When the file is good again, the hold is gone.
+    outer_zip(z, good)
+    res = dm.extract_dailymed(raw, out, release_kinds=kinds)
+    assert res["held_buckets"] == [] and res["failed"] == 0
+    assert not failed_marker_path(out, "dailymed", "dailymed_bab").is_file()
+
+
+def test_a_corrupt_newest_copy_does_not_downgrade_the_row(raw, out):
+    kinds = ("prescription", "otc")
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip", {_name("prescription", S_AB): _inner(S_AB, 1)}
+    )
+    upd = raw / "dm_spl_weekly_update_20240108.zip"
+    outer_zip(upd, {"prescription/new.zip": _inner(S_AB, 2)})
+    dm.extract_dailymed(raw, out, release_kinds=kinds)
+    outer_zip(upd, {"prescription/new.zip": b"damaged"})
+    res = dm.extract_dailymed(raw, out, release_kinds=kinds)
+    assert res["held_buckets"] == ["dailymed_bab"]
+    assert _rows(out, "dailymed_bab__part00001")[0]["source_record_id"].endswith(".2")
+
+
+def test_a_label_with_no_text_is_empty_and_one_with_text_is_ok(raw, out):
+    outer_zip(
+        raw / "dm_spl_release_human_rx_part1.zip",
+        {
+            _name("prescription", S_AB): _inner(S_AB, sections=[]),
+            _name("prescription", S_AB2): _inner(S_AB2),
+        },
+    )
+    res = dm.extract_dailymed(raw, out, release_kinds=("prescription", "otc"))
+    by_id = {r["id"]: r for r in _rows(out, "dailymed_bab__part00001")}
+    assert by_id[f"dailymed:{S_AB}"]["extract_status"] == "empty"
+    assert by_id[f"dailymed:{S_AB2}"]["extract_status"] == "ok"
+    st = _bucket_marker(out, "dailymed_bab")
+    assert st["extract_status_counts"] == {"empty": 1, "ok": 1}
+    assert res["rows"] == 2
+
+
+def test_iter_labels_is_gone():
+    assert not hasattr(dm, "iter_labels")

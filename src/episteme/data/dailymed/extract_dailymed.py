@@ -53,6 +53,21 @@ only by being missing from the updates cannot be seen, so a ``setId`` that an up
 holds and no full release holds stays. The withdrawals that a full release shows are
 the ones that the replacement of the release zips brings.
 
+Old update zips that stay on disk keep a label that a new full release dropped: delete the
+old updates when a full release is replaced.
+
+**Guards** (refuse before anything is written; ``--force --reason`` overrides them, with a
+``force_override`` audit row; a run under a ``_sample`` processed root skips them):
+the release part numbers of each kind must run from 1 without a gap, and the share of the
+previously known labels that this scan no longer holds must not exceed
+``Settings.dailymed_max_withdrawn_share`` (``EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE``,
+default 0.1; with no earlier state there is no limit).
+
+A known label whose inner zip cannot be read in the scan, with no other readable copy
+(or only an older version), is not withdrawn and its row is not dropped. The XML is
+needed to write the row again, so its whole bucket is held: not rewritten, listed as
+failed (``held_buckets``), and its earlier parts and manifest stay as they are.
+
 Importable core: ``extract_dailymed(raw_dir, processed_dir, *, max_files=0,
 force=False, workers=1, verbose=False, skip_units=None, skip_reason=None,
 release_kinds=None) -> dict``. ``main()`` is the thin CLI wrapper.
@@ -126,7 +141,7 @@ FAILED_INPUTS_FILE = "failed_inputs.json"
 BUCKET_PREFIX_CHARS = 2
 LICENSE_RAW = "U.S. government work: DailyMed (NLM) / FDA structured product labeling"
 
-_RELEASE_RE = re.compile(r"^dm_spl_release_human_(rx|otc)_part\d+\.zip$")
+_RELEASE_RE = re.compile(r"^dm_spl_release_human_(rx|otc)_part(\d+)\.zip$")
 _UPDATE_RE = re.compile(r"^dm_spl_(monthly|weekly|daily)_update_.+\.zip$")
 _RELEASE_KIND = {"rx": "prescription", "otc": "otc"}
 
@@ -137,6 +152,11 @@ _FAILED_LABELS_LISTED = 100
 
 class DailymedScanError(RuntimeError):
     """The scan cannot be trusted (an outer zip is unreadable); nothing was written."""
+
+
+class DailymedGuardError(DailymedScanError):
+    """A guard refused the run (a release part is missing, or too many labels would be
+    withdrawn). ``--force --reason`` overrides it."""
 
 
 class DailymedBucketError(ValueError):
@@ -233,15 +253,25 @@ def _xml_name(zf: zipfile.ZipFile) -> str:
     return names[0]
 
 
-def _identity(inner_bytes: bytes) -> tuple[str, int]:
-    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as zf:
-        with zf.open(_xml_name(zf)) as f:
-            return spl.read_identity(f)
+def _identity(inner: zipfile.ZipFile) -> tuple[str, int]:
+    with inner.open(_xml_name(inner)) as f:
+        return spl.read_identity(f)
 
 
-def _xml_bytes(inner_bytes: bytes) -> bytes:
-    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as zf:
-        return zf.read(_xml_name(zf))
+@contextlib.contextmanager
+def _inner_zip(outer: zipfile.ZipFile, info: zipfile.ZipInfo) -> Iterator[zipfile.ZipFile]:
+    """The inner zip ``info`` of an outer zip.
+
+    A STORED outer member is opened as a seekable stream: the inner central directory
+    (at the end) and the XML are read, and the images are skipped by a seek, not read. A
+    compressed outer member cannot be sought without decompressing it up to the target (and
+    again after each rewind), so it is read whole once, as before."""
+    if info.compress_type == zipfile.ZIP_STORED:
+        with outer.open(info) as f, zipfile.ZipFile(f) as inner:
+            yield inner
+    else:
+        with zipfile.ZipFile(io.BytesIO(outer.read(info))) as inner:
+            yield inner
 
 
 @dataclass
@@ -256,6 +286,7 @@ class Scan:
     superseded: Counter = field(default_factory=Counter)  # per bucket prefix
     duplicates: Counter = field(default_factory=Counter)
     failed: list[dict[str, str]] = field(default_factory=list)  # at most _FAILED_LABELS_LISTED
+    failed_keys: set[str] = field(default_factory=set)  # every failed label key
     n_failed: int = 0
     unreadable_outers: list[str] = field(default_factory=list)
 
@@ -284,12 +315,14 @@ def scan_zips(
             infos.sort(key=lambda i: i.header_offset)
             for info in infos:
                 try:
-                    set_id, version = _identity(zf.read(info))
+                    with _inner_zip(zf, info) as inner:
+                        set_id, version = _identity(inner)
                 except Exception as e:  # noqa: BLE001 - one label; transient ones stop the run
                     if is_transient(e):
                         raise
                     key = label_key(path, raw_dir, info.filename)
                     scan.n_failed += 1
+                    scan.failed_keys.add(key)
                     if len(scan.failed) < _FAILED_LABELS_LISTED:
                         scan.failed.append({"file": key, "error": str(e)})
                     if on_failed is not None:
@@ -327,25 +360,76 @@ def _entry(scan: Scan, raw_dir: Path, set_id: str, w: tuple[int, int, str, int, 
     }
 
 
+def release_part_gaps(outers: list[Path]) -> list[str]:
+    """One message per release kind whose part numbers do not run from 1 without a gap
+    (``dm_spl_release_human_rx_part1..N``). A kind with no release zip is not a gap
+    (an update-only directory); a missing LAST part cannot be seen here, the withdrawn
+    share guard is what catches that."""
+    nums: dict[str, set[int]] = {}
+    for p in outers:
+        m = _RELEASE_RE.match(p.name)
+        if m:
+            nums.setdefault(_RELEASE_KIND[m.group(1)], set()).add(int(m.group(2)))
+    gaps = []
+    for kind in sorted(nums):
+        missing = [n for n in range(1, max(nums[kind]) + 1) if n not in nums[kind]]
+        if missing:
+            gaps.append(f"{kind}: release part(s) {missing} missing")
+    return gaps
+
+
+def _is_sample(processed_dir: Path) -> bool:
+    """A sample run (``run_pipeline.sh --sample``) has a processed root under ``_sample``."""
+    return "_sample" in Path(processed_dir).resolve().parts
+
+
+def _plan_against_earlier_state(processed_dir: Path, scan: Scan) -> tuple[dict[str, str], int, int]:
+    """Compare the scan with the manifests of the earlier run, one manifest at a time.
+
+    Returns ``(held, withdrawn, known)``. ``held`` maps a bucket prefix to the reason it
+    must not be rewritten: one of its known labels failed in this scan and has no readable
+    copy of the same or a newer version. The rest are counted: ``known`` labels in the
+    other buckets, ``withdrawn`` of them that the scan no longer holds. Nothing is written."""
+    held: dict[str, str] = {}
+    withdrawn = known = 0
+    d = _manifest_dir(processed_dir)
+    if not d.is_dir():
+        return held, withdrawn, known
+    for p in sorted(d.glob(f"{bucket_key('')}*.json")):
+        prefix = p.stem[len(bucket_key("")) :]
+        try:
+            entries = json.loads(p.read_text(encoding="utf-8"))["labels"]
+        except (OSError, ValueError, KeyError):
+            continue
+        unreadable = [
+            e["key"]
+            for e in entries
+            if e["key"] in scan.failed_keys
+            and (scan.winners.get(e["set_id"]) or (-1,))[0] < e["version"]
+        ]
+        if unreadable:
+            held[prefix] = f"{unreadable[0]} cannot be read and no copy of its version is readable"
+            continue
+        known += len(entries)
+        withdrawn += sum(1 for e in entries if e["set_id"] not in scan.winners)
+    return held, withdrawn, known
+
+
 def _write_manifests(
-    processed_dir: Path, raw_dir: Path, scan: Scan
-) -> tuple[dict[str, Path], dict[str, int], int]:
-    """One manifest per bucket. Returns ``(prefix -> manifest path, prefix -> count of
-    labels in it, count of labels that left their bucket since the last manifest)``."""
+    processed_dir: Path, raw_dir: Path, scan: Scan, held: dict[str, str]
+) -> dict[str, Path]:
+    """One manifest per bucket that is not held. Returns ``prefix -> manifest path``."""
     by_prefix: dict[str, list[dict]] = {}
     for set_id in sorted(scan.winners):
-        by_prefix.setdefault(bucket_prefix(set_id), []).append(
-            _entry(scan, raw_dir, set_id, scan.winners[set_id])
-        )
+        prefix = bucket_prefix(set_id)
+        if prefix not in held:
+            by_prefix.setdefault(prefix, []).append(
+                _entry(scan, raw_dir, set_id, scan.winners[set_id])
+            )
     paths: dict[str, Path] = {}
-    counts: dict[str, int] = {}
-    withdrawn = 0
     for prefix in sorted(by_prefix):
         entries = by_prefix[prefix]
         path = _manifest_path(processed_dir, prefix)
-        with contextlib.suppress(OSError, ValueError, KeyError):
-            old = json.loads(path.read_text(encoding="utf-8"))
-            withdrawn += len({e["set_id"] for e in old["labels"]} - {e["set_id"] for e in entries})
         payload = {
             "bucket": prefix,
             "key": bucket_key(prefix),
@@ -360,29 +444,58 @@ def _write_manifests(
         }
         write_marker(path, payload)
         paths[prefix] = path
-        counts[prefix] = len(entries)
-    return paths, counts, withdrawn
+    return paths
 
 
-def _retire_vanished_buckets(processed_dir: Path, live: set[str]) -> tuple[int, int]:
-    """Remove the buckets that have a manifest but no label in this scan: delete their
-    parts (the loaded ones go to the retire pending file), markers and manifest.
-    Returns ``(buckets removed, labels withdrawn)``."""
+def _retire_vanished_buckets(processed_dir: Path, live: set[str]) -> int:
+    """Remove the buckets that have a manifest but no label in this scan (and are not
+    held): delete their parts (the loaded ones go to the retire pending file), markers
+    and manifest. Returns the number of buckets removed."""
     d = _manifest_dir(processed_dir)
     if not d.is_dir():
-        return 0, 0
-    removed = withdrawn = 0
+        return 0
+    removed = 0
     for p in sorted(d.glob(f"{bucket_key('')}*.json")):
         prefix = p.stem[len(bucket_key("")) :]
         if prefix in live:
             continue
-        with contextlib.suppress(OSError, ValueError, KeyError):
-            withdrawn += len(json.loads(p.read_text(encoding="utf-8"))["labels"])
         success_marker_path(processed_dir, SOURCE, bucket_key(prefix)).unlink(missing_ok=True)
         _delete_all_parts(processed_dir, bucket_key(prefix))
         p.unlink(missing_ok=True)
         removed += 1
-    return removed, withdrawn
+    return removed
+
+
+def _audit_override(reason: str, what: str) -> None:
+    """One ``force_override`` audit row for a guard that ``--force --reason`` overrode,
+    degrading to the file-only mirror when no DB is reachable. Never raises."""
+    obj = f"{SOURCE} extract guard: {what}"[:500]
+    with _AUDIT_LOCK:
+        try:
+            from episteme.data.db.connection import connection as _pg_connection
+
+            with _pg_connection() as _conn:
+                _audit(
+                    "force_override",
+                    conn=_conn,
+                    object=obj,
+                    reason=reason,
+                    run_id=get_settings().run_id,
+                )
+                _conn.commit()
+        except Exception:  # noqa: BLE001 - best-effort
+            try:
+                from episteme import audit_trail as _audit_trail
+
+                _audit_trail.mirror_only(
+                    "force_override",
+                    object=obj,
+                    reason=reason,
+                    note="db_unavailable_or_failed",
+                    run_id=get_settings().run_id,
+                )
+            except Exception:  # noqa: BLE001
+                _LOG.warning("audit mirror_only fallback also failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -419,45 +532,14 @@ def _iter_outer(
         ordered.sort(key=lambda t: t[0])
         for _off, entry, info in ordered:
             try:
-                xml = _xml_bytes(zf.read(info))
+                with _inner_zip(zf, info) as inner:
+                    xml = inner.read(_xml_name(inner))
             except Exception as e:  # noqa: BLE001
                 if is_transient(e):
                     raise
                 on_error(entry, e)
                 continue
             yield entry, xml
-
-
-def iter_labels(
-    raw_dir: Path,
-    release_kinds: tuple[str, ...],
-    *,
-    failed: list[dict[str, str]] | None = None,
-) -> Iterator[tuple[str, bytes]]:
-    """``(label key, XML bytes)`` of the newest version of each label, streamed from
-    the zips of zips: a scan for the winners, then each outer zip read once in file
-    order. Images are never read. Labels that cannot be read are appended to ``failed``
-    (``{"file", "error"}``) when it is given, else they raise."""
-    raw_dir = Path(raw_dir)
-    scan = scan_zips(raw_dir, release_kinds, on_failed=None)
-    if scan.unreadable_outers:
-        raise DailymedScanError("; ".join(scan.unreadable_outers))
-    for item in scan.failed:
-        if failed is not None:
-            failed.append(item)
-    by_outer: dict[int, list[dict]] = {}
-    for set_id in sorted(scan.winners):
-        w = scan.winners[set_id]
-        by_outer.setdefault(w[1], []).append(_entry(scan, raw_dir, set_id, w))
-
-    def _on_error(entry: dict, exc: BaseException) -> None:
-        if failed is None:
-            raise exc
-        failed.append({"file": entry["key"], "error": str(exc)})
-
-    for oi in sorted(by_outer):
-        for entry, xml in _iter_outer(scan.outers[oi], by_outer[oi], _on_error):
-            yield entry["key"], xml
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +567,10 @@ def row_from_xml(xml: bytes) -> tuple[dict[str, Any], list[dict[str, Any]], dict
         "subset": subset_from_license(license_code),
         "is_retracted": False,
         # Metadata of the label: the LOINC code of the document (human Rx / OTC label).
+        # book_meta is the only metadata column that fits; it makes decide_extract_status
+        # treat the row as a book row (never empty), so the status is set here.
         "book_meta": json.dumps({"doc_type": parsed["doc_type"], "version": version}),
+        "extract_status": "ok" if parsed["body_text"].strip() else "empty",
     }
     out = finalize_row(row)
     if out["body_text"] != row["body_text"]:
@@ -621,6 +706,7 @@ def process_bucket(
         if not force:
             done = _read_bucket_marker(processed_dir, key)
             if done is not None and done["inputs"] == fingerprint:
+                failed_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
                 return {
                     "source_file": key,
                     "skipped": True,
@@ -779,6 +865,7 @@ def process_bucket(
             "elapsed_sec": round(time.time() - t0, 4),
         }
         mark_success(processed_dir, SOURCE, key, stats=stats)
+        failed_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)  # a held mark
         result = {k: v for k, v in stats.items() if k != "inputs"}
         return {"source_file": key, "skipped": False, "ok": True, **result}
     except Exception as e:  # noqa: BLE001
@@ -849,6 +936,7 @@ def extract_dailymed(
     skip_units: list[str] | None = None,
     skip_reason: str | None = None,
     release_kinds: tuple[str, ...] | None = None,
+    force_reason: str | None = None,
 ) -> dict:
     """Importable core: scan the DailyMed zips under ``raw_dir`` and extract them by
     bucket into staging parts + ops markers under ``processed_dir``.
@@ -856,12 +944,33 @@ def extract_dailymed(
     ``max_files`` limits the number of buckets of the run; ``skip_units`` take bucket
     keys. Returns ``{"inputs", "ok", "failed", "rows", "buckets", "labels",
     "superseded_versions", "duplicate_files", "failed_labels_count", "withdrawn_labels",
-    "retired_buckets"}``. Raises ``DailymedScanError`` when an outer zip is unreadable."""
+    "retired_buckets", "held_buckets"}``. ``force_reason`` with ``force`` overrides the
+    guards (see the module docstring). Raises ``DailymedScanError`` when an outer zip is
+    unreadable, ``DailymedGuardError`` when a guard refuses."""
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    kinds = tuple(release_kinds) if release_kinds is not None else settings.dailymed_kinds
+    override = bool(force and force_reason)
+    sample = _is_sample(processed_dir)
+    overridden: list[str] = []
+
+    def _guard(message: str) -> None:
+        """Refuse with ``message``, unless a sample run or ``--force --reason``."""
+        if sample:
+            return
+        if not override:
+            raise DailymedGuardError(
+                f"{message}; nothing was written. Fix the input, or run again with "
+                "--force --reason to override (audited)"
+            )
+        overridden.append(message)
+
+    gaps = release_part_gaps(discover_outer_zips(raw_dir, kinds))
+    if gaps:
+        _guard("; ".join(gaps))
     check_bucket_scheme(processed_dir)
-    kinds = tuple(release_kinds) if release_kinds is not None else get_settings().dailymed_kinds
 
     def _scan_failed(key: str, exc: BaseException) -> None:
         mark_failed(processed_dir, SOURCE, key, error_class="scan_error", message=str(exc), exc=exc)
@@ -885,11 +994,28 @@ def extract_dailymed(
     duplicates_total = sum(scan.duplicates.values())
     n_scan_failed = scan.n_failed
     retired_buckets = withdrawn = 0
+    held: dict[str, str] = {}
     if scan.outers:
         # With no zip at all nothing is judged: an empty raw dir retires nothing.
-        paths, counts, withdrawn = _write_manifests(processed_dir, raw_dir, scan)
-        retired_buckets, gone = _retire_vanished_buckets(processed_dir, set(paths))
-        withdrawn += gone
+        held, withdrawn, known = _plan_against_earlier_state(processed_dir, scan)
+        limit = settings.dailymed_max_withdrawn_share
+        if known and withdrawn / known > limit:
+            _guard(
+                f"{withdrawn} of {known} known labels ({withdrawn / known:.1%}) are not in "
+                f"the zips; the limit is {limit:.1%} (EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE)"
+            )
+        if overridden:
+            _audit_override(str(force_reason), "; ".join(overridden))
+        paths = _write_manifests(processed_dir, raw_dir, scan, held)
+        retired_buckets = _retire_vanished_buckets(processed_dir, set(paths) | set(held))
+        for prefix, why in held.items():
+            mark_failed(
+                processed_dir,
+                SOURCE,
+                bucket_key(prefix),
+                error_class="held_bucket",
+                message=f"bucket not rewritten: {why}",
+            )
     else:
         paths = {}
     del scan  # the dict of the scan is not needed by the buckets (or the workers)
@@ -922,7 +1048,8 @@ def extract_dailymed(
     summary = {
         "inputs": len(keys),
         "ok": sum(1 for r in results if r.get("ok")),
-        "failed": sum(1 for r in results if not r.get("ok") and not r.get("skipped")),
+        "failed": sum(1 for r in results if not r.get("ok") and not r.get("skipped")) + len(held),
+        "held_buckets": [bucket_key(p) for p in sorted(held)],
         "rows": sum(int(r.get("n_rows") or 0) for r in results if r.get("ok")),
         "buckets": len(keys),
         "labels": n_labels,
@@ -1021,6 +1148,7 @@ def _main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             skip_units=args.skip_unit,
             skip_reason=args.reason,
+            force_reason=args.reason,
         )
     except DailymedScanError as e:
         print(f"ERROR: {e}", file=sys.stderr)

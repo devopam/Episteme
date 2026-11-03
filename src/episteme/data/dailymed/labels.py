@@ -150,8 +150,14 @@ def replace_labels(conn, shard: Path) -> dict[str, int]:
         raise FileNotFoundError(f"{shard.name}: no label sidecar at {side}")
     n_sections = n_substances = 0
     seen: set[tuple[str, str | None, str | None]] = set()
+    # The ids of the incoming articles: a label that moved from another part of its bucket
+    # is deleted from that part's articles by the load, but its label rows stay unless they
+    # are deleted by id here.
+    ids = sorted(set(pq.read_table(shard, columns=["id"]).column("id").to_pylist()))
     with conn.cursor() as cur:
         delete_labels(cur, [shard.stem])
+        for table in ("label_section", "label_substance"):
+            cur.execute(f"DELETE FROM episteme.{table} WHERE article_id = ANY(%s)", (ids,))
         with (
             cur.copy(
                 "COPY episteme.label_section "

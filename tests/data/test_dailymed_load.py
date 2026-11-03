@@ -245,3 +245,36 @@ def test_retire_removes_the_label_rows_and_nothing_else(db, tmp_path):
         assert [r[0] for r in cur.fetchall()] == ["other:1"]
     assert _count(db, "label_substance") == 0
     assert _count(db, "label_section") == 1
+
+
+@pytest.mark.pg
+def test_a_label_that_moves_to_another_part_leaves_no_duplicate_label_rows(
+    db, tmp_path, monkeypatch
+):
+    sids = [set_id("ab", n) for n in (1, 2, 3)]
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    members = {
+        f"prescription/20240101_{s}.zip": inner_zip(
+            spl_xml(s, sections=[section("34073-7", "7 INTERACTIONS", ["Avoid warfarin."])])
+        )
+        for s in sids
+    }
+    outer_zip(raw / "dm_spl_release_human_rx_part1.zip", members)
+    monkeypatch.setattr(dm, "_part_caps", lambda: (2, 10**12))
+    dm.extract_dailymed(raw, out, release_kinds=KINDS)  # part 1: ab1, ab2; part 2: ab3
+    _load(db, out, "dailymed_bab__part00001")
+    _load(db, out, "dailymed_bab__part00002")
+    moved = f"dailymed:{sids[2]}"
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.label_section WHERE article_id = %s", (moved,))
+        assert cur.fetchone()[0] == 1
+    # ab1 leaves the release (a withdrawal, allowed here): ab3 moves into part 1.
+    del members[f"prescription/20240101_{sids[0]}.zip"]
+    outer_zip(raw / "dm_spl_release_human_rx_part1.zip", members)
+    dm.extract_dailymed(raw, out, force=True, force_reason="test", release_kinds=KINDS)
+    _load(db, out, "dailymed_bab__part00001")
+    with db.cursor() as cur:
+        for table in ("label_section", "label_substance"):
+            cur.execute(f"SELECT count(*) FROM episteme.{table} WHERE article_id = %s", (moved,))
+            n = cur.fetchone()[0]
+            assert n == (1 if table == "label_section" else 3), (table, n)

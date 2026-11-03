@@ -128,6 +128,9 @@ DEFAULT_RECALL_MAX_RANGE_LOTS = 1000
 # releases are not read.
 DAILYMED_KINDS = ("prescription", "otc")
 DEFAULT_DAILYMED_KINDS = DAILYMED_KINDS
+# The DailyMed extract refuses a run that would withdraw more than this share of the labels
+# it knew (a missing release part would otherwise retire them); --force --reason overrides.
+DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE = 0.1
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -319,6 +322,9 @@ class Settings:
     recall_max_range_lots: int = DEFAULT_RECALL_MAX_RANGE_LOTS
     # DailyMed label kinds the extract reads (EPISTEME_DAILYMED_KINDS).
     dailymed_kinds: tuple[str, ...] = DEFAULT_DAILYMED_KINDS
+    # Largest share of known labels one DailyMed extract may withdraw
+    # (EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE).
+    dailymed_max_withdrawn_share: float = DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -462,6 +468,9 @@ def get_settings() -> Settings:
             "EPISTEME_RECALL_MAX_RANGE_LOTS", DEFAULT_RECALL_MAX_RANGE_LOTS
         ),
         dailymed_kinds=_dailymed_kinds(),
+        dailymed_max_withdrawn_share=_get_non_negative_float_or_default(
+            "EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE", DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
+        ),
         slice_max_bytes=_slice_max_bytes(),
     )
 

@@ -10,6 +10,7 @@ text sections.
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -98,19 +99,23 @@ def spl_xml(
     ).encode()
 
 
-def inner_zip(xml: bytes, *, xml_name: str = "label.xml", images: bool = True) -> bytes:
+def inner_zip(
+    xml: bytes, *, xml_name: str = "label.xml", images: bool = True, image_bytes: int = 0
+) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(xml_name, xml)
         if images:
             zf.writestr("figure-1.jpg", b"\xff\xd8not a real image\xff\xd9")
+        if image_bytes:
+            zf.writestr("big.jpg", os.urandom(image_bytes), zipfile.ZIP_STORED)
     return buf.getvalue()
 
 
-def outer_zip(path: Path, members: dict[str, bytes]) -> Path:
-    """An outer zip of ``{member name: bytes}`` (the inner zips, stored)."""
+def outer_zip(path: Path, members: dict[str, bytes], compression: int = zipfile.ZIP_STORED) -> Path:
+    """An outer zip of ``{member name: bytes}`` (the inner zips; stored by default)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+    with zipfile.ZipFile(path, "w", compression) as zf:
         for name, data in members.items():
             zf.writestr(name, data)
     return path
