@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -93,6 +93,106 @@ def _get_positive_int_or_default(name: str, default: int) -> int:
         value = 0
     if value < 1:
         _LOG.warning("%s must be an integer >= 1, got %r; using %d", name, raw, default)
+        return default
+    return value
+
+
+# Today's values of the tunables that used to be source constants. The old
+# module names (postgres_loader.LOAD_BATCH_BYTES, staging_writer.WRITE_BATCH_BYTES,
+# pmc.buckets.BUCKET_IDS) hold these same values; the code reads the setting at
+# the point of use, and a test may still patch the module name.
+DEFAULT_LOAD_BATCH_BYTES = 64 * 1024 * 1024
+DEFAULT_WRITE_BATCH_BYTES = 64 * 1024 * 1024
+DEFAULT_PMC_BUCKET_IDS = 50_000
+# Seconds to wait between two requests to EMA's site (feed and document downloads).
+DEFAULT_EMA_DELAY_SECONDS = 2.0
+# Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
+# holds a long transaction on reg_record blocks it); then the feed fails.
+DEFAULT_REG_LOCK_TIMEOUT_S = 300
+# Seconds the FAERS loader waits for the lock of its generation swap, and of the drops
+# after it. New readers queue behind the waiting lock, so the wait is short; a failed run
+# keeps the built generation, and a re-run goes straight to the swap.
+DEFAULT_FAERS_LOCK_TIMEOUT_S = 60
+# The FAERS loader refuses a new generation below this share of the live report count.
+DEFAULT_FAERS_MIN_LIVE_SHARE = 0.9
+# A report with more distinct moieties than this is left out of the FAERS pair counts, and
+# counted: pairs grow with the square of the count.
+DEFAULT_FAERS_PAIR_DRUG_CAP = 30
+# Dictionary entries that the FAERS bridge resolves in one transaction.
+DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
+# A wider "X through Y" in recall text is more likely a typing error than a real list, so
+# only its two ends are kept.
+DEFAULT_RECALL_MAX_RANGE_LOTS = 1000
+# DailyMed label kinds the extract reads (EPISTEME_DAILYMED_KINDS, comma separated):
+# "prescription" (human Rx) and "otc" (human OTC). Animal, homeopathic and remainder
+# releases are not read.
+DAILYMED_KINDS = ("prescription", "otc")
+DEFAULT_DAILYMED_KINDS = DAILYMED_KINDS
+# The DailyMed extract refuses a run that would withdraw more than this share of the labels
+# it knew (a missing release part would otherwise retire them); --force --reason overrides.
+DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE = 0.1
+# EPAR PDFs. A document with more pages, or more bytes, than these is failed and counted,
+# not read: pypdf holds a large file's objects in memory (target: under 2 GB with one worker).
+DEFAULT_EPAR_MAX_PAGES = 2000
+DEFAULT_EPAR_MAX_BYTES = 200 * 1024 * 1024
+# The EPAR extract refuses a run that would withdraw more than this share of the documents
+# it knew (a truncated feed would otherwise retire them); --force --reason overrides.
+DEFAULT_EPAR_MAX_WITHDRAWN_SHARE = 0.1
+# Document ids per EPAR extract bucket. A bucket is the ids from n*width up to (n+1)*width, so
+# a document stays in its bucket whatever else the feed holds. The three document types
+# of the first cut are about 23% of the ids, so 8,000 ids hold about 500 documents.
+# Changing it moves documents between buckets: the extract records the width under
+# _ops/ema_epar/ and refuses a run at another width.
+DEFAULT_EPAR_BUCKET_IDS = 8000
+# Sources that never enter the training corpus, whatever their licence subset. The owner's
+# design splits the data: publications train the model; regulatory reference data (labels,
+# EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
+# programme-design.md). A policy, not a tunable: no environment key.
+CORPUS_EXCLUDED_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
+_SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+
+
+def _dailymed_kinds() -> tuple[str, ...]:
+    """``EPISTEME_DAILYMED_KINDS``: a comma separated list of ``DAILYMED_KINDS``
+    names, without repeats, in the order of ``DAILYMED_KINDS``. Unset or empty:
+    the default. An unknown name raises ``ConfigError`` (a typo must not drop a kind)."""
+    raw = _get("EPISTEME_DAILYMED_KINDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_DAILYMED_KINDS
+    names = {n.strip().lower() for n in raw.split(",") if n.strip()}
+    unknown = sorted(names - set(DAILYMED_KINDS))
+    if unknown:
+        raise ConfigError(
+            f"EPISTEME_DAILYMED_KINDS names {unknown}; allowed: {', '.join(DAILYMED_KINDS)}"
+        )
+    return tuple(k for k in DAILYMED_KINDS if k in names)
+
+
+def _slice_max_bytes() -> dict[str, int]:
+    """Slice size caps set by ``EPISTEME_SLICE_MAX_BYTES_<SOURCE>`` (the source
+    name upper-cased) -> ``{source: bytes}``. A source with no key, or with an
+    invalid value (logged), is absent: the sample gate then uses its own cap."""
+    names = {k for k in (*_SOURCES, *os.environ) if k.startswith(_SLICE_CAP_PREFIX)}
+    out: dict[str, int] = {}
+    for name in sorted(names):
+        source = name[len(_SLICE_CAP_PREFIX) :].lower()
+        value = _get_positive_int_or_default(name, 0)
+        if source and value:
+            out[source] = value
+    return out
+
+
+def _get_non_negative_float_or_default(name: str, default: float) -> float:
+    """A float >= 0; unset, invalid or negative logs a warning (when set) and gives ``default``."""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not value >= 0:  # also rejects nan
+        _LOG.warning("%s must be a number >= 0, got %r; using %s", name, raw, default)
         return default
     return value
 
@@ -214,6 +314,45 @@ class Settings:
     stop_file: Path | None = None
     # run_pipeline.sh --no-wait: a busy stage or advisory lock refuses (exit 75).
     no_wait: bool = False
+    # Memory bounds of the load and the staging write, in bytes of row data.
+    load_batch_bytes: int = DEFAULT_LOAD_BATCH_BYTES
+    write_batch_bytes: int = DEFAULT_WRITE_BATCH_BYTES
+    # PMC ids per extract bucket. Changing it moves articles between buckets, and
+    # the old parts, markers and loaded rows stay under their old keys. The extract
+    # records the width under _ops/pmc/ and refuses a run at another width until the
+    # old parts are retired (episteme.data.pmc.buckets.check_bucket_width).
+    pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
+    # Seconds between two requests to EMA (EPISTEME_EMA_DELAY_SECONDS).
+    ema_delay_seconds: float = DEFAULT_EMA_DELAY_SECONDS
+    # Seconds to wait for the reg_record partition DDL lock (EPISTEME_REG_LOCK_TIMEOUT_S).
+    reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
+    # Seconds to wait for the FAERS generation swap's lock (EPISTEME_FAERS_LOCK_TIMEOUT_S).
+    faers_lock_timeout_s: int = DEFAULT_FAERS_LOCK_TIMEOUT_S
+    # Lowest share of the live report count a new generation may have
+    # (EPISTEME_FAERS_MIN_LIVE_SHARE).
+    faers_min_live_share: float = DEFAULT_FAERS_MIN_LIVE_SHARE
+    # Most distinct moieties of a report in the pair counts (EPISTEME_FAERS_PAIR_DRUG_CAP).
+    faers_pair_drug_cap: int = DEFAULT_FAERS_PAIR_DRUG_CAP
+    # Entries per transaction of the FAERS bridge (EPISTEME_FAERS_BRIDGE_BATCH_ROWS).
+    faers_bridge_batch_rows: int = DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+    # Most lots that one written range in recall text may expand to
+    # (EPISTEME_RECALL_MAX_RANGE_LOTS).
+    recall_max_range_lots: int = DEFAULT_RECALL_MAX_RANGE_LOTS
+    # DailyMed label kinds the extract reads (EPISTEME_DAILYMED_KINDS).
+    dailymed_kinds: tuple[str, ...] = DEFAULT_DAILYMED_KINDS
+    # Largest share of known labels one DailyMed extract may withdraw
+    # (EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE).
+    dailymed_max_withdrawn_share: float = DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
+    # EPAR PDF caps and extract limits (EPISTEME_EPAR_MAX_PAGES, EPISTEME_EPAR_MAX_BYTES,
+    # EPISTEME_EPAR_MAX_WITHDRAWN_SHARE, EPISTEME_EPAR_BUCKET_IDS).
+    epar_max_pages: int = DEFAULT_EPAR_MAX_PAGES
+    epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
+    epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
+    epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
+    # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
+    corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
+    # Per-source sample slice caps, lower-case source name -> bytes.
+    slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
     def pg_dsn(self) -> str:
         return (
@@ -324,7 +463,65 @@ def get_settings() -> Settings:
         else None,
         # run_pipeline.sh --no-wait exports EPISTEME_NO_WAIT=1.
         no_wait=(_get("EPISTEME_NO_WAIT") or "").strip() == "1",
+        load_batch_bytes=_get_positive_int_or_default(
+            "EPISTEME_LOAD_BATCH_BYTES", DEFAULT_LOAD_BATCH_BYTES
+        ),
+        write_batch_bytes=_get_positive_int_or_default(
+            "EPISTEME_WRITE_BATCH_BYTES", DEFAULT_WRITE_BATCH_BYTES
+        ),
+        pmc_bucket_ids=_get_positive_int_or_default(
+            "EPISTEME_PMC_BUCKET_IDS", DEFAULT_PMC_BUCKET_IDS
+        ),
+        ema_delay_seconds=_get_non_negative_float_or_default(
+            "EPISTEME_EMA_DELAY_SECONDS", DEFAULT_EMA_DELAY_SECONDS
+        ),
+        reg_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_REG_LOCK_TIMEOUT_S", DEFAULT_REG_LOCK_TIMEOUT_S
+        ),
+        faers_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_FAERS_LOCK_TIMEOUT_S", DEFAULT_FAERS_LOCK_TIMEOUT_S
+        ),
+        faers_min_live_share=_get_non_negative_float_or_default(
+            "EPISTEME_FAERS_MIN_LIVE_SHARE", DEFAULT_FAERS_MIN_LIVE_SHARE
+        ),
+        faers_pair_drug_cap=_get_positive_int_or_default(
+            "EPISTEME_FAERS_PAIR_DRUG_CAP", DEFAULT_FAERS_PAIR_DRUG_CAP
+        ),
+        faers_bridge_batch_rows=_get_positive_int_or_default(
+            "EPISTEME_FAERS_BRIDGE_BATCH_ROWS", DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+        ),
+        recall_max_range_lots=_get_positive_int_or_default(
+            "EPISTEME_RECALL_MAX_RANGE_LOTS", DEFAULT_RECALL_MAX_RANGE_LOTS
+        ),
+        dailymed_kinds=_dailymed_kinds(),
+        dailymed_max_withdrawn_share=_get_non_negative_float_or_default(
+            "EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE", DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
+        ),
+        epar_max_pages=_get_positive_int_or_default(
+            "EPISTEME_EPAR_MAX_PAGES", DEFAULT_EPAR_MAX_PAGES
+        ),
+        epar_max_bytes=_get_positive_int_or_default(
+            "EPISTEME_EPAR_MAX_BYTES", DEFAULT_EPAR_MAX_BYTES
+        ),
+        epar_max_withdrawn_share=_get_non_negative_float_or_default(
+            "EPISTEME_EPAR_MAX_WITHDRAWN_SHARE", DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
+        ),
+        epar_bucket_ids=_get_positive_int_or_default(
+            "EPISTEME_EPAR_BUCKET_IDS", DEFAULT_EPAR_BUCKET_IDS
+        ),
+        slice_max_bytes=_slice_max_bytes(),
     )
+
+
+def source_url(name: str) -> str:
+    """Endpoint URL for a ``scripts/data/_lib/sources.env`` key (the real
+    environment and ``.env`` may override it). Raises ``ConfigError`` when the key
+    has no value. Feed config holds key names only; this is where a name becomes a URL."""
+    get_settings()  # loads sources.env once
+    value = _get(name)
+    if not value:
+        raise ConfigError(f"{name} is not set (add it to scripts/data/_lib/sources.env)")
+    return value
 
 
 def require_actor() -> str:

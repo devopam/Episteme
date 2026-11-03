@@ -218,3 +218,8 @@ def test_cap_list_elements_passes_none_and_non_strings_through():
     assert cap_list_elements(None) is None
     assert cap_list_elements([]) == []
     assert cap_list_elements(["a", None]) == ["a", None]
+
+
+def test_sources_include_the_regulatory_text_sources():
+    assert "dailymed" in SOURCES
+    assert "ema_epar" in SOURCES

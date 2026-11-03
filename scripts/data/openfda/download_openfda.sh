@@ -4,7 +4,8 @@
 # fetch only (no extract/parse). Download-only, forever. The catalog URL comes
 # from $OPENFDA_CATALOG (scripts/data/_lib/sources.env); the zip URLs are read
 # out of that catalog's JSON at run time (not literals in this file).
-# MODE positional: label (default) | drug | all_human | all.
+# MODE positional: label (default) | drug | all_human | substance | all.
+# substance = other/substance only (the UNII/GSRS substance data; all_human covers drug/ only).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
@@ -20,7 +21,7 @@ while [ $# -gt 0 ]; do
         --max-files) MAX_FILES="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         --force)     FORCE=1; shift ;;
         --reason)    shift; [ $# -gt 0 ] && shift ;;   # run_pipeline already enforced it
-        label|drug|all_human|all) MODE="$1"; shift ;;
+        label|drug|all_human|substance|all) MODE="$1"; shift ;;
         *)           log WARN "download_openfda.sh: ignoring $1"; shift ;;
     esac
 done
@@ -79,6 +80,8 @@ def want(path: str) -> bool:
         return any(k in p for k in keys)
     if mode == "all_human":
         return p.startswith("drug") or "/drug/" in p
+    if mode == "substance":
+        return p == "other/substance"
     return False
 
 seen = set()

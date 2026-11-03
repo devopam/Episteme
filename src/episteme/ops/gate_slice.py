@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,20 @@ BOOKSHELF_PERCENTILE = 0.99
 APOLLO_MIN_BYTES = 10 * MB
 
 _EUROPEPMC_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.tar\.gz$")
+
+# FAERS: the quarter folder of the openFDA zips, and the quarter that the change from
+# AERS to FAERS (2012) falls in.
+_FAERS_QUARTER = re.compile(r"(\d{4})q([1-4])")
+FAERS_CHANGE_QUARTER = (2012, 3)
+# DailyMed: the number of largest inner zips whose XML size is read, and the number of
+# largest labels whose products are counted.
+DAILYMED_SIZE_CANDIDATES = 200
+DAILYMED_PRODUCT_CANDIDATES = 20
+# EPAR: the number of largest PDFs in the slice; the number of next-largest PDFs searched
+# for a scan, and the bytes per page from which a PDF looks like a scan.
+EPAR_LARGEST = 6
+EPAR_SCAN_CANDIDATES = 50
+EPAR_SCANNED_MIN_BYTES_PER_PAGE = 100_000
 
 
 class SliceError(RuntimeError):
@@ -301,6 +316,254 @@ def _select_pmc(raw: Path) -> list[Path]:
     return out
 
 
+# --- regulatory sources ------------------------------------------------------
+
+
+def _quarter_index(folder: str) -> int | None:
+    m = _FAERS_QUARTER.fullmatch(folder)
+    return int(m.group(1)) * 4 + int(m.group(2)) - 1 if m else None
+
+
+def _faers_by_quarter(raw: Path) -> dict[int, list[Path]]:
+    """The openFDA event zips by quarter index. A folder not named like ``2020q1``
+    (``all_other``) is left out."""
+    from episteme.data.regulatory.faers.generation import faers_zips
+
+    out: dict[int, list[Path]] = {}
+    for p in faers_zips(raw):
+        n = _quarter_index(p.parent.name)
+        if n is not None:
+            out.setdefault(n, []).append(p)
+    return out
+
+
+def faers_largest_year(raw: Path) -> int | None:
+    """The year whose zips hold the most bytes (a tie goes to the later year), or None."""
+    by_year: dict[int, int] = {}
+    for n, files in _faers_by_quarter(Path(raw)).items():
+        by_year[n // 4] = by_year.get(n // 4, 0) + sum(_size(p) for p in files)
+    return max(by_year, key=lambda y: (by_year[y], y)) if by_year else None
+
+
+def _select_faers(raw: Path) -> list[Path]:
+    """The oldest quarter (all its zips), the quarter nearest to 2012q3 (all its zips; the
+    earlier one on a tie), the largest zip of the newest quarter, and all zips of the
+    largest year, so that the signal build runs on a year-sized partition."""
+    quarters = _faers_by_quarter(raw)
+    if not quarters:
+        raise SliceError(f"openfda_faers: no event zip in a <year>q<n> folder under {raw}")
+    target = FAERS_CHANGE_QUARTER[0] * 4 + FAERS_CHANGE_QUARTER[1] - 1
+    chosen: set[Path] = set(quarters[min(quarters)])
+    chosen.update(quarters[min(quarters, key=lambda n: (abs(n - target), n))])
+    chosen.add(max(quarters[max(quarters)], key=lambda p: (_size(p), p.name)))
+    year = faers_largest_year(raw)
+    for n, files in quarters.items():
+        if n // 4 == year:
+            chosen.update(files)
+    return sorted(chosen, key=lambda p: p.as_posix())
+
+
+def _select_openfda(raw: Path) -> list[Path]:
+    """The zips of the openFDA reference feeds (``drug/<tag>``). Not ``drug/event``
+    (FAERS), ``drug/label`` or ``other/substance``."""
+    from episteme.data.regulatory.load_reg import feed_files, select_feeds
+
+    out: list[Path] = []
+    for feed in select_feeds("openfda", None):
+        out.extend(feed_files("openfda", feed, raw))
+    if not out:
+        raise SliceError(f"openfda: no feed zip under {raw}")
+    return sorted(set(out), key=lambda p: p.as_posix())
+
+
+def _select_ema(raw: Path) -> list[Path]:
+    """Every EMA feed file directly under the raw folder (they are small). Not the PDFs."""
+    from episteme.data.regulatory.load_reg import feed_files, select_feeds
+
+    out: list[Path] = []
+    for feed in select_feeds("ema", None):
+        out.extend(feed_files("ema", feed, raw))
+    if not out:
+        raise SliceError(f"ema: no feed file under {raw}")
+    return sorted(set(out), key=lambda p: p.as_posix())
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _cut_only(source: str) -> Callable[[Path], list[Path]]:
+    def select(_raw: Path) -> list[Path]:
+        raise SliceError(f"{source}: the slice is cut by its builder, not selected")
+
+    return select
+
+
+def _build_dailymed(raw: Path, dest: Path) -> dict:
+    """Cut new outer zips with the chosen labels: the largest label (by XML bytes, among
+    the ``DAILYMED_SIZE_CANDIDATES`` largest inner zips), the label with the most products
+    (among the ``DAILYMED_PRODUCT_CANDIDATES`` largest XMLs) and one OTC label (the median
+    by inner zip size). The inner zips and their member names are copied unchanged, so a
+    label keeps its ``label_key`` and its id. The outer zips are named ``..._part1``.
+
+    Each outer zip is opened once and kept open for the whole build. A candidate whose inner
+    zip or XML cannot be read is skipped and counted (``skipped_candidates``); the build
+    stops with ``SliceError`` only when no readable prescription label remains."""
+    import contextlib
+
+    from defusedxml import ElementTree as ET  # noqa: N817
+
+    from episteme.config import get_settings
+    from episteme.data.dailymed import extract_dailymed as dm
+    from episteme.data.dailymed import spl
+
+    kinds = get_settings().dailymed_kinds
+    outers = [p for p in dm.discover_outer_zips(raw, kinds) if dm.RELEASE_RE.match(p.name)]
+    skipped = 0
+    with contextlib.ExitStack() as stack:
+        opened: dict[Path, zipfile.ZipFile] = {
+            p: stack.enter_context(zipfile.ZipFile(p)) for p in outers
+        }
+        # (inner zip bytes, outer zip, member name), by kind.
+        entries: dict[str, list[tuple[int, Path, str]]] = {k: [] for k in kinds}
+        for outer, zf in opened.items():
+            kind = dm.RELEASE_KIND[dm.RELEASE_RE.match(outer.name).group(1)]
+            for info in zf.infolist():
+                if dm.wanted_member(info, (kind,)):
+                    entries[kind].append((info.file_size, outer, info.filename))
+        empty = [k for k in kinds if not entries[k]]
+        if empty:
+            raise SliceError(f"dailymed: no {', '.join(empty)} label in a full release under {raw}")
+
+        def read_xml(outer_path: Path, member: str) -> bytes:
+            zf = opened[outer_path]
+            with dm.inner_zip(zf, zf.getinfo(member)) as inner:
+                return inner.read(dm.xml_name(inner))
+
+        def xml_bytes_of(outer_path: Path, member: str) -> int:
+            zf = opened[outer_path]
+            with dm.inner_zip(zf, zf.getinfo(member)) as inner:
+                return inner.getinfo(dm.xml_name(inner)).file_size
+
+        chosen: dict[str, list[tuple[Path, str]]] = {k: [] for k in kinds}
+        if "prescription" in kinds:
+            rank = sorted(entries["prescription"], key=lambda e: (-e[0], e[1].name, e[2]))
+            sized: list[tuple[int, Path, str]] = []
+            for _bytes, outer_path, member in rank[:DAILYMED_SIZE_CANDIDATES]:
+                try:
+                    sized.append((xml_bytes_of(outer_path, member), outer_path, member))
+                except (ValueError, zipfile.BadZipFile, KeyError, OSError):
+                    skipped += 1  # an unreadable label is not a candidate
+            sized.sort(key=lambda e: (-e[0], e[1].name, e[2]))
+            best: tuple[int, Path, str] | None = None
+            best_products = -1
+            readable: list[tuple[int, Path, str]] = []
+            for entry in sized[:DAILYMED_PRODUCT_CANDIDATES]:
+                try:
+                    root = ET.fromstring(read_xml(entry[1], entry[2]))
+                except (ET.ParseError, ValueError, zipfile.BadZipFile, KeyError, OSError):
+                    skipped += 1  # a corrupt XML among the candidates
+                    continue
+                readable.append(entry)
+                n = len(spl.ndc_products(root))
+                if n > best_products:
+                    best, best_products = entry, n
+            if not readable:
+                raise SliceError(
+                    f"dailymed: no readable prescription label under {raw} "
+                    f"({skipped} candidate(s) skipped)"
+                )
+            picks = [readable[0]]
+            if best is not None and best not in picks:
+                picks.append(best)
+            chosen["prescription"] = [(e[1], e[2]) for e in picks]
+        if "otc" in kinds:
+            ranked = sorted(entries["otc"], key=lambda e: (e[0], e[1].name, e[2]))
+            mid = ranked[(len(ranked) - 1) // 2]
+            chosen["otc"] = [(mid[1], mid[2])]
+
+        names = {"prescription": "rx", "otc": "otc"}
+        files: list[str] = []
+        for kind in kinds:
+            out = dest / f"dm_spl_release_human_{names[kind]}_part1.zip"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as dst:
+                for outer_path, member in sorted(chosen[kind], key=lambda t: (t[0].name, t[1])):
+                    dst.writestr(
+                        member, opened[outer_path].read(member), compress_type=zipfile.ZIP_STORED
+                    )
+            files.append(out.name)
+    return {
+        "files": files,
+        "inputs": list(files),
+        "bytes": sum((dest / f).stat().st_size for f in files),
+        "labels": {k: [m for _, m in chosen[k]] for k in kinds},
+        "skipped_candidates": skipped,
+    }
+
+
+def _pdf_pages(path: Path) -> int | None:
+    """The page count of a PDF, or None when it cannot be read."""
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(path), strict=False).pages)
+    except Exception:  # noqa: BLE001 - an unreadable PDF is simply not a scan candidate
+        return None
+
+
+def _build_epar(raw: Path, dest: Path) -> dict:
+    """Cut the document feed to the chosen documents and link their PDFs: the
+    ``EPAR_LARGEST`` largest by size, and the one among the next ``EPAR_SCAN_CANDIDATES``
+    with the most bytes per page when that is at least ``EPAR_SCANNED_MIN_BYTES_PER_PAGE``
+    (a scan). The feed lists only the chosen documents, so none counts as not downloaded."""
+    from episteme.data.ema import download_epar as dl
+
+    feed_path = raw / dl.FEED_FILE
+    if not feed_path.is_file():
+        raise SliceError(f"ema_epar: the feed file {feed_path} is missing")
+    docs = dl.load_documents(feed_path)
+    have = [(d, dl.document_path(raw, d["id"])) for d in docs]
+    have = [(d, p) for d, p in have if p.is_file()]
+    if not have:
+        raise SliceError(f"ema_epar: no downloaded PDF of a listed document under {raw}")
+    by_size = sorted(have, key=lambda t: (-_size(t[1]), int(t[0]["id"])))
+    picked = by_size[:EPAR_LARGEST]
+    scan: tuple[float, dict, Path] | None = None
+    for d, p in by_size[EPAR_LARGEST : EPAR_LARGEST + EPAR_SCAN_CANDIDATES]:
+        pages = _pdf_pages(p)
+        if not pages:
+            continue
+        per_page = _size(p) / pages
+        if per_page >= EPAR_SCANNED_MIN_BYTES_PER_PAGE and (scan is None or per_page > scan[0]):
+            scan = (per_page, d, p)
+    if scan is not None:
+        picked.append((scan[1], scan[2]))
+    picked.sort(key=lambda t: int(t[0]["id"]))
+
+    feed_dest = dest / dl.FEED_FILE
+    feed_dest.parent.mkdir(parents=True, exist_ok=True)
+    feed_dest.write_text(
+        json.dumps({"meta": {"total_records": len(picked)}, "data": [d for d, _ in picked]}),
+        encoding="utf-8",
+    )
+    files = [dl.FEED_FILE]
+    inputs: list[str] = []
+    total = feed_dest.stat().st_size
+    for d, p in picked:
+        target = dl.document_path(dest, d["id"])
+        _link_or_copy(p, target)
+        rel = target.relative_to(dest).as_posix()
+        files.append(rel)
+        inputs.append(rel)
+        total += _size(target)
+    return {"files": files, "inputs": inputs, "bytes": total, "scanned_looking": scan is not None}
+
+
 def _every_file(_p: Path) -> bool:
     return True
 
@@ -345,7 +608,32 @@ SLICES: dict[str, SliceSpec] = {
         Path("pmc/oa_comm"),
         is_unit=lambda p: p.suffix == ".json",
     ),
+    "dailymed": SliceSpec(
+        "dailymed", 1 * GB, _cut_only("dailymed"), Path("dailymed"), build=_build_dailymed
+    ),
+    "ema_epar": SliceSpec(
+        "ema_epar", 2 * GB, _cut_only("ema_epar"), Path("ema"), build=_build_epar
+    ),
+    "ema": SliceSpec("ema", 1 * GB, _select_ema, Path("ema")),
+    "openfda": SliceSpec("openfda", 2 * GB, _select_openfda, Path("openfda")),
+    # The whole raw set is about 105 GB over 90 quarters: the largest year plus the other
+    # picks is far above 8 GB. Override with EPISTEME_SLICE_MAX_BYTES_OPENFDA_FAERS.
+    "openfda_faers": SliceSpec("openfda_faers", 32 * GB, _select_faers, Path("openfda")),
 }
+
+
+def _cap_key(source: str) -> str:
+    """The environment key that sets the slice cap of ``source``."""
+    return f"EPISTEME_SLICE_MAX_BYTES_{source.upper()}"
+
+
+def max_bytes_of(source: str) -> int:
+    """The size cap of a source's slice: ``EPISTEME_SLICE_MAX_BYTES_<SOURCE>`` when
+    set, else the spec's own cap."""
+    from episteme.config import get_settings
+
+    spec = _spec(source)
+    return get_settings().slice_max_bytes.get(source, spec.max_bytes)
 
 
 def _spec(source: str) -> SliceSpec:
@@ -411,9 +699,11 @@ def prepare(
             shutil.rmtree(dest_root)
         dest_root.mkdir(parents=True)
         built = spec.build(raw, dest_root)
-        if built["bytes"] > spec.max_bytes:
+        cap = max_bytes_of(source)
+        if built["bytes"] > cap:
             raise SliceError(
-                f"{source}: slice is {built['bytes']} bytes, over the cap of {spec.max_bytes}"
+                f"{source}: slice is {built['bytes']} bytes, over the cap of {cap}; raise the "
+                f"cap with {_cap_key(source)}"
             )
         result = {**built, "linked": 0, "copied": len(built["files"])}
         meta_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -423,8 +713,12 @@ def prepare(
     if missing:
         raise FileNotFoundError(f"selected file is missing: {missing[0]}")
     total = sum(_size(p) for p in files)
-    if total > spec.max_bytes:
-        raise SliceError(f"{source}: slice is {total} bytes, over the cap of {spec.max_bytes}")
+    cap = max_bytes_of(source)
+    if total > cap:
+        raise SliceError(
+            f"{source}: slice is {total} bytes, over the cap of {cap}; raise the cap with "
+            f"{_cap_key(source)}"
+        )
 
     meta_path.unlink(missing_ok=True)
     if dest_root.exists():

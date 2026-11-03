@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 import shlex
 
-from ._repo import REPO, doc, lit_sources, structured_sources, wrapper_table
+from ._repo import (
+    FAERS_SOURCE,
+    REPO,
+    doc,
+    lit_sources,
+    no_graph_sources,
+    reg_sources,
+    structured_sources,
+    wrapper_table,
+)
 
 RUNBOOK = "10-data-sources-runbook.md"
 STAGES = {"all", "download", "extract", "load", "graph", "materialize", "enrich", "serialize"}
@@ -18,6 +27,7 @@ DISPATCHER_FLAGS = {
     "--no-wait",
     "--sample",
     "--skip-gate",
+    "--allow-partial",
 }
 # flags that consume the next token as their value
 VALUE_FLAGS = {"--reason", "--max-files", "--since", "--raw-dir", "--repo-type"}
@@ -79,6 +89,8 @@ def _all_invocations() -> list[list[str]]:
 def _allowed(src: str, stage: str) -> bool:
     if src == "corpus":
         return stage == "materialize"
+    if src == FAERS_SOURCE:  # outside WRAPPER: only its load is wired
+        return stage == "load"
     if src not in wrapper_table():
         return False
     if src == "pmc":
@@ -88,11 +100,16 @@ def _allowed(src: str, stage: str) -> bool:
     if stage == "extract":
         return src in lit_sources()
     if stage == "graph":
-        return src in lit_sources() or src == "mesh"
+        return (src in lit_sources() and src not in no_graph_sources()) or src == "mesh"
     if stage == "serialize":
         return src in structured_sources()
     if stage == "load":
-        return src in lit_sources() or src in structured_sources() or src == "europepmc_id_mappings"
+        return (
+            src in lit_sources()
+            or src in structured_sources()
+            or src in reg_sources()
+            or src == "europepmc_id_mappings"
+        )
     if stage == "enrich":
         return src == "europepmc_lite"
     return False
@@ -190,7 +207,7 @@ def test_positional_modes_exist_in_the_wrapper():
 
 def test_every_wired_source_has_a_runbook_section_or_inventory_pointer():
     t = _text()
-    for src in wrapper_table():
+    for src in (*wrapper_table(), FAERS_SOURCE):
         assert src in t, src
     assert "12-source-inventory" in t
 

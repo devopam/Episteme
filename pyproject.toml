@@ -36,6 +36,9 @@ data = [
     "isal>=1.8.0",
     "jsonschema>=4.0.0",
     "pronto>=2.7",
+    "ijson>=3.6.0",
+    "openpyxl>=3.1.5",
+    "pypdf>=6.0",
 ]
 model = [
     "torch>=2.14.1",
@@ -61,6 +64,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "episteme.ops.gate_rules" = ["*.json"]
+"episteme.data.regulatory" = ["*.toml"]
 
 [tool.ruff]
 line-length = 100

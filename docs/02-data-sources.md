@@ -114,6 +114,26 @@ Episteme uses a **bimodal** data strategy:
 | **EMA open data** (selected) | EU assessment / shortages where open | Varies | EMA | Jurisdiction-specific |
 | **FAERS** (public) | Adverse event reports | Quarterly / openFDA | FDA | RAG analytics |
 
+#### 2.2.1 Regulatory sources wired for the first cut (2026-11)
+
+Design: `superpowers/specs/2026-11-02-regulatory-sources-design.md`. Stages and scripts: `12-source-inventory.md`. Operator steps: `10-data-sources-runbook.md` sections 5.8 to 5.15. The licence posture is a project ruling for each source, not a legal determination; it is recorded here first.
+
+| Source (`source` key) | What it contributes | Stored in | Update pattern | Licence posture |
+|---|---|---|---|---|
+| **DailyMed** (`dailymed`): SPL labels, prescription and OTC kinds | Label text and sections (LOINC-coded, as offsets into the body), the substances and NDC products of each label | `episteme.articles` and `article_body` (source `dailymed`); `label_section`, `label_substance` | Full release zips plus monthly, weekly and daily update zips | US government work: `license = public_domain`, `subset = commercial` (set by the extractor; `license_raw` keeps the real text). Animal, homeopathic and remainder releases wait |
+| **EMA feeds** (`ema`): one dataset per feed: `ema_medicines`, `ema_post_authorisation`, `ema_orphan`, `ema_pip`, `ema_psusa`, `ema_referrals`, `ema_dhpc`, `ema_shortages`, `ema_mrl`, `ema_herbal`, `ema_outside_eu`; `ema_article57` (Excel); `ema_epar_documents` (the document index) | Reference records of EU medicines, designations, safety communications, shortages, residue limits, herbal and non-EU opinions; the product and substance names that join to the US data | `episteme.reg_record`, one partition per dataset and release | EMA publishes the JSON feeds about twice a day; a release is cut per the `cadence` of `feeds.toml` | EMA legal notice: reuse allowed, commercial and non-commercial. **Credit EMA as the source in each copy** (use the wording of EMA's legal notice when a product ships). Third-party content is excluded. Reference data, no `license` column |
+| **EMA EPAR documents** (`ema_epar`): English PDFs of type product information, assessment report and RMP summary | The text of the EPARs | `episteme.articles` and `article_body` (source `ema_epar`) | Follows the `ema_epar_documents` feed; one PDF at a time, with a delay | Same EMA terms: `license = permissive` (nearest value of the vocabulary), `license_raw` holds the terms, `subset = commercial`. **Credit EMA** in each copy; third-party content excluded. The owner approved loading EMA |
+| **openFDA `drug/*`** (`openfda`): `enforcement` (recalls, with lot numbers in `code_info`), `ndc`, `drugsfda`, `orangebook`, `shortages` | US recalls, NDC products, approvals, exclusivity and shortages, keyed to substances | `episteme.reg_record` | Monthly or as openFDA republishes the download catalogue | US government data, published under openFDA's terms of service. Treated as public domain. Third-party text inside records is not cleared individually |
+| **FAERS** (`openfda_faers`): `drug/event` zips (about 12,000 reports each) | Adverse event reports from 2004: reports, suspect and concomitant drugs with batch numbers, reaction terms; signal tables by quarter | `episteme.faers_*` (typed tables, by generation) | Quarterly in the zips; a refresh is a full reissue, done by hand (runbook section 5.12) | US government data. Reaction terms are MedDRA preferred terms published in FDA's public data. **Open (owner):** operator rights to expose the terms to subscribing tenants, before serving |
+| **FDA substance data** (`other/substance` of openFDA, loaded by `load_substance`) | UNII, every synonym, RxCUI and ATC codes, active-moiety links: the anchor of the US/EU bridge | `episteme.substance`, `substance_xref` | When FDA republishes (one file per run) | US government data (FDA substance registration); treated as public domain |
+
+Notes:
+
+- `cdisc_bc` and `cdisc_usdm` rules are unchanged (section 2.6).
+- **Not in the training corpus.** DailyMed labels and EMA EPAR text are reference data: they are looked up, not trained on (owner's design, `docs/superpowers/specs/2026-10-28-end-consumer-programme-design.md`). `corpus materialize` leaves out the sources in the config list `corpus_excluded_sources` (`dailymed`, `ema_epar`), although their rows carry `subset = commercial`.
+- Rights for EPAR text and DailyMed text, if a later decision puts them in the training corpus: Claude's reading is that the EMA notice allows reuse with credit and that DailyMed labels are public. The owner confirms before such a build.
+- Veterinary, device and food endpoints of openFDA, PMS, SPOR and CTIS are not wired; the model takes them as new `feeds.toml` entries.
+
 ### 2.3 Open or semi-open terminologies & units
 
 | Source | What it contributes | License notes | Induction status |
@@ -252,3 +272,4 @@ When a new source is added, update **this file first**, then runbook + extractor
 | 2026-09-25 | CDISC standards | Added §2.6 (Controlled Terminology, Biomedical Concepts, USDM, SDTM) with per-item licence status; backlog and red-list rows |
 | 2026-09-29 | SP7 | CDISC Controlled Terminology wired as `cdisc_ct` (download, serialize, load, per-package retire); §2.6 and backlog rows updated to done |
 | 2026-09-29 | SP8 | USDM wired as `cdisc_usdm` (download-only, latest release's `Deliverables/`); §2.6 and backlog rows updated |
+| 2026-11-03 | Regulatory sources | Added §2.2.1: DailyMed, the EMA feeds and EPARs, openFDA `drug/*`, FAERS and the FDA substance data, with the licence posture and the EMA credit |

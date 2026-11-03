@@ -13,8 +13,10 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
 ``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
-``peak_rss_mb``, and for ``parts_within_caps`` ``max_rows_per_source_file``,
-``max_est_bytes_per_source_file`` (staging) with ``part_rows``, ``part_bytes``
+``peak_rss_mb``, ``meta_total_equals_rows`` (bool), ``xref_coverage_pct`` (dict by dataset,
+for ``min_xref_coverage_pct``; a dataset with no value fails), and for ``parts_within_caps``
+``max_rows_per_source_file``, ``max_est_bytes_per_source_file`` (staging) with ``part_rows``,
+``part_bytes``
 (the caps recorded in the sample's part markers; the profile's caps when the
 sample has no part marker). A rule
 whose measure is missing fails: a gate never passes on data it did not see.
@@ -59,6 +61,8 @@ _EXTRACT_MODULES = {
     ),
     "apollo": ("episteme.data.apollo.extract_apollo", "apollo/extract_apollo.sh"),
     "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
+    "dailymed": ("episteme.data.dailymed.extract_dailymed", "dailymed/extract_dailymed.sh"),
+    "ema_epar": ("episteme.data.ema.extract_epar", "ema/extract_ema_epar.sh"),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
@@ -80,6 +84,13 @@ STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
             "episteme.data.pubchem.serialize_pubchem",
             "pubchem/serialize_pubchem.sh",
         ),
+        # ema_epar loads through load_articles; its wrappers sit with the other EMA ones.
+        ("ema_epar", "load"): (LOAD_MODULE, "ema/load_ema_epar.sh"),
+        # The regulatory reference feeds load through load_reg, not load_articles.
+        ("ema", "load"): ("episteme.data.regulatory.load_reg", "ema/load_ema.sh"),
+        ("openfda", "load"): ("episteme.data.regulatory.load_reg", "openfda/load_openfda.sh"),
+        # FAERS loads by generation, into its own typed tables.
+        ("openfda_faers", "load"): ("episteme.data.regulatory.faers.load", "openfda/load_faers.sh"),
     }
 )
 
@@ -96,6 +107,8 @@ def stage_module(source: str, stage: str) -> tuple[str, str]:
 EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pubchem", "load"): ("episteme.data.pubchem.retire",),
     ("pmc", "load"): ("episteme.data.pmc.retire",),
+    ("dailymed", "load"): ("episteme.data.dailymed.retire",),
+    ("ema_epar", "load"): ("episteme.data.ema.retire",),
 }
 
 
@@ -121,6 +134,9 @@ _KNOWN_KEYS = {
     "rows_loaded_equals_staging",
     "max_peak_rss_mb",
     "parts_within_caps",
+    "meta_total_equals_rows",
+    "min_xref_coverage_pct",
+    "min_counts",
 }
 
 
@@ -237,6 +253,23 @@ _PER_KEY = {
 }
 
 
+def _per_key_min(measures: dict, rule: str, key: str, limits: dict) -> list[str]:
+    """A minimum for each name in ``limits``. A name with no value, or a value of None,
+    fails: unlike ``_per_key_max``, a missing value is never read as 0, because a minimum
+    of 0 must still fail on data that was not measured."""
+    seen = measures.get(key)
+    if not isinstance(seen, dict):
+        return [_missing(rule)]
+    out = []
+    for name, limit in limits.items():
+        value = seen.get(name)
+        if value is None:
+            out.append(f"{rule}: {key}[{name}] is missing")
+        elif value < limit:
+            out.append(f"{rule}: {key}[{name}] is {_num(value)}, the minimum is {_num(limit)}")
+    return out
+
+
 def _parts_within_caps(measures: dict, rule: str) -> list[str]:
     """Every part is within the row and byte caps (measured on the staging
     shards by ``gate_report``). The byte measure covers parts with 2 or more
@@ -284,6 +317,18 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(f"{rule}: the loaded rows differ from the staging rows")
         elif rule == "parts_within_caps" and limit:
             fails += _parts_within_caps(measures, rule)
+        elif rule == "meta_total_equals_rows" and limit:
+            value = measures.get("meta_total_equals_rows")
+            if value is None:
+                fails.append(_missing(rule))
+            elif not value:
+                fails.append(f"{rule}: a feed holds a different number of rows than its meta total")
+        elif rule == "min_xref_coverage_pct":
+            fails += _per_key_min(measures, rule, "xref_coverage_pct", limit)
+        elif rule == "min_counts":
+            # A named count that the run produced (signal rows, reports): none may be missing
+            # or below its minimum, so a build that made nothing cannot pass.
+            fails += _per_key_min(measures, rule, "counts", limit)
     return fails
 
 
@@ -514,6 +559,38 @@ def _connect():
         yield conn
 
 
+# Sources whose run record gets a snapshot of the database temp counter before and after.
+_TEMP_SOURCES = ("openfda_faers",)
+
+
+def _feeds_record(source: str | None) -> dict | None:
+    """The feed config of a reference-feed stage (``feeds.feeds_record``), read at the run
+    start: ``feeds.toml`` is data, outside the code hash, so its values go into the record.
+    ``None`` for another source. A read error is recorded, not raised."""
+    from episteme.data.regulatory.feeds import FEED_SOURCES, feeds_record
+
+    if source not in FEED_SOURCES:
+        return None
+    try:
+        return feeds_record(source)
+    except (OSError, ValueError) as exc:
+        return {"error": f"could not read feeds.toml: {exc}"}
+
+
+def _db_temp_bytes() -> int | None:
+    """``pg_stat_database.temp_bytes`` of the configured database now, or None when it
+    cannot be read (the measure then fails closed: a rule on it sees no value)."""
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT temp_bytes FROM pg_stat_database WHERE datname = current_database()"
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except Exception:  # noqa: BLE001 - a missing snapshot must not stop the stage
+        return None
+
+
 def _tree_rss(proc: Any, known: dict[int, Any] | None = None) -> int:
     """Summed RSS (bytes) of ``proc`` and all its descendants, now. Each
     descendant seen is also added to ``known`` (pid -> psutil.Process), so a
@@ -560,6 +637,15 @@ def _stop_tree(proc: Any, child: subprocess.Popen) -> None:
 # writes this file under its ops folder; ``gate run`` reads it (opt-in). It
 # lives here, not in checkpoint_markers, so no stage code hash depends on it.
 FAILED_INPUTS_FILE = "failed_inputs.json"
+
+
+def _read_failed_extra(processed_root: Path, source: str, key: str) -> int | None:
+    """An extra count of ``failed_inputs.json`` (ema_epar: ``no_text``), or None."""
+    try:
+        path = Path(processed_root) / "_ops" / source / FAILED_INPUTS_FILE
+        return int(json.loads(path.read_text(encoding="utf-8"))[key])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def read_failed_inputs(processed_root: Path, source: str, run_id: str | None) -> int | None:
@@ -619,6 +705,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except (KeyError, RuntimeError, OSError) as exc:
             _err(f"gate run: could not hash {args.source} {args.stage}: {exc}")
             return 1
+    feeds = _feeds_record(args.source)
+    # FAERS: the signal build runs as SQL on the server, outside the process tree that
+    # peak_rss_mb measures. Its temp use is the change of the database counter.
+    temp_before = _db_temp_bytes() if args.source in _TEMP_SOURCES else None
     t0 = time.monotonic()
     try:
         child = subprocess.Popen(cmd)
@@ -679,6 +769,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # with a stop exit code. That is an interrupted run too.
     if interrupted or raw_rc in _STOP_RCS:
         record["interrupted"] = True
+    if feeds is not None:
+        record["feeds"] = feeds
+    if args.source in _TEMP_SOURCES:
+        record["db_temp_bytes_before"] = temp_before
+        record["db_temp_bytes_after"] = _db_temp_bytes()
     if args.source:
         # Opt-in: a stage that counts failed inputs beyond its exit code (pmc:
         # failed articles) writes failed_inputs.json for this run id.
@@ -797,32 +892,46 @@ def _cmd_report(args: argparse.Namespace) -> int:
         _err(f"gate report: {exc}")
         return 2
     raw_dir = sample_root / "01_raw" / gate_slice.SLICES[source].raw_subpath
-    # The units of work only (a sidecar file is no input of the stage); an old
-    # slice.json without "inputs" falls back to every file.
-    inputs = [raw_dir / rel for rel in slice_meta.get("inputs", slice_meta["files"])]
-    staging_dir = (
-        Path(args.staging_dir)
-        if args.staging_dir
-        else sample_root / "02_processed" / "staging" / source
-    )
-    measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
-    # The caps that wrote the parts, not the caps of the profile now.
-    caps, cap_failures = _sample_part_caps(source, sample_root)
-    if caps is None:
-        prof = profile.get_profile()
-        caps = (prof.part_rows, prof.part_bytes)
-    measures["part_rows"], measures["part_bytes"] = caps
-    if stage == "load":
-        # Part shards carry their own source_file (<input_key>__partNNNNN).
-        source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
+    cap_failures: list[str] = []
+    if source in gate_report.SOURCE_MEASURES:
+        # No articles staging (reg_record, FAERS): the measures come from the database,
+        # tied to this run's id so that a load that did nothing cannot pass.
+        from episteme.config import get_settings
+
         with _connect() as conn:
-            # The loader keeps one row per id (a re-issued id under another
-            # source_file replaces the older row), so compare distinct ids.
-            measures.update(
-                gate_report.measure_load(
-                    conn, source, source_files, staging_rows=measures.get("distinct_ids")
-                )
+            measures = gate_report.SOURCE_MEASURES[source](
+                conn, raw_dir=raw_dir, run_id=get_settings().run_id, record=record
             )
+    else:
+        # The units of work only (a sidecar file is no input of the stage); an old
+        # slice.json without "inputs" falls back to every file.
+        inputs = [raw_dir / rel for rel in slice_meta.get("inputs", slice_meta["files"])]
+        staging_dir = (
+            Path(args.staging_dir)
+            if args.staging_dir
+            else sample_root / "02_processed" / "staging" / source
+        )
+        measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+        no_text = _read_failed_extra(sample_root / "02_processed", source, "no_text")
+        if no_text is not None:
+            measures["no_text_documents"] = no_text
+        # The caps that wrote the parts, not the caps of the profile now.
+        caps, cap_failures = _sample_part_caps(source, sample_root)
+        if caps is None:
+            prof = profile.get_profile()
+            caps = (prof.part_rows, prof.part_bytes)
+        measures["part_rows"], measures["part_bytes"] = caps
+        if stage == "load":
+            # Part shards carry their own source_file (<input_key>__partNNNNN).
+            source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
+            with _connect() as conn:
+                # The loader keeps one row per id (a re-issued id under another
+                # source_file replaces the older row), so compare distinct ids.
+                measures.update(
+                    gate_report.measure_load(
+                        conn, source, source_files, staging_rows=measures.get("distinct_ids")
+                    )
+                )
     failures = (
         _hash_failures(source, stage, record) + cap_failures + evaluate(measures, stage_rules)
     )

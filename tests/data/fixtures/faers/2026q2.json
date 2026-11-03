@@ -1,0 +1,397 @@
+[
+ {
+  "safetyreportversion": "1",
+  "safetyreportid": "26933255",
+  "primarysourcecountry": "US",
+  "occurcountry": "US",
+  "reporttype": "1",
+  "serious": "2",
+  "seriousnessdeath": "2",
+  "seriousnesslifethreatening": "2",
+  "seriousnesshospitalization": "2",
+  "seriousnessdisabling": "2",
+  "seriousnesscongenitalanomali": "2",
+  "seriousnessother": "2",
+  "receivedateformat": "102",
+  "receivedate": "20260628",
+  "receiptdateformat": "102",
+  "receiptdate": "20260628",
+  "primarysource": {
+   "reportercountry": "US",
+   "qualification": "5"
+  },
+  "patient": {
+   "patientagegroup": "6",
+   "patientsex": "1",
+   "reaction": [
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Oxygen saturation decreased",
+     "reactionoutcome": "6"
+    },
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Diarrhoea",
+     "reactionoutcome": "6"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "DUPIXENT",
+     "drugbatchnumb": "5F841A",
+     "drugauthorizationnumb": "761055",
+     "drugstructuredosagenumb": "300",
+     "drugstructuredosageunit": "003",
+     "drugseparatedosagenumb": "1",
+     "drugintervaldosageunitnumb": "2",
+     "drugintervaldosagedefinition": "803",
+     "drugdosagetext": "300.000MG QOW",
+     "drugindication": "Asthma",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20260519",
+     "actiondrug": "5",
+     "drugrecurreadministration": "3",
+     "drugadditional": "3",
+     "activesubstance": {
+      "activesubstancename": "DUPILUMAB"
+     },
+     "openfda": {
+      "brand_name": [
+       "DUPIXENT"
+      ],
+      "generic_name": [
+       "DUPILUMAB"
+      ],
+      "substance_name": [
+       "DUPILUMAB"
+      ],
+      "rxcui": [
+       "1876401",
+       "1876406",
+       "2099300"
+      ],
+      "unii": [
+       "420K487FSG"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "ALBUTEROL SULFATE",
+     "drugseparatedosagenumb": "1",
+     "activesubstance": {
+      "activesubstancename": "ALBUTEROL SULFATE"
+     },
+     "openfda": {
+      "brand_name": [
+       "ALBUTEROL SULFATE",
+       "VENTOLIN HFA",
+       "ALBUTEROL"
+      ],
+      "generic_name": [
+       "ALBUTEROL SULFATE"
+      ],
+      "substance_name": [
+       "ALBUTEROL SULFATE"
+      ],
+      "rxcui": [
+       "755497",
+       "2123111",
+       "197316"
+      ],
+      "unii": [
+       "021SEF3731"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "ATORVASTATIN CALCIUM",
+     "drugseparatedosagenumb": "1",
+     "activesubstance": {
+      "activesubstancename": "ATORVASTATIN CALCIUM"
+     },
+     "openfda": {
+      "brand_name": [
+       "ATORVASTATIN CALCIUM",
+       "LIPITOR"
+      ],
+      "generic_name": [
+       "ATORVASTATIN CALCIUM",
+       "ATORVASTATIN CALCIUM, FILM COATED"
+      ],
+      "substance_name": [
+       "ATORVASTATIN CALCIUM TRIHYDRATE",
+       "ATORVASTATIN CALCIUM PROPYLENE GLYCOL SOLVATE",
+       "ATORVASTATIN"
+      ],
+      "rxcui": [
+       "259255",
+       "617310",
+       "617311"
+      ],
+      "unii": [
+       "48A5M73Z4Q",
+       "YRZ789OWMI",
+       "A0JWA85V8F"
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportversion": "1",
+  "safetyreportid": "26905497",
+  "primarysourcecountry": "US",
+  "occurcountry": "US",
+  "reporttype": "1",
+  "serious": "1",
+  "seriousnessdeath": "2",
+  "seriousnesslifethreatening": "2",
+  "seriousnesshospitalization": "2",
+  "seriousnessdisabling": "2",
+  "seriousnesscongenitalanomali": "2",
+  "seriousnessother": "1",
+  "receivedateformat": "102",
+  "receivedate": "20260622",
+  "receiptdateformat": "102",
+  "receiptdate": "20260622",
+  "primarysource": {
+   "reportercountry": "US",
+   "qualification": "1"
+  },
+  "patient": {
+   "patientonsetage": "87",
+   "patientonsetageunit": "801",
+   "patientagegroup": "6",
+   "patientsex": "2",
+   "reaction": [
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Corneal opacity",
+     "reactionoutcome": "6"
+    },
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Corneal deposits",
+     "reactionoutcome": "3"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "OXERVATE",
+     "drugbatchnumb": "Unknown",
+     "drugseparatedosagenumb": "1",
+     "drugindication": "Neurotrophic keratopathy",
+     "actiondrug": "6",
+     "drugrecurreadministration": "3",
+     "drugadditional": "4",
+     "activesubstance": {
+      "activesubstancename": "CENEGERMIN-BKBJ"
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "MOXIFLOXACIN",
+     "drugseparatedosagenumb": "1",
+     "activesubstance": {
+      "activesubstancename": "MOXIFLOXACIN"
+     },
+     "openfda": {
+      "brand_name": [
+       "MOXIFLOXACIN",
+       "MOXIFLOXACIN OPHTHALMIC SOLUTION"
+      ],
+      "generic_name": [
+       "MOXIFLOXACIN",
+       "MOXIFLOXACIN HYDROCHLORIDE"
+      ],
+      "substance_name": [
+       "MOXIFLOXACIN HYDROCHLORIDE",
+       "MOXIFLOXACIN HYDROCHLORIDE MONOHYDRATE"
+      ],
+      "rxcui": [
+       "311787",
+       "351156",
+       "403818"
+      ],
+      "unii": [
+       "C53598599T",
+       "B8956S8609"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "PREDNISOLONE",
+     "drugseparatedosagenumb": "1",
+     "activesubstance": {
+      "activesubstancename": "PREDNISOLONE"
+     },
+     "openfda": {
+      "brand_name": [
+       "PREDNISOLONE"
+      ],
+      "generic_name": [
+       "PREDNISOLONE",
+       "PREDNISOLONE ORAL",
+       "PREDNISOLONE ORAL SOLUTION"
+      ],
+      "substance_name": [
+       "PREDNISOLONE"
+      ],
+      "rxcui": [
+       "198142",
+       "283077"
+      ],
+      "unii": [
+       "9PHQ9Y1OLM"
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportversion": "3",
+  "safetyreportid": "26882264",
+  "primarysourcecountry": "US",
+  "occurcountry": "US",
+  "reporttype": "1",
+  "serious": "1",
+  "seriousnessdeath": "2",
+  "seriousnesslifethreatening": "2",
+  "seriousnesshospitalization": "2",
+  "seriousnessdisabling": "2",
+  "seriousnesscongenitalanomali": "2",
+  "seriousnessother": "1",
+  "receivedateformat": "102",
+  "receivedate": "20260616",
+  "receiptdateformat": "102",
+  "receiptdate": "20260626",
+  "primarysource": {
+   "reportercountry": "US",
+   "qualification": "3"
+  },
+  "patient": {
+   "patientweight": "95.238",
+   "patientsex": "1",
+   "reaction": [
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Unresponsive to stimuli",
+     "reactionoutcome": "2"
+    },
+    {
+     "reactionmeddraversionpt": "29.0",
+     "reactionmeddrapt": "Asthenia",
+     "reactionoutcome": "2"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYVASO",
+     "drugauthorizationnumb": "022387",
+     "drugstructuredosagenumb": "120",
+     "drugstructuredosageunit": "004",
+     "drugseparatedosagenumb": "1",
+     "drugintervaldosageunitnumb": "1",
+     "drugintervaldosagedefinition": "804",
+     "drugdosagetext": "30 ?G, QID",
+     "drugindication": "Pulmonary arterial hypertension",
+     "drugstartdateformat": "602",
+     "drugstartdate": "2026",
+     "drugenddateformat": "610",
+     "drugenddate": "202606",
+     "actiondrug": "1",
+     "drugrecurreadministration": "3",
+     "drugadditional": "1",
+     "activesubstance": {
+      "activesubstancename": "TREPROSTINIL"
+     },
+     "openfda": {
+      "brand_name": [
+       "TYVASO"
+      ],
+      "generic_name": [
+       "TREPROSTINIL"
+      ],
+      "substance_name": [
+       "TREPROSTINIL"
+      ],
+      "rxcui": [
+       "857795",
+       "857799"
+      ],
+      "unii": [
+       "RUM6K67ESG"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYVASO",
+     "drugauthorizationnumb": "022387",
+     "drugseparatedosagenumb": "1",
+     "drugdosagetext": "UNK",
+     "actiondrug": "1",
+     "drugrecurreadministration": "3",
+     "drugadditional": "1",
+     "activesubstance": {
+      "activesubstancename": "TREPROSTINIL"
+     },
+     "openfda": {
+      "brand_name": [
+       "TYVASO"
+      ],
+      "generic_name": [
+       "TREPROSTINIL"
+      ],
+      "substance_name": [
+       "TREPROSTINIL"
+      ],
+      "rxcui": [
+       "857795",
+       "857799"
+      ],
+      "unii": [
+       "RUM6K67ESG"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "VITAMIN C",
+     "drugseparatedosagenumb": "1",
+     "drugdosagetext": "UNK",
+     "drugindication": "Product used for unknown indication",
+     "activesubstance": {
+      "activesubstancename": "ASCORBIC ACID"
+     },
+     "openfda": {
+      "brand_name": [
+       "VITAMIN C SERUM"
+      ],
+      "generic_name": [
+       "VITAMIN C"
+      ],
+      "substance_name": [
+       "HYALURONIC ACID",
+       "NIACINAMIDE",
+       "ASCORBIC ACID"
+      ],
+      "unii": [
+       "S270N0TRQY",
+       "25X51I8RD4",
+       "PQ6CK8PD0R"
+      ]
+     }
+    }
+   ]
+  }
+ }
+]

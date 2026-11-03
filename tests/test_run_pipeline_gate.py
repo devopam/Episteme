@@ -566,6 +566,44 @@ def test_sample_load_runs_on_the_sample_staging(tree):
     ).is_file()
 
 
+def _logging_stage(tree, rel: str) -> None:
+    """Replace a stage wrapper with the fake that also logs its arguments."""
+    log_args = 'echo "args $*" >> "$CALLS"\n'
+    fake = FAKE_STAGE.replace("rc_var=", log_args + "rc_var=")
+    _write(tree[0] / rel, fake)
+
+
+@pytest.mark.parametrize(
+    ("source", "wrapper", "stage_line"),
+    [
+        ("openfda_faers", "openfda/load_faers.sh", "stage load_faers"),
+        ("ema", "ema/load_ema.sh", "stage load_ema"),
+        ("openfda", "openfda/load_openfda.sh", "stage load_openfda"),
+    ],
+)
+def test_sample_load_of_a_reference_source_builds_its_slice_and_loads_again(
+    tree, source, wrapper, stage_line
+):
+    """These loads read the raw files and have no staging: a sample load builds the slice
+    itself, needs no sample extract, and is forced so that an earlier sample's marker or
+    fingerprint cannot make it do nothing."""
+    _logging_stage(tree, wrapper)
+    proc, calls, audit = _run(tree, source, "load", "--sample", CHECK_load="no pass")
+    assert proc.returncode == 0, proc.stderr
+    assert any(c.startswith("prepare secondary") or c.startswith("prepare ") for c in calls)
+    assert _stages(calls) == [stage_line]
+    args = next(c for c in calls if c.startswith("args "))
+    assert "--force" in args and "--reason" in args
+    assert "migcheck secondary" in calls
+    assert "run the sample extract first" not in proc.stderr
+
+
+def test_sample_load_of_a_reference_source_refuses_a_user_force(tree):
+    proc, calls, audit = _run(tree, "ema", "load", "--sample", "--force", "--reason", "x")
+    assert proc.returncode == 2
+    assert _stages(calls) == []
+
+
 @pytest.mark.pg
 def test_a_sample_load_against_episteme_test_checks_the_real_migrations(tree):
     """The real `gate migrations-check` on episteme_test (local machine only).
