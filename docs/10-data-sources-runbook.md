@@ -179,7 +179,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0009 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0010 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -194,11 +194,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0007_pubmed_partition.sql` | `pubmed` LIST partitions: `articles_pubmed` (year ladder: 13 ranges plus a `DEFAULT` for a NULL or out-of-range year) and `article_body_pubmed` | A full `pubmed` reload can `TRUNCATE` these (an audited operator step for now; the loader still replaces shard by shard, fast while the partitions are empty) instead of deleting rows scattered through the default partition. **Precondition:** no `pubmed` row in `articles_default` / `article_body_default` (the `CREATE TABLE ... PARTITION OF` scans the default partition and fails otherwise), so on a loaded database purge `pubmed` first (one audited `DELETE ... WHERE source = 'pubmed'`). Apply with no load running. |
 | `0008_pmc_bookshelf_default_partition.sql` | `DEFAULT` year partitions `articles_pmc_default` and `articles_bookshelf_default` | A `pmc` or `bookshelf` row with a NULL or out-of-range year lands there instead of failing its batch. No precondition and no scan of the year partitions; apply before the first `pmc` or `bookshelf` load. |
 | `0009_apollo_pubchem_partitions.sql` | `apollo` and `pubchem` LIST partitions: `articles_apollo`, `articles_pubchem`, `article_body_apollo`, `article_body_pubchem` (no year split) | Keeps the loader's per-shard id deletes off the ~30-million-row default partition (an apollo shard spent an hour or more there). **Precondition:** no `apollo` or `pubchem` row in `articles_default` / `article_body_default` (the `CREATE TABLE ... PARTITION OF` scans the default partition and fails otherwise), so on a loaded database purge first (audited `DELETE ... WHERE source = ...`, and remove the purged shards' load markers `<processed root>/_ops/<source>/load_success/<shard>.ok` and their `episteme._lineage` rows, `WHERE source = '<source>'`, so the shards load again). Apply with no load running. |
+| `0010_regulatory_sources.sql` | The regulatory sources: `reg_release`, `reg_record`, `substance`, `substance_xref`, the FAERS typed and signal tables, `recall_lot`, `label_section`, `label_substance`, and the `dailymed` and `ema_epar` LIST partitions (section 5.8 to 5.13) | Apply it with **no load running**: it scans the default partitions of `articles` and `article_body` under an exclusive lock, and it fails if they hold a `dailymed` or `ema_epar` row. Required before any `dailymed`, `ema`, `ema_epar`, `openfda` or `openfda_faers` load. |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0009, apply those eight directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0010, apply those nine directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t`; the fourth column is 0004's `articles_id_idx` and the fifth is 0005's table):
@@ -209,7 +210,7 @@ PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c 
 
 **Migration 0006 through MCPg.** Where the database is reached through the MCPg MCP server, apply 0006's DDL with `run_ddl` (it is idempotent). `run_ddl` refuses GRANT and REVOKE, so the operator then runs the file's single `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON episteme.mesh_facet_rule FROM episteme_app;` line once as `episteme_sys_admin` (the psql loop above does this itself). The pipeline writes as `episteme_app`, so every other new table keeps the standard DML grants; only `mesh_facet_rule` is read-only to it, so facet rules change only through `episteme_sys_admin`. Check: `to_regclass('episteme.article_authors')` and `to_regclass('episteme._graph_lineage')` are not null, and `episteme.mesh_facet_rule` holds 31 rows.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0009 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0010 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -369,7 +370,10 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 | Structured: `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` | yes | no | yes | yes | `mesh` only | no | no | download, serialize, load (plus graph for `mesh`) |
 | `europepmc_id_mappings` | yes | no | no | yes (to `episteme.id_map`) | no | no | no | download only |
 | `europepmc_lite` | yes | no | no | no | no | yes | no | download only |
-| `europepmc_abstracts`, `hf_corpus`, `dailymed`, `openfda`, `aact`, `cdisc_bc`, `cdisc_usdm` | yes | no | no | no | no | no | no | download only |
+| `dailymed`, `ema_epar` | yes | yes | no | yes | no | no | no | download, extract, load (no graph stage; section 5.8, 5.10) |
+| Reference feeds: `ema`, `openfda` | yes | no | no | yes (to `episteme.reg_record`) | no | no | no | download, load (section 5.9, 5.11) |
+| `openfda_faers` | no (the zips come from `openfda download all_human`) | no | no | yes (typed tables, by generation) | no | no | no | not allowed (section 5.12) |
+| `europepmc_abstracts`, `hf_corpus`, `aact`, `cdisc_bc`, `cdisc_usdm` | yes | no | no | no | no | no | no | download only |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
 
 Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
@@ -386,6 +390,7 @@ Any combination not marked yes exits 3 with a message such as `chembl extract is
   - `pubmed`: each data file is two entries (the `.xml.gz` and its `.md5`), so `--max-files 2` is one data file with its checksum.
 - **`--no-wait`** is for a stage that needs a lock. If the lock is busy, the run does not wait. It exits 75. The runner exports `EPISTEME_NO_WAIT=1`, so a Python stage also refuses a busy advisory lock with exit 75 (section 4.8).
 - **`--sample`** runs one `extract`, `serialize` or `load` stage on a small raw slice of a gated source. It writes the gate report and, if the rules pass, the pass file. Section 4.9.
+- **`--allow-partial --reason "<why>"`** is valid with `openfda_faers load` only. It lets a load go on with a partial input set or below the live floor, and writes one `force_override` audit row for each check it passes. `--force` does not pass those checks. Section 5.12. A sample run does not accept it.
 - **`--skip-gate --reason "<why>"`** runs a gated stage that has no valid pass. It writes one `gate_override` audit row for each such stage. Section 4.9.
 - **`--bulk`** is supported on `load` and `graph`: drop the secondary indexes of the stage's index group, run the stage, always rebuild them (section 4.6). `load` uses group `articles`; `graph` uses group `pubmed_graph` for every source. Any other stage exits with `--bulk is only valid with the load or graph stage`.
 - **`--force --reason "<why>"`** re-does work that already has a success marker: extract and serialize reprocess, load reloads shards (the `load_articles` path records a `force_override` audit row with the reason), download wrappers delete and re-fetch the capped set. `--force` without a non-empty `--reason` exits 2 (`--force requires --reason`). Not every wrapper acts on `--force` (the Hugging Face wrappers and `europepmc_preprint` say so and ignore it). Forcing a reload is an audited exception: state a real reason.
@@ -715,12 +720,33 @@ A full run of a gated stage needs a valid pass. The pass comes from a sample run
 | `apollo` | `extract`, `load` | In each of three groups, the smallest file of at least 10 MB. The groups are `train/pretrain` `*_qa.json`, `train/pretrain` `*_text.json`, and `train/sft` files whose name starts with `medical`. | 4 GB |
 | `pubchem` | `serialize`, `load` | The first 2 × `part_rows` CIDs and `part_rows` CIDs from the middle of `CID-SMILES`. Each sibling file is cut to the same CIDs. | 1 GB |
 | `pmc` | `extract`, `load` | Three buckets of 50,000 PMC ids: the largest by XML bytes, the median by XML bytes, and the one with the most superseded versions (ties: the lowest bucket number). Each brings its metadata and XML files, also the lower versions. | 4 GB |
+| `dailymed` | `extract`, `load` | New outer zips cut from the full releases: the prescription label with the largest XML (among the 200 largest inner zips), the prescription label with the most products (among the 20 largest XMLs), and one OTC label (the median by inner zip size). The inner zips and their member names are copied unchanged. | 1 GB |
+| `ema_epar` | `extract`, `load` | The document feed cut to the 6 largest downloaded PDFs, plus one scanned-looking PDF (the most bytes per page among the next 50, at least 100,000 bytes per page) if one exists. | 2 GB |
+| `ema` | `load` | Every feed file directly under `<raw>/ema/`. The EPAR PDFs are not part of it. | 1 GB |
+| `openfda` | `load` | The zips of the five `drug/*` reference feeds. Not `drug/event`, `drug/label` or `other/substance`. | 2 GB |
+| `openfda_faers` | `load` | The oldest quarter whole, the quarter nearest to 2012q3 whole (the AERS-to-FAERS change), the largest zip of the newest quarter, and all zips of the year that holds the most bytes. The last part lets the signal build run on a year-sized partition. | 8 GB |
 
 - A source with no rules file is not gated.
 - The `pubchem` slice is cut, not linked: the cut files are new files with the same relative paths. Only the first primary file is cut when more than one exists.
 - The stages `download`, `graph`, `enrich` and `materialize` are not gated.
 - A slice keeps the path of each file relative to the raw folder of the source. The `input_key` and the row ids are therefore the same as in a full run.
 - If a group has no file, a file is missing, or the slice is over its cap, the run refuses (exit 2).
+- The `dailymed` and `ema_epar` slices are cut like the `pubchem` one: new files, with the member names of the originals. The `ema_epar` feed file lists only the chosen documents, so none counts as not downloaded.
+
+**Regulatory sources in the gate.**
+
+- **Loads without staging.** `ema`, `openfda` and `openfda_faers` read the raw files in their load, so there is no sample extract. `--sample load` builds the slice itself, then loads. The runner passes `--force` to these loads on its own, so that a marker or a fingerprint of an earlier sample cannot make the load do nothing. You still may not pass `--force` with `--sample`.
+- **Measures come from the database,** not from staging shards: `rows` (the rows that the audit rows of this run report), `rows_by_dataset`, `meta_total_equals_rows`, `xref_coverage_pct` per dataset, `failed_inputs`, `peak_rss_mb`. A load that did nothing has `rows` 0 and fails `min_rows`.
+- **Two rule keys are new:** `meta_total_equals_rows` (every feed holds as many rows as its `meta.total_records`; EMA JSON feeds) and `min_xref_coverage_pct` (per dataset, the share of distinct normalised substance names that have a `name` row in `substance_xref`; a dataset with no value fails).
+- **Substance data first.** Load the FDA substance data (section 5.11) into `episteme_test` before the `ema` and `openfda` samples. Without it the coverage is 0 and the rules fail.
+- **The sample bypasses the whole-issue checks** of the loaders, because its slice is partial on purpose: FAERS when its database target is the secondary database (`run_pipeline.sh --sample` sets it), and DailyMed and EPAR when the processed root is under `_sample` (`<processed root>/_sample/<source>/02_processed`).
+- **FAERS memory and temp use.** The `openfda_faers` report records `peak_rss_mb` (from the run record, so it includes the signal build) and `db_temp_bytes_total`. That number is `pg_stat_database.temp_bytes`, a counter since the last reset. Reset the statistics of `episteme_test` (`SELECT pg_stat_reset()`, as the superuser) just before the FAERS sample, and the number is the temp use of that run. It has no rule yet. The report also gives the largest year (`largest_year`, `largest_year_reports`) and the signal rows.
+- **Rules start provisional.** The rules file format has no comment field, so this list is the record. Set each value from the first sample, then edit the rules file (the pass is then written again):
+  - all five sources: `max_peak_rss_mb`;
+  - `dailymed` extract: `max_empty_text_pct`;
+  - `ema_epar` extract: `max_empty_text_pct`, and `max_failed_inputs` of 1, which lets the one scanned-looking PDF give no text (`no_text`);
+  - `ema`, `openfda`, `openfda_faers`: every value of `min_xref_coverage_pct` (an anchor dataset of each source, `ema_medicines`, `fda_ndc` and `faers_drug_entry`, has a minimum above 0 so that a missing substance load fails; the others are 0, which only requires a measure);
+  - `min_rows` of the three loads (1: some work was done).
 
 **Run a sample.** Run the extract, then the load. Each command takes the stage lock like a normal run.
 
@@ -757,11 +783,11 @@ The slice uses a hard link to each raw file where the file system allows it. Oth
 - It sets `EPISTEME_DB_MODE=restricted`, whatever the shell or `.env` says (also `unrestricted` or `read-only`). The DB-mode guard then refuses the production database, also when `PGDATABASE_SECONDARY` names it by mistake. `episteme_test` is allowed in this mode.
 - It redirects only the raw, processed and corpus roots, to the sample folder. The data root and the lock folder stay as in production. A sample run and a production heavy job therefore never run at the same time.
 
-**The migration check.** Before a sample `load`, the runner checks that `episteme_test` has the objects of the migrations 0002 to 0009. It checks the objects, not `episteme._migrations`: production has an empty `_migrations` table, because the migrations were applied by hand (section 2.3). Migration 0001 is deferred: pgvector is not on the server. The check prints each migration that lacks an object. Then the run exits 2. If the check itself fails (for example, the database is not reachable), the run exits 1.
+**The migration check.** Before a sample `load`, the runner checks that `episteme_test` has the objects of the migrations 0002 to 0010. It checks the objects, not `episteme._migrations`: production has an empty `_migrations` table, because the migrations were applied by hand (section 2.3). Migration 0001 is deferred: pgvector is not on the server. The check prints each migration that lacks an object. Then the run exits 2. If the check itself fails (for example, the database is not reachable), the run exits 1.
 
 To add the missing migrations, use the per-file procedure of section 2.3. Do it once, and only with the operator's go-ahead.
 
-1. Apply 0002 to 0009 to `episteme_test` as `episteme_sys_admin`, with the loop in section 2.3.
+1. Apply 0002 to 0010 to `episteme_test` as `episteme_sys_admin`, with the loop in section 2.3.
 2. Apply 0004 with no load running: its `CREATE INDEX` blocks writes to every partition while it builds.
 3. Run the check query of section 2.3.
 
@@ -1200,12 +1226,12 @@ Run these only when no production run is going.
 
 ### 5.3 Volatile sources (download only)
 
-These are download-only by design (Phase 1 retrieval material; docs/12). No serializer, no rows in `episteme.articles`. Outputs land in `<raw>/<source>/` with a `last_sync_utc.txt` stamp.
+These are download-only by design (Phase 1 retrieval material; docs/12). No serializer, no rows in `episteme.articles`. `dailymed` and `openfda` are listed here for their download modes only: both also have load stages now (section 5.8 and 5.11), and `ema` and `ema_epar` are in section 5.9 and 5.10. Outputs land in `<raw>/<source>/` with a `last_sync_utc.txt` stamp.
 
 | Source | Modes | Notes |
 |---|---|---|
 | `dailymed` | `index`, `monthly`, `fullparts`, `all` (default) | Scrapes `.zip` hrefs from DailyMed SPL resource pages under `DAILYMED_BASE` |
-| `openfda` | `label` (default), `drug`, `all_human`, `all` | Reads zip URLs out of the catalog JSON at `OPENFDA_CATALOG` |
+| `openfda` | `label` (default), `drug`, `all_human`, `substance`, `all` | Reads zip URLs out of the catalog JSON at `OPENFDA_CATALOG` |
 | `aact` | none | Scrapes date-keyed daily snapshot links from `AACT_DOWNLOADS`; a page whose layout changed resolves 0 links and exits 0 without a stamp |
 
 ```bash
@@ -1327,6 +1353,169 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh cdisc_usdm download -
 ```
 
 Sample success (bounded first run): exit code 0. Without `aria2c` you see a WARN that it was not found and downloads fall back to sequential `curl`; that is expected. The run ends with `write_sync_stamp: ./01_raw/cdisc_usdm/last_sync_utc.txt` and `pipeline done: cdisc_usdm download`, and `<raw>/cdisc_usdm/<release-tag>/` then holds `Deliverables/`, `LICENSE`, `README.md` and `PROVENANCE.txt`.
+
+---
+
+### 5.8 DailyMed labels (`dailymed`)
+
+DailyMed labels become `episteme.articles` rows (source `dailymed`, licence `public_domain`, see `docs/09-extraction-contract.md` section 6.4). The chain is download, extract, load. There is no graph stage: the label tables are loaded with the labels.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh dailymed download fullparts --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh dailymed extract
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh dailymed load
+```
+
+- **Input.** The full release zips (`dm_spl_release_human_rx_partN.zip`, `dm_spl_release_human_otc_partN.zip`) and the update zips (`dm_spl_{monthly,weekly,daily}_update_*.zip`). Each holds inner zips with one XML label each. The highest version of a `setId` wins, across releases and updates.
+- **Which kinds.** `EPISTEME_DAILYMED_KINDS` lists the kinds that the extract reads: `prescription` and `otc`. Animal, homeopathic and remainder releases and the indexing files are never read. A change of the setting needs a new extract.
+- **Units.** 256 fixed buckets by the first two hex characters of the `setId`. A bucket is written in parts `dailymed_bXX__partNNNNN`, capped by the part rows and bytes of the runtime profile. A bucket whose manifest is unchanged is skipped.
+- **Guards.** The extract refuses before it writes anything, when:
+  - the part numbers of a release kind do not run from 1 without a gap (a part is missing), or
+  - the share of the known labels that this scan no longer holds is over `EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE` (a withdrawal guard; with no earlier state there is no limit).
+  The override is `--force --reason "<why>"`. It writes a `force_override` audit row. A sample run skips both guards.
+- **Held buckets.** A known label whose inner zip cannot be read, with no other readable copy, is not withdrawn. Its whole bucket is held: it is not written again, it is listed as failed (`held_buckets` in the summary), and its old parts and rows stay. Fix the zip, then run the extract again.
+- **Old update zips.** An update zip that stays on disk keeps a label that a new full release dropped. When a full release is replaced, delete the older update zips (older than the new release) before the extract.
+- **Retire.** A label that is in no zip of the scan leaves its part. The load wrapper then runs the retire step, only after a good load: it deletes the rows of the retired parts and their label rows, with an audit row. The guards above sit in the extract, before any part is removed.
+- **Failed labels.** A label with a corrupt inner zip or XML is left out, listed in its bucket and counted in `failed_inputs`. The run goes on. A corrupt OUTER zip stops the run before it writes.
+- **Gate.** `dailymed` is gated for `extract` and `load` (section 4.9).
+
+### 5.9 EMA feeds (`ema`)
+
+The EMA open-data feeds are reference data in `episteme.reg_record` (section 5.13), not articles. Twelve feeds cover medicines, post-authorisation, orphan designations, PIPs, PSUSAs, referrals, DHPCs, shortages, maximum residue limits, herbal medicines and opinions outside the EU (eleven JSON feeds) and Article 57 (an Excel workbook). The document index of the EPARs (`ema_epar_documents`) is a thirteenth file, fetched and loaded the same way.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema load
+```
+
+- **Download.** One file at a time. `EPISTEME_EMA_DELAY_SECONDS` seconds pass between two requests. The URLs come from the `EMA_*` keys of `scripts/data/_lib/sources.env`. A file is written under a temporary name and renamed when it is whole. Each feed has a success or failed marker, so a re-run skips finished feeds. A file that is cut short is tried once more, then marked failed; the other feeds still run.
+- **The verification stop (exit 3).** EMA can answer an automated request with a human-verification page (status 200 and HTML). That page is never data. The stage writes a failed marker for the feed, stops at once, and exits 3 with `FeedVerificationError`. It does not retry and it does not try to get around the check. What to do:
+  1. Wait. Do not run the download again in a loop.
+  2. Raise `EPISTEME_EMA_DELAY_SECONDS` if the delay was short.
+  3. Run `ema download` again later. Finished feeds are skipped, so the re-run resumes with the feed that stopped.
+  4. If the page returns every time, tell the owner. A person can fetch the file by hand into `<raw>/ema/<feed name>.json` (`.xlsx` for Article 57); the loader reads the file as it is.
+- **Herbal feed.** `ema_herbal` has 251 rows and declares `meta.total_records` 204 (the rows include exact duplicates). The download stores the file with both numbers in its marker. The load drops exact duplicate rows before it compares the count with the declared total.
+- **Article 57 header.** The workbook has a header row below some title rows (row 7 in the file seen). The parser takes the first row that has at least three of the known column names as the header. If no row qualifies the feed fails with `no header row found`.
+- **Load.** One release per feed, cut by the `cadence` of `src/episteme/data/regulatory/feeds.toml`. The load fails a feed when the rows (after duplicates) differ from its `meta.total_records`, and the old latest release then stays latest. Section 5.13 has the rules of `reg_record`.
+- **Gate.** `ema` is gated for `load` (section 4.9).
+
+### 5.10 EMA EPAR documents (`ema_epar`)
+
+The English EPAR PDFs of the types product information, assessment report and RMP summary become `episteme.articles` rows (source `ema_epar`, licence `permissive`, `license_raw` holds the EMA terms). **Credit EMA** wherever a copy is shown. The chain is download, extract, load.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar extract
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
+```
+
+- **Order.** Run `ema download` first: it fetches the document index that lists the PDFs. `ema_epar download` then fetches the PDFs listed there, one at a time, `EPISTEME_EMA_DELAY_SECONDS` apart. A PDF is checked (header and trailer) before it is renamed into `<raw>/ema/epar/<id>.pdf`.
+- **The verification stop.** It works as for the feeds (section 5.9). Exit 3, the PDFs fetched so far stay, nothing is retried. A re-run resumes: a stored PDF is not fetched again.
+- **Extract.** A document goes to bucket `int(id) // EPISTEME_EPAR_BUCKET_IDS`. The bucket depends on the id alone, so a document that appears or leaves never moves another one. The text comes from `pypdf`, page by page. A document over `EPISTEME_EPAR_MAX_PAGES` pages or `EPISTEME_EPAR_MAX_BYTES` bytes is not read.
+- **Failed documents.** Each failure is listed in its bucket with a reason: `pdf_parse_error`, `over_limit`, `unreadable_file`, `no_text` or `not_downloaded`. All are counted in `failed_inputs`. A document with no extractable text (an image-only scan) keeps its row with `extract_status = empty` and no body.
+- **Guards.** The extract refuses before it writes anything when the feed has a different number of rows than its `meta.total_records`, or when the share of the known documents that the feed no longer lists is over `EPISTEME_EPAR_MAX_WITHDRAWN_SHARE`. The override is `--force --reason "<why>"` (audited). A sample run skips both.
+- **Held buckets.** A known document whose file is missing holds its bucket: it is not written again and its row is not dropped.
+- **Gate.** `ema_epar` is gated for `extract` and `load` (section 4.9).
+
+### 5.11 openFDA reference feeds (`openfda`) and the FDA substance data
+
+`openfda download all_human` fetches `drug/*` (the FAERS zips are among them). `openfda load` reads five feeds of those zips into `episteme.reg_record`: `fda_enforcement`, `fda_ndc`, `fda_drugsfda`, `fda_orangebook` and `fda_shortages`. The field names of `fda_orangebook` and `fda_shortages` are not yet checked against a real file: until the first sample, their keys hash the whole row.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda download all_human
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda load
+```
+
+After a good `fda_enforcement` release, the load builds the `recall_lot` rows of that release (the lots in the free text `code_info`, and the substances of each recall). The step runs last, so it sees this run's `fda_ndc`. It also runs when the release was skipped as current, so that a re-run repairs a crash before it. A failure of the step is a failed unit of the run. `lot_matches` reports `recall_lots_built: false` when a release has no rows, so zero recalls is not read as "no recall".
+
+**FDA substance data (`other/substance`).** This file anchors the US/EU bridge: the UNII, every synonym, the RxCUI and ATC codes and the active-moiety links. It has its own download mode and its own wrapper, and it is not a source of `run_pipeline.sh` (and so not gated).
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda download substance
+PGDATABASE=episteme_test bash scripts/data/openfda/load_substance.sh
+```
+
+- **One file per run.** The loader refuses more than one file. It treats the file as the whole dataset.
+- **A reload deletes this dataset's gone `substance_xref` rows.** The xref rows of this dataset that are no longer in the file are deleted, so a stale link cannot form a false combination. Rows of other sources stay. `substance` rows and their keys are never deleted, and a key is never reused.
+- **`resolve_names` re-runs per source.** The names of EMA and FAERS are matched to the FDA names by exact normalised match (`resolve_names(conn, names, source)`, no fuzzy match). After a substance reload, run it again for each source: it replaces that source's rows for each name it re-resolves. A name that does not match is counted, not stored.
+- **Order.** Load the substance data before the EMA and openFDA samples and before FAERS: the `xref_coverage_pct` gate measures read `substance_xref`.
+
+### 5.12 FAERS (`openfda_faers`)
+
+FAERS is loaded from the `drug/event` zips that `openfda download all_human` fetched, into typed tables, by generation. `openfda_faers` has a `load` stage only (it is not in the `WRAPPER` table of the dispatcher, and it has no download of its own).
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load
+```
+
+- **Manual refresh.** FAERS is a full reissue, and nothing schedules it. When openFDA publishes a quarter, run `openfda download all_human`, then `openfda_faers load`. A load of an unchanged input set is a no-op (`current`).
+- **Generation swap.** The load does not edit the live tables. It builds new tables (`faers_report_<gen>`, `faers_drug_<gen>`, `faers_reaction_<gen>`), copies one zip per transaction, de-duplicates by report id, builds the indexes and the signal tables, and then swaps the new generation in with one rename transaction. A reader sees the old generation until the swap and the new one after. The swap waits for its lock at most `EPISTEME_FAERS_LOCK_TIMEOUT_S` seconds. If a reader holds a lock, the swap fails with `GenerationSwapError`: the old generation keeps serving, the built generation stays, and a re-run goes on from there.
+- **Whole-issue checks.** A swap replaces everything, so a partial input set must not go live. Two checks run:
+  - By file name, before any work: each quarter folder must hold exactly parts `1..N of N` with one `N`, and no quarter may be missing between the earliest and the latest present. A stopped download, `--max-files` and a stale `-of-0009` next to a new `-of-0010` all fail it.
+  - Before the indexes: a new generation with fewer reports than the share `EPISTEME_FAERS_MIN_LIVE_SHARE` of the live count stops. With no live generation there is no floor. The built generation stays for the re-run.
+- **`--allow-partial --reason`.** The override of both checks. It writes one `force_override` audit row with the reason for each check it passes. `--force` alone does not pass them. `--force --reason` only starts a new generation although the data is current.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --allow-partial --reason "2026 q3 not yet published"
+```
+
+- **A failed drop of the old generation.** After the swap the load drops the old tables. If a transaction holds them, the drop fails with a warning that names the tables. The new generation is live, and the run does not fail. To retry, run `openfda_faers load` again when no transaction holds the tables: each run first drops what an earlier swap left behind.
+- **Resume.** A fingerprint of the parser version and the `input_key`, size and modification time of every input decides: an unfinished generation with this fingerprint is resumed (zips with a progress row are skipped), a live generation with it is current, anything else starts fresh. Other unfinished generations are dropped.
+- **`recall_lot` refresh.** After the load (also when the generation was current), the CLI builds the `recall_lot` rows of the latest `fda_enforcement` release. With no such release it prints `no latest fda_enforcement release: recall_lot not built`. Load `openfda` first.
+- **No separate rebuild command.** The signal tables are built with the generation, and they swap with it. A better bridge (`faers_entry_substance`, from a changed `substance_xref`) reaches the signals only with a new generation: run `openfda_faers load --force --reason "<why>"`. A normal run bridges new drug entries only.
+- **Pair cap and batch size.** `EPISTEME_FAERS_PAIR_DRUG_CAP` leaves out of the pair counts the reports that list more moieties than the cap (they are counted in `reports_over_pair_cap`). `EPISTEME_FAERS_BRIDGE_BATCH_ROWS` sets the entries per transaction of the bridge.
+- **Memory and temp use.** The de-duplication across years and the signal build sort large sets. The sample slice therefore holds the largest year whole (section 4.9), and its report records the peak memory and the database temp bytes.
+- **Gate.** `openfda_faers` is gated for `load` (section 4.9). A sample run (`db_target` secondary) skips the whole-issue checks, because its slice is partial on purpose.
+
+### 5.13 `reg_record`: loading, latest and plans
+
+`episteme.reg_record` holds the records of all reference feeds, `LIST (dataset)` then `LIST (release_id)`. `episteme.reg_release` has one row per release and a flag `is_latest`.
+
+- **One release is one partition.** The load creates the partitions of a release, loads, builds the indexes, checks the counts and only then moves `is_latest`. A failed release never becomes latest, and the old latest keeps serving. A reload of the same release id replaces its partition.
+- **`--only`.** To load part of a source, name the feeds. `--only` is a flag of the wrapper, and `run_pipeline.sh` does not forward it:
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/ema/load_ema.sh --only ema_pip --only ema_orphan
+```
+
+- **A missing input fails that feed.** A configured feed with no file is a failed feed (a red run), not a feed with zero rows. Use `--only` while only some files are downloaded.
+- **Lock timeout.** The partition DDL waits at most `EPISTEME_REG_LOCK_TIMEOUT_S` seconds for its lock. A reader with an open transaction cannot hang a load: the feed fails and a re-run loads it.
+- **The pruning rule for queries.** Read the latest release first (`latest_release(conn, dataset)`), then pass `dataset` and `release_id` as values. Never join `reg_release` inside the query: the planner would then open every partition. With values, the plan reads one leaf.
+- **Plan checks.** `scripts/data/regulatory/check_plans.py` prints `EXPLAIN` for the six queries of the design (section 8) and exits 1 when a plan has the wrong shape. It only reads: the connection and the transaction are read only, and it never runs the statements. Run it on `episteme_test` after the samples, and on full data with `EPISTEME_DB_MODE=read-only`:
+
+```bash
+PGDATABASE=episteme_test uv run python scripts/data/regulatory/check_plans.py --dataset fda_ndc
+```
+
+### 5.14 Settings of the regulatory sources
+
+All of them are read in `src/episteme/config.py` (the only module that reads the environment). The defaults are in that file. Names only:
+
+| Key | What it sets |
+|---|---|
+| `EPISTEME_EMA_DELAY_SECONDS` | Seconds between two EMA requests (feeds and PDFs) |
+| `EPISTEME_REG_LOCK_TIMEOUT_S` | Seconds the `reg_record` partition DDL waits for its lock |
+| `EPISTEME_FAERS_LOCK_TIMEOUT_S` | Seconds the FAERS swap waits for its lock |
+| `EPISTEME_FAERS_MIN_LIVE_SHARE` | Floor of a new FAERS generation, as a share of the live report count |
+| `EPISTEME_FAERS_PAIR_DRUG_CAP` | Most moieties of one report in the pair counts |
+| `EPISTEME_FAERS_BRIDGE_BATCH_ROWS` | Drug entries per transaction of the bridge |
+| `EPISTEME_RECALL_MAX_RANGE_LOTS` | Most lots one written range may expand to |
+| `EPISTEME_DAILYMED_KINDS` | DailyMed kinds that the extract reads |
+| `EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE` | Share of the known labels that a scan may drop |
+| `EPISTEME_EPAR_MAX_PAGES`, `EPISTEME_EPAR_MAX_BYTES` | Size limits of one EPAR PDF |
+| `EPISTEME_EPAR_MAX_WITHDRAWN_SHARE` | Share of the known documents that the feed may drop |
+| `EPISTEME_EPAR_BUCKET_IDS` | Width of an EPAR bucket, in document ids (a change rebuilds every bucket) |
+| `EPISTEME_LOAD_BATCH_BYTES`, `EPISTEME_WRITE_BATCH_BYTES` | Byte caps of a load batch and of a staging write batch |
+| `EPISTEME_PMC_BUCKET_IDS` | Width of a PMC bucket (a change rebuilds every bucket) |
+| `EPISTEME_SLICE_MAX_BYTES_<SOURCE>` | Size cap of the sample slice of one source (for example `..._OPENFDA_FAERS`) |
+
+### 5.15 How to word the results (agents and consumers)
+
+- **Fixed combinations.** A product that is a fixed combination lists several moieties in one entry. The pair counts then contain pairs of moieties that belong to one product. Say that these pairs come from a fixed combination. Do not report them as an interaction found in the data.
+- **Unmatched names.** A name that matches no substance is counted, not stored. State the count as a gap in coverage. Do not guess a match.
+- **`recalls_no_substance`.** The recalls of the release that no route could tie to a moiety. They cannot appear in the recall list of any substance. A zero count of recalls for a substance is therefore not proof that none exist; quote this number next to it.
+- **`substance_method`.** How a recall was tied to a substance: `openfda` (the record's own names or UNIIs), `ndc` (an NDC in the text, against the latest `fda_ndc`), or `product_text` (exact names found in the product description, the weakest). A wrong link is worse than a gap, so name the method when you quote a recalled lot.
+- **Lots.** A recall without a lot, and a lot the rules refuse, are reported as gaps, not as "no lot recalled".
 
 ---
 

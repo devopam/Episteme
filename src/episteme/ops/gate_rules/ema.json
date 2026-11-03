@@ -1,0 +1,22 @@
+{
+  "load": {
+    "max_failed_inputs": 0,
+    "min_rows": 1,
+    "meta_total_equals_rows": true,
+    "min_xref_coverage_pct": {
+      "ema_medicines": 1.0,
+      "ema_post_authorisation": 0.0,
+      "ema_orphan": 0.0,
+      "ema_pip": 0.0,
+      "ema_psusa": 0.0,
+      "ema_referrals": 0.0,
+      "ema_dhpc": 0.0,
+      "ema_shortages": 0.0,
+      "ema_mrl": 0.0,
+      "ema_herbal": 0.0,
+      "ema_outside_eu": 0.0,
+      "ema_article57": 0.0
+    },
+    "max_peak_rss_mb": 2048
+  }
+}

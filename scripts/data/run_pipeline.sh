@@ -199,6 +199,10 @@ _is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; 
 # The FAERS generation loader (src/episteme/data/regulatory/faers/load.py).
 wpath_faers="$HERE/openfda/load_faers.sh"
 
+# These loads read the raw files directly (no extract stage, no staging), so a sample
+# load builds its own raw slice and always does the work (see "sample" below).
+_slice_at_load() { _is_reg "$1" || [ "$1" = "openfda_faers" ]; }
+
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
 # cover, must be a plain error with a clean exit — never a dangling,
@@ -391,7 +395,7 @@ if [ "$SAMPLE" = "1" ]; then
     SAMPLE_RECORD="$SAMPLE_ROOT/run_record_$STAGE.json"
     # The production raw root (common.sh resolve_dest reads it the same way).
     PROD_RAW_ROOT="${EPISTEME_RAW_ROOT:-${EPISTEME_DATA_ROOT:-.}/01_raw}"
-    if [ "$STAGE" = "load" ]; then
+    if [ "$STAGE" = "load" ] && ! _slice_at_load "$SOURCE"; then
         sample_staging="$SAMPLE_ROOT/02_processed/staging/$SOURCE"
         [ -n "$(ls -A "$sample_staging" 2>/dev/null)" ] \
             || die "--sample load: no sample staging in $sample_staging; run the sample extract first" 2
@@ -688,6 +692,11 @@ run_stage() {
 
 load_args=()
 [ "$FORCE" = "1" ] && load_args=(--force --reason "$REASON")
+# A sample load of a reference feed or FAERS must load again: a marker or a fingerprint of
+# an earlier sample would otherwise make it do nothing, and the gate would measure old data.
+if [ "$SAMPLE" = "1" ] && [ "$STAGE" = "load" ] && _slice_at_load "$SOURCE"; then
+    load_args=(--force --reason "sample run of $SOURCE")
+fi
 
 download_args=()
 extract_args=()
@@ -791,7 +800,7 @@ if [ "$SAMPLE" = "1" ]; then
         "$PASS_ROOT"/_sample/?*) ;;
         *) die "sample: the sample root $SAMPLE_ROOT is not inside $PASS_ROOT/_sample" 1 ;;
     esac
-    if [ "$STAGE" = "load" ]; then
+    if [ "$STAGE" = "load" ] && ! _slice_at_load "$SOURCE"; then
         rm -rf "$SAMPLE_ROOT/02_processed/_ops/$SOURCE/load_success"
     else
         log INFO "sample: building the raw slice in $SAMPLE_ROOT"

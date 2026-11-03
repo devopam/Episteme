@@ -29,5 +29,26 @@ def structured_sources() -> set[str]:
     return _words("STRUCTURED_SOURCES")
 
 
+def no_graph_sources() -> set[str]:
+    """Literature sources that have extract and load but no graph stage."""
+    return _words("NO_GRAPH_SOURCES")
+
+
+def reg_sources() -> set[str]:
+    """Reference feeds: a download and a load into ``reg_record``, nothing else."""
+    return _words("REG_SOURCES")
+
+
+# `openfda_faers` is not in WRAPPER: it has no download of its own (the zips come from
+# `openfda download all_human`) and only a load stage. run_pipeline.sh treats it as a
+# special case, and the docs test helpers must too.
+FAERS_SOURCE = "openfda_faers"
+FAERS_SCRIPT = "openfda/load_faers.sh"
+
+
+def dispatcher_treats_faers_as_a_special_case() -> bool:
+    return f'"$SOURCE" = "{FAERS_SOURCE}"' in _RUN and "wpath_faers" in _RUN
+
+
 def doc(name: str) -> str:
     return (REPO / "docs" / name).read_text(encoding="utf-8")

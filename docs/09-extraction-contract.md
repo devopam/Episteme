@@ -311,6 +311,8 @@ Matching order in `normalize_license` matters: CC0, then the NC/SA/ND variants, 
 | Author manuscripts | `text_mining` | Do not mix into commercial training by default |
 | Apollo | `permissive` -> `commercial` (HF card `apache-2.0`) | The code already assigns this; `docs/02` still lists commercial-use diligence as open |
 | Structured sources | Per source, see 6.3 and `docs/12-source-inventory.md` | Licence rulings live in the serializers |
+| `dailymed` | `commercial` (`public_domain`) | US government work; set by the extractor, see 6.3 |
+| `ema_epar` | `commercial` (`permissive`) | EMA reuse terms, with EMA credited; `license_raw` holds the terms, see 6.3 |
 
 Commercial path:
 
@@ -333,6 +335,17 @@ Caveat for PubChem and ClinVar: they carry contributor-submitted content whose s
 | `uniprot` | `subset` = `text_mining` (hardcoded) | the real licence is CC BY 4.0, but the serializer hardcodes `text_mining` as a governance override instead of calling `subset_from_license` |
 | `cdisc_bc` | none | download-only, no serializer, no `articles` rows; licence **unverified** (repo code is MIT; the README grants CC-BY-4.0 to documentation only and states nothing for `export/` data); no `subset` is ever assigned, and until CDISC confirms a licence for `export/` directly no row from this source may enter a training corpus |
 | `cdisc_usdm` | none | download-only, no serializer, no `articles` rows; licence **unverified** (the repo README grants MIT to code and scripts and CC-BY-4.0 to documentation and minutes; the USDM model files are named in neither); no `subset` is ever assigned, and until CDISC confirms a licence for the model files no row from this source may enter a training corpus |
+
+### 6.4 Regulatory text sources
+
+Two sources write label and assessment text into `episteme.articles` from the regulatory design (`docs/superpowers/specs/2026-11-02-regulatory-sources-design.md`):
+
+| Source | `license` -> `subset` | `license_raw` | Basis |
+|--------|----------------|---------------|-------|
+| `dailymed` | `public_domain` -> `commercial` | `U.S. government work: DailyMed (NLM) / FDA structured product labeling` | DailyMed labels are US government work. The extractor sets `public_domain` itself (`normalize_license` never returns it), so this is the same kind of explicit ruling as 6.3, and `license_raw` keeps the real text. This is a ruling for the source, not a legal determination for each label; it is Claude's reading in the design, to be confirmed by the owner |
+| `ema_epar` | `permissive` -> `commercial` | the EMA legal notice summary: reuse allowed, commercial and non-commercial, if EMA is acknowledged as the source; third-party content excluded | No licence of the vocabulary names the EMA terms exactly. `permissive` (reuse with attribution) is the nearest, and `license_raw` makes the choice auditable. The owner approved loading EMA documents. **Credit EMA** wherever a copy is shown or distributed |
+
+The text sources are `dailymed` and `ema_epar`. Their reference feeds (`ema`, `openfda`, FAERS) do not write to `episteme.articles`: they have their own tables (`docs/08-data-storage-principles.md`) and no `license` column; `docs/02-data-sources.md` records the terms of each feed.
 
 Per-source cadence and script paths: `docs/12-source-inventory.md`.
 
@@ -399,6 +412,8 @@ src/episteme/data/sample_audit.py                 # field-shape report
 src/episteme/data/<source>/extract_<source>.py    # literature extractors
 src/episteme/data/<source>/serialize_<source>.py  # structured serializers
 ```
+
+Regulatory sources: `dailymed` and `ema_epar` follow the literature pattern (extract in bounded parts, then `load_articles`; no graph stage), with their wrappers in `scripts/data/dailymed/` and, for `ema_epar`, in `scripts/data/ema/`. The reference feeds `ema` and `openfda` load into `episteme.reg_record` through `scripts/data/ema/load_ema.sh` and `scripts/data/openfda/load_openfda.sh`. `openfda_faers` loads FAERS by generation through `scripts/data/openfda/load_faers.sh`. `docs/10-data-sources-runbook.md` has one section for each.
 
 Exceptions: the Europe PMC extractors sit in `src/episteme/data/europepmc/{preprints,manuscripts}/` with plural file names, and their wrappers in `scripts/data/europepmc_{preprint,manuscript}/`. `scripts/data/run_pipeline.sh` is the authority on which wrapper handles which source. The v1.1 names `scripts/data/extract_<source>.sh`, `scripts/data/analyze_source_samples.py`, `src/episteme/data/schema.py` and `src/episteme/data/ops.py` do not exist.
 

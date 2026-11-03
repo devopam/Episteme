@@ -1,6 +1,17 @@
 import re
 
-from ._repo import REPO, doc, lit_sources, structured_sources, wrapper_table
+from ._repo import (
+    FAERS_SCRIPT,
+    FAERS_SOURCE,
+    REPO,
+    dispatcher_treats_faers_as_a_special_case,
+    doc,
+    lit_sources,
+    no_graph_sources,
+    reg_sources,
+    structured_sources,
+    wrapper_table,
+)
 
 
 def _rows() -> dict[str, list[str]]:
@@ -12,12 +23,19 @@ def _rows() -> dict[str, list[str]]:
     return rows
 
 
+def _wired() -> dict[str, str]:
+    """Every wired source and its script: the WRAPPER table, and openfda_faers (a load
+    stage only, outside WRAPPER)."""
+    assert dispatcher_treats_faers_as_a_special_case()
+    return {**wrapper_table(), FAERS_SOURCE: FAERS_SCRIPT}
+
+
 def test_inventory_covers_exactly_the_wired_sources():
-    assert set(_rows()) == set(wrapper_table())
+    assert set(_rows()) == set(_wired())
 
 
 def test_every_inventory_script_exists():
-    for src, script in wrapper_table().items():
+    for src, script in _wired().items():
         assert (REPO / "scripts" / "data" / script).is_file(), src
         assert f"`{script}`" in doc("12-source-inventory.md"), src
 
@@ -32,9 +50,16 @@ def test_stage_column_matches_the_dispatcher_rules():
     """Stages per source follow run_pipeline.sh: lit = download/extract/load/graph,
     structured = download/serialize/load (+graph for mesh), the rest as wired there."""
     lit, structured = lit_sources(), structured_sources()
-    for src in wrapper_table():
+    no_graph, reg = no_graph_sources(), reg_sources()
+    for src in _wired():
         got = _stages(src)
-        if src == "pmc":  # has its own chain (docs/12); the common four must be present
+        if src == FAERS_SOURCE:
+            assert got == ["load"], got  # no download of its own, no extract, no graph
+        elif src in reg:
+            assert got == ["download", "load"], (src, got)
+        elif src in lit and src in no_graph:
+            assert got == ["download", "extract", "load"], (src, got)
+        elif src == "pmc":  # has its own chain (docs/12); the common four must be present
             assert {"download", "extract", "load", "graph"} <= set(got), got
         elif src in lit:
             assert got == ["download", "extract", "load", "graph"], (src, got)

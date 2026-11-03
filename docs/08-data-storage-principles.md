@@ -99,8 +99,8 @@ Notes on what is and is not code-backed:
 
 | Table | Partitioning | Holds |
 |-------|--------------|-------|
-| `episteme.articles` | `LIST (source)`; `pmc` sub-partitioned `RANGE (year)`; `DEFAULT` catch-all (`bookshelf` also has a year ladder via migration 0002; `pubmed` has one via migration 0007; each year ladder has a `DEFAULT` sub-partition for a NULL or out-of-range year, `pmc` and `bookshelf` via migration 0008; `apollo` and `pubchem` have plain partitions via migration 0009) | Narrow hot row per article (no text columns) |
-| `episteme.article_body` | `LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002, `pubmed` via migration 0007, `apollo` and `pubchem` via migration 0009) | `title`, `abstract`, `body_text`, `text`; primary key `(article_id, source)` |
+| `episteme.articles` | `LIST (source)`; `pmc` sub-partitioned `RANGE (year)`; `DEFAULT` catch-all (`bookshelf` also has a year ladder via migration 0002; `pubmed` has one via migration 0007; each year ladder has a `DEFAULT` sub-partition for a NULL or out-of-range year, `pmc` and `bookshelf` via migration 0008; `apollo` and `pubchem` have plain partitions via migration 0009; `dailymed` and `ema_epar` have plain partitions via migration 0010) | Narrow hot row per article (no text columns) |
+| `episteme.article_body` | `LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002, `pubmed` via migration 0007, `apollo` and `pubchem` via migration 0009; `dailymed` and `ema_epar` via migration 0010) | `title`, `abstract`, `body_text`, `text`; primary key `(article_id, source)` |
 | `episteme.article_cites` | `HASH (src_pmid)`, 8 buckets | Citation edges `(src_pmid, dst_pmid, dst_doi, ref_text, source_file)`; `dst_pmid` is nullable (migration 0006) |
 | `episteme.article_mesh` | `HASH (pmid)`, 8 buckets | `pmid`, `descriptor_ui`, `descriptor_name`, `major_topic`, `qualifier_uis` (migration 0006), `qualifiers`, `source_file` |
 | `episteme.article_parts` | `HASH`, 8 buckets (migration 0002) | Book to part edges |
@@ -113,6 +113,14 @@ Notes on what is and is not code-backed:
 | `episteme.mesh_tree`, `episteme.mesh_facet_rule` | none (migration 0006) | MeSH descriptor tree numbers (filled by `mesh graph`); facet rules (seeded, read-only to `episteme_app`) |
 | `episteme._graph_lineage` | none (migration 0006) | One row per graphed raw file: `graph_sha256`, rows per relation, run id |
 | `episteme._audit` | `RANGE (recorded_at)` monthly plus `DEFAULT` | Append-only hash-chained audit trail |
+| `episteme.reg_release` | none (migration 0010) | One row per `(dataset, release_id)` with `rows`, `status` and `is_latest`; a unique partial index allows one latest release per dataset |
+| `episteme.reg_record` | `LIST (dataset)`, then `LIST (release_id)` (migration 0010; a loader creates the partitions) | Reference-feed records of EMA and openFDA: `record_key`, `substance_names`, `product_keys`, `event_date`, `payload` (`jsonb`), `source_file`. A query names `dataset` and `release_id` as values, so the plan reads one leaf |
+| `episteme.substance`, `episteme.substance_xref` | none (migration 0010) | One row per UNII with its `moiety_key`; cross-references by `id_type` (`unii`, `name`, `rxcui`, `atc`, and `<source>_name` for EMA and FAERS names). Keys are never reused |
+| `episteme.faers_report`, `episteme.faers_drug`, `episteme.faers_reaction` | `RANGE (receive_year)`, one partition per year 2004 to 2030 plus `DEFAULT` (migration 0010) | FAERS typed rows. The parents hold no index; the loader builds them per generation, builds the next generation in new tables and swaps it in |
+| `episteme.faers_drug_entry`, `episteme.faers_entry_substance`, `episteme.faers_term` | none (migration 0010) | Dictionaries that live across generations: drug entries, their bridge to substances, reaction terms |
+| `episteme.faers_pair_quarter`, `faers_event_quarter`, `faers_quarter_totals`, `faers_moiety_quarter`, `faers_term_quarter`, `faers_batch_coverage`, `faers_batch_quarter` | none (migration 0010) | Signal tables, rebuilt per generation and swapped with it. `substance_key` holds a moiety key |
+| `episteme.recall_lot` | none (migration 0010) | Lots read from the free text of `fda_enforcement`, by release |
+| `episteme.label_section`, `episteme.label_substance` | none (migration 0010) | DailyMed label sections (offsets into `body_text`, no text copy) and the substances of each label |
 
 ## 7. Implementation Phasing (shipped state)
 

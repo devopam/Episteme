@@ -13,8 +13,10 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
 ``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
-``peak_rss_mb``, and for ``parts_within_caps`` ``max_rows_per_source_file``,
-``max_est_bytes_per_source_file`` (staging) with ``part_rows``, ``part_bytes``
+``peak_rss_mb``, ``meta_total_equals_rows`` (bool), ``xref_coverage_pct`` (dict by dataset,
+for ``min_xref_coverage_pct``; a dataset with no value fails), and for ``parts_within_caps``
+``max_rows_per_source_file``, ``max_est_bytes_per_source_file`` (staging) with ``part_rows``,
+``part_bytes``
 (the caps recorded in the sample's part markers; the profile's caps when the
 sample has no part marker). A rule
 whose measure is missing fails: a gate never passes on data it did not see.
@@ -132,6 +134,8 @@ _KNOWN_KEYS = {
     "rows_loaded_equals_staging",
     "max_peak_rss_mb",
     "parts_within_caps",
+    "meta_total_equals_rows",
+    "min_xref_coverage_pct",
 }
 
 
@@ -248,6 +252,23 @@ _PER_KEY = {
 }
 
 
+def _per_key_min(measures: dict, rule: str, key: str, limits: dict) -> list[str]:
+    """A minimum for each name in ``limits``. A name with no value, or a value of None,
+    fails: unlike ``_per_key_max``, a missing value is never read as 0, because a minimum
+    of 0 must still fail on data that was not measured."""
+    seen = measures.get(key)
+    if not isinstance(seen, dict):
+        return [_missing(rule)]
+    out = []
+    for name, limit in limits.items():
+        value = seen.get(name)
+        if value is None:
+            out.append(f"{rule}: {key}[{name}] is missing")
+        elif value < limit:
+            out.append(f"{rule}: {key}[{name}] is {_num(value)}, the minimum is {_num(limit)}")
+    return out
+
+
 def _parts_within_caps(measures: dict, rule: str) -> list[str]:
     """Every part is within the row and byte caps (measured on the staging
     shards by ``gate_report``). The byte measure covers parts with 2 or more
@@ -295,6 +316,14 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(f"{rule}: the loaded rows differ from the staging rows")
         elif rule == "parts_within_caps" and limit:
             fails += _parts_within_caps(measures, rule)
+        elif rule == "meta_total_equals_rows" and limit:
+            value = measures.get("meta_total_equals_rows")
+            if value is None:
+                fails.append(_missing(rule))
+            elif not value:
+                fails.append(f"{rule}: a feed holds a different number of rows than its meta total")
+        elif rule == "min_xref_coverage_pct":
+            fails += _per_key_min(measures, rule, "xref_coverage_pct", limit)
     return fails
 
 
@@ -808,32 +837,43 @@ def _cmd_report(args: argparse.Namespace) -> int:
         _err(f"gate report: {exc}")
         return 2
     raw_dir = sample_root / "01_raw" / gate_slice.SLICES[source].raw_subpath
-    # The units of work only (a sidecar file is no input of the stage); an old
-    # slice.json without "inputs" falls back to every file.
-    inputs = [raw_dir / rel for rel in slice_meta.get("inputs", slice_meta["files"])]
-    staging_dir = (
-        Path(args.staging_dir)
-        if args.staging_dir
-        else sample_root / "02_processed" / "staging" / source
-    )
-    measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
-    # The caps that wrote the parts, not the caps of the profile now.
-    caps, cap_failures = _sample_part_caps(source, sample_root)
-    if caps is None:
-        prof = profile.get_profile()
-        caps = (prof.part_rows, prof.part_bytes)
-    measures["part_rows"], measures["part_bytes"] = caps
-    if stage == "load":
-        # Part shards carry their own source_file (<input_key>__partNNNNN).
-        source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
+    cap_failures: list[str] = []
+    if source in gate_report.SOURCE_MEASURES:
+        # No articles staging (reg_record, FAERS): the measures come from the database,
+        # tied to this run's id so that a load that did nothing cannot pass.
+        from episteme.config import get_settings
+
         with _connect() as conn:
-            # The loader keeps one row per id (a re-issued id under another
-            # source_file replaces the older row), so compare distinct ids.
-            measures.update(
-                gate_report.measure_load(
-                    conn, source, source_files, staging_rows=measures.get("distinct_ids")
-                )
+            measures = gate_report.SOURCE_MEASURES[source](
+                conn, raw_dir=raw_dir, run_id=get_settings().run_id, record=record
             )
+    else:
+        # The units of work only (a sidecar file is no input of the stage); an old
+        # slice.json without "inputs" falls back to every file.
+        inputs = [raw_dir / rel for rel in slice_meta.get("inputs", slice_meta["files"])]
+        staging_dir = (
+            Path(args.staging_dir)
+            if args.staging_dir
+            else sample_root / "02_processed" / "staging" / source
+        )
+        measures = gate_report.measure_staging(staging_dir, inputs=inputs, record=record)
+        # The caps that wrote the parts, not the caps of the profile now.
+        caps, cap_failures = _sample_part_caps(source, sample_root)
+        if caps is None:
+            prof = profile.get_profile()
+            caps = (prof.part_rows, prof.part_bytes)
+        measures["part_rows"], measures["part_bytes"] = caps
+        if stage == "load":
+            # Part shards carry their own source_file (<input_key>__partNNNNN).
+            source_files = measures.get("source_files") or [input_key(p, raw_dir) for p in inputs]
+            with _connect() as conn:
+                # The loader keeps one row per id (a re-issued id under another
+                # source_file replaces the older row), so compare distinct ids.
+                measures.update(
+                    gate_report.measure_load(
+                        conn, source, source_files, staging_rows=measures.get("distinct_ids")
+                    )
+                )
     failures = (
         _hash_failures(source, stage, record) + cap_failures + evaluate(measures, stage_rules)
     )
