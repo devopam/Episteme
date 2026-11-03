@@ -65,6 +65,10 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme.faers_drug",
         "table:episteme.label_substance",
     ],
+    "0011_label_section_ordinal.sql": [
+        "column:episteme.label_section.ordinal",
+        "column:episteme.label_section.product",
+    ],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {

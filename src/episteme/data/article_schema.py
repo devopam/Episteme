@@ -70,6 +70,12 @@ SOURCES = (
     "ema_epar",
 )
 
+# Every source is exactly one kind (a test enforces it, so a new source fails until it is
+# classified). Reference sources are looked up, not trained on: config's
+# CORPUS_EXCLUDED_SOURCES must cover them all.
+REFERENCE_SOURCES = ("dailymed", "ema_epar")
+TRAINING_SOURCES = tuple(s for s in SOURCES if s not in REFERENCE_SOURCES)
+
 SUBSETS = ("commercial", "text_mining", "open_metadata", "other")
 
 EXTRACT_STATUSES = ("ok", "empty", "partial", "dropped")
