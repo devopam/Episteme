@@ -84,7 +84,7 @@ def test_admin_server_is_superuser_with_alter_system_allowlist(tmp_path):
         tmp_path,
         ["episteme", "--admin"],
         {
-            "EPISTEME_SYS_ADMIN_PASSWORD": "unused",
+            "EPISTEME_SYS_ADMIN_PASSWORD": SECRET,
             "POSTGRES_SUPERUSER": "pgsu",
             "POSTGRES_SUPERUSER_PASSWORD": SECRET,
             "MCPG_ACCESS_MODE": "read-only",
@@ -94,7 +94,11 @@ def test_admin_server_is_superuser_with_alter_system_allowlist(tmp_path):
     assert r.returncode == 0, r.stderr
     v = _vars(r.stdout)
     assert v["MCPG_DATABASE_URL"] == f"postgresql://pgsu:{ENCODED}@localhost:5433/episteme"
-    assert v["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
+    # episteme_test is a read-only secondary as episteme_sys_admin, not as the superuser;
+    # the inherited value is replaced, not kept.
+    assert v["MCPG_SECONDARY_DATABASE_URLS"] == (
+        f"episteme_test=postgresql://episteme_sys_admin:{ENCODED}@localhost:5433/episteme_test"
+    )
     assert v["MCPG_ALLOW_ALTER_SYSTEM"] == "true"
     assert v["MCPG_ACCESS_MODE"] == "unrestricted"
     assert v["MCPG_ALTER_SYSTEM_ALLOWLIST"].split(",") == [
@@ -107,6 +111,25 @@ def test_admin_server_is_superuser_with_alter_system_allowlist(tmp_path):
         "effective_cache_size",
         "max_parallel_maintenance_workers",
     ]
+
+
+INHERITED = {"MCPG_SECONDARY_DATABASE_URLS": "x=postgresql://someone@h/x"}
+
+
+def test_admin_has_no_secondary_without_the_sys_admin_password(tmp_path):
+    env = {"POSTGRES_SUPERUSER_PASSWORD": SECRET, **INHERITED}
+    r = _run(tmp_path, ["episteme", "--admin"], env)
+    assert r.returncode == 0, r.stderr
+    assert _vars(r.stdout)["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
+
+
+def test_admin_on_episteme_test_has_no_secondary(tmp_path):
+    env = {"POSTGRES_SUPERUSER_PASSWORD": SECRET, "EPISTEME_SYS_ADMIN_PASSWORD": SECRET}
+    r = _run(tmp_path, ["episteme_test", "--admin"], {**env, **INHERITED})
+    assert r.returncode == 0, r.stderr
+    v = _vars(r.stdout)
+    assert v["MCPG_DATABASE_URL"].endswith("/episteme_test")
+    assert v["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
 
 
 def test_admin_superuser_defaults_to_postgres(tmp_path):
