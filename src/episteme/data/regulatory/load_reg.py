@@ -54,7 +54,12 @@ from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.checkpoint_markers import input_key
 from episteme.data.regulatory.feeds import Feed, load_feeds
-from episteme.data.regulatory.normalize import norm_name, norm_product_key, split_names
+from episteme.data.regulatory.normalize import (
+    fits_index,
+    norm_name,
+    norm_product_key,
+    split_names,
+)
 from episteme.data.regulatory.parsers import ema_total, parse
 from episteme.ops.failure import record_failure
 
@@ -195,6 +200,9 @@ class RowPreparer:
             "conflicts": 0,
             "missing_key": 0,
             "bad_dates": 0,
+            # Names and product keys too long to be an index key (``fits_index``): left
+            # out of the array, counted. The value stays in ``payload``.
+            "long_values": 0,
         }
 
     @property
@@ -219,14 +227,22 @@ class RowPreparer:
             for cell in field_values(row, path):
                 for part in split_names(cell):
                     n = norm_name(part)
-                    if n and n not in names:
-                        names.append(n)
+                    if not n or n in names:
+                        continue
+                    if not fits_index(n):
+                        stats["long_values"] += 1
+                        continue
+                    names.append(n)
         products: list[str] = []
         for path in feed.product_fields:
             for cell in field_values(row, path):
                 p = norm_product_key(cell)
-                if p and p not in products:
-                    products.append(p)
+                if not p or p in products:
+                    continue
+                if not fits_index(p):
+                    stats["long_values"] += 1
+                    continue
+                products.append(p)
         event_date = None
         if feed.date_field:
             raw = field_values(row, feed.date_field)
@@ -437,7 +453,7 @@ def load_release(
 
     Returns ``{"rows", "duplicates", "status", ...}``. ``status`` is ``loaded`` or
     ``failed`` (the feed failed a check: nothing was published, ``reason`` says why).
-    Also in the result: ``conflicts``, ``missing_key``, ``bad_dates``, ``rows_in``,
+    Also in the result: ``conflicts``, ``missing_key``, ``bad_dates``, ``long_values``, ``rows_in``,
     ``release_id``, ``total_records``. A reload of an existing release replaces its
     partition. A parse error (a truncated file) raises and leaves nothing behind.
     """
@@ -506,6 +522,7 @@ def load_release(
         conflicts=prep.stats["conflicts"],
         missing_key=prep.stats["missing_key"],
         bad_dates=prep.stats["bad_dates"],
+        long_values=prep.stats["long_values"],
         rows_in=prep.stats["rows_in"],
     )
     return result
@@ -535,6 +552,42 @@ def marker_name_for(feed: Feed, release_id: str, raw_dir: Path) -> str:
     stem and hash keep a release id with ``/`` or quotes out of the marker path."""
     safe = f"{_stem(release_id, 24)}_{_short_hash(release_id, _HASH_LEN)}"
     return input_key(raw_dir / f"{feed.name}__{safe}", raw_dir)
+
+
+def database_name(conn: psycopg.Connection) -> str:
+    """``current_database()`` of ``conn``. The read transaction is rolled back, so the
+    connection is idle again."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_database()")
+            return str(cur.fetchone()[0])
+    finally:
+        conn.rollback()
+
+
+def db_marker_name(database: str, key: str) -> str:
+    """The marker name of ``key`` for one database: ``<db stem>_<hash>__<key>``. A load
+    into ``episteme_test`` and one into ``episteme`` never share a marker."""
+    return f"{_stem(database, 24)}_{_short_hash(database, _HASH_LEN)}__{key}"
+
+
+def release_loaded(conn: psycopg.Connection, dataset: str, release_id: str) -> bool:
+    """Whether the database holds release ``release_id`` of ``dataset`` with status
+    ``loaded``. A marker alone never proves the load: the files can outlive the rows.
+    The read is rolled back; a failed read counts as "not loaded"."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT EXISTS (SELECT 1 FROM {SCHEMA}.reg_release WHERE dataset = %s "
+                "AND release_id = %s AND status = 'loaded')",
+                (dataset, release_id),
+            )
+            return bool(cur.fetchone()[0])
+    except psycopg.Error:
+        _LOG.warning("could not read reg_release for %s %s", dataset, release_id, exc_info=True)
+        return False
+    finally:
+        conn.rollback()
 
 
 def _fingerprint(files: Sequence[tuple[Path, str]]) -> list[list]:
@@ -571,9 +624,15 @@ def run_feeds(
 ) -> dict:
     """Load each feed in turn. One feed's failure does not stop the others. A feed with
     no input file is a failed feed (a wrong ``--raw-dir`` must not look like success).
+
+    A feed is skipped only when its marker (for this database) matches the input files
+    AND the database confirms the release (``release_loaded``). Otherwise it loads,
+    whatever the marker says. After a good EMA release, its names are resolved against
+    ``substance_xref`` (``resolve_release_names``) in the same transaction.
     Returns ``{"loaded", "skipped", "failed"}`` (``failed`` lists the feed names)."""
     loaded = skipped = 0
     failed: list[str] = []
+    database = database_name(conn)
 
     def _fail(feed: Feed, why: str) -> None:
         print(f"FAIL {feed.name}: {why}")
@@ -593,8 +652,9 @@ def run_feeds(
             release_id = release or release_id_for(feed, paths)
             files = list(zip(paths, input_keys(paths, raw_dir), strict=True))
             fp = _fingerprint(files)
+            key = marker_name_for(feed, release_id, raw_dir)
             marker = checkpoint_markers.load_success_marker_path(
-                processed_root, source, marker_name_for(feed, release_id, raw_dir)
+                processed_root, source, db_marker_name(database, key)
             )
             if marker.is_file() and not force:
                 try:
@@ -602,9 +662,14 @@ def run_feeds(
                 except (OSError, ValueError):
                     stored = {}
                 if stored.get("files") == fp:
-                    print(f"skip {feed.name} {release_id}")
-                    skipped += 1
-                    continue
+                    if release_loaded(conn, feed.name, release_id):
+                        print(f"skip {feed.name} {release_id}")
+                        skipped += 1
+                        continue
+                    print(
+                        f"reload {feed.name} {release_id}: a marker exists, but {database} "
+                        "holds no loaded release"
+                    )
             try:
                 with audit_trail.deferred_mirror(conn):
                     if force:
@@ -618,6 +683,8 @@ def run_feeds(
                     result = load_release(
                         conn, feed, paths, release_id, run_id=run_id, raw_dir=raw_dir
                     )
+                    if result["status"] == "loaded" and source == "ema":
+                        result["names"] = resolve_release_names(conn, feed, release_id, run_id)
                     audit_trail.commit(conn)
             except BaseException:
                 audit_trail.rollback(conn)
@@ -631,7 +698,8 @@ def run_feeds(
                 marker,
                 {
                     "source": source,
-                    "source_file": marker.name,
+                    "source_file": key,
+                    "database": database,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "stats": stats,
                 },
@@ -640,12 +708,54 @@ def run_feeds(
             _fail(feed, f"{release_id}: {exc!r}")
             continue
         loaded += 1
+        names = result.get("names")
+        names_text = (
+            f" names_matched={names['matched']} names_unmatched={names['unmatched']}"
+            if names
+            else ""
+        )
         print(
             f"ok {feed.name} release={release_id} rows={result['rows']} "
             f"duplicates={result['duplicates']} conflicts={result['conflicts']} "
-            f"missing_key={result['missing_key']} bad_dates={result['bad_dates']}"
+            f"missing_key={result['missing_key']} bad_dates={result['bad_dates']} "
+            f"long_values={result.get('long_values', 0)}{names_text}"
         )
     return {"loaded": loaded, "skipped": skipped, "failed": failed}
+
+
+def release_names(conn: psycopg.Connection, dataset: str, release_id: str) -> list[str]:
+    """The distinct ``substance_names`` of one release (``dataset`` and ``release_id`` as
+    values, so the plan reads one leaf). Read whole: the resolution that follows COPYs on
+    the same connection, so no cursor can stay open."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT DISTINCT n FROM {SCHEMA}.reg_record r, unnest(r.substance_names) AS n "
+            "WHERE r.dataset = %s AND r.release_id = %s",
+            (dataset, release_id),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def resolve_release_names(
+    conn: psycopg.Connection, feed: Feed, release_id: str, run_id: str
+) -> dict:
+    """Resolve the names of one loaded EMA release against ``substance_xref``
+    (``load_substance.resolve_names``, source ``ema``: ``ema_name`` rows), in the caller's
+    transaction, so the release and its links commit together. Records the counts in a
+    ``load_commit`` audit row. Returns ``{"matched", "unmatched", "skipped_long"}``. The
+    import is here because ``load_substance`` imports this module."""
+    from episteme.data.regulatory.load_substance import resolve_names
+
+    counts = resolve_names(conn, release_names(conn, feed.name, release_id), "ema")
+    audit_trail.record(
+        "load_commit",
+        conn=conn,
+        object=f"substance_xref ema_name {feed.name} {release_id}",
+        rows_affected=counts["matched"],
+        new_value=counts,
+        run_id=run_id,
+    )
+    return counts
 
 
 def _refresh_recall_lots(

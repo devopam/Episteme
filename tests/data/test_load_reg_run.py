@@ -65,11 +65,26 @@ def env(tmp_path, monkeypatch):
         lambda src, stage, unit, err, run_id=None: failures.append((unit, err)),
     )
     monkeypatch.setattr(load_reg.audit_trail, "record", lambda *a, **k: "x")
+    # The database seams: its name, whether it holds the release, the name resolution.
+    monkeypatch.setattr(load_reg, "database_name", lambda conn: env.database)
+    monkeypatch.setattr(
+        load_reg, "release_loaded", lambda conn, dataset, release_id: env.in_db(dataset)
+    )
+    resolved: list[str] = []
+
+    def fake_resolve(conn, feed, release_id, run_id):
+        resolved.append(feed.name)
+        return {"matched": 2, "unmatched": 1, "skipped_long": 0}
+
+    monkeypatch.setattr(load_reg, "resolve_release_names", fake_resolve)
 
     class Env:
         pass
 
     env = Env()
+    env.database = "episteme_test"
+    env.in_db = lambda dataset: True
+    env.resolved = resolved
     env.bad, env.boom = set(), set()
     env.raw, env.processed = raw, tmp_path / "processed"
     env.calls, env.failures = calls, failures
@@ -156,6 +171,119 @@ def test_a_release_override_gets_its_own_marker(env):
     assert _run(env, [_feed("f1")], release="2026-01")["loaded"] == 1
     assert _run(env, [_feed("f1")], release="2026-02")["loaded"] == 1
     assert _run(env, [_feed("f1")], release="2026-01")["skipped"] == 1
+
+
+def test_a_marker_with_no_loaded_release_in_the_database_loads_again(env, capsys):
+    _put(env, "f1")
+    feeds = [_feed("f1")]
+    assert _run(env, feeds)["loaded"] == 1
+    env.in_db = lambda dataset: False  # the rows are gone (another database, a reset)
+    res = _run(env, feeds)
+    assert res["loaded"] == 1 and res["skipped"] == 0 and env.calls == ["f1", "f1"]
+    assert "holds no loaded release" in capsys.readouterr().out
+
+
+def test_a_marker_made_for_episteme_test_is_not_used_for_episteme(env):
+    _put(env, "f1")
+    feeds = [_feed("f1")]
+    assert _run(env, feeds)["loaded"] == 1  # episteme_test
+    env.database = "episteme"
+    assert _run(env, feeds)["loaded"] == 1  # its own marker is missing: it loads
+    assert _run(env, feeds)["skipped"] == 1
+    env.database = "episteme_test"
+    assert _run(env, feeds)["skipped"] == 1
+    markers = sorted(p.name for p in Path(env.processed).rglob("*.ok"))
+    assert len(markers) == 2 and markers[0] != markers[1]
+    assert all("f1__" in m for m in markers)
+
+
+def test_db_marker_name_differs_by_database():
+    a = load_reg.db_marker_name("episteme_test", "k")
+    b = load_reg.db_marker_name("episteme", "k")
+    assert a != b and a.endswith("__k") and b.endswith("__k")
+    assert not set(load_reg.db_marker_name('x/"y', "k")) & set('/\\"')
+
+
+def test_an_ema_release_resolves_its_names_and_records_the_counts(env, capsys):
+    _put(env, "f1")
+    assert _run(env, [_feed("f1")])["loaded"] == 1
+    assert env.resolved == ["f1"]
+    assert "names_matched=2 names_unmatched=1" in capsys.readouterr().out
+    marker = next(Path(env.processed).rglob("*.ok"))
+    stats = json.loads(marker.read_text(encoding="utf-8"))["stats"]
+    assert stats["names"] == {"matched": 2, "unmatched": 1, "skipped_long": 0}
+
+
+def test_a_failed_ema_release_resolves_nothing(env):
+    _put(env, "f1")
+    env.bad.add("f1")
+    _run(env, [_feed("f1")])
+    assert env.resolved == []
+
+
+def test_an_openfda_release_resolves_nothing(env):
+    d = env.raw / "drug" / "ndc"
+    d.mkdir(parents=True)
+    (d / "drug-ndc-0001-of-0001.json.zip").write_text("z")
+    feed = _feed("fda_ndc")
+    out = load_reg.run_feeds(
+        FakeConn(),
+        "openfda",
+        [feed],
+        env.raw,
+        env.processed,
+        release=None,
+        force=False,
+        reason=None,
+        run_id="r",
+    )
+    assert out["loaded"] == 1 and env.resolved == []
+
+
+def test_resolve_release_names_reads_the_release_and_audits_the_counts(monkeypatch):
+    from episteme.data.regulatory import load_substance
+
+    seen = {}
+
+    def fake_resolve(conn, names, source):
+        seen["names"], seen["source"] = list(names), source
+        return {"matched": 1, "unmatched": 1, "skipped_long": 0}
+
+    audits = []
+    monkeypatch.setattr(load_substance, "resolve_names", fake_resolve)
+    monkeypatch.setattr(load_reg, "release_names", lambda conn, d, r: ["metformin", "nope"])
+    monkeypatch.setattr(load_reg.audit_trail, "record", lambda ev, **k: audits.append((ev, k)))
+    out = load_reg.resolve_release_names(FakeConn(), _feed("ema_medicines"), "2026-11", "r")
+    assert out == {"matched": 1, "unmatched": 1, "skipped_long": 0}
+    assert seen == {"names": ["metformin", "nope"], "source": "ema"}
+    ((event, kw),) = audits
+    assert event == "load_commit" and kw["new_value"] == out
+    assert "ema_medicines 2026-11" in kw["object"]
+
+
+# --- RowPreparer: values too long to index ----------------------------------------
+def test_names_and_product_keys_too_long_to_index_are_skipped_and_counted():
+    from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES
+
+    feed = Feed(
+        name="t",
+        url_key="K",
+        format="ema_json",
+        jurisdiction="EU",
+        record_key=("id",),
+        substance_fields=("sub",),
+        product_fields=("prod",),
+        date_field=None,
+        cadence="monthly",
+    )
+    long = "x" * (MAX_INDEX_TEXT_BYTES + 1)
+    rows, stats = load_reg.prepare_rows(
+        feed, [{"id": "1", "sub": f"aspirin | {long}", "prod": ["P1", long]}], "f"
+    )
+    assert rows[0]["substance_names"] == ["aspirin"]
+    assert rows[0]["product_keys"] == ["P1"]
+    assert stats["long_values"] == 2
+    assert rows[0]["payload"]["prod"][1] == long  # the value stays in the payload
 
 
 # --- run_feeds: failures ----------------------------------------------------------

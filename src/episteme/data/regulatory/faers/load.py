@@ -51,10 +51,17 @@ So a partial or stale input set must not go live:
   generation there is no floor. The built generation stays, so a re-run with the override
   goes on from there.
 
-``override_reason`` (CLI: ``--allow-partial --reason``) passes both, and writes one
+* With a ``post_load`` (the CLI always gives one): ``substance_empty``, before any work, refuses
+  a database with no ``substance`` row (the signals would be empty), and ``signal_problems``,
+  before the swap, refuses signals whose bridge tied no drug row of the generation or whose
+  ``faers_pair_quarter`` would have no row. A load into ``episteme_test`` must never leave
+  production with empty signals.
+
+``override_reason`` (CLI: ``--allow-partial --reason``) passes all of them, and writes one
 ``force_override`` audit row with its reason for each check that it passes. ``--force``
 alone does not. A sample run (``sample``; the CLI sets it on the secondary database, which
-only ``run_pipeline.sh --sample`` selects) reads a slice on purpose and skips both.
+only ``run_pipeline.sh --sample`` selects) reads a slice on purpose and skips the first two;
+it does not skip the substance and signal checks.
 
 **Resume: how a run decides** (``decide_generation``). The fingerprint is a SHA-256 of
 ``FORMAT_VERSION`` (of ``parse``) and the ``input_key``, size and modification time of every
@@ -103,6 +110,7 @@ reads ``os.environ``.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -191,7 +199,9 @@ __all__ = [
     "old_leaf_table",
     "old_table",
     "parse_bound",
+    "signal_problems",
     "state_table",
+    "substance_empty",
     "unfinished_generations",
 ]
 
@@ -206,15 +216,16 @@ def fingerprint(files: Iterable[tuple[Path, str]]) -> str:
     return hashlib.sha256(json.dumps([FORMAT_VERSION, sorted(rows)]).encode("utf-8")).hexdigest()
 
 
-def build_signals(conn: psycopg.Connection) -> dict:
-    """The ``post_load`` of the CLI: bridge new entries, then build the signal tables of the
-    one unfinished generation. They swap with it."""
+def build_signals(conn: psycopg.Connection, *, redo: bool = False) -> dict:
+    """The ``post_load`` of the CLI: bridge new entries (with ``redo``, all entries again, so
+    a corrected xref link reaches the signals; the CLI sets it with ``--force``), then build
+    the signal tables of the one unfinished generation. They swap with it."""
     generation = next(iter(unfinished_generations(conn)))
     conn.commit()
     state = _read_state(conn, generation)
     bridge = state.get(("phase", "bridged"))
     if bridge is None:  # a re-run keeps the map that its finished partitions were built on
-        bridge = bridge_entries(conn)
+        bridge = bridge_entries(conn, redo=redo)
         with conn.cursor() as cur:
             _put_state(cur, generation, "phase", "bridged", bridge)
         conn.commit()
@@ -222,6 +233,35 @@ def build_signals(conn: psycopg.Connection) -> dict:
         conn, pair_drug_cap=get_settings().faers_pair_drug_cap, generation=generation
     )
     return {"bridge": bridge, "signals": signals}
+
+
+def substance_empty(conn: psycopg.Connection) -> bool:
+    """Whether ``substance`` has no row (the FDA substance data is not loaded in this
+    database). The read is rolled back."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT NOT EXISTS (SELECT 1 FROM episteme.substance)")
+            return bool(cur.fetchone()[0])
+    finally:
+        conn.rollback()
+
+
+def signal_problems(post_load_stats: dict) -> list[str]:
+    """Why the signals of a built generation must not swap in: the bridge tied no drug row
+    of the generation to a substance, or ``faers_pair_quarter`` would have no row. Reads the
+    counts that ``build_signals`` returned (kept in the progress table, so a resumed run is
+    checked as well). Empty when the signals are usable."""
+    signals = post_load_stats.get("signals") or {}
+    out = []
+    bridged = int(signals.get("drug_rows") or 0) - int(signals.get("drug_rows_unbridged") or 0)
+    if bridged <= 0:
+        out.append(
+            "the bridge matched no drug entry of this generation to a substance "
+            f"(drug_rows {signals.get('drug_rows', 0)}, all unbridged)"
+        )
+    if int(signals.get("pair_rows") or 0) <= 0:
+        out.append("faers_pair_quarter would have 0 rows")
+    return out
 
 
 def load_generation(
@@ -271,6 +311,17 @@ def load_generation(
     if problems:
         _audit_override(conn, "input set", override_reason, {"problems": problems}, run_id)
         overrides.append("input set")
+    # The signals need substances. A sample run does not skip this: an empty substance
+    # table in the target database would swap in empty signals.
+    if post_load is not None and substance_empty(conn):
+        if override_reason is None:
+            raise GenerationError(
+                "episteme.substance is empty in this database: load the FDA substance data "
+                "first (scripts/data/openfda/load_substance.sh), in this database; nothing "
+                "was loaded. To go on anyway, pass --allow-partial --reason."
+            )
+        _audit_override(conn, "empty substance", override_reason, {"substances": 0}, run_id)
+        overrides.append("empty substance")
 
     leftovers_dropped = _drop_old_leftovers(conn)
     with conn.cursor() as cur:
@@ -346,6 +397,20 @@ def load_generation(
         except BaseException:
             conn.rollback()
             raise
+    if post_load is not None:
+        # Not bypassed by a sample run: empty signals must never swap in silently.
+        signal_issues = signal_problems(state.get(("phase", "post_load")) or {})
+        if signal_issues:
+            if override_reason is None:
+                raise GenerationError(
+                    "; ".join(signal_issues) + f"; no swap. Generation {generation} stays "
+                    "built. Check that the substance data is loaded in this database; if the "
+                    "result is right, run the load again with --allow-partial --reason."
+                )
+            _audit_override(
+                conn, "empty signals", override_reason, {"problems": signal_issues}, run_id
+            )
+            overrides.append("empty signals")
 
     audit_counts = {
         "reports": checked["reports"],
@@ -451,7 +516,8 @@ def main(argv: list[str] | None = None) -> int:
                         override_reason=args.reason if args.allow_partial else None,
                         # Only run_pipeline.sh --sample selects the secondary database.
                         sample=settings.db_target == "secondary",
-                        post_load=build_signals,
+                        # --force re-bridges every entry, so a corrected link reaches FAERS.
+                        post_load=functools.partial(build_signals, redo=args.force),
                     )
                     print("done " + " ".join(f"{k}={v}" for k, v in result.items()))
                     # Not part of the generation, and quick, so it runs on a "current" too.

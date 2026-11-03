@@ -140,10 +140,12 @@ class _Audit:
         pass
 
 
-def _run(tmp_path, monkeypatch, files, *, force=False):
+def _run(tmp_path, monkeypatch, files, *, force=False, database="episteme_test", in_db=True):
     loads = []
     _Audit.calls = []
     monkeypatch.setattr(ls, "audit_trail", _Audit)
+    monkeypatch.setattr(ls, "database_name", lambda conn: database)
+    monkeypatch.setattr(ls, "substances_loaded", lambda conn: in_db)
     monkeypatch.setattr(
         ls,
         "load_substances",
@@ -172,6 +174,28 @@ def test_run_files_skips_a_file_with_a_matching_marker(tmp_path, monkeypatch):
     assert first == {"loaded": 1, "skipped": 0, "failed": []} and loads == [z]
     again, loads = _run(tmp_path, monkeypatch, [z])
     assert again == {"loaded": 0, "skipped": 1, "failed": []} and loads == []
+
+
+def test_run_files_loads_when_the_marker_matches_but_the_database_is_empty(
+    tmp_path, monkeypatch, capsys
+):
+    z = _zip(tmp_path / "raw" / "other" / "substance" / "s.zip", [METFORMIN])
+    _run(tmp_path, monkeypatch, [z])
+    out, loads = _run(tmp_path, monkeypatch, [z], in_db=False)
+    assert out == {"loaded": 1, "skipped": 0, "failed": []} and loads == [z]
+    assert "holds no fda_substance rows" in capsys.readouterr().out
+
+
+def test_run_files_marker_of_episteme_test_is_not_used_for_episteme(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "raw" / "other" / "substance" / "s.zip", [METFORMIN])
+    _run(tmp_path, monkeypatch, [z], database="episteme_test")
+    out, loads = _run(tmp_path, monkeypatch, [z], database="episteme")
+    assert out["loaded"] == 1 and loads == [z]
+    again, loads = _run(tmp_path, monkeypatch, [z], database="episteme")
+    assert again["skipped"] == 1 and loads == []
+    payloads = [json.loads(p.read_text("utf-8")) for p in (tmp_path / "proc").rglob("*.ok")]
+    assert sorted(p["database"] for p in payloads) == ["episteme", "episteme_test"]
+    assert {p["source_file"] for p in payloads} == {"other__substance__s.zip"}
 
 
 def test_run_files_reloads_when_the_file_changed(tmp_path, monkeypatch):
@@ -424,3 +448,25 @@ def test_resolve_names_again_drops_the_stale_row(db, tmp_path):
     db.commit()
     assert _keys(db, "ema_name", "shared") == [b_key]
     assert len(_keys(db, "faers_name", "beta")) == 1  # another source's row stays
+
+
+@pytest.mark.pg
+def test_a_marker_with_an_empty_xref_table_loads_again(db, tmp_path):
+    raw = tmp_path / "raw"
+    z = _zip(raw / "other" / "substance" / "s.zip", [METFORMIN])
+    proc = tmp_path / "proc"
+
+    def run():
+        out = ls.run_files(db, [z], raw, proc, force=False, reason=None, run_id="t")
+        db.rollback()
+        return out
+
+    assert run()["loaded"] == 1
+    assert run()["skipped"] == 1  # marker and rows agree
+    (marker,) = proc.rglob("*.ok")
+    assert marker.name.startswith("episteme_test_")  # the database name is in the key
+    with db.cursor() as cur:  # the rows go (a reset, or a marker from elsewhere)
+        cur.execute("TRUNCATE episteme.substance_xref, episteme.substance")
+    db.commit()
+    assert run()["loaded"] == 1
+    assert len(_keys(db, "name", "metformin")) == 1

@@ -22,8 +22,13 @@ on reload, and an xref row is added with ``ON CONFLICT DO NOTHING``, never moved
 the record's own. A record can have more than one (a salt of two moieties) and often
 has one that points at itself; the record's own UNII is the fallback.
 
-``resolve_names`` maps names from another dataset (EMA, FAERS) to substances by exact
-normalised match, and counts the names that do not match. No fuzzy match.
+``resolve_names`` maps names from another dataset to substances by exact normalised match,
+and counts the names that do not match. No fuzzy match. ``load_reg`` calls it after each
+good EMA release (source ``ema``, rows ``ema_name``); FAERS has its own bridge
+(``faers_entry_substance``).
+
+A file is skipped only when its marker, keyed on the database name and the ``input_key``,
+matches the file and the database holds this dataset's rows.
 
 The CLI connects as the table owner, as ``load_reg`` does. Config comes from
 ``episteme.config``; this module never reads ``os.environ``.
@@ -47,7 +52,7 @@ import psycopg
 from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
-from episteme.data.regulatory.load_reg import input_keys
+from episteme.data.regulatory.load_reg import database_name, db_marker_name, input_keys
 from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES, norm_name
 from episteme.ops.failure import record_failure
 
@@ -315,6 +320,23 @@ def marker_name_for(path: Path, raw_dir: Path) -> str:
     return checkpoint_markers.input_key(path, raw_dir)
 
 
+def substances_loaded(conn: psycopg.Connection) -> bool:
+    """Whether the database holds ``substance_xref`` rows of this dataset. A marker alone
+    never proves the load. The read is rolled back; a failed read counts as "not loaded"."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT EXISTS (SELECT 1 FROM {SCHEMA}.substance_xref WHERE source = %s)",
+                (DATASET,),
+            )
+            return bool(cur.fetchone()[0])
+    except psycopg.Error:
+        _LOG.warning("could not read substance_xref", exc_info=True)
+        return False
+    finally:
+        conn.rollback()
+
+
 def _fingerprint(path: Path) -> list:
     st = path.stat()
     return [st.st_size, st.st_mtime_ns]
@@ -330,7 +352,9 @@ def run_files(
     reason: str | None,
     run_id: str,
 ) -> dict:
-    """Load each file. A file with a matching marker is skipped unless ``force``.
+    """Load each file. A file is skipped (unless ``force``) only when its marker for this
+    database matches the file AND the database holds this dataset's xref rows
+    (``substances_loaded``); otherwise it loads, whatever the marker says.
     Returns ``{"loaded", "skipped", "failed"}`` (``failed`` lists the input keys)."""
     keys = input_keys(files, raw_dir)  # raises when two inputs share a key
     loaded = skipped = 0
@@ -348,8 +372,11 @@ def run_files(
     if not files:
         print(f"FAIL {DATASET}: no input files under {raw_dir / 'other' / 'substance'}")
         failed.append(DATASET)
+    database = database_name(conn) if files else ""
     for path, key in zip(files, keys, strict=True):
-        marker = checkpoint_markers.load_success_marker_path(processed_root, SOURCE, key)
+        marker = checkpoint_markers.load_success_marker_path(
+            processed_root, SOURCE, db_marker_name(database, key)
+        )
         fp = _fingerprint(path)
         if marker.is_file() and not force:
             try:
@@ -357,9 +384,11 @@ def run_files(
             except (OSError, ValueError):
                 stored = {}
             if stored.get("file") == fp:
-                print(f"skip {key}")
-                skipped += 1
-                continue
+                if substances_loaded(conn):
+                    print(f"skip {key}")
+                    skipped += 1
+                    continue
+                print(f"reload {key}: a marker exists, but {database} holds no {DATASET} rows")
         try:
             try:
                 with audit_trail.deferred_mirror(conn):
@@ -377,6 +406,7 @@ def run_files(
                 {
                     "source": SOURCE,
                     "source_file": key,
+                    "database": database,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "stats": {**stats, "file": fp},
                 },

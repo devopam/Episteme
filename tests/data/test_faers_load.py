@@ -313,6 +313,140 @@ def test_a_sample_run_skips_the_quarter_check(tmp_path):
         )
 
 
+class _IdleConn:
+    """Idle for ``load_generation``'s first check; any later database step stops the test."""
+
+    class info:  # noqa: N801 - mirrors psycopg's attribute
+        from psycopg.pq import TransactionStatus
+
+        transaction_status = TransactionStatus.IDLE
+
+    def cursor(self):
+        raise AssertionError("no database step expected here")
+
+
+def test_an_empty_substance_table_is_refused_before_any_work_even_in_a_sample(
+    tmp_path, monkeypatch
+):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")])
+    monkeypatch.setattr(fl, "substance_empty", lambda conn: True)
+    monkeypatch.setattr(fl, "_drop_old_leftovers", lambda conn: pytest.fail("work started"))
+    for sample in (False, True):
+        with pytest.raises(fl.GenerationError, match="substance is empty.*load_substance"):
+            fl.load_generation(
+                _IdleConn(),
+                [z],
+                raw_dir=raw,
+                processed_dir=tmp_path,
+                run_id="r",
+                post_load=lambda conn: {},
+                sample=sample,
+            )
+
+
+def test_the_substance_check_needs_a_post_load(tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")])
+
+    class Stop(Exception):
+        pass
+
+    def stop(conn):
+        raise Stop
+
+    monkeypatch.setattr(fl, "substance_empty", lambda conn: pytest.fail("checked"))
+    monkeypatch.setattr(fl, "_drop_old_leftovers", stop)
+    with pytest.raises(Stop):
+        fl.load_generation(_IdleConn(), [z], raw_dir=raw, processed_dir=tmp_path, run_id="r")
+
+
+def test_an_empty_substance_table_passes_with_the_override_and_is_audited(tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_report("1")])
+    audits = []
+
+    class Stop(Exception):
+        pass
+
+    def stop(conn):
+        raise Stop
+
+    monkeypatch.setattr(fl, "substance_empty", lambda conn: True)
+    monkeypatch.setattr(fl, "_audit_override", lambda conn, what, *a: audits.append(what))
+    monkeypatch.setattr(fl, "_drop_old_leftovers", stop)
+    with pytest.raises(Stop):
+        fl.load_generation(
+            _IdleConn(),
+            [z],
+            raw_dir=raw,
+            processed_dir=tmp_path,
+            run_id="r",
+            post_load=lambda conn: {},
+            override_reason="why",
+        )
+    assert audits == ["empty substance"]
+
+
+@pytest.mark.parametrize(
+    ("signals", "problems"),
+    [
+        ({"drug_rows": 10, "drug_rows_unbridged": 2, "pair_rows": 4}, []),
+        ({"drug_rows": 10, "drug_rows_unbridged": 10, "pair_rows": 0}, ["bridge", "pair"]),
+        ({"drug_rows": 10, "drug_rows_unbridged": 0, "pair_rows": 0}, ["pair"]),
+        ({}, ["bridge", "pair"]),
+    ],
+)
+def test_signal_problems(signals, problems):
+    got = fl.signal_problems({"bridge": {"entries": 0}, "signals": signals})
+    assert len(got) == len(problems)
+    for text, word in zip(got, problems, strict=True):
+        assert word in text
+
+
+def test_main_passes_force_to_the_bridge_as_redo(tmp_path, monkeypatch):
+    import contextlib
+
+    import episteme.config as cfg
+    import episteme.ops.status as status
+    import episteme.ops.stop as stop
+    from episteme.data.db import connection as db_connection
+
+    monkeypatch.setenv("EPISTEME_RAW_ROOT", str(tmp_path / "rawroot"))
+    monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "proc"))
+    cfg.get_settings.cache_clear()
+    _zip(tmp_path / "rawroot" / "openfda", "2020q1", [_report("1")])
+    monkeypatch.setattr(db_connection, "admin_dsn_from_settings", lambda: "dsn")
+
+    class Conn:
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(fl.psycopg, "connect", lambda *a, **k: contextlib.nullcontext(Conn()))
+    handle = type("H", (), {"exit_code": lambda s, rc: rc})()
+    monkeypatch.setattr(stop, "stage_guard", lambda *a, **k: contextlib.nullcontext(handle))
+    monkeypatch.setattr(status, "current", lambda: type("C", (), {"update": lambda s, **k: 0})())
+    monkeypatch.setattr(fl.audit_trail, "record", lambda *a, **k: "x")
+    monkeypatch.setattr(fl, "latest_release", lambda conn, dataset: None)
+    seen = []
+
+    def fake_load(conn, zips, **kw):
+        seen.append(kw["post_load"])
+        return {"status": "current"}
+
+    monkeypatch.setattr(fl, "load_generation", fake_load)
+    try:
+        assert fl.main([]) == 0
+        assert fl.main(["--force", "--reason", "fixed links"]) == 0
+    finally:
+        cfg.get_settings.cache_clear()
+    assert [p.keywords for p in seen] == [{"redo": False}, {"redo": True}]
+    assert all(p.func is fl.build_signals for p in seen)
+
+
 def test_a_partial_input_set_is_refused_before_any_database_work(tmp_path):
     raw = tmp_path / "raw"
     z = _zip(raw, "2020q1", [_report("1")], 1, 2)
@@ -1197,6 +1331,22 @@ def test_post_load_is_not_repeated_after_a_failed_swap(db, reader, tmp_path, mon
     _run(db, tmp_path, [z], post_load=lambda conn: calls.append(1))
     assert calls == [1]
     assert _ids(reader) == ["new"]
+
+
+@pytest.mark.pg
+def test_a_run_with_an_empty_substance_table_is_refused(db, tmp_path):
+    with db.cursor() as cur:
+        cur.execute("TRUNCATE episteme.substance, episteme.substance_xref")
+    db.commit()
+    z = _zip(tmp_path / "raw", "2020q1", [_report("1")])
+    with pytest.raises(fl.GenerationError, match="substance is empty"):
+        _run(db, tmp_path, [z], post_load=fl.build_signals)
+    db.rollback()
+    assert _generation_relations(db) == []  # refused before any table was built
+    db.rollback()
+    with pytest.raises(fl.GenerationError, match="substance is empty"):
+        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True)
+    db.rollback()
 
 
 @pytest.mark.pg

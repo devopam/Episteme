@@ -800,7 +800,7 @@ def test_half_built_signals_never_swap_and_a_rerun_repeats_no_finished_work(
     db.rollback()
     monkeypatch.setattr(sg, "_add_primary_key", real_key)
     monkeypatch.setattr(sg, "_build_partition", lambda *a: pytest.fail("built again"))
-    monkeypatch.setattr(fl, "bridge_entries", lambda conn: pytest.fail("bridged again"))
+    monkeypatch.setattr(fl, "bridge_entries", lambda conn, **kw: pytest.fail("bridged again"))
     out = _run(db, tmp_path, [z], post_load=fl.build_signals)
     assert out["status"] == "swapped" and out["post_load"]["signals"]["pair_rows"] == 2
     assert out["post_load"]["bridge"]["active_substance"] == 2
@@ -820,6 +820,45 @@ def test_half_built_signals_never_swap_and_a_rerun_repeats_no_finished_work(
     assert out["status"] == "swapped"
     assert _pairs(db) == []
     assert _generation_relations(db) == []
+    db.rollback()
+
+
+@pytest.mark.pg
+def test_a_forced_run_sees_a_link_that_a_reload_moved(db, tmp_path):
+    import functools
+
+    a, b, c = _substance(db, "alpha"), _substance(db, "beta"), _substance(db, "gamma")
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_zip_report("1", ["alpha", "gamma"], "20200201")])
+    _run(db, tmp_path, [z], post_load=fl.build_signals)
+    assert _pairs(db) == sorted([(a, c, Q1_2020, 1, 1), (c, a, Q1_2020, 1, 1)])
+    with db.cursor() as cur:  # a substance reload moves the name to another substance
+        cur.execute(
+            "UPDATE episteme.substance_xref SET substance_key = %s "
+            "WHERE id_type = 'name' AND id_value = 'alpha'",
+            (b,),
+        )
+    db.commit()
+    # What the CLI passes for --force --reason: a fresh generation, every entry re-bridged.
+    out = _run(
+        db, tmp_path, [z], force=True, post_load=functools.partial(fl.build_signals, redo=True)
+    )
+    assert out["status"] == "swapped"
+    assert _pairs(db) == sorted([(b, c, Q1_2020, 1, 1), (c, b, Q1_2020, 1, 1)])
+    db.rollback()
+
+
+@pytest.mark.pg
+def test_signals_that_bridge_nothing_are_not_swapped_in_even_in_a_sample(db, tmp_path):
+    _substance(db, "alpha")
+    raw = tmp_path / "raw"
+    z = _zip(raw, "2020q1", [_zip_report("1", ["nothing", "unknown"], "20200201")])
+    with pytest.raises(fl.GenerationError, match="bridge matched no drug entry.*0 rows"):
+        _run(db, tmp_path, [z], post_load=fl.build_signals, sample=True)
+    db.rollback()
+    assert _all(db, "SELECT count(*) FROM episteme.faers_report") == [(0,)]
+    out = _run(db, tmp_path, [z], post_load=fl.build_signals, override_reason="known gap")
+    assert out["status"] == "swapped" and "empty signals" in out["overrides"]
     db.rollback()
 
 

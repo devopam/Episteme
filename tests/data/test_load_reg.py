@@ -372,3 +372,62 @@ def test_open_read_transaction_makes_the_feed_fail_not_hang(db, tmp_path, monkey
     res = load_reg.load_release(db, feed, f, "2026-11", run_id="r")
     db.commit()
     assert res["status"] == "loaded"
+
+
+def _run_feeds(conn, feeds, raw, processed):
+    out = load_reg.run_feeds(
+        conn, "ema", feeds, raw, processed, release=None, force=False, reason=None, run_id="t"
+    )
+    conn.rollback()
+    return out
+
+
+def test_a_marker_with_no_release_in_the_database_loads_again(db, tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    feed = _feed()
+    _ema_file(raw / "ema_test.json", _rows(2))
+    processed = tmp_path / "processed"
+    assert _run_feeds(db, [feed], raw, processed)["loaded"] == 1
+    assert _run_feeds(db, [feed], raw, processed)["skipped"] == 1
+    (marker,) = processed.rglob("*.ok")
+    assert marker.name.startswith("episteme_test_")  # the database name is in the key
+    _clear_reg(db)  # the rows go; the marker stays
+    assert _run_feeds(db, [feed], raw, processed)["loaded"] == 1
+    assert load_reg.latest_release(db, feed.name) is not None
+    db.rollback()
+
+
+def test_an_ema_release_resolves_its_names_in_its_own_transaction(db, tmp_path):
+    with db.cursor() as cur:
+        cur.execute("TRUNCATE episteme.substance, episteme.substance_xref")
+        cur.execute("INSERT INTO episteme.substance (unii) VALUES ('U1') RETURNING substance_key")
+        key = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO episteme.substance_xref "
+            "(substance_key, id_type, id_value, method, confidence, source) "
+            "VALUES (%s, 'name', 'metformin', 'normalised_name', 1.0, 'fda_substance')",
+            (key,),
+        )
+    db.commit()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    rows = [{"url": "u1", "sub": "Metformin | Unknownium", "prod": "P", "date": "2025-01-02"}]
+    _ema_file(raw / "ema_test.json", rows)
+    processed = tmp_path / "processed"
+    assert _run_feeds(db, [_feed()], raw, processed)["loaded"] == 1
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT substance_key, id_value, source FROM episteme.substance_xref "
+            "WHERE id_type = 'ema_name'"
+        )
+        assert cur.fetchall() == [(key, "metformin", "ema")]
+        cur.execute(
+            "SELECT new_value FROM episteme._audit "
+            "WHERE object LIKE 'substance_xref ema_name%%' ORDER BY seq DESC LIMIT 1"
+        )
+        (counts,) = cur.fetchone()
+    db.rollback()
+    assert counts["matched"] == 1 and counts["unmatched"] == 1
+    stats = json.loads(next(processed.rglob("*.ok")).read_text("utf-8"))["stats"]
+    assert stats["names"]["matched"] == 1
