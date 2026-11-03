@@ -220,7 +220,9 @@ def test_a_second_load_replaces_the_label_rows_of_the_part(db, tmp_path):
             )
         },
     )
-    dm.extract_dailymed(raw, out, release_kinds=KINDS)
+    # One of two known labels leaves: over the withdrawal limit, so the guard is overridden
+    # (audited), as an operator would.
+    dm.extract_dailymed(raw, out, force=True, force_reason="test", release_kinds=KINDS)
     _load(db, out, "dailymed_bab__part00001")
     with db.cursor() as cur:
         cur.execute("SELECT DISTINCT article_id FROM episteme.label_section")

@@ -935,8 +935,9 @@ def test_retire_removes_the_rows_of_a_part_a_withdrawn_document_left(db, raw, ou
     ex.extract_epar(raw, out)
     pending = parts_retire.read_retire_pending(out, "ema_epar")
     assert pending == ["ema_epar_b0001__part00001"]
+    # Retiring the bucket removed the part's load marker with its shard (delete_all_parts).
     lp = load_success_marker_path(out, "ema_epar", "ema_epar_b0001__part00001.parquet")
-    lp.unlink()  # the part was not loaded again
+    assert not lp.exists()
     postgres_loader.delete_source_files(db, source="ema_epar", source_files=pending, run_id="t")
     db.commit()
     assert _count(db) == 1
