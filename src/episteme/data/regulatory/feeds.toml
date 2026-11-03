@@ -132,6 +132,7 @@ cadence = "monthly"
 
 [feeds.ema_epar_documents]
 # Document index, not substance data; the document text step reads it.
+# document_types: the document types whose English PDF becomes an articles row (ema_epar).
 url_key = "EMA_EPAR_DOCUMENTS_JSON"
 format = "ema_json"
 jurisdiction = "EU"
@@ -140,6 +141,7 @@ substance_fields = []
 product_fields = ["ema_product_number"]
 date_field = "first_published_date"
 cadence = "monthly"
+document_types = ["product-information", "assessment-report", "rmp-summary"]
 
 [feeds.fda_enforcement]
 # url_key is the openFDA download catalogue; the zip URLs are read out of it at run time. code_info holds the lot numbers.

@@ -60,6 +60,7 @@ _EXTRACT_MODULES = {
     "apollo": ("episteme.data.apollo.extract_apollo", "apollo/extract_apollo.sh"),
     "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
     "dailymed": ("episteme.data.dailymed.extract_dailymed", "dailymed/extract_dailymed.sh"),
+    "ema_epar": ("episteme.data.ema.extract_epar", "ema/extract_ema_epar.sh"),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
@@ -81,6 +82,8 @@ STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
             "episteme.data.pubchem.serialize_pubchem",
             "pubchem/serialize_pubchem.sh",
         ),
+        # ema_epar loads through load_articles; its wrappers sit with the other EMA ones.
+        ("ema_epar", "load"): (LOAD_MODULE, "ema/load_ema_epar.sh"),
         # The regulatory reference feeds load through load_reg, not load_articles.
         ("ema", "load"): ("episteme.data.regulatory.load_reg", "ema/load_ema.sh"),
         ("openfda", "load"): ("episteme.data.regulatory.load_reg", "openfda/load_openfda.sh"),
@@ -103,6 +106,7 @@ EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pubchem", "load"): ("episteme.data.pubchem.retire",),
     ("pmc", "load"): ("episteme.data.pmc.retire",),
     ("dailymed", "load"): ("episteme.data.dailymed.retire",),
+    ("ema_epar", "load"): ("episteme.data.ema.retire",),
 }
 
 

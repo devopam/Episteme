@@ -77,13 +77,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import glob
 import io
 import json
 import logging
 import re
 import sys
-import threading
 import time
 import zipfile
 from collections import Counter
@@ -96,9 +94,8 @@ _SRC = Path(__file__).resolve().parents[3]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
-from episteme.data import parts_retire, staging_writer  # noqa: E402
+from episteme.data import bucket_parts  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     LICENSE_PUBLIC_DOMAIN,
     SCHEMA_VERSION,
@@ -111,7 +108,6 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     failed_marker_path,
     input_key,
     is_success,
-    load_success_marker_path,
     mark_failed,
     mark_success,
     ops_root,
@@ -126,8 +122,8 @@ from episteme.data.parallel import (  # noqa: E402
     run_per_file,
 )
 from episteme.data.pmc.buckets import key_and_rel  # noqa: E402
-from episteme.data.staging_writer import write_rows  # noqa: E402
-from episteme.ops.profile import PART_ROW_OVERHEAD_BYTES, get_profile  # noqa: E402
+from episteme.data.staging_writer import WRITE_BATCH_ROWS  # noqa: E402
+from episteme.ops.profile import get_profile  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
 from episteme.ops.skip import add_skip_args, check_skip_args  # noqa: E402
 from episteme.ops.stop import stage_guard  # noqa: E402
@@ -145,8 +141,7 @@ _RELEASE_RE = re.compile(r"^dm_spl_release_human_(rx|otc)_part(\d+)\.zip$")
 _UPDATE_RE = re.compile(r"^dm_spl_(monthly|weekly|daily)_update_.+\.zip$")
 _RELEASE_KIND = {"rx": "prescription", "otc": "otc"}
 
-_AUDIT_LOCK = threading.Lock()
-_WRITE_BATCH_ROWS = staging_writer.WRITE_BATCH_ROWS
+_WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 _FAILED_LABELS_LISTED = 100
 
 
@@ -190,11 +185,9 @@ def check_bucket_scheme(processed_dir: Path) -> int:
     a run at another width, before anything is written (a different width gives
     different bucket keys: the old parts and rows would stay, and the same labels
     would load again under the new keys). Returns the width."""
-    path = ops_root(processed_dir, SOURCE) / "bucket_scheme.json"
-    if not path.is_file():
-        write_marker(path, {"prefix_chars": BUCKET_PREFIX_CHARS})
-        return BUCKET_PREFIX_CHARS
-    stored = int(json.loads(path.read_text(encoding="utf-8"))["prefix_chars"])
+    stored = bucket_parts.check_bucket_scheme(
+        processed_dir, SOURCE, "prefix_chars", BUCKET_PREFIX_CHARS
+    )
     if stored != BUCKET_PREFIX_CHARS:
         raise RuntimeError(
             f"DailyMed bucket prefix is {BUCKET_PREFIX_CHARS} characters but {processed_dir} "
@@ -379,8 +372,7 @@ def release_part_gaps(outers: list[Path]) -> list[str]:
 
 
 def _is_sample(processed_dir: Path) -> bool:
-    """A sample run (``run_pipeline.sh --sample``) has a processed root under ``_sample``."""
-    return "_sample" in Path(processed_dir).resolve().parts
+    return bucket_parts.is_sample(processed_dir)
 
 
 def _plan_against_earlier_state(processed_dir: Path, scan: Scan) -> tuple[dict[str, str], int, int]:
@@ -467,35 +459,7 @@ def _retire_vanished_buckets(processed_dir: Path, live: set[str]) -> int:
 
 
 def _audit_override(reason: str, what: str) -> None:
-    """One ``force_override`` audit row for a guard that ``--force --reason`` overrode,
-    degrading to the file-only mirror when no DB is reachable. Never raises."""
-    obj = f"{SOURCE} extract guard: {what}"[:500]
-    with _AUDIT_LOCK:
-        try:
-            from episteme.data.db.connection import connection as _pg_connection
-
-            with _pg_connection() as _conn:
-                _audit(
-                    "force_override",
-                    conn=_conn,
-                    object=obj,
-                    reason=reason,
-                    run_id=get_settings().run_id,
-                )
-                _conn.commit()
-        except Exception:  # noqa: BLE001 - best-effort
-            try:
-                from episteme import audit_trail as _audit_trail
-
-                _audit_trail.mirror_only(
-                    "force_override",
-                    object=obj,
-                    reason=reason,
-                    note="db_unavailable_or_failed",
-                    run_id=get_settings().run_id,
-                )
-            except Exception:  # noqa: BLE001
-                _LOG.warning("audit mirror_only fallback also failed", exc_info=True)
+    bucket_parts.audit_override(SOURCE, reason, what)
 
 
 # ---------------------------------------------------------------------------
@@ -580,11 +544,7 @@ def row_from_xml(xml: bytes) -> tuple[dict[str, Any], list[dict[str, Any]], dict
 
 def dailymed_row_bytes(row: dict[str, Any]) -> int:
     """Estimated bytes of one row (as ``pmc_row_bytes``)."""
-    total = PART_ROW_OVERHEAD_BYTES
-    for value in row.values():
-        if isinstance(value, str):
-            total += len(value.encode("utf-8"))
-    return total
+    return bucket_parts.row_bytes(row)
 
 
 # ---------------------------------------------------------------------------
@@ -596,89 +556,10 @@ def _part_caps() -> tuple[int, int]:
     return profile.part_rows, profile.part_bytes
 
 
-def _staging_dir(processed_dir: Path) -> Path:
-    return Path(processed_dir) / "staging" / SOURCE
-
-
-def _best_effort_audit(name: str, n_rows: int) -> None:
-    """One chained ``extract_commit`` audit row, degrading to the file-only mirror when
-    no DB is reachable. Never raises. Called BEFORE a part's ``mark_success``."""
-    with _AUDIT_LOCK:
-        try:
-            from episteme.data.db.connection import connection as _pg_connection
-
-            with _pg_connection() as _conn:
-                _audit(
-                    "extract_commit",
-                    conn=_conn,
-                    object=f"{SOURCE} {name}",
-                    rows_affected=n_rows,
-                    reason=None,
-                    run_id=get_settings().run_id,
-                )
-                _conn.commit()
-        except Exception:  # noqa: BLE001 - best-effort
-            try:
-                from episteme import audit_trail as _audit_trail
-
-                _audit_trail.mirror_only(
-                    "extract_commit",
-                    object=f"{SOURCE} {name}",
-                    rows_affected=n_rows,
-                    note="db_unavailable_or_failed",
-                    run_id=get_settings().run_id,
-                )
-            except Exception:  # noqa: BLE001
-                _LOG.warning("audit mirror_only fallback also failed for %s", name, exc_info=True)
-
-
 def _delete_all_parts(processed_dir: Path, key: str) -> None:
-    """Delete every part of bucket ``key``: success, failed and load-success markers
-    first, then the shards and sidecars. A part with a load-success marker was loaded:
-    its name goes to the retire pending file of the bucket BEFORE any delete."""
-    pattern = re.compile(re.escape(key) + r"__part(\d{5,})\.")
-    prefix = glob.escape(f"{key}__part") + "*"
-    load_dir = load_success_marker_path(processed_dir, SOURCE, "x").parent
-    marker_dirs = [
-        success_marker_path(processed_dir, SOURCE, "x").parent,
-        failed_marker_path(processed_dir, SOURCE, "x").parent,
-        load_dir,
-    ]
-    loaded: list[str] = []
-    if load_dir.is_dir():
-        for p in load_dir.glob(prefix):
-            m = pattern.match(p.name)
-            if m:
-                loaded.append(f"{key}__part{m.group(1)}")
-    if loaded:
-        parts_retire.add_retire_pending(processed_dir, SOURCE, loaded, unit=key)
+    """Delete every part of bucket ``key``, the sidecars too (see ``bucket_parts``)."""
     side_dir = labels.sidecar_path(processed_dir, "x").parent
-    for d in [*marker_dirs, _staging_dir(processed_dir), side_dir]:
-        if not d.is_dir():
-            continue
-        for p in d.glob(prefix):
-            if pattern.match(p.name):
-                p.unlink(missing_ok=True)
-
-
-def _read_bucket_marker(processed_dir: Path, key: str) -> dict[str, Any] | None:
-    """The stats of the bucket success marker when it has the parts format, else ``None``."""
-    p = success_marker_path(processed_dir, SOURCE, key)
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    st = payload.get("stats") if isinstance(payload, dict) else None
-    if not isinstance(st, dict):
-        return None
-    parts = st.get("parts")
-    if not isinstance(parts, int) or isinstance(parts, bool) or parts < 0:
-        return None
-    if st.get("parts_list") != [f"{key}__part{n:05d}" for n in range(1, parts + 1)]:
-        return None
-    if not isinstance(st.get("inputs"), list):
-        return None
-    return st
+    bucket_parts.delete_all_parts(processed_dir, SOURCE, key, (side_dir,))
 
 
 def process_bucket(
@@ -704,7 +585,7 @@ def process_bucket(
         prefix = str(manifest["bucket"])
         fingerprint = manifest["fingerprint"]
         if not force:
-            done = _read_bucket_marker(processed_dir, key)
+            done = bucket_parts.read_bucket_marker(processed_dir, SOURCE, key)
             if done is not None and done["inputs"] == fingerprint:
                 failed_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
                 return {
@@ -773,81 +654,29 @@ def process_bucket(
                     failed_marker_path(processed_dir, SOURCE, entry["key"]).unlink(missing_ok=True)
                     yield row, side
 
-        rows_src = _bucket_rows()
-        n = 0
-        with contextlib.closing(rows_src):
-            pending = next(rows_src, None)
-            while pending is not None:
-                n += 1
-                current_part = n
-                psf = part_name(prefix, n)
-                part: dict[str, Any] = {
-                    "rows": 0,
-                    "est_bytes": 0,
-                    "first": None,
-                    "last": None,
-                    "counts": Counter(),
-                    "side": [],
-                }
+        def _sidecar(psf: str, side: list[dict[str, Any]]) -> dict[str, Any]:
+            # The sidecar follows the shard it belongs to; the load refuses a shard
+            # without one, and the bucket marker (after the last part) is what says
+            # that the extract is whole.
+            labels.write_sidecar(processed_dir, psf, side)
+            return {"label_rows": len(side)}
 
-                def _part_rows(psf: str = psf, part: dict[str, Any] = part):
-                    nonlocal pending
-                    while pending is not None:
-                        row, side = pending
-                        row_est = dailymed_row_bytes(row)
-                        # A row that does not fit ends the part and stays pending for the
-                        # next one; a single row over the cap goes alone in its own part.
-                        if part["rows"] and part["est_bytes"] + row_est > cap_bytes:
-                            return
-                        pending = None
-                        row["source_file"] = psf
-                        part["rows"] += 1
-                        part["est_bytes"] += row_est
-                        part["side"].extend(side)
-                        if part["first"] is None:
-                            part["first"] = row["id"]
-                        part["last"] = row["id"]
-                        part["counts"][str(row.get("extract_status"))] += 1
-                        yield row
-                        if part["rows"] >= cap_rows:
-                            return
-                        pending = next(rows_src, None)
-
-                gen = _part_rows()
-                try:
-                    write_info = write_rows(
-                        gen,
-                        processed_dir,
-                        source=SOURCE,
-                        source_file=psf,
-                        prefer_parquet=True,
-                        batch_size=_WRITE_BATCH_ROWS,
-                    )
-                finally:
-                    gen.close()
-                # The sidecar follows the shard it belongs to; the load refuses a shard
-                # without one, and the bucket marker (after the last part) is what says
-                # that the extract is whole.
-                labels.write_sidecar(processed_dir, psf, part["side"])
-                part_stats = {
-                    "n_rows": part["rows"],
-                    "first_id": part["first"],
-                    "last_id": part["last"],
-                    "extract_status_counts": dict(part["counts"]),
-                    "label_rows": len(part["side"]),
-                    "part_rows": cap_rows,
-                    "part_bytes": cap_bytes,
-                    "est_bytes": part["est_bytes"],
-                    "write": write_info,
-                }
-                part["side"] = []
-                _best_effort_audit(psf, part["rows"])
-                mark_success(processed_dir, SOURCE, psf, stats=part_stats)
-                n_rows_new += part["rows"]
-                status_counts.update(part["counts"])
-                current_part = n + 1
-                if pending is None:
-                    pending = next(rows_src, None)
+        progress: dict[str, Any] = {"part": None, "rows": 0}
+        try:
+            n, n_rows_new, status_counts = bucket_parts.write_parts(
+                _bucket_rows(),
+                processed_dir=processed_dir,
+                source=SOURCE,
+                part_name=lambda i: part_name(prefix, i),
+                cap_rows=cap_rows,
+                cap_bytes=cap_bytes,
+                batch_rows=_WRITE_BATCH_ROWS,
+                after_shard=_sidecar,
+                progress=progress,
+            )
+        finally:
+            current_part = progress["part"]
+            n_rows_new = progress["rows"]
 
         stats: dict[str, Any] = {
             "n_rows": n_rows_new,
@@ -910,19 +739,7 @@ def _print_verbose(result: dict[str, Any]) -> None:
 def _select_buckets(
     keys: list[str], skip_units: list[str] | None, skip_reason: str | None
 ) -> list[str]:
-    if not skip_units:
-        return keys
-    from episteme.ops import skip
-
-    keep = set(
-        skip.apply_skips(
-            SOURCE, "extract", keys, skip_units, skip_reason, run_id=get_settings().run_id
-        )
-    )
-    for k in keys:
-        if k not in keep:
-            print(f"skip-unit {k}", file=sys.stderr)
-    return [k for k in keys if k in keep]
+    return bucket_parts.select_buckets(SOURCE, keys, skip_units, skip_reason)
 
 
 def extract_dailymed(
@@ -1086,14 +903,9 @@ def extract_dailymed(
 
 
 def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
-    """Tell the sample gate how many inputs failed: failed buckets plus failed labels.
-    ``gate run`` reads the file when its ``run_id`` is the run's own."""
-    run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
+    """Tell the sample gate how many inputs failed: failed buckets plus failed labels."""
     failed = int(res.get("failed") or 0) + int(res.get("failed_labels_count") or 0)
-    write_marker(
-        ops_root(processed_dir, SOURCE) / FAILED_INPUTS_FILE,
-        {"run_id": run_id, "failed_inputs": failed},
-    )
+    bucket_parts.write_failed_inputs(processed_dir, SOURCE, failed)
 
 
 def _main(argv: list[str] | None = None) -> int:

@@ -39,6 +39,8 @@ class Feed:
     product_fields: tuple[str, ...]
     date_field: str | None
     cadence: str
+    # Document types whose files are fetched and read as text (ema_epar_documents only).
+    document_types: tuple[str, ...] = ()
 
 
 def load_feeds(path: Path | None = None) -> dict[str, Feed]:
@@ -60,5 +62,6 @@ def load_feeds(path: Path | None = None) -> dict[str, Feed]:
             product_fields=tuple(entry["product_fields"]),
             date_field=entry.get("date_field") or None,
             cadence=str(entry["cadence"]),
+            document_types=tuple(entry.get("document_types") or ()),
         )
     return out

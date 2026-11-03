@@ -25,6 +25,10 @@ SOURCE="${1:-}"
 STAGE="${2:-}"
 [ -n "$SOURCE" ] && [ -n "$STAGE" ] || usage
 shift 2 || true
+# The folder of a source's stage wrappers under scripts/data/ (its own name, except for
+# ema_epar, whose wrappers sit with the other EMA ones).
+SRC_DIR="$SOURCE"
+[ "$SOURCE" = "ema_epar" ] && SRC_DIR="ema"
 
 # M5: validate args first, THEN require the audit actor — so `run_pipeline.sh`
 # with no/bad args gives usage(), not "missing required environment variable".
@@ -166,6 +170,7 @@ declare -A WRAPPER=(
     [dailymed]="dailymed/download_dailymed.sh"
     [openfda]="openfda/download_openfda.sh"
     [ema]="ema/download_ema.sh"
+    [ema_epar]="ema/download_ema_epar.sh"
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
@@ -176,9 +181,10 @@ declare -A WRAPPER=(
 # chain (dispatch to $HERE/<source>/<stage>_<source>.sh). Every other source is
 # download-only in SP2 (structured serialize = SP4). `_is_lit` gates the
 # extract/load/graph arms below.
-LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf dailymed"
-# dailymed has extract and load, and no graph stage (its label tables are loaded with it).
-NO_GRAPH_SOURCES="dailymed"
+LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf dailymed ema_epar"
+# dailymed and ema_epar have extract and load, and no graph stage (the label tables of
+# dailymed are loaded with it).
+NO_GRAPH_SOURCES="dailymed ema_epar"
 _has_graph() { case " $NO_GRAPH_SOURCES " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -245,24 +251,24 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             else
                 _is_lit "$SOURCE" || _is_structured "$SOURCE" || _is_reg "$SOURCE" \
                     || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured) or the regulatory feeds" 3
-                litw="$HERE/$SOURCE/load_$SOURCE.sh"
+                litw="$HERE/$SRC_DIR/load_$SOURCE.sh"
                 [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             fi
             ;;
         extract)
             _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
-            litw="$HERE/$SOURCE/extract_$SOURCE.sh"
+            litw="$HERE/$SRC_DIR/extract_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
         graph)
             { _is_lit "$SOURCE" && _has_graph "$SOURCE"; } || [ "$SOURCE" = "mesh" ] \
                 || die "$SOURCE graph is not wired" 3
-            litw="$HERE/$SOURCE/graph_$SOURCE.sh"
+            litw="$HERE/$SRC_DIR/graph_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
         serialize)
             _is_structured "$SOURCE" || die "$SOURCE $STAGE is not in SP4 — SP2 (literature) territory" 3
-            structw="$HERE/$SOURCE/serialize_$SOURCE.sh"
+            structw="$HERE/$SRC_DIR/serialize_$SOURCE.sh"
             [ -f "$structw" ] || die "wrapper not found: $structw (not yet implemented?)" 3
             ;;
         enrich)
@@ -719,9 +725,9 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
-# dailymed: --force --reason overrides its extract guards (audited); the reason rides along
-# once (skip_reason already holds it when --skip-unit is used).
-if [ "$SOURCE" = "dailymed" ] && [ "$FORCE" = "1" ] && [ "${#skip_args[@]}" -eq 0 ]; then
+# dailymed and ema_epar: --force --reason overrides their extract guards (audited); the
+# reason rides along once (skip_reason already holds it when --skip-unit is used).
+if { [ "$SOURCE" = "dailymed" ] || [ "$SOURCE" = "ema_epar" ]; } && [ "$FORCE" = "1" ] && [ "${#skip_args[@]}" -eq 0 ]; then
     lit_extract_args+=(--reason "$REASON")
 fi
 lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
@@ -908,18 +914,18 @@ else
     # also get `extract`/`load`/`graph` (dispatch to $HERE/<source>/<stage>_<source>.sh).
     case "$STAGE" in
         download) run_stage download bash "$wpath" "${wrapper_args[@]}" ;;
-        extract)  run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
+        extract)  run_stage extract bash "$HERE/$SRC_DIR/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
         load)
             if [ "$SOURCE" = "europepmc_id_mappings" ]; then
                 run_stage load bash "$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh" "${load_args[@]}"
             elif [ "$SOURCE" = "openfda_faers" ]; then
                 run_stage load bash "$wpath_faers" "${load_args[@]}"
             else
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
             fi
             ;;
-        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}" ;;
-        serialize) run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
+        graph)    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}" ;;
+        serialize) run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
                 run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
@@ -930,19 +936,19 @@ else
         all)
             run_stage download bash "$wpath" "${wrapper_args[@]}"
             if _is_structured "$SOURCE"; then
-                run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
                 if [ "$SOURCE" = "mesh" ]; then
-                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}"
                 fi
             elif _is_lit "$SOURCE"; then
-                run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage extract bash "$HERE/$SRC_DIR/extract_$SOURCE.sh" "${lit_extract_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
                 if _has_graph "$SOURCE"; then
-                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}"
                 fi
             elif _is_reg "$SOURCE"; then
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
             else
                 log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi

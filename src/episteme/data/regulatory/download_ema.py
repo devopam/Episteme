@@ -54,7 +54,7 @@ class FeedVerificationError(RuntimeError):
     """EMA answered with its human-verification page (or any HTML) instead of data."""
 
 
-class _Retryable(RuntimeError):
+class Retryable(RuntimeError):
     """A failed or incomplete download that one more try may fix."""
 
 
@@ -73,9 +73,9 @@ def _check_complete(tmp: Path, feed: Feed) -> dict[str, Any]:
         try:
             with zipfile.ZipFile(tmp) as zf:
                 if "xl/workbook.xml" not in zf.namelist():
-                    raise _Retryable("not a workbook")
+                    raise Retryable("not a workbook")
         except zipfile.BadZipFile as exc:
-            raise _Retryable(f"truncated workbook: {exc}") from exc
+            raise Retryable(f"truncated workbook: {exc}") from exc
         return {}
     rows = 0
     try:
@@ -83,29 +83,38 @@ def _check_complete(tmp: Path, feed: Feed) -> dict[str, Any]:
             for _ in ijson.items(fh, "data.item", use_float=True):
                 rows += 1
     except ijson.JSONError as exc:
-        raise _Retryable(f"truncated or invalid JSON: {exc}") from exc
+        raise Retryable(f"truncated or invalid JSON: {exc}") from exc
     total = ema_total(tmp)
     if total is None:
-        raise _Retryable("no meta.total_records")
+        raise Retryable("no meta.total_records")
     if rows != total:
         _LOG.warning("%s: %d rows but meta.total_records = %d", feed.name, rows, total)
     return {"rows": rows, "total_records": total}
 
 
-def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, Any]:
-    """One request into ``tmp``. Raises ``FeedVerificationError`` or ``_Retryable``."""
+def download_to(
+    session: Any,
+    url: str,
+    label: str,
+    tmp: Path,
+    check: Callable[[Path], dict[str, Any]],
+) -> dict[str, Any]:
+    """One request into ``tmp``, then ``check(tmp)`` proves the bytes are a whole file
+    and returns stats. Raises ``FeedVerificationError`` (status 200 with HTML, or a body
+    that starts like HTML) or ``Retryable``. ``check`` may raise either too; this is the
+    one place the EMA feeds and the EPAR documents share their transfer rules."""
     try:
         resp = session.get(url, stream=True, timeout=_CONNECT_READ_TIMEOUT)
     except (requests.RequestException, OSError) as exc:
-        raise _Retryable(f"request failed: {exc}") from exc
+        raise Retryable(f"request failed: {exc}") from exc
     try:
         ctype = str(resp.headers.get("Content-Type", "")).lower()
         if resp.status_code != 200:
             # An HTML error page (404, 5xx) is an ordinary error, not the verification page.
-            raise _Retryable(f"HTTP {resp.status_code}")
+            raise Retryable(f"HTTP {resp.status_code}")
         if "html" in ctype:
             raise FeedVerificationError(
-                f"{feed.name}: EMA answered status 200 with HTML, not data: "
+                f"{label}: EMA answered status 200 with HTML, not data: "
                 "its human-verification page; the stage stops"
             )
         size = 0
@@ -119,13 +128,13 @@ def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, A
                         first = False
                         if _looks_like_html(chunk):
                             raise FeedVerificationError(
-                                f"{feed.name}: EMA answered with an HTML body, not data: "
+                                f"{label}: EMA answered with an HTML body, not data: "
                                 "its human-verification page; the stage stops"
                             )
                     out.write(chunk)
                     size += len(chunk)
             except (requests.RequestException, OSError) as exc:
-                raise _Retryable(f"transfer failed after {size} bytes: {exc}") from exc
+                raise Retryable(f"transfer failed after {size} bytes: {exc}") from exc
             out.flush()
             os.fsync(out.fileno())
         declared = resp.headers.get("Content-Length")
@@ -139,16 +148,21 @@ def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, A
             and str(declared).isdigit()
             and int(declared) != size
         ):
-            raise _Retryable(f"truncated: {size} of {declared} bytes")
+            raise Retryable(f"truncated: {size} of {declared} bytes")
         if size == 0:
-            raise _Retryable("empty response")
-        stats = _check_complete(tmp, feed)
+            raise Retryable("empty response")
+        stats = check(tmp)
         stats["bytes"] = size
         return stats
     finally:
         close = getattr(resp, "close", None)
         if close:
             close()
+
+
+def _download_once(session: Any, url: str, feed: Feed, tmp: Path) -> dict[str, Any]:
+    """One feed request into ``tmp``. Raises ``FeedVerificationError`` or ``Retryable``."""
+    return download_to(session, url, feed.name, tmp, lambda p: _check_complete(p, feed))
 
 
 def fetch_ema_feeds(
@@ -210,7 +224,7 @@ def fetch_ema_feeds(
                     exc=exc,
                 )
                 raise
-            except _Retryable as exc:
+            except Retryable as exc:
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
                 _LOG.warning("%s: attempt %d of %d failed: %s", feed.name, attempt, ATTEMPTS, exc)

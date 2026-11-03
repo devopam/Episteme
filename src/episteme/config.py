@@ -131,6 +131,19 @@ DEFAULT_DAILYMED_KINDS = DAILYMED_KINDS
 # The DailyMed extract refuses a run that would withdraw more than this share of the labels
 # it knew (a missing release part would otherwise retire them); --force --reason overrides.
 DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE = 0.1
+# EPAR PDFs. A document with more pages, or more bytes, than these is failed and counted,
+# not read: pypdf holds a large file's objects in memory (target: under 2 GB with one worker).
+DEFAULT_EPAR_MAX_PAGES = 2000
+DEFAULT_EPAR_MAX_BYTES = 200 * 1024 * 1024
+# The EPAR extract refuses a run that would withdraw more than this share of the documents
+# it knew (a truncated feed would otherwise retire them); --force --reason overrides.
+DEFAULT_EPAR_MAX_WITHDRAWN_SHARE = 0.1
+# Document ids per EPAR extract bucket. A bucket is the ids from n*width up to (n+1)*width, so
+# a document stays in its bucket whatever else the feed holds. The three document types
+# of the first cut are about 23% of the ids, so 8,000 ids hold about 500 documents.
+# Changing it moves documents between buckets: the extract records the width under
+# _ops/ema_epar/ and refuses a run at another width.
+DEFAULT_EPAR_BUCKET_IDS = 8000
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -325,6 +338,12 @@ class Settings:
     # Largest share of known labels one DailyMed extract may withdraw
     # (EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE).
     dailymed_max_withdrawn_share: float = DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
+    # EPAR PDF caps and extract limits (EPISTEME_EPAR_MAX_PAGES, EPISTEME_EPAR_MAX_BYTES,
+    # EPISTEME_EPAR_MAX_WITHDRAWN_SHARE, EPISTEME_EPAR_BUCKET_IDS).
+    epar_max_pages: int = DEFAULT_EPAR_MAX_PAGES
+    epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
+    epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
+    epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
 
@@ -470,6 +489,18 @@ def get_settings() -> Settings:
         dailymed_kinds=_dailymed_kinds(),
         dailymed_max_withdrawn_share=_get_non_negative_float_or_default(
             "EPISTEME_DAILYMED_MAX_WITHDRAWN_SHARE", DEFAULT_DAILYMED_MAX_WITHDRAWN_SHARE
+        ),
+        epar_max_pages=_get_positive_int_or_default(
+            "EPISTEME_EPAR_MAX_PAGES", DEFAULT_EPAR_MAX_PAGES
+        ),
+        epar_max_bytes=_get_positive_int_or_default(
+            "EPISTEME_EPAR_MAX_BYTES", DEFAULT_EPAR_MAX_BYTES
+        ),
+        epar_max_withdrawn_share=_get_non_negative_float_or_default(
+            "EPISTEME_EPAR_MAX_WITHDRAWN_SHARE", DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
+        ),
+        epar_bucket_ids=_get_positive_int_or_default(
+            "EPISTEME_EPAR_BUCKET_IDS", DEFAULT_EPAR_BUCKET_IDS
         ),
         slice_max_bytes=_slice_max_bytes(),
     )
