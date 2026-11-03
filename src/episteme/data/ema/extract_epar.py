@@ -121,7 +121,7 @@ LICENSE_RAW = (
 
 _WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 _FAILED_DOCS_LISTED = 100
-_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 class EparScanError(RuntimeError):
