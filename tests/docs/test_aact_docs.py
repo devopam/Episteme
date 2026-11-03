@@ -81,7 +81,7 @@ def test_runbook_has_an_aact_section_with_the_operator_steps():
     sec = _section(text, "### 5.16 AACT trials (`aact`)")
     for needle in (
         "run_pipeline.sh aact load",
-        "--zip",
+        "run_pipeline.sh aact load --zip",
         "EPISTEME_AACT_MAX_ORPHAN_SHARE",
         "aact_r<YYYYMMDD>",
         "DROP SCHEMA",
@@ -94,6 +94,9 @@ def test_runbook_has_an_aact_section_with_the_operator_steps():
         assert needle in sec, needle
     for phrase in BETA_LIMITS:
         assert phrase in sec, phrase
+    # The dispatcher carries --zip, so the gate pass applies: no direct wrapper call.
+    assert "load_aact.sh --zip" not in sec
+    assert "mesh_headings" in doc(RUNBOOK).split("`tables_with_rows` at least 45")[1][:400]
     # The steps: a load, the release switch, dropping an old schema, the EPAR counts.
     for title in (
         "Load.",

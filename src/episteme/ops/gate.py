@@ -665,14 +665,27 @@ def _read_failed_extra(processed_root: Path, source: str, key: str) -> int | Non
         return None
 
 
-def epar_section_measures(processed_root: Path) -> dict:
+def epar_section_measures(processed_root: Path, run_id: str | None) -> dict:
     """The section measures of the EPAR extract (report only): the counts that
-    ``_write_failed_inputs`` of the extract left in ``failed_inputs.json``, and their share."""
+    ``_write_failed_inputs`` of the extract left in ``failed_inputs.json``, and their share.
+    As for ``read_failed_inputs``, the file counts only when it is of run ``run_id``;
+    otherwise every value is None."""
     from episteme.ops import gate_report
 
+    counts: dict[str, int | None] = {
+        "documents_with_sections": None,
+        "documents_without_sections": None,
+    }
+    if run_id:
+        try:
+            path = Path(processed_root) / "_ops" / "ema_epar" / FAILED_INPUTS_FILE
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("run_id") == run_id:
+                counts = {k: int(data[k]) for k in counts}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
     return gate_report.section_measures(
-        _read_failed_extra(processed_root, "ema_epar", "documents_with_sections"),
-        _read_failed_extra(processed_root, "ema_epar", "documents_without_sections"),
+        counts["documents_with_sections"], counts["documents_without_sections"]
     )
 
 
@@ -944,7 +957,11 @@ def _cmd_report(args: argparse.Namespace) -> int:
         if no_text is not None:
             measures["no_text_documents"] = no_text
         if source == "ema_epar" and stage == "extract":
-            measures.update(epar_section_measures(sample_root / "02_processed"))
+            from episteme.config import get_settings
+
+            measures.update(
+                epar_section_measures(sample_root / "02_processed", get_settings().run_id)
+            )
         # The caps that wrote the parts, not the caps of the profile now.
         caps, cap_failures = _sample_part_caps(source, sample_root)
         if caps is None:

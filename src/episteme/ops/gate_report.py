@@ -525,12 +525,13 @@ def aact_summary_measures(summary: dict | None) -> dict:
     tables = summary.get("tables") or {}
     out["tables_with_rows"] = sum(1 for n in tables.values() if n)
     out["empty_tables"] = sum(1 for n in tables.values() if not n)
-    shares = {
-        t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0
-        for t, o in (summary.get("orphans") or {}).items()
-    }
+    orphans = summary.get("orphans") or {}
+    shares = {t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0 for t, o in orphans.items()}
     out["orphan_share_pct"] = shares
-    out["orphan_share_pct_max"] = max(shares.values(), default=0.0)
+    # The largest share is a measure only when every table but studies was checked: an
+    # empty or partial orphan record must fail the rule, not pass it as 0.
+    checked = bool(orphans) and all(t in orphans for t in tables if t != "studies")
+    out["orphan_share_pct_max"] = max(shares.values()) if checked else None
     names = summary.get("names") or {}
     total = int(names.get("interventions") or 0)
     if total:
@@ -550,6 +551,8 @@ def measure_aact(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) 
 
     summary: dict | None = None
     out: dict[str, Any] = {}
+    # The live studies check reads the latest release; the summary row of this run's id
+    # ties the result to this run (no row for the run: every summary measure is None).
     studies = distinct = None
     with conn.cursor() as cur:
         out["rows"] = _rows_of_run(cur, run_id)

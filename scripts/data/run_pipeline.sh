@@ -16,7 +16,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON] [--zip PATH]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -36,6 +36,8 @@ require_env EPISTEME_ACTOR
 
 FORCE=0
 ALLOW_PARTIAL=0
+ZIP_SET=0
+ZIP_PATH=""
 BULK=0
 SAMPLE=0
 SKIP_GATE=0
@@ -84,6 +86,9 @@ while [ $# -gt 0 ]; do
         # openfda_faers load only: go on with a partial input set or below the live
         # floor (needs --reason): one audited force_override row per check it passes.
         --allow-partial) ALLOW_PARTIAL=1; shift ;;
+        # aact load only: load this release zip instead of the newest one. The gate pass
+        # check applies as for any other full run.
+        --zip) ZIP_SET=1; ZIP_PATH="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -114,6 +119,12 @@ if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || 
     # reg_record partitions, FAERS generations and AACT release schemas carry their own
     # indexes; the articles index group is not theirs.
     die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
+fi
+if [ "$ZIP_SET" = "1" ]; then
+    { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
+    [ -n "$ZIP_PATH" ] || die "--zip requires a path" 2
+    # A sample run loads its own slice: the whole newest release zip.
+    [ "$SAMPLE" = "0" ] || die "--sample and --zip cannot be used together" 2
 fi
 if [ "$SKIP_GATE" = "1" ]; then
     [ "$SAMPLE" = "0" ] || die "--sample and --skip-gate cannot be used together" 2
@@ -721,6 +732,7 @@ skip_reason=()
 extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
+[ "$ZIP_SET" = "1" ] && load_args+=(--zip "$ZIP_PATH")
 if [ "$ALLOW_PARTIAL" = "1" ]; then
     load_args+=(--allow-partial)
     [ "$FORCE" = "1" ] || load_args+=(--reason "$REASON")

@@ -145,6 +145,24 @@ def test_aact_summary_measures_without_a_summary_are_missing():
     assert m["tables_with_rows"] is None and m["empty_tables"] is None
     assert m["orphan_share_pct_max"] is None
     assert m["xref_coverage_pct"] == {"aact_intervention": None}
+    # An empty, missing or partial orphan record is no measure: the rule must fail on it.
+    for orphans in ({}, None):
+        m = gate_report.aact_summary_measures(_aact_summary(orphans=orphans))
+        assert m["orphan_share_pct_max"] is None
+        assert any(
+            "max_orphan_share_pct" in f
+            for f in gate.evaluate(
+                {**_aact_measures(), "orphan_share_pct_max": None},
+                gate.load_rules("aact")["load"],
+            )
+        )
+    no_orphans = {k: v for k, v in _aact_summary().items() if k != "orphans"}
+    assert gate_report.aact_summary_measures(no_orphans)["orphan_share_pct_max"] is None
+    partial = gate_report.aact_summary_measures(_aact_summary(orphans={"conditions": 5}))
+    assert partial["orphan_share_pct_max"] is None  # interventions was not checked
+    # Only studies loaded and no orphan record: still no measure.
+    only = gate_report.aact_summary_measures(_aact_summary(tables={"studies": 3}, orphans={}))
+    assert only["orphan_share_pct_max"] is None
     # No intervention at all: a share of nothing is not a pass.
     none = gate_report.aact_summary_measures(
         _aact_summary(names={"interventions": 0, "interventions_matched": 0})
@@ -223,8 +241,12 @@ def test_epar_reports_section_share():
         assert not [f for f in gate.evaluate(measures, rules) if "section" in f], stage
 
 
-def test_gate_reads_the_epar_section_counts_of_the_extract(tmp_path):
+def test_gate_reads_the_epar_section_counts_of_the_extract(tmp_path, monkeypatch):
+    import episteme.config as cfg
     from episteme.data import bucket_parts
+
+    monkeypatch.setenv("EPISTEME_RUN_ID", "run-1")
+    cfg.get_settings.cache_clear()
 
     processed = tmp_path / "02_processed"
     bucket_parts.write_failed_inputs(
@@ -235,12 +257,17 @@ def test_gate_reads_the_epar_section_counts_of_the_extract(tmp_path):
         documents_with_sections=3,
         documents_without_sections=1,
     )
-    got = gate.epar_section_measures(processed)
+    got = gate.epar_section_measures(processed, "run-1")
     assert got["documents_with_sections"] == 3 and got["documents_without_sections"] == 1
     assert got["sections_share_pct"] == pytest.approx(75.0)
     # No file: every value is missing.
-    empty = gate.epar_section_measures(tmp_path / "nowhere")
+    empty = gate.epar_section_measures(tmp_path / "nowhere", "run-1")
     assert empty["documents_with_sections"] is None and empty["sections_share_pct"] is None
+    # A file of another run, or no run id, counts for nothing.
+    other = gate.epar_section_measures(processed, "run-2")
+    assert other["documents_with_sections"] is None and other["sections_share_pct"] is None
+    assert gate.epar_section_measures(processed, None)["sections_share_pct"] is None
+    cfg.get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
