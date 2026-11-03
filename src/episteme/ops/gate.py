@@ -91,6 +91,8 @@ STAGE_MODULES: dict[tuple[str, str], tuple[str, str]] = _StageModules(
         ("openfda", "load"): ("episteme.data.regulatory.load_reg", "openfda/load_openfda.sh"),
         # FAERS loads by generation, into its own typed tables.
         ("openfda_faers", "load"): ("episteme.data.regulatory.faers.load", "openfda/load_faers.sh"),
+        # AACT loads one schema per release and switches the aact views.
+        ("aact", "load"): ("episteme.data.aact.load_aact", "aact/load_aact.sh"),
     }
 )
 

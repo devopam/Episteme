@@ -101,7 +101,7 @@ if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
     # These load wrappers reach a Python module that has no --skip-unit.
     if [ "$STAGE" = "load" ]; then
         case "$SOURCE" in
-            europepmc_id_mappings|cdisc_ct|ema|openfda|openfda_faers)
+            europepmc_id_mappings|cdisc_ct|ema|openfda|openfda_faers|aact)
                 die "$SOURCE load does not support --skip-unit" 2 ;;
         esac
     fi
@@ -110,9 +110,9 @@ if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
-if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || [ "$SOURCE" = "openfda_faers" ]; }; then
-    # reg_record partitions and FAERS generations carry their own indexes; the articles
-    # index group is not theirs.
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || [ "$SOURCE" = "openfda_faers" ] || [ "$SOURCE" = "aact" ]; }; then
+    # reg_record partitions, FAERS generations and AACT release schemas carry their own
+    # indexes; the articles index group is not theirs.
     die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
 fi
 if [ "$SKIP_GATE" = "1" ]; then
@@ -191,9 +191,11 @@ _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; 
 STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
 _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-# Regulatory reference feeds: download, then load into episteme.reg_record (one
-# partition per release; src/episteme/data/regulatory/load_reg.py).
-REG_SOURCES="ema openfda"
+# Regulatory and registry reference data: download, then load one full snapshot per
+# release. ema and openfda load into episteme.reg_record (one partition per release;
+# src/episteme/data/regulatory/load_reg.py); aact loads into its own schema per release,
+# exposed by the views of schema aact (src/episteme/data/aact/load_aact.py).
+REG_SOURCES="ema openfda aact"
 _is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # The FAERS generation loader (src/episteme/data/regulatory/faers/load.py).
