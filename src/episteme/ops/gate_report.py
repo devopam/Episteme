@@ -494,7 +494,95 @@ def measure_faers(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict)
     return out
 
 
+def section_measures(with_sections: int | None, without_sections: int | None) -> dict:
+    """The EPAR SmPC section counts of the ``product-information`` documents and the share
+    (percent) that has sections. Report only: no rule reads the share until the sample sets
+    a floor. No document counted (or no count) gives a share of None."""
+    known = with_sections is not None and without_sections is not None
+    total = with_sections + without_sections if known else 0
+    return {
+        "documents_with_sections": with_sections,
+        "documents_without_sections": without_sections,
+        "sections_share_pct": _pct(with_sections, total) if total else None,
+    }
+
+
+def aact_summary_measures(summary: dict | None) -> dict:
+    """Measures from the summary that ``load_aact`` writes with its ``load_commit`` audit row:
+    the tables with rows and without, the orphan ``nct_id`` share (percent) per table and its
+    largest value, and the share of interventions that ``resolve_names`` tied to a moiety
+    (``xref_coverage_pct["aact_intervention"]``, recorded, no limit). No summary (the run
+    loaded nothing) gives None for every value, so the rules fail."""
+    out: dict[str, Any] = {
+        "tables_with_rows": None,
+        "empty_tables": None,
+        "orphan_share_pct": None,
+        "orphan_share_pct_max": None,
+        "xref_coverage_pct": {"aact_intervention": None},
+    }
+    if not summary:
+        return out
+    tables = summary.get("tables") or {}
+    out["tables_with_rows"] = sum(1 for n in tables.values() if n)
+    out["empty_tables"] = sum(1 for n in tables.values() if not n)
+    shares = {
+        t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0
+        for t, o in (summary.get("orphans") or {}).items()
+    }
+    out["orphan_share_pct"] = shares
+    out["orphan_share_pct_max"] = max(shares.values(), default=0.0)
+    names = summary.get("names") or {}
+    total = int(names.get("interventions") or 0)
+    if total:
+        out["xref_coverage_pct"] = {
+            "aact_intervention": _pct(int(names.get("interventions_matched") or 0), total)
+        }
+    return out
+
+
+def measure_aact(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) -> dict:
+    """Measures of ``aact`` after a sample load. The load summary of this run (its
+    ``load_commit`` audit row for the latest release) gives the tables, the orphan shares and
+    the intervention coverage; a run that loaded nothing has none, so its rules fail. The
+    ``aact.studies`` view is read live: ``studies_equal_distinct_nct_id``. ``counts`` holds
+    what ``min_counts`` reads. ``rows`` is the event sum of the run, as for the other loads."""
+    from episteme.data.aact import load_aact
+
+    summary: dict | None = None
+    out: dict[str, Any] = {}
+    studies = distinct = None
+    with conn.cursor() as cur:
+        out["rows"] = _rows_of_run(cur, run_id)
+        cur.execute(
+            "SELECT release_id FROM episteme.reg_release WHERE dataset = %s AND is_latest",
+            (load_aact.DATASET,),
+        )
+        row = cur.fetchone()
+        release = row[0] if row else None
+        if release is not None and run_id:
+            cur.execute(
+                "SELECT new_value FROM episteme._audit WHERE run_id = %s "
+                "AND event_type = 'load_commit' AND object = %s ORDER BY seq DESC LIMIT 1",
+                (run_id, f"{load_aact.DATASET} {release}"),
+            )
+            found = cur.fetchone()
+            summary = found[0] if found else None
+        if release is not None:
+            cur.execute(
+                f"SELECT count(*), count(DISTINCT nct_id) FROM "
+                f"{load_aact.VIEW_SCHEMA}.{load_aact.STUDIES}"
+            )
+            studies, distinct = (int(v) for v in cur.fetchone())
+    out["release_id"] = release
+    out.update(aact_summary_measures(summary))
+    out["studies_equal_distinct_nct_id"] = None if studies is None else studies == distinct
+    out["counts"] = {"tables_with_rows": out["tables_with_rows"], "studies": studies}
+    out.update(record_measures(record))
+    return out
+
+
 SOURCE_MEASURES: dict[str, Callable[..., dict]] = {
+    "aact": measure_aact,
     "ema": partial(measure_reg, source="ema"),
     "openfda": partial(measure_reg, source="openfda"),
     "openfda_faers": measure_faers,

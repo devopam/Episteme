@@ -1,0 +1,17 @@
+{
+  "load": {
+    "max_failed_inputs": 0,
+    "min_rows": 1,
+    "max_empty_tables": 0,
+    "studies_equal_distinct_nct_id": true,
+    "max_orphan_share_pct": 5.0,
+    "min_xref_coverage_pct": {
+      "aact_intervention": 0.0
+    },
+    "max_peak_rss_mb": 2048,
+    "min_counts": {
+      "tables_with_rows": 45,
+      "studies": 1
+    }
+  }
+}

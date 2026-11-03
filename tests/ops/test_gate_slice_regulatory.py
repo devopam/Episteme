@@ -399,6 +399,46 @@ def test_epar_slice_without_a_pdf_is_refused(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AACT: the whole file is the sample
+# ---------------------------------------------------------------------------
+def _aact_raw(tmp_path) -> Path:
+    raw = tmp_path / "raw" / "aact"
+    _w(raw / "20261003_export_ctgov.zip", 40)  # an older release
+    _w(raw / "20261103_export_ctgov.zip", 50)  # the newest release
+    _w(raw / "postgres_data.zip", 60)  # not a release zip
+    _w(raw / "aact_data_dictionary_2026-11-03.csv", 5)
+    return raw
+
+
+def test_aact_slice_is_the_whole_file(tmp_path):
+    _aact_raw(tmp_path)
+    got = gate_slice.select("aact", tmp_path / "raw")
+    assert [p.name for p in got] == ["20261103_export_ctgov.zip"]
+    processed = tmp_path / "proc"
+    sample = processed / "_sample" / "aact"
+    meta = gate_slice.prepare("aact", tmp_path / "raw", sample, processed_root=processed)
+    assert meta["files"] == ["20261103_export_ctgov.zip"]
+    assert meta["inputs"] == ["20261103_export_ctgov.zip"]
+    assert (sample / "01_raw" / "aact" / "20261103_export_ctgov.zip").stat().st_size == 50
+    assert gate_slice.SLICES["aact"].raw_subpath == Path("aact")
+    assert gate_slice.SLICES["aact"].max_bytes >= 3 * gate_slice.GB  # the zip is 2.4 GiB
+
+
+def test_aact_slice_without_a_release_zip_is_refused(tmp_path):
+    _w(tmp_path / "raw" / "aact" / "postgres_data.zip", 10)
+    with pytest.raises(gate_slice.SliceError, match="aact"):
+        gate_slice.select("aact", tmp_path / "raw")
+
+
+def test_aact_slice_with_two_zips_of_one_release_is_refused(tmp_path):
+    raw = tmp_path / "raw" / "aact"
+    _w(raw / "20261103_export_ctgov.zip", 10)
+    _w(raw / "old" / "20261103_export_ctgov.zip", 10)
+    with pytest.raises(gate_slice.SliceError, match="20261103"):
+        gate_slice.select("aact", tmp_path / "raw")
+
+
+# ---------------------------------------------------------------------------
 # The sample path of each stage skips the whole-issue checks
 # ---------------------------------------------------------------------------
 def test_the_processed_root_run_pipeline_builds_counts_as_a_sample(tmp_path):

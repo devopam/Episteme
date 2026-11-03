@@ -13,8 +13,10 @@ Measure keys that the rules read: ``rows``, ``rows_per_input``,
 ``empty_text_pct``,
 ``extract_status_pct`` (dict), ``null_pct`` (dict), ``license_counts`` (dict),
 ``failed_inputs``, ``orphan_bodies``, ``rows_loaded_equals_staging``,
-``peak_rss_mb``, ``meta_total_equals_rows`` (bool), ``xref_coverage_pct`` (dict by dataset,
-for ``min_xref_coverage_pct``; a dataset with no value fails), and for ``parts_within_caps``
+``peak_rss_mb``, ``empty_tables``, ``orphan_share_pct_max`` and
+``studies_equal_distinct_nct_id`` (aact), ``meta_total_equals_rows`` (bool),
+``xref_coverage_pct`` (dict by dataset, for ``min_xref_coverage_pct``; a dataset with no
+value fails), and for ``parts_within_caps``
 ``max_rows_per_source_file``, ``max_est_bytes_per_source_file`` (staging) with ``part_rows``,
 ``part_bytes``
 (the caps recorded in the sample's part markers; the profile's caps when the
@@ -139,6 +141,9 @@ _KNOWN_KEYS = {
     "meta_total_equals_rows",
     "min_xref_coverage_pct",
     "min_counts",
+    "max_empty_tables",
+    "studies_equal_distinct_nct_id",
+    "max_orphan_share_pct",
 }
 
 
@@ -248,6 +253,8 @@ _SIMPLE = {
     "max_failed_inputs": (_max_rule, "failed_inputs"),
     "max_orphan_bodies": (_max_rule, "orphan_bodies"),
     "max_peak_rss_mb": (_max_rule, "peak_rss_mb"),
+    "max_empty_tables": (_max_rule, "empty_tables"),
+    "max_orphan_share_pct": (_max_rule, "orphan_share_pct_max"),
 }
 _PER_KEY = {
     "max_status_pct": "extract_status_pct",
@@ -317,6 +324,14 @@ def evaluate(measures: dict, stage_rules: dict) -> list[str]:
                 fails.append(_missing(rule))
             elif not value:
                 fails.append(f"{rule}: the loaded rows differ from the staging rows")
+        elif rule == "studies_equal_distinct_nct_id" and limit:
+            value = measures.get("studies_equal_distinct_nct_id")
+            if value is None:
+                fails.append(_missing(rule))
+            elif not value:
+                fails.append(
+                    f"{rule}: studies holds a different number of rows than distinct nct_id"
+                )
         elif rule == "parts_within_caps" and limit:
             fails += _parts_within_caps(measures, rule)
         elif rule == "meta_total_equals_rows" and limit:
@@ -650,6 +665,17 @@ def _read_failed_extra(processed_root: Path, source: str, key: str) -> int | Non
         return None
 
 
+def epar_section_measures(processed_root: Path) -> dict:
+    """The section measures of the EPAR extract (report only): the counts that
+    ``_write_failed_inputs`` of the extract left in ``failed_inputs.json``, and their share."""
+    from episteme.ops import gate_report
+
+    return gate_report.section_measures(
+        _read_failed_extra(processed_root, "ema_epar", "documents_with_sections"),
+        _read_failed_extra(processed_root, "ema_epar", "documents_without_sections"),
+    )
+
+
 def read_failed_inputs(processed_root: Path, source: str, run_id: str | None) -> int | None:
     """``failed_inputs`` of ``<ops>/failed_inputs.json`` when it is of run ``run_id``;
     ``None`` when the file is missing, unreadable or of another run."""
@@ -917,6 +943,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
         no_text = _read_failed_extra(sample_root / "02_processed", source, "no_text")
         if no_text is not None:
             measures["no_text_documents"] = no_text
+        if source == "ema_epar" and stage == "extract":
+            measures.update(epar_section_measures(sample_root / "02_processed"))
         # The caps that wrote the parts, not the caps of the profile now.
         caps, cap_failures = _sample_part_caps(source, sample_root)
         if caps is None:

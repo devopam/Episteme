@@ -888,7 +888,14 @@ def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
     without letting them hide another failure."""
     no_text = int((res.get("failed_by_reason") or {}).get("no_text") or 0)
     failed = int(res.get("failed") or 0) + int(res.get("failed_docs_count") or 0) - no_text
-    bucket_parts.write_failed_inputs(processed_dir, SOURCE, failed, no_text=no_text)
+    bucket_parts.write_failed_inputs(
+        processed_dir,
+        SOURCE,
+        failed,
+        no_text=no_text,
+        documents_with_sections=int(res.get("documents_with_sections") or 0),
+        documents_without_sections=int(res.get("documents_without_sections") or 0),
+    )
 
 
 def _main(argv: list[str] | None = None) -> int:

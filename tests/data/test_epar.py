@@ -563,6 +563,9 @@ def test_a_pdf_with_no_text_is_failed_and_counted(raw, out):
     listed = json.loads((out / "_ops" / "ema_epar" / "failed_inputs.json").read_text("utf-8"))
     # A document with no text is told apart: the empty-text rule sees its row.
     assert listed["failed_inputs"] == 0 and listed["no_text"] == 1
+    # The section counts reach the gate report too (report only).
+    assert listed["documents_with_sections"] == res["documents_with_sections"]
+    assert listed["documents_without_sections"] == res["documents_without_sections"]
 
 
 def test_a_broken_or_oversize_pdf_is_failed_and_does_not_stop_the_bucket(raw, out, monkeypatch):

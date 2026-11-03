@@ -191,6 +191,7 @@ REGULATORY = {
     "ema": ("load",),
     "openfda": ("load",),
     "openfda_faers": ("load",),
+    "aact": ("load",),
 }
 
 
