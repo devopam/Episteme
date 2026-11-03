@@ -21,9 +21,10 @@ from episteme.data.ema import extract_epar as ex
 from episteme.data.ema import smpc
 
 from .test_dailymed_load import _Conn, _Cursor
-from .test_epar import PREFIX, doc
+from .test_epar import doc
 
 ANNEX_I = ["ANNEX I", "SUMMARY OF PRODUCT CHARACTERISTICS"]
+HEAD = [*ANNEX_I, "1. NAME OF THE MEDICINAL PRODUCT", "Foo"]
 
 
 def smpc_block(name: str, *, with_annex_head: bool = True) -> list[str]:
@@ -208,12 +209,11 @@ def test_no_headings_found_gives_no_rows_and_is_counted(tmp_path):
     res = ex.extract_epar(raw, out)
     assert res["documents_with_sections"] == 1
     assert res["documents_without_sections"] == 1
-    assert PREFIX  # the shared feed prefix is the one the documents use
 
 
 def test_a_wrong_order_or_repeat_is_not_a_second_section():
     lines = [
-        *ANNEX_I,
+        *HEAD,
         "4.2 Posology and method of administration",
         "x",
         "4.1 Therapeutic indications",
@@ -225,6 +225,66 @@ def test_a_wrong_order_or_repeat_is_not_a_second_section():
     ]
     rows = smpc.smpc_sections(text_of(lines))
     assert [r["loinc_code"] for r in rows] == ["34068-7", "34070-3"]
+
+
+def _codes(lines: list[str]) -> list[str]:
+    return [r["loinc_code"] for r in smpc.smpc_sections(text_of(lines))]
+
+
+def test_a_wrapped_cross_reference_is_not_a_heading():
+    lines = [
+        *HEAD,
+        "4.2 Posology and method of administration",
+        "See the warnings in",
+        "4.4 Special warnings and precautions for use).",
+        "more dosing text.",
+        "4.3 Contraindications",
+        "c",
+        "4.4 Special warnings and precautions for use",
+        "real warnings.",
+    ]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == ["34068-7", "34070-3", "43685-7"]
+    assert "more dosing text." in body[rows[0]["start_offset"] : rows[0]["end_offset"]]
+    assert body[rows[2]["start_offset"] : rows[2]["end_offset"]].endswith("real warnings.")
+
+
+def test_a_gap_in_the_numbers_is_accepted_within_a_group():
+    lines = [*HEAD, "4.6 Fertility, pregnancy and lactation", "a", "4.8 Undesirable effects", "b"]
+    assert _codes(lines) == ["42228-7", "34084-4"]
+    # a later group is taken at its first number only
+    lines = [*HEAD, "4.9 Overdose", "a", "5.1 Pharmacodynamic properties", "b"]
+    assert _codes(lines) == ["34088-5", "43679-0"]
+    lines = [*HEAD, "4.9 Overdose", "a", "5.2 Pharmacokinetic properties", "b"]
+    assert _codes(lines) == ["34088-5"]
+
+
+def test_a_number_and_title_split_over_two_lines_are_joined():
+    lines = [*HEAD, "4.1", "Therapeutic indications", "ind text", "4.5.", "Interaction", "i"]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == ["34067-9", "34073-7"]
+    assert rows[0]["title"] == "4.1 Therapeutic indications"
+    assert body[rows[0]["start_offset"] :].startswith("4.1\nTherapeutic indications")
+    assert body[rows[1]["start_offset"] : rows[1]["end_offset"]] == "4.5.\nInteraction\ni"
+
+
+def test_a_running_header_does_not_reset_the_smpc():
+    lines = [
+        *HEAD,
+        "4.1 Therapeutic indications",
+        "a",
+        "SUMMARY OF PRODUCT CHARACTERISTICS",
+        "more of 4.1",
+        "4.2 Posology and method of administration",
+        "b",
+    ]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == ["34067-9", "34068-7"]
+    assert "more of 4.1" in body[rows[0]["start_offset"] : rows[0]["end_offset"]]
+    assert {r["product"] for r in rows} == {"Foo"}
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +359,7 @@ def test_rule_version_in_fingerprint_of_product_information_only(monkeypatch):
     }
     other = {**base, "id": "2", "type": "assessment-report"}
     pi_1, other_1 = ex._fingerprint_row(base), ex._fingerprint_row(other)
-    assert smpc.SMPC_RULE_VERSION in pi_1 or any(
-        isinstance(x, list) and smpc.SMPC_RULE_VERSION in x for x in pi_1
-    )
+    assert pi_1[-1] == smpc.SMPC_RULE_VERSION
     assert len(other_1) == 6  # the other types keep the earlier shape
     monkeypatch.setattr(ex.smpc, "SMPC_RULE_VERSION", smpc.SMPC_RULE_VERSION + 1)
     assert ex._fingerprint_row(base) != pi_1
