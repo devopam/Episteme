@@ -264,6 +264,18 @@ def signal_problems(post_load_stats: dict) -> list[str]:
     return out
 
 
+def signal_refusal_message(issues: list[str], generation: str) -> str:
+    """The refusal text for signals that must not swap in. It names the recovery step
+    (``--force --reason`` starts a new generation and bridges every entry again) and the
+    override (``--allow-partial --reason``) for a result that is right."""
+    return (
+        "; ".join(issues) + f"; no swap. Generation {generation} stays built. Check that the "
+        "substance data is loaded in this database, then run the load again with "
+        '--force --reason "<why>" (a new generation, every entry bridged again). If the '
+        "result is right, run it with --allow-partial --reason."
+    )
+
+
 def load_generation(
     conn: psycopg.Connection,
     zips: Sequence[Path],
@@ -407,11 +419,7 @@ def load_generation(
         signal_issues = signal_problems(state.get(("phase", "post_load")) or {})
         if signal_issues:
             if override_reason is None:
-                raise GenerationError(
-                    "; ".join(signal_issues) + f"; no swap. Generation {generation} stays "
-                    "built. Check that the substance data is loaded in this database; if the "
-                    "result is right, run the load again with --allow-partial --reason."
-                )
+                raise GenerationError(signal_refusal_message(signal_issues, generation))
             _audit_override(
                 conn, "empty signals", override_reason, {"problems": signal_issues}, run_id
             )

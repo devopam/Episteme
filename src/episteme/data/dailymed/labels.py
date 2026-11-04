@@ -20,6 +20,12 @@ One row of the sidecar is either a section or a substance (``kind``):
   is the 9-digit labeler-product key (``normalize.norm_ndc_product``), as in the
   ``product_keys`` of ``fda_ndc``; a value that is not an NDC product is kept as it is.
 
+The module serves two sources (``LABEL_SOURCES``). ``dailymed`` writes sections and
+substances. ``ema_epar`` writes sections only (SmPC sections, ``episteme.data.ema.smpc``),
+each with ``ordinal`` and ``product`` (NULL for DailyMed). The sidecar directory is
+``<source>_labels``. Every function takes the source as a parameter; the default is
+``dailymed``.
+
 ``replace_labels`` runs inside the transaction of the shard's load: it deletes the
 label rows of the part (by the ``source_file`` of its articles) and copies the
 sidecar. ``delete_labels`` is also what the retire step calls, so no label row
@@ -34,9 +40,21 @@ from typing import Any
 
 from episteme.data.regulatory.normalize import norm_ndc_product
 
-SIDECAR_DIR = "dailymed_labels"
 SIDECAR_SUFFIX = ".labels.parquet"
 SOURCE = "dailymed"
+# Sources with label side tables. Only the sources of this module's sidecar format.
+LABEL_SOURCES = ("dailymed", "ema_epar")
+# The sections of these sources carry the order and the product (the COPY writes them).
+_ORDERED_SOURCES = ("ema_epar",)
+
+
+def sidecar_dir_name(source: str = SOURCE) -> str:
+    if source not in LABEL_SOURCES:
+        raise ValueError(f"{source!r} has no label tables")
+    return f"{source}_labels"
+
+
+SIDECAR_DIR = sidecar_dir_name(SOURCE)  # the DailyMed directory, kept for the earlier name
 
 SIDECAR_COLUMNS = (
     "article_id",
@@ -45,23 +63,25 @@ SIDECAR_COLUMNS = (
     "title",
     "start_offset",
     "end_offset",
+    "ordinal",
+    "product",
     "unii",
     "unii_role",
     "ndc_product",
     "method",
 )
-_INT_COLUMNS = ("start_offset", "end_offset")
+_INT_COLUMNS = ("start_offset", "end_offset", "ordinal")
 _COPY_BATCH_ROWS = 20_000
 
 
-def sidecar_path(processed_dir: Path, part: str) -> Path:
-    return Path(processed_dir) / "staging" / SIDECAR_DIR / f"{part}{SIDECAR_SUFFIX}"
+def sidecar_path(processed_dir: Path, part: str, source: str = SOURCE) -> Path:
+    return Path(processed_dir) / "staging" / sidecar_dir_name(source) / f"{part}{SIDECAR_SUFFIX}"
 
 
-def shard_sidecar(shard: Path) -> Path:
-    """The sidecar of a shard ``staging/dailymed/<part>.parquet``."""
+def shard_sidecar(shard: Path, source: str = SOURCE) -> Path:
+    """The sidecar of a shard ``staging/<source>/<part>.parquet``."""
     shard = Path(shard)
-    return shard.parent.parent / SIDECAR_DIR / f"{shard.stem}{SIDECAR_SUFFIX}"
+    return shard.parent.parent / sidecar_dir_name(source) / f"{shard.stem}{SIDECAR_SUFFIX}"
 
 
 def sidecar_rows(article_id: str, parsed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -97,7 +117,9 @@ def sidecar_rows(article_id: str, parsed: dict[str, Any]) -> list[dict[str, Any]
     return rows
 
 
-def write_sidecar(processed_dir: Path, part: str, rows: list[dict[str, Any]]) -> Path:
+def write_sidecar(
+    processed_dir: Path, part: str, rows: list[dict[str, Any]], source: str = SOURCE
+) -> Path:
     """Write the sidecar of ``part`` (also with no rows: a missing sidecar is an
     error at load time, an empty one is not). Atomic: temp file, then rename."""
     import pyarrow as pa
@@ -110,7 +132,7 @@ def write_sidecar(processed_dir: Path, part: str, rows: list[dict[str, Any]]) ->
     table = pa.table(
         {c: pa.array(cols[c], type=schema.field(c).type) for c in SIDECAR_COLUMNS}, schema=schema
     )
-    path = sidecar_path(processed_dir, part)
+    path = sidecar_path(processed_dir, part, source)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     pq.write_table(table, tmp)
@@ -118,8 +140,8 @@ def write_sidecar(processed_dir: Path, part: str, rows: list[dict[str, Any]]) ->
     return path
 
 
-def delete_labels(cur, source_files: list[str]) -> int:
-    """Delete the label rows of the articles whose ``source_file`` is in
+def delete_labels(cur, source: str, source_files: list[str]) -> int:
+    """Delete the label rows of the articles of ``source`` whose ``source_file`` is in
     ``source_files``. Run it BEFORE the articles are deleted: it finds the
     articles by ``source_file``. Returns the count of deleted ``label_section`` rows."""
     names = sorted(set(source_files))
@@ -129,7 +151,7 @@ def delete_labels(cur, source_files: list[str]) -> int:
          USING episteme.articles a
          WHERE a.source = %s AND a.source_file = ANY(%s) AND s.article_id = a.id
         """,
-        (SOURCE, names),
+        (source, names),
     )
     n = cur.rowcount
     cur.execute(
@@ -138,13 +160,13 @@ def delete_labels(cur, source_files: list[str]) -> int:
          USING episteme.articles a
          WHERE a.source = %s AND a.source_file = ANY(%s) AND s.article_id = a.id
         """,
-        (SOURCE, names),
+        (source, names),
     )
     return n
 
 
-def replace_labels(conn, shard: Path) -> dict[str, int]:
-    """Replace the label rows of the part ``shard`` (``staging/dailymed/<part>.parquet``)
+def replace_labels(conn, source: str, shard: Path) -> dict[str, int]:
+    """Replace the label rows of the part ``shard`` (``staging/<source>/<part>.parquet``)
     with its sidecar, in the open transaction of the caller (it never commits).
 
     Call it before the shard's articles are loaded: the delete finds the old rows
@@ -154,7 +176,7 @@ def replace_labels(conn, shard: Path) -> dict[str, int]:
     import pyarrow.parquet as pq
 
     shard = Path(shard)
-    side = shard_sidecar(shard)
+    side = shard_sidecar(shard, source)
     if not side.is_file():
         raise FileNotFoundError(f"{shard.name}: no label sidecar at {side}")
     n_sections = n_substances = 0
@@ -164,24 +186,26 @@ def replace_labels(conn, shard: Path) -> dict[str, int]:
     # are deleted by id here.
     ids = sorted(set(pq.read_table(shard, columns=["id"]).column("id").to_pylist()))
     with conn.cursor() as cur:
-        delete_labels(cur, [shard.stem])
+        delete_labels(cur, source, [shard.stem])
         for table in ("label_section", "label_substance"):
             cur.execute(f"DELETE FROM episteme.{table} WHERE article_id = ANY(%s)", (ids,))
         # One COPY at a time per connection: the sidecar is read twice, once per table.
-        with cur.copy(
-            "COPY episteme.label_section "
-            "(article_id, loinc_code, title, start_offset, end_offset) FROM STDIN"
-        ) as sec_copy:
+        ordered = source in _ORDERED_SOURCES
+        columns = "article_id, loinc_code, title, start_offset, end_offset"
+        if ordered:
+            columns += ", ordinal, product"
+        with cur.copy(f"COPY episteme.label_section ({columns}) FROM STDIN") as sec_copy:
             for r in _sidecar_rows(side, "section"):
-                sec_copy.write_row(
-                    (
-                        r["article_id"],
-                        r["loinc_code"],
-                        r["title"],
-                        r["start_offset"],
-                        r["end_offset"],
-                    )
+                values = (
+                    r["article_id"],
+                    r["loinc_code"],
+                    r["title"],
+                    r["start_offset"],
+                    r["end_offset"],
                 )
+                if ordered:
+                    values += (r.get("ordinal"), r.get("product"))
+                sec_copy.write_row(values)
                 n_sections += 1
         with cur.copy(
             "COPY episteme.label_substance (article_id, unii, ndc_product) FROM STDIN"

@@ -28,9 +28,10 @@ DISPATCHER_FLAGS = {
     "--sample",
     "--skip-gate",
     "--allow-partial",
+    "--zip",
 }
 # flags that consume the next token as their value
-VALUE_FLAGS = {"--reason", "--max-files", "--since", "--raw-dir", "--repo-type"}
+VALUE_FLAGS = {"--reason", "--max-files", "--since", "--raw-dir", "--repo-type", "--zip"}
 # stages that honour --max-files (extract/serialize/download) or forward it (all)
 MAX_FILES_STAGES = {"download", "extract", "serialize", "all"}
 # downloads that accept --max-files but ignore it (hf download resumes by itself)

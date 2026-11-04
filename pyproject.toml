@@ -65,6 +65,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "episteme.ops.gate_rules" = ["*.json"]
 "episteme.data.regulatory" = ["*.toml"]
+"episteme.data.aact" = ["*.csv"]
 
 [tool.ruff]
 line-length = 100

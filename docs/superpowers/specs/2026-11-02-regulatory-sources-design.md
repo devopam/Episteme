@@ -181,7 +181,7 @@ Signal tables, rebuilt per generation and swapped with it, never computed at que
 - DailyMed labels and EPAR PDFs become `episteme.articles` rows with new sources `dailymed` and `ema_epar`, and `article_body` text, so RAG and the corpus reach them as they do publications.
 - One row per `setId` (the highest `versionNumber`), or per EPAR document id. This is the publications rule. A label or EPAR that a full release no longer contains is retired through the existing retire path, with an audit row (Claude's call).
 - Labelled sections (warnings, interactions, adverse reactions) are recorded in a new `label_section (article_id, loinc_code, title, start_offset, end_offset)`, pointing into the body text, because Q1 must check a pair against the interactions section specifically. Offsets, not a copy: no third copy of the text (the Owner rejected even two). Index `(article_id, loinc_code)`.
-- `label_substance (article_id, substance_key, unii, ndc_product)` links text to composition.
+- `label_substance (article_id, unii, ndc_product)` links text to composition. It stores no `substance_key` (no fact table stores a resolved key, section 5.3): a query joins through `unii` to `substance.unii`, then to `moiety_key`.
 - openFDA `drug/label` is not loaded as text: it derives from the same SPLs, so it would duplicate DailyMed (Claude's call). It stays on disk as a cross-check.
 
 ## 6. Pipeline

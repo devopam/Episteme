@@ -144,6 +144,9 @@ DEFAULT_EPAR_MAX_WITHDRAWN_SHARE = 0.1
 # Changing it moves documents between buckets: the extract records the width under
 # _ops/ema_epar/ and refuses a run at another width.
 DEFAULT_EPAR_BUCKET_IDS = 8000
+# The AACT loader refuses a release in which more than this share of a table's rows have an
+# nct_id that is not in studies (AACT has known orphans). Provisional: the first sample sets it.
+DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
 # Sources that never enter the training corpus, whatever their licence subset. The owner's
 # design splits the data: publications train the model; regulatory reference data (labels,
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
@@ -349,6 +352,9 @@ class Settings:
     epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
     epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
     epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
+    # Largest share of orphan rows (nct_id not in studies) per AACT table
+    # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
+    aact_max_orphan_share: float = DEFAULT_AACT_MAX_ORPHAN_SHARE
     # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
     # Per-source sample slice caps, lower-case source name -> bytes.
@@ -508,6 +514,9 @@ def get_settings() -> Settings:
         ),
         epar_bucket_ids=_get_positive_int_or_default(
             "EPISTEME_EPAR_BUCKET_IDS", DEFAULT_EPAR_BUCKET_IDS
+        ),
+        aact_max_orphan_share=_get_non_negative_float_or_default(
+            "EPISTEME_AACT_MAX_ORPHAN_SHARE", DEFAULT_AACT_MAX_ORPHAN_SHARE
         ),
         slice_max_bytes=_slice_max_bytes(),
     )

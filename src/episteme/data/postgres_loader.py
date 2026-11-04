@@ -606,12 +606,12 @@ def delete_source_files(
         raise ValueError("source_files must not be empty")
     names = sorted(set(source_files))
     with conn.cursor() as cur:
-        if source == "dailymed":
+        from episteme.data.dailymed import labels
+
+        if source in labels.LABEL_SOURCES:
             # The label tables point at the articles by id: they go first, while the
             # articles that name them still exist.
-            from episteme.data.dailymed import labels
-
-            labels.delete_labels(cur, names)
+            labels.delete_labels(cur, source, names)
         cur.execute(
             """
             DELETE FROM episteme.article_body b

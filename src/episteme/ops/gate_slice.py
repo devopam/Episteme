@@ -388,6 +388,20 @@ def _select_ema(raw: Path) -> list[Path]:
     return sorted(set(out), key=lambda p: p.as_posix())
 
 
+def _select_aact(raw: Path) -> list[Path]:
+    """The whole AACT release file: the newest release zip under the raw folder. The slice
+    is one unit of 2.4 GiB, so the sample loads it all (spec 7)."""
+    from episteme.data.aact.load_aact import find_release_zip, release_zips
+
+    zips = release_zips(raw)
+    if not zips:
+        raise SliceError(f"aact: no release zip under {raw}")
+    try:
+        return [find_release_zip(raw, zips)]
+    except ValueError as exc:
+        raise SliceError(f"aact: {exc}") from exc
+
+
 def _link_or_copy(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -619,6 +633,8 @@ SLICES: dict[str, SliceSpec] = {
     # The whole raw set is about 105 GB over 90 quarters: the largest year plus the other
     # picks is far above 8 GB. Override with EPISTEME_SLICE_MAX_BYTES_OPENFDA_FAERS.
     "openfda_faers": SliceSpec("openfda_faers", 32 * GB, _select_faers, Path("openfda")),
+    # The whole file is the sample: one release zip of about 2.4 GiB (spec 7).
+    "aact": SliceSpec("aact", 4 * GB, _select_aact, Path("aact")),
 }
 
 

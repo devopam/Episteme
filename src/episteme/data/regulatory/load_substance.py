@@ -101,6 +101,13 @@ def _clean(value: Any) -> str:
     return str(value).replace("\x00", "").strip()
 
 
+def resolve_key(raw: Any) -> str:
+    """The key ``resolve_names`` matches a name on: NUL and outer space removed, then
+    ``norm_name``. Empty when nothing is left. Other loaders that join on the names that
+    ``resolve_names`` wrote (AACT ``intervention_substance``) use this, so the rules agree."""
+    return norm_name(_clean(raw or ""))
+
+
 def _unii(value: Any) -> str | None:
     """A UNII without NUL and outer space; ``None`` when nothing is left."""
     return _clean(value) or None if value is not None else None
@@ -265,7 +272,7 @@ def resolve_names(conn: psycopg.Connection, names: Iterable[str], source: str) -
             skipped_long = 0
             with cur.copy("COPY _stg_names FROM STDIN") as cp:
                 for raw in names:
-                    n = norm_name(_clean(raw or ""))
+                    n = resolve_key(raw)
                     if not n:
                         continue
                     if len(n.encode("utf-8")) > MAX_NAME_BYTES:

@@ -563,6 +563,17 @@ def test_a_pdf_with_no_text_is_failed_and_counted(raw, out):
     listed = json.loads((out / "_ops" / "ema_epar" / "failed_inputs.json").read_text("utf-8"))
     # A document with no text is told apart: the empty-text rule sees its row.
     assert listed["failed_inputs"] == 0 and listed["no_text"] == 1
+    # The section counts reach the gate report too (report only).
+    assert listed["documents_with_sections"] == res["documents_with_sections"]
+    assert listed["documents_without_sections"] == res["documents_without_sections"]
+    # A scan (no text) is out of the section share: counted apart as documents_no_text.
+    assert res["documents_no_text"] == 1
+    assert res["documents_with_sections"] + res["documents_without_sections"] == 1
+    assert listed["documents_no_text"] == 1
+    assert bucket["stats"]["documents_no_text"] == 1
+    # A skipped bucket keeps the count from its marker.
+    again = ex.extract_epar(raw, out)
+    assert again["documents_no_text"] == 1
 
 
 def test_a_broken_or_oversize_pdf_is_failed_and_does_not_stop_the_bucket(raw, out, monkeypatch):
@@ -871,7 +882,11 @@ def _schema():
             cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
             cur.execute((REPO_ROOT / "src/episteme/data/db/extensions.sql").read_text("utf-8"))
             cur.execute((REPO_ROOT / "src/episteme/data/db/schema.sql").read_text("utf-8"))
-            for name in ("0002_container_and_book_parts.sql", "0010_regulatory_sources.sql"):
+            for name in (
+                "0002_container_and_book_parts.sql",
+                "0010_regulatory_sources.sql",
+                "0011_label_section_ordinal.sql",
+            ):
                 cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         conn.commit()
     finally:
@@ -884,6 +899,7 @@ def db(_schema, pg_conn, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "audit_root"))
     _clear_settings()
     with pg_conn.cursor() as cur:
+        cur.execute("TRUNCATE episteme.label_section, episteme.label_substance")
         cur.execute("DELETE FROM episteme.article_body WHERE source = 'ema_epar'")
         cur.execute("DELETE FROM episteme.articles WHERE source = 'ema_epar'")
     pg_conn.commit()
@@ -941,3 +957,51 @@ def test_retire_removes_the_rows_of_a_part_a_withdrawn_document_left(db, raw, ou
     postgres_loader.delete_source_files(db, source="ema_epar", source_files=pending, run_id="t")
     db.commit()
     assert _count(db) == 1
+
+
+@pytest.mark.pg
+def test_epar_part_load_writes_its_sections(db, raw, out):
+    from episteme.data import load_articles, postgres_loader
+
+    from .test_smpc import LEAFLET, smpc_block, smpc_pdf
+
+    docs = [doc(1), doc(2, type_="assessment-report")]
+    _feed(raw, docs)
+    (raw / "epar" / "1.pdf").write_bytes(smpc_pdf([*smpc_block("Foo"), *LEAFLET]))
+    _pdf(raw, 2)
+    ex.extract_epar(raw, out)
+    shard = out / "staging" / "ema_epar" / "ema_epar_b0000__part00001.parquet"
+    extra = load_articles._pre_load(db, "ema_epar", shard)
+    postgres_loader.load_source_file(db, source="ema_epar", staging_path=shard, run_id="t")
+    db.commit()
+    assert extra["label_sections"] == 5 and extra["label_substances"] == 0
+    with db.cursor() as cur:
+        cur.execute("SELECT DISTINCT article_id FROM episteme.label_section")
+        assert [r[0] for r in cur.fetchall()] == ["ema_epar:1"]
+        cur.execute(
+            """
+            SELECT s.ordinal, s.product,
+                   substr(b.body_text, s.start_offset + 1, s.end_offset - s.start_offset)
+              FROM episteme.label_section s
+              JOIN episteme.article_body b ON b.article_id = s.article_id
+             WHERE s.loinc_code = '34073-7'
+            """
+        )
+        ordinal, product, text = cur.fetchone()
+    assert (ordinal, product) == (3, "Foo 10 mg tablets")
+    assert text.endswith("Avoid warfarin.") and text.startswith("4.5 Interaction")
+    # The same part again: replaced, not added to.
+    load_articles._pre_load(db, "ema_epar", shard)
+    postgres_loader.load_source_file(db, source="ema_epar", staging_path=shard, run_id="t")
+    db.commit()
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.label_section")
+        assert cur.fetchone()[0] == 5
+    # Retire removes the label rows with the articles.
+    postgres_loader.delete_source_files(
+        db, source="ema_epar", source_files=["ema_epar_b0000__part00001"], run_id="t"
+    )
+    db.commit()
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.label_section")
+        assert cur.fetchone()[0] == 0
