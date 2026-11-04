@@ -689,9 +689,12 @@ def test_partial_load_resumes(db, tmp_path, monkeypatch):
     calls: list[str] = []
     real = la._load_table
 
+    failed = {"done": False}  # calls.clear() below does not reset this
+
     def flaky(conn, ctx, member):
         calls.append(member)
-        if member == "interventions.txt" and calls.count(member) == 1:
+        if member == "interventions.txt" and not failed["done"]:
+            failed["done"] = True
             raise RuntimeError("disk full")
         return real(conn, ctx, member)
 
