@@ -287,6 +287,83 @@ def test_a_running_header_does_not_reset_the_smpc():
     assert {r["product"] for r in rows} == {"Foo"}
 
 
+BLACK_TRIANGLE = [
+    "▼This medicinal product is subject to additional monitoring. This will allow quick",
+    "identification of new safety information. Healthcare professionals are asked to report",
+    "any suspected adverse reactions. See section 4.8 for how to report adverse reactions.",
+]
+
+
+def test_the_additional_monitoring_statement_before_section_one_still_starts_the_smpc():
+    """The EMA QRD template puts the black triangle statement between the title and
+    "1. NAME OF THE MEDICINAL PRODUCT"."""
+    block = smpc_block("Foo")
+    body = text_of([*block[:2], *BLACK_TRIANGLE, *block[2:], *LEAFLET])
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == [
+        "34067-9",
+        "34068-7",
+        "34073-7",
+        "smpc:4.7",
+        "43679-0",
+    ]
+    assert {r["product"] for r in rows} == {"Foo 10 mg tablets"}
+    assert "additional monitoring" not in body[rows[0]["start_offset"] : rows[0]["end_offset"]]
+
+
+def test_a_title_far_from_section_one_or_with_a_heading_between_is_a_running_header():
+    # More than 6 non-blank lines between the title and the NAME heading.
+    far = [*ANNEX_I, *(f"line {i}" for i in range(7)), "1. NAME OF THE MEDICINAL PRODUCT"]
+    assert smpc.smpc_sections(text_of([*far, "Foo", "4.1 Therapeutic indications", "a"])) == []
+    # Within 6 lines, but a numbered section comes first: the title is a running header.
+    lines = [
+        *HEAD,
+        "4.1 Therapeutic indications",
+        "a",
+        "SUMMARY OF PRODUCT CHARACTERISTICS",
+        "4.2 Posology and method of administration",
+        "b",
+        "1. NAME OF THE MEDICINAL PRODUCT",
+    ]
+    rows = smpc.smpc_sections(text_of(lines))
+    assert [r["loinc_code"] for r in rows] == ["34067-9", "34068-7"]
+    assert {r["product"] for r in rows} == {"Foo"}
+
+
+def test_a_top_level_number_split_from_its_heading_is_joined():
+    lines = [
+        *ANNEX_I,
+        "1.",
+        "NAME OF THE MEDICINAL PRODUCT",
+        "Foo 10 mg tablets",
+        "4.9 Overdose",
+        "o",
+        "5.",
+        "PHARMACOLOGICAL PROPERTIES",
+        "p",
+    ]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == ["34088-5"]
+    assert rows[0]["product"] == "Foo 10 mg tablets"
+    # The split "5." heading ends 4.9: the slice stops before it, exactly.
+    assert body[rows[0]["start_offset"] : rows[0]["end_offset"]] == "4.9 Overdose\no"
+
+
+def test_a_lone_number_does_not_swallow_an_annex_marker_or_a_top_heading():
+    lines = [*HEAD, "4.1 Therapeutic indications", "dose", "0.5", "ANNEX II", "4.2 Leaflet text"]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert [r["loinc_code"] for r in rows] == ["34067-9"]
+    assert body[rows[0]["start_offset"] : rows[0]["end_offset"]] == (
+        "4.1 Therapeutic indications\ndose\n0.5"
+    )
+    lines = [*HEAD, "4.9 Overdose", "o", "2.", "5. PHARMACOLOGICAL PROPERTIES", "p"]
+    body = text_of(lines)
+    rows = smpc.smpc_sections(body)
+    assert body[rows[0]["start_offset"] : rows[0]["end_offset"]] == "4.9 Overdose\no\n2."
+
+
 # ---------------------------------------------------------------------------
 # extract: PDF text -> sidecar
 # ---------------------------------------------------------------------------

@@ -108,6 +108,22 @@ def test_runbook_has_an_aact_section_with_the_operator_steps():
         assert f"**{title}**" in sec, title
 
 
+def test_runbook_migration_loop_applies_and_checks_0011():
+    text = doc(RUNBOOK)
+    loop = [ln for ln in text.splitlines() if "for f in 0002_container_and_book_parts" in ln][0]
+    assert loop.split("; do")[0].split()[-1] == "0011_label_section_ordinal"
+    assert "expect `t|t|t|t|t|t`" in text and "column_name=\\$\\$ordinal\\$\\$" in text
+    row = [ln for ln in text.splitlines() if ln.startswith("| `0011_label_section_ordinal")][0]
+    assert "first `ema_epar` load" in row and "extract" not in row
+
+
+def test_runbook_says_how_to_switch_back_and_what_the_drop_warning_means():
+    sec = _section(doc(RUNBOOK), "### 5.16 AACT trials (`aact`)")
+    assert "**Back to the newest release after a forced older load.**" in sec
+    assert "WARN aact: the replaced schemas of release <id> stay" in sec
+    assert "documents_no_text" in sec
+
+
 def test_runbook_settings_table_lists_the_aact_orphan_key_and_it_exists_in_config():
     sec = _section(doc(RUNBOOK), "### 5.14 Settings of the regulatory sources")
     assert "`EPISTEME_AACT_MAX_ORPHAN_SHARE`" in sec

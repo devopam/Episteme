@@ -566,6 +566,14 @@ def test_a_pdf_with_no_text_is_failed_and_counted(raw, out):
     # The section counts reach the gate report too (report only).
     assert listed["documents_with_sections"] == res["documents_with_sections"]
     assert listed["documents_without_sections"] == res["documents_without_sections"]
+    # A scan (no text) is out of the section share: counted apart as documents_no_text.
+    assert res["documents_no_text"] == 1
+    assert res["documents_with_sections"] + res["documents_without_sections"] == 1
+    assert listed["documents_no_text"] == 1
+    assert bucket["stats"]["documents_no_text"] == 1
+    # A skipped bucket keeps the count from its marker.
+    again = ex.extract_epar(raw, out)
+    assert again["documents_no_text"] == 1
 
 
 def test_a_broken_or_oversize_pdf_is_failed_and_does_not_stop_the_bucket(raw, out, monkeypatch):

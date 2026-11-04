@@ -69,6 +69,11 @@ SECTION_HEADING_RE = re.compile(r"^(4\.[1-9]|5\.[1-3]|6\.[1-6])\s+([A-Z].{2,150}
 TOP_HEADING_RE = re.compile(r"^\d{1,2}\.\s+[A-Z][A-Z0-9 ,;:'()/&-]{3,}$")
 # A line that is only a section number: the title is on the next line.
 NUMBER_ONLY_RE = re.compile(r"^\d\.\d+\.?$")
+# A line that is only a top-level number ("1.", "5."): the heading is on the next line.
+TOP_NUMBER_ONLY_RE = re.compile(r"^\d{1,2}\.$")
+# The NAME heading must follow the title within this many non-blank lines (the QRD
+# template puts the additional-monitoring statement, the black triangle, between them).
+NAME_LOOKAHEAD_LINES = 6
 # A title ending like this is a wrapped cross-reference ("see 4.4 ... use)."), not a heading.
 TITLE_REJECT_END = (")", ",", ";", ").", "),")
 _MAX_PRODUCT_CHARS = 200
@@ -86,8 +91,11 @@ def _num_key(number: str) -> tuple[int, int]:
 
 def _lines(text: str) -> list[tuple[int, str]]:
     """``(start offset, stripped line)`` for every non-blank line of ``text``. A line that
-    is only a number (``4.2`` or ``4.2.``) is joined with the next non-blank line, so a
-    heading that the PDF split in two is matched whole; the offset is the number's."""
+    is only a number (``4.2``, ``4.2.``, or a top-level ``5.``) is joined with the next
+    non-blank line, so a heading that the PDF split in two is matched whole; the offset is
+    the number's. A top-level number keeps its full stop (``5. PHARMACOLOGICAL
+    PROPERTIES``). No join when the next line is an ANNEX marker or a top heading: a lone
+    number (a dose such as ``0.5``) must not hide a stop marker."""
     raw: list[tuple[int, str]] = []
     pos = 0
     for line in text.split("\n"):
@@ -99,8 +107,15 @@ def _lines(text: str) -> list[tuple[int, str]]:
     k = 0
     while k < len(raw):
         at, line = raw[k]
-        if NUMBER_ONLY_RE.match(line) and k + 1 < len(raw):
-            line = f"{line.rstrip('.')} {raw[k + 1][1]}"
+        nxt = raw[k + 1][1] if k + 1 < len(raw) else None
+        joinable = nxt is not None and not (
+            ANNEX_ONE_RE.match(nxt) or ANNEX_OTHER_RE.match(nxt) or TOP_HEADING_RE.match(nxt)
+        )
+        if joinable and NUMBER_ONLY_RE.match(line):
+            line = f"{line.rstrip('.')} {nxt}"
+            k += 1
+        elif joinable and TOP_NUMBER_ONLY_RE.match(line):
+            line = f"{line} {nxt}"
             k += 1
         out.append((at, line))
         k += 1
@@ -122,12 +137,32 @@ def _accept(number: str, title: str, last: tuple[int, int]) -> bool:
     return major > last[0] and minor == 1
 
 
+def _starts_smpc(lines: list[tuple[int, str]], idx: int) -> bool:
+    """Whether the title line ``lines[idx]`` starts an SmPC: the NAME heading is one of the
+    next ``NAME_LOOKAHEAD_LINES`` lines, and no section heading, top heading, ANNEX marker or
+    other title comes before it."""
+    for _pos, line in lines[idx + 1 : idx + 1 + NAME_LOOKAHEAD_LINES]:
+        if NAME_HEADING_RE.match(line):  # before TOP_HEADING_RE, which it also matches
+            return True
+        if (
+            SECTION_HEADING_RE.match(line)
+            or TOP_HEADING_RE.match(line)
+            or ANNEX_ONE_RE.match(line)
+            or ANNEX_OTHER_RE.match(line)
+            or SMPC_START_RE.match(line)
+        ):
+            return False
+    return False
+
+
 def _split_smpcs(text: str) -> list[dict[str, Any]]:
     """The SmPCs of Annex I: each has ``name`` and ``events``, a list of
     ``("h", number, title, offset)`` headings and ``("stop", offset)`` marks, plus
     ``end`` (the offset where its region ends). A "SUMMARY OF PRODUCT CHARACTERISTICS"
-    line starts an SmPC only when the next line is the "1. NAME OF THE MEDICINAL PRODUCT"
-    heading; a page running header with that text stays in the body."""
+    line starts an SmPC only when the "1. NAME OF THE MEDICINAL PRODUCT" heading follows
+    within ``NAME_LOOKAHEAD_LINES`` non-blank lines, with no section heading, top heading,
+    ANNEX marker or other title between (``_starts_smpc``); a page running header with that
+    text stays in the body."""
     lines = _lines(text)
     smpcs: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
@@ -143,8 +178,7 @@ def _split_smpcs(text: str) -> list[dict[str, Any]]:
 
     for idx, (pos, line) in enumerate(lines):
         prev = lines[idx - 1] if idx else None
-        nxt = lines[idx + 1][1] if idx + 1 < len(lines) else ""
-        if SMPC_START_RE.match(line) and NAME_HEADING_RE.match(nxt):
+        if SMPC_START_RE.match(line) and _starts_smpc(lines, idx):
             close(prev[0] if prev is not None and ANNEX_ONE_RE.match(prev[1]) else pos)
             cur = {"name": None, "events": [], "end": len(text)}
             awaiting_name = False

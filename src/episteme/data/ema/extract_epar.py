@@ -46,7 +46,8 @@ SmPC headings of Annex I in the stored ``body_text`` and the part gets a label s
 ``dailymed.labels``); the load writes it to ``label_section`` in the transaction of the
 shard. A document where no heading is found gets no rows; ``documents_with_sections`` and
 ``documents_without_sections`` count the ``product-information`` documents with and without
-rows (in the bucket marker and in the summary). The section-rule version
+rows (in the bucket marker and in the summary); a document with no text (a scan) is left
+out of both and counted as ``documents_no_text``. The section-rule version
 (``smpc.SMPC_RULE_VERSION``) is part of the fingerprint of ``product-information``
 documents only, so a new rule extracts those again and no other type.
 
@@ -310,8 +311,12 @@ def _section_rows(
 ) -> list[dict[str, Any]]:
     """The label sidecar rows (``kind`` ``section``) of one row, and the document counts.
     Only ``product-information`` documents are read; the others give no rows and are not
-    counted."""
+    counted. A document with no text (a scan, ``extract_status`` ``empty``) is out of the
+    section share: it is counted apart, as ``no_text``."""
     if entry.get("type") != SECTION_DOC_TYPE:
+        return []
+    if row["extract_status"] == "empty":
+        counts["no_text"] += 1
         return []
     found = smpc.smpc_sections(row["body_text"] or "")
     counts["with" if found else "without"] += 1
@@ -524,6 +529,7 @@ def process_bucket(
                     "failed_by_reason": dict(done.get("failed_by_reason") or {}),
                     "documents_with_sections": int(done.get("documents_with_sections") or 0),
                     "documents_without_sections": int(done.get("documents_without_sections") or 0),
+                    "documents_no_text": int(done.get("documents_no_text") or 0),
                 }
             if is_success(processed_dir, SOURCE, key):
                 _LOG.warning("%s: an input changed since the bucket completed; written again", key)
@@ -553,7 +559,7 @@ def process_bucket(
         cap_rows, cap_bytes = _part_caps()
         failed: list[dict[str, str]] = []
         by_reason: Counter[str] = Counter()
-        sections = {"with": 0, "without": 0}
+        sections = {"with": 0, "without": 0, "no_text": 0}
 
         def _doc_failed(entry: dict, reason: str, exc: BaseException) -> None:
             by_reason[reason] += 1
@@ -625,6 +631,7 @@ def process_bucket(
             "failed_by_reason": dict(by_reason),
             "documents_with_sections": sections["with"],
             "documents_without_sections": sections["without"],
+            "documents_no_text": sections["no_text"],
             "part_rows": cap_rows,
             "part_bytes": cap_bytes,
             "extract_status_counts": dict(status_counts),
@@ -692,7 +699,8 @@ def extract_epar(
     ``max_files`` limits the number of buckets of the run; ``skip_units`` take bucket keys.
     Returns ``{"inputs", "ok", "failed", "held_buckets", "rows", "buckets", "documents",
     "withdrawn_docs", "retired_buckets", "failed_docs_count", "failed_by_reason",
-    "documents_with_sections", "documents_without_sections", "not_downloaded",
+    "documents_with_sections", "documents_without_sections", "documents_no_text",
+    "not_downloaded",
     "refused_rows", "duplicate_ids"}``. ``force_reason`` with ``force`` overrides the guards.
     Raises ``EparScanError`` when the feed is missing or lists no wanted document,
     ``EparGuardError`` when a guard refuses."""
@@ -851,6 +859,7 @@ def extract_epar(
         "documents_without_sections": sum(
             int(r.get("documents_without_sections") or 0) for r in results
         ),
+        "documents_no_text": sum(int(r.get("documents_no_text") or 0) for r in results),
         "not_downloaded": n_missing,
         "refused_rows": int(feed_stats.get("refused_url", 0))
         + int(feed_stats.get("refused_id", 0)),
@@ -895,6 +904,7 @@ def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
         no_text=no_text,
         documents_with_sections=int(res.get("documents_with_sections") or 0),
         documents_without_sections=int(res.get("documents_without_sections") or 0),
+        documents_no_text=int(res.get("documents_no_text") or 0),
     )
 
 
