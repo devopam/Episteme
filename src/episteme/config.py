@@ -105,7 +105,13 @@ DEFAULT_LOAD_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_WRITE_BATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_PMC_BUCKET_IDS = 50_000
 # Seconds to wait between two requests to EMA's site (feed and document downloads).
-DEFAULT_EMA_DELAY_SECONDS = 2.0
+DEFAULT_EMA_DELAY_SECONDS = 5.0
+# A 429 or 503 from EMA pauses the whole run. Without a Retry-After header the wait starts
+# at the backoff, doubles per consecutive throttle, and stops at the cap (seconds). After
+# this many throttles in a row the stage stops (exit 3); a success resets the count.
+DEFAULT_EMA_BACKOFF_SECONDS = 60.0
+DEFAULT_EMA_MAX_BACKOFF_SECONDS = 600.0
+DEFAULT_EMA_MAX_THROTTLES = 5
 # Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
 # holds a long transaction on reg_record blocks it); then the feed fails.
 DEFAULT_REG_LOCK_TIMEOUT_S = 300
@@ -327,6 +333,12 @@ class Settings:
     pmc_bucket_ids: int = DEFAULT_PMC_BUCKET_IDS
     # Seconds between two requests to EMA (EPISTEME_EMA_DELAY_SECONDS).
     ema_delay_seconds: float = DEFAULT_EMA_DELAY_SECONDS
+    # First wait after a 429/503 without Retry-After (EPISTEME_EMA_BACKOFF_SECONDS), the cap
+    # of every throttle wait (EPISTEME_EMA_MAX_BACKOFF_SECONDS), and the count of throttles in
+    # a row that stops the stage (EPISTEME_EMA_MAX_THROTTLES).
+    ema_backoff_seconds: float = DEFAULT_EMA_BACKOFF_SECONDS
+    ema_max_backoff_seconds: float = DEFAULT_EMA_MAX_BACKOFF_SECONDS
+    ema_max_throttles: int = DEFAULT_EMA_MAX_THROTTLES
     # Seconds to wait for the reg_record partition DDL lock (EPISTEME_REG_LOCK_TIMEOUT_S).
     reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
     # Seconds to wait for the FAERS generation swap's lock (EPISTEME_FAERS_LOCK_TIMEOUT_S).
@@ -480,6 +492,15 @@ def get_settings() -> Settings:
         ),
         ema_delay_seconds=_get_non_negative_float_or_default(
             "EPISTEME_EMA_DELAY_SECONDS", DEFAULT_EMA_DELAY_SECONDS
+        ),
+        ema_backoff_seconds=_get_non_negative_float_or_default(
+            "EPISTEME_EMA_BACKOFF_SECONDS", DEFAULT_EMA_BACKOFF_SECONDS
+        ),
+        ema_max_backoff_seconds=_get_non_negative_float_or_default(
+            "EPISTEME_EMA_MAX_BACKOFF_SECONDS", DEFAULT_EMA_MAX_BACKOFF_SECONDS
+        ),
+        ema_max_throttles=_get_positive_int_or_default(
+            "EPISTEME_EMA_MAX_THROTTLES", DEFAULT_EMA_MAX_THROTTLES
         ),
         reg_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REG_LOCK_TIMEOUT_S", DEFAULT_REG_LOCK_TIMEOUT_S

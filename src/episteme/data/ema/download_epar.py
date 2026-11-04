@@ -23,6 +23,13 @@ status 200 with HTML (or any 200 body that is not a PDF) is that page: it is nev
 The stage writes a failed marker and stops with ``FeedVerificationError``, keeps every file
 already fetched, and a re-run resumes. A download cut short is tried once more and then
 recorded as failed; the other documents still run.
+
+A 429 or 503 is a throttle, not a failure of the document: the whole run pauses
+(``Retry-After`` when EMA sends it, else a backoff that doubles per throttle in a row), and
+the same document is asked for again without using one of its attempts. After
+``EPISTEME_EMA_MAX_THROTTLES`` throttles in a row the stage writes a failed marker, keeps
+every file already fetched, and stops with ``RateLimited`` (exit 3); a re-run resumes. A
+stop request or a dead parent ends the stage cleanly (``stage_guard``, no lock).
 """
 
 from __future__ import annotations
@@ -53,16 +60,26 @@ from episteme.data.checkpoint_markers import (
 from episteme.data.regulatory.download_ema import (
     ATTEMPTS,
     FeedVerificationError,
+    RateLimited,
     Retryable,
+    Throttled,
+    ThrottleGate,
     TooLarge,
     download_to,
 )
 from episteme.data.regulatory.feeds import load_feeds
 from episteme.data.regulatory.parsers import ema_total, parse
+from episteme.ops.stop import stage_guard
 
 _LOG = logging.getLogger(__name__)
 
-__all__ = ["ATTEMPTS", "FeedVerificationError", "fetch_documents", "select_documents"]
+__all__ = [
+    "ATTEMPTS",
+    "FeedVerificationError",
+    "RateLimited",
+    "fetch_documents",
+    "select_documents",
+]
 
 MARKER_SOURCE = "ema_epar_download"
 FEED_NAME = "ema_epar_documents"
@@ -199,12 +216,16 @@ def fetch_documents(
     sleep: Callable[[float], None] = time.sleep,
     force: bool = False,
     max_files: int | None = None,
+    backoff_s: float | None = None,
+    max_backoff_s: float | None = None,
+    max_throttles: int | None = None,
 ) -> dict:
     """Download the English PDF of each document into ``raw_dir/epar/<id>.pdf``.
 
     Returns ``{"fetched": [ids], "skipped": [ids], "failed": {id: reason}, "refused": n}``.
     Raises ``FeedVerificationError`` (after its failed marker) when EMA answers with its
-    verification page; what was fetched before stays. ``session`` and ``sleep`` are seams
+    verification page, and ``RateLimited`` (after its failed marker) after too many throttles
+    in a row; what was fetched before stays. ``session`` and ``sleep`` are seams
     for tests. A document that ``select_documents`` would refuse (id, URL prefix) is
     refused here too: the caller need not have filtered."""
     raw_dir = Path(raw_dir)
@@ -214,6 +235,9 @@ def fetch_documents(
     max_bytes = settings.epar_max_bytes
     prefix = source_url(PREFIX_KEY)
     session = session or requests.Session()
+    gate = ThrottleGate(
+        sleep=sleep, backoff_s=backoff_s, max_backoff_s=max_backoff_s, max_throttles=max_throttles
+    )
 
     result: dict = {"fetched": [], "skipped": [], "failed": {}, "refused": 0}
     selected: list[dict] = []
@@ -241,9 +265,13 @@ def fetch_documents(
             continue
         tmp = final.with_name(f".{final.name}.{os.getpid()}.tmp")
         last_error = ""
-        for attempt in range(1, ATTEMPTS + 1):
-            if requests_made and delay > 0:
+        attempt = 0
+        waited = False
+        while attempt < ATTEMPTS:
+            # The pause after a throttle is the delay: no second wait before the new request.
+            if requests_made and delay > 0 and not waited:
                 sleep(delay)
+            waited = False
             requests_made += 1
             try:
                 stats = download_to(
@@ -254,6 +282,25 @@ def fetch_documents(
                     _check_pdf,
                     max_bytes=max_bytes,
                 )
+            except KeyboardInterrupt:
+                tmp.unlink(missing_ok=True)
+                raise
+            except Throttled as exc:
+                tmp.unlink(missing_ok=True)
+                try:
+                    gate.on_throttle(exc, f"document {d['id']}")
+                except RateLimited as stop_exc:
+                    mark_failed(
+                        processed_root,
+                        MARKER_SOURCE,
+                        key,
+                        error_class="RateLimited",
+                        message=str(stop_exc),
+                        exc=stop_exc,
+                    )
+                    raise
+                waited = True
+                continue  # the same document again; this try does not count
             except FeedVerificationError as exc:
                 tmp.unlink(missing_ok=True)
                 mark_failed(
@@ -270,6 +317,7 @@ def fetch_documents(
                 # retried; the other documents go on.
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
+                gate.ok()
                 mark_failed(
                     processed_root,
                     MARKER_SOURCE,
@@ -283,10 +331,13 @@ def fetch_documents(
             except Retryable as exc:
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
+                attempt += 1
+                gate.ok()
                 _LOG.warning(
                     "document %s: attempt %d of %d failed: %s", d["id"], attempt, ATTEMPTS, exc
                 )
                 continue
+            gate.ok()
             os.replace(tmp, final)
             mark_success(
                 processed_root,
@@ -345,18 +396,21 @@ def main(argv: list[str] | None = None) -> int:
         for d in docs[: args.max_files]:
             print(f"dry-run: would fetch document {d['id']} -> {document_path(out_dir, d['id'])}")
         return 0
-    try:
-        result = fetch_documents(out_dir, docs, force=args.force, max_files=args.max_files)
-    except FeedVerificationError as exc:
-        print(f"ema_epar: {exc}", file=sys.stderr)
-        return 3
-    print(
-        f"ema_epar: fetched={len(result['fetched'])} skipped={len(result['skipped'])} "
-        f"failed={len(result['failed'])} refused={result['refused']}"
-    )
-    for doc_id, reason in result["failed"].items():
-        print(f"ema_epar: FAILED document {doc_id}: {reason}", file=sys.stderr)
-    return 1 if result["failed"] else 0
+    # No lock: a download holds no database and not the heavy lock. Only the stop handlers,
+    # the stop-request file and the parent watchdog apply (conn_ref returns None).
+    with stage_guard(lambda: None, argv=argv) as g:
+        try:
+            result = fetch_documents(out_dir, docs, force=args.force, max_files=args.max_files)
+        except (FeedVerificationError, RateLimited) as exc:
+            print(f"ema_epar: {exc}", file=sys.stderr)
+            return g.exit_code(3)
+        print(
+            f"ema_epar: fetched={len(result['fetched'])} skipped={len(result['skipped'])} "
+            f"failed={len(result['failed'])} refused={result['refused']}"
+        )
+        for doc_id, reason in result["failed"].items():
+            print(f"ema_epar: FAILED document {doc_id}: {reason}", file=sys.stderr)
+        return g.exit_code(1 if result["failed"] else 0)
 
 
 if __name__ == "__main__":

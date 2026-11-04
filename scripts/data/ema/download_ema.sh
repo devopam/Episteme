@@ -2,8 +2,10 @@
 # Episteme acquisition wrapper: EMA open-data feeds (JSON reports + the Article 57
 # workbook). Download-only. The feed URLs come from the EMA_* keys of
 # scripts/data/_lib/sources.env, named by src/episteme/data/regulatory/feeds.toml.
-# One file at a time, EPISTEME_EMA_DELAY_SECONDS between requests (default 2). If EMA
-# answers with its human-verification page the stage stops (exit 3) and does not retry.
+# One file at a time, EPISTEME_EMA_DELAY_SECONDS between requests (default 5). If EMA
+# answers with its human-verification page the stage stops (exit 3) and does not retry. A 429 or
+# 503 pauses the run (EPISTEME_EMA_BACKOFF_SECONDS, EPISTEME_EMA_MAX_BACKOFF_SECONDS); after
+# EPISTEME_EMA_MAX_THROTTLES in a row the stage stops (exit 3) and a re-run resumes.
 # Flags: --dry-run, --force, --max-files N, --reason TEXT, --output-dir DIR.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -2,7 +2,9 @@
 # Episteme acquisition wrapper: the English EPAR PDFs that the ema_epar_documents feed lists
 # (types from src/episteme/data/regulatory/feeds.toml). Run the `ema` download first: it
 # fetches the feed. One file at a time, EPISTEME_EMA_DELAY_SECONDS between requests (default
-# 2). If EMA answers with its human-verification page the stage stops (exit 3), keeps what it
+# 5). A 429 or 503 pauses the run (EPISTEME_EMA_BACKOFF_SECONDS,
+# EPISTEME_EMA_MAX_BACKOFF_SECONDS); after EPISTEME_EMA_MAX_THROTTLES in a row the stage stops
+# (exit 3) and a re-run resumes. If EMA answers with its human-verification page the stage stops (exit 3), keeps what it
 # fetched, and does not retry; a re-run resumes.
 # Flags: --dry-run, --force, --max-files N, --reason TEXT, --output-dir DIR.
 set -uo pipefail
