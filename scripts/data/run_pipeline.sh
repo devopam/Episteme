@@ -123,6 +123,10 @@ fi
 if [ "$ZIP_SET" = "1" ]; then
     { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
     [ -n "$ZIP_PATH" ] || die "--zip requires a path" 2
+    # A missing path must not take the next flag ("--zip --skip-gate") as the zip.
+    case "$ZIP_PATH" in
+        --*) die "--zip requires a path, not the flag $ZIP_PATH" 2 ;;
+    esac
     # A sample run loads its own slice: the whole newest release zip.
     [ "$SAMPLE" = "0" ] || die "--sample and --zip cannot be used together" 2
 fi

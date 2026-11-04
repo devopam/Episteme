@@ -49,3 +49,11 @@ def test_zip_is_refused_with_sample_and_without_a_path(tree):
     assert calls == []
     proc, calls = _run(tree, "aact", "load", "--zip")
     assert proc.returncode == 2 and calls == []
+
+
+def test_zip_refuses_a_flag_as_its_path(tree):
+    """``--zip --skip-gate`` must not take ``--skip-gate`` as the zip path."""
+    proc, calls = _run(tree, "aact", "load", "--zip", "--skip-gate", "--reason", "t")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--zip requires a path" in proc.stderr + proc.stdout
+    assert calls == []

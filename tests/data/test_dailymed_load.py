@@ -49,7 +49,8 @@ class _Conn:
 # ---------------------------------------------------------------------------
 # pure
 # ---------------------------------------------------------------------------
-def test_pre_load_runs_only_for_dailymed(monkeypatch):
+def test_pre_load_runs_the_label_step_for_dailymed_and_not_for_article_sources(monkeypatch):
+    """The ema_epar label step is tested in test_smpc.py."""
     calls: list[Path] = []
 
     def fake(conn, source, shard):
@@ -90,7 +91,8 @@ def test_a_shard_without_a_sidecar_is_refused(tmp_path):
         labels.replace_labels(_Conn(), "dailymed", shard)
 
 
-def test_retire_deletes_label_rows_for_dailymed_only(monkeypatch):
+def test_retire_deletes_label_rows_for_dailymed_and_not_for_pmc(monkeypatch):
+    """The ema_epar retire is tested in test_smpc.py."""
     monkeypatch.setattr(postgres_loader.audit_trail, "record", lambda *a, **k: None)
     conn = _Conn()
     postgres_loader.delete_source_files(conn, source="dailymed", source_files=["p1"])
