@@ -27,11 +27,13 @@ MESSAGE = "EMA rate limit: run again later; fetched files are kept"
 class LogSession(FakeSession):
     """A fake session that writes every request, and every sleep, into one event list."""
 
-    def __init__(self, responses, events):
+    def __init__(self, responses, events, flush=lambda: None):
         super().__init__(responses)
         self.events = events
+        self.flush = flush
 
     def get(self, url, **kwargs):
+        self.flush()
         self.events.append(("get", url))
         return super().get(url, **kwargs)
 
@@ -54,8 +56,21 @@ def _settings_cache():
 def env(tmp_path):
     events: list = []
     sleeps: list[float] = []
+    pending: list[float] = []
+
+    def flush() -> None:
+        """The throttle wait is made of slices of 1 s at most: one wait is their sum."""
+        if pending:
+            total = float(sum(pending))
+            pending.clear()
+            sleeps.append(total)
+            events.append(("sleep", total))
 
     def sleep(secs: float) -> None:
+        if secs <= 1.0:  # a slice of a throttle wait (the delay is 2 s)
+            pending.append(secs)
+            return
+        flush()
         sleeps.append(secs)
         events.append(("sleep", secs))
 
@@ -64,6 +79,7 @@ def env(tmp_path):
         "proc": tmp_path / "proc",
         "events": events,
         "sleeps": sleeps,
+        "flush": flush,
         "kw": {
             "processed_root": tmp_path / "proc",
             "delay_s": 2.0,
@@ -76,7 +92,9 @@ def env(tmp_path):
 
 
 def _sess(env, *docs_and_resps) -> LogSession:
-    return LogSession({d["document_url"]: list(r) for d, r in docs_and_resps}, env["events"])
+    return LogSession(
+        {d["document_url"]: list(r) for d, r in docs_and_resps}, env["events"], env["flush"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +221,79 @@ def test_the_wait_settings_come_from_settings(env, monkeypatch):
     assert len(s.calls) == 3 and env["sleeps"] == [3.0, 4.0]
 
 
+def test_the_wait_is_made_of_slices_of_one_second_at_most(env):
+    a = doc(1)
+    slices: list[float] = []
+    kw = {**env["kw"], "sleep": slices.append}
+    s = _sess(env, (a, [throttle(429, "5"), _pdf_resp("a")]))
+    dl.fetch_documents(env["raw"], [a], session=s, **kw)
+    assert slices == [1.0] * 5 and sum(slices) == 5.0
+    slices.clear()
+    s = _sess(env, (doc(2), [throttle(429, "2"), _pdf_resp("b")]))
+    dl.fetch_documents(env["raw"], [doc(2)], session=s, **kw)
+    assert max(slices) <= 1.0 and sum(slices) == 2.0
+
+
+def test_a_stop_raised_in_a_slice_ends_the_run(env):
+    a, b = doc(1), doc(2)
+    seen: list[float] = []
+
+    def sleep(secs: float) -> None:
+        seen.append(secs)
+        if len(seen) == 3:  # the stop arrives in the third second of a long wait
+            raise KeyboardInterrupt
+
+    s = _sess(env, (a, [throttle(429, "600"), _pdf_resp("a")]), (b, [_pdf_resp("b")]))
+    kw = {**env["kw"], "sleep": sleep}
+    with pytest.raises(KeyboardInterrupt):
+        dl.fetch_documents(env["raw"], [a, b], session=s, **kw)
+    assert len(seen) == 3 and s.calls == [a["document_url"]]
+    assert not list((env["raw"] / "epar").glob(".*"))
+
+
+def test_a_500_between_throttles_does_not_reset_the_count(env):
+    docs = [doc(1), doc(2), doc(3)]
+    kw = {**env["kw"], "backoff_s": 1.0}
+    # Each of the first two documents: 429, 500, 429, 500 (both tries spent). Then 429 is the fifth.
+    seq = [throttle(), throttle(500), throttle(), throttle(500)]
+    s = _sess(
+        env,
+        (docs[0], list(seq)),
+        (docs[1], [throttle(), throttle(500), throttle(), throttle(500)]),
+        (docs[2], [throttle(), _pdf_resp("c")]),
+    )
+    with pytest.raises(RateLimited):
+        dl.fetch_documents(env["raw"], docs, session=s, **kw)
+    assert s.calls.count(docs[2]["document_url"]) == 1  # the fifth throttle, in the third document
+
+
+@pytest.mark.parametrize("value", ["٣٠", "١"])  # Arabic-Indic digits
+def test_a_unicode_digit_retry_after_falls_back_to_the_backoff(env, value):
+    assert fd.parse_retry_after(value) is None
+    a = doc(1)
+    s = _sess(env, (a, [throttle(429, value), _pdf_resp("a")]))
+    dl.fetch_documents(env["raw"], [a], session=s, **env["kw"])
+    assert env["sleeps"] == [60.0]
+
+
+@pytest.mark.parametrize("retry_after", ["0", None])
+def test_a_wait_is_at_least_one_second(env, retry_after):
+    a = doc(1)
+    kw = {**env["kw"], "backoff_s": 0.0}
+    s = _sess(env, (a, [throttle(429, retry_after), _pdf_resp("a")]))
+    dl.fetch_documents(env["raw"], [a], session=s, **kw)
+    assert env["sleeps"] == [1.0]
+
+
+def test_a_503_with_an_html_body_is_a_throttle_not_the_verification_page(env):
+    a = doc(1)
+    html = FakeResp(b"<html>Service Unavailable</html>", 503, "text/html; charset=utf-8")
+    s = _sess(env, (a, [html, _pdf_resp("a")]))
+    out = dl.fetch_documents(env["raw"], [a], session=s, **env["kw"])
+    assert out["fetched"] == ["1"] and env["sleeps"] == [60.0]
+    assert not failed_marker_path(env["proc"], dl.MARKER_SOURCE, "epar__1.pdf").exists()
+
+
 # ---------------------------------------------------------------------------
 # EMA feeds
 # ---------------------------------------------------------------------------
@@ -218,7 +309,7 @@ def _furl(feed) -> str:
 
 
 def _fsess(env, *feeds_and_resps) -> LogSession:
-    return LogSession({_furl(f): list(r) for f, r in feeds_and_resps}, env["events"])
+    return LogSession({_furl(f): list(r) for f, r in feeds_and_resps}, env["events"], env["flush"])
 
 
 def test_feed_429_waits_and_asks_again(fenv):

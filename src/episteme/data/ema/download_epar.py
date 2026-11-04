@@ -317,7 +317,6 @@ def fetch_documents(
                 # retried; the other documents go on.
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
-                gate.ok()
                 mark_failed(
                     processed_root,
                     MARKER_SOURCE,
@@ -332,7 +331,6 @@ def fetch_documents(
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
                 attempt += 1
-                gate.ok()
                 _LOG.warning(
                     "document %s: attempt %d of %d failed: %s", d["id"], attempt, ATTEMPTS, exc
                 )

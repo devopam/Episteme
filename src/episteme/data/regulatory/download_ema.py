@@ -82,6 +82,8 @@ class RateLimited(RuntimeError):
 
 RATE_LIMIT_MESSAGE = "EMA rate limit: run again later; fetched files are kept"
 _THROTTLE_STATUS = (429, 503)
+WAIT_SLICE_S = 1.0
+MIN_WAIT_S = 1.0
 
 
 def _utcnow() -> datetime:
@@ -94,7 +96,7 @@ def parse_retry_after(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text:
         return None
-    if text.isdigit():
+    if text.isascii() and text.isdigit():
         return float(text)
     try:
         when = parsedate_to_datetime(text)
@@ -142,6 +144,7 @@ class ThrottleGate:
             wait = min(exc.retry_after, self.max_backoff_s)
         else:
             wait = min(self.backoff_s * 2 ** (self.count - 1), self.max_backoff_s)
+        wait = max(wait, MIN_WAIT_S)  # a 0 from Retry-After or a setting still waits
         _LOG.warning(
             "%s: %s; throttle %d of %d, waiting %.0f s",
             label,
@@ -150,7 +153,13 @@ class ThrottleGate:
             self.max_throttles,
             wait,
         )
-        self.sleep(wait)
+        # Slices, so a pending stop (an interrupt that cannot wake one long sleep) raises
+        # between two slices.
+        left = wait
+        while left > 0:
+            piece = min(WAIT_SLICE_S, left)
+            self.sleep(piece)
+            left -= piece
         return wait
 
 
@@ -373,7 +382,6 @@ def fetch_ema_feeds(
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
                 attempt += 1
-                gate.ok()
                 _LOG.warning("%s: attempt %d of %d failed: %s", feed.name, attempt, ATTEMPTS, exc)
                 continue
             gate.ok()
