@@ -170,6 +170,37 @@ def test_aact_summary_measures_without_a_summary_are_missing():
     assert none["xref_coverage_pct"] == {"aact_intervention": None}
 
 
+def test_aact_a_table_without_nct_id_counts_as_checked():
+    """``search_terms`` has no ``nct_id``, so the loader cannot count its orphans; the load
+    summary lists it in ``missing_nct_id``. Such a table is checked, so the largest share is
+    a measure; a table in neither list still leaves the measure missing."""
+    tables = {"studies": 1000, "conditions": 2500, "interventions": 1800, "search_terms": 40}
+    m = gate_report.aact_summary_measures(
+        _aact_summary(tables=tables, missing_nct_id=["search_terms"])
+    )
+    assert m["orphan_share_pct_max"] == pytest.approx(0.2)
+    assert "search_terms" not in m["orphan_share_pct"]
+    assert gate.evaluate({**_aact_measures(), **m}, gate.load_rules("aact")["load"]) == []
+    # Without the list, search_terms is unchecked: no measure, so the rule fails.
+    assert (
+        gate_report.aact_summary_measures(_aact_summary(tables=tables))["orphan_share_pct_max"]
+        is None
+    )
+    # A table in neither list still fails, with the list present.
+    more = {**tables, "notes": 3}
+    m = gate_report.aact_summary_measures(
+        _aact_summary(tables=more, missing_nct_id=["search_terms"])
+    )
+    assert m["orphan_share_pct_max"] is None
+    # The list alone, with no orphan record, is no measure.
+    m = gate_report.aact_summary_measures(
+        _aact_summary(
+            tables={"studies": 3, "search_terms": 2}, orphans={}, missing_nct_id=["search_terms"]
+        )
+    )
+    assert m["orphan_share_pct_max"] is None
+
+
 def _aact_measures(**over):
     base = {
         "rows": 1000,

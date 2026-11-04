@@ -510,7 +510,9 @@ def section_measures(with_sections: int | None, without_sections: int | None) ->
 def aact_summary_measures(summary: dict | None) -> dict:
     """Measures from the summary that ``load_aact`` writes with its ``load_commit`` audit row:
     the tables with rows and without, the orphan ``nct_id`` share (percent) per table and its
-    largest value, and the share of interventions that ``resolve_names`` tied to a moiety
+    largest value (a measure only when every table but ``studies`` is in ``orphans`` or in
+    ``missing_nct_id``, the tables without an ``nct_id`` column), and the share of
+    interventions that ``resolve_names`` tied to a substance
     (``xref_coverage_pct["aact_intervention"]``, recorded, no limit). No summary (the run
     loaded nothing) gives None for every value, so the rules fail."""
     out: dict[str, Any] = {
@@ -529,8 +531,12 @@ def aact_summary_measures(summary: dict | None) -> dict:
     shares = {t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0 for t, o in orphans.items()}
     out["orphan_share_pct"] = shares
     # The largest share is a measure only when every table but studies was checked: an
-    # empty or partial orphan record must fail the rule, not pass it as 0.
-    checked = bool(orphans) and all(t in orphans for t in tables if t != "studies")
+    # empty or partial orphan record must fail the rule, not pass it as 0. A table without
+    # an nct_id column (search_terms) is listed in missing_nct_id and counts as checked.
+    no_nct_id = set(summary.get("missing_nct_id") or [])
+    checked = bool(orphans) and all(
+        t in orphans or t in no_nct_id for t in tables if t != "studies"
+    )
     out["orphan_share_pct_max"] = max(shares.values()) if checked else None
     names = summary.get("names") or {}
     total = int(names.get("interventions") or 0)

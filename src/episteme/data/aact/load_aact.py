@@ -29,8 +29,10 @@ for the interpreter), so other CSV readers in the same process see the raised li
 
 **Dictionary.** The file header drives the columns. Columns only in the file, columns only in
 the dictionary, deprecated columns that are loaded, and dictionary tables missing from the zip
-(``mesh_headings``, ``mesh_terms``, ``study_searches``) are reported; none fails the load. The
-dictionary date (``dictionary.DICTIONARY_DATE``) is recorded with the release.
+are reported. Only a missing table fails the load, and only when it is not one of
+``KNOWN_ABSENT_TABLES`` (``mesh_headings``, ``mesh_terms``, ``study_searches``): that check
+runs first, before any table loads. The dictionary date (``dictionary.DICTIONARY_DATE``) is
+recorded with the release.
 
 **Order of work** (``load_release``):
 
@@ -55,10 +57,11 @@ dictionary date (``dictionary.DICTIONARY_DATE``) is recorded with the release.
 4. **Names.** The distinct names of ``interventions.name`` and
    ``intervention_other_names.name`` go through ``load_substance.resolve_names`` (source
    ``aact``: exact normalised match, ``aact_name`` xref rows; no fuzzy match). The release table
-   ``intervention_substance (nct_id, intervention_id, substance_key, method)`` holds each
-   intervention's matched substances (``method`` ``normalised_name`` or
-   ``normalised_other_name``). ``substance_key`` is the matched substance; its active moiety
-   is ``substance.moiety_key``. Coverage is reported, not checked.
+   ``intervention_substance (nct_id, intervention_id, substance_key, moiety_key, method)``
+   holds each intervention's matched substances (``method`` ``normalised_name`` or
+   ``normalised_other_name``). ``substance_key`` is the matched substance; ``moiety_key`` is
+   its active moiety (``substance.moiety_key``, or the substance itself when that is NULL),
+   the key that the FAERS signal tables count on. Coverage is reported, not checked.
 5. **Switch,** one transaction under ``lock_timeout`` (``EPISTEME_REG_LOCK_TIMEOUT_S``): every
    view in ``aact`` is dropped and one view per table of the release is created (``SELECT``
    granted to ``episteme_app``), ``reg_release`` moves ``is_latest`` to the release
@@ -140,6 +143,11 @@ STATE_TABLE = "_load_state"
 RELEASE_ROW = "_release"
 STUDIES = "studies"
 INTERVENTION_SUBSTANCE = "intervention_substance"
+# Dictionary tables that the AACT zip leaves out (checked on the 2026-11-03 release; NLM
+# MeSH covers the first two). Absent from the zip is allowed for these three only: any other
+# dictionary table missing from the zip fails the load before a table loads, so the gate's
+# tables_with_rows floor (the dictionary's 52 tables less these three: 49) holds.
+KNOWN_ABSENT_TABLES: tuple[str, ...] = ("mesh_headings", "mesh_terms", "study_searches")
 # A change of the reading or typing rules changes the fingerprint, so a finished release is
 # not taken as current after such a change.
 LOADER_VERSION = 1
@@ -156,13 +164,13 @@ EXTRA_INDEXES: dict[str, tuple[str, ...]] = {
     "conditions": ("downcase_name",),
     "browse_conditions": ("mesh_term",),
     "browse_interventions": ("mesh_term",),
-    INTERVENTION_SUBSTANCE: ("substance_key",),
+    INTERVENTION_SUBSTANCE: ("substance_key", "moiety_key"),
 }
 # The text columns of EXTRA_INDEXES are indexed on left(col, INDEX_PREFIX_CHARS): at most
 # 4 bytes a character, so 2000 bytes, under the btree key limit (about 2700 bytes).
 INDEX_PREFIX_CHARS = 500
 # Columns that hold no free text: indexed whole.
-_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key"})
+_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key", "moiety_key"})
 # Estimated bytes of one row beyond its text, and of one field (the Python str object).
 _ROW_OVERHEAD = 64
 _FIELD_OVERHEAD = 50
@@ -448,12 +456,19 @@ def row_size(row: Sequence[str]) -> int:
 
 def compare_tables(tables: Sequence[str], dictionary: dict[str, list[dict]]) -> dict:
     """Tables of the dictionary missing from the zip, and tables of the zip that the
-    dictionary does not know. Reported, never fatal."""
+    dictionary does not know. Both are reported; ``unexpected_missing`` decides which
+    missing table fails the load."""
     have, known = set(tables), set(dictionary)
     return {
         "missing_from_zip": sorted(known - have),
         "not_in_dictionary": sorted(have - known),
     }
+
+
+def unexpected_missing(missing_from_zip: Sequence[str]) -> list[str]:
+    """The tables of ``missing_from_zip`` other than ``KNOWN_ABSENT_TABLES``: each one fails
+    the load."""
+    return sorted(set(missing_from_zip) - set(KNOWN_ABSENT_TABLES))
 
 
 def orphan_breaches(counts: dict[str, tuple[int, int]], limit: float) -> dict[str, float]:
@@ -784,8 +799,9 @@ def _build_indexes(conn: psycopg.Connection, schema: str, tables: Sequence[str])
 
 
 def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> dict:
-    """The row checks of spec 4.4; ``_Invalid`` on a breach. Returns
-    ``{"orphans": {table: n}, "orphan_shares": {table: share}}``."""
+    """The row checks of spec 4.4; ``_Invalid`` on a breach. Returns ``{"studies": n,
+    "orphans": {table: n}, "orphan_shares": {table: share}, "missing_nct_id": [tables]}``;
+    ``missing_nct_id`` lists the tables with no ``nct_id`` column (no orphan count)."""
     if STUDIES not in state:
         raise _Invalid("the zip has no studies table")
     empty = sorted(t for t, s in state.items() if not s["rows"])
@@ -871,22 +887,28 @@ def _resolve_interventions(conn: psycopg.Connection, ctx: _Ctx) -> dict:
                 cur.execute(
                     sql.SQL(
                         "CREATE TABLE {} (nct_id text, intervention_id text, "
-                        "substance_key bigint, method text)"
+                        "substance_key bigint, moiety_key bigint, method text)"
                     ).format(target)
                 )
                 for table, id_col, method in sources:
+                    # moiety_key: the active moiety of the matched substance, or the
+                    # substance itself when it has none (as the FAERS signal tables key on).
                     cur.execute(
                         sql.SQL(
-                            "INSERT INTO {target} (nct_id, intervention_id, substance_key, method) "
-                            "SELECT DISTINCT i.nct_id, i.{id}, x.substance_key, %s::text "
+                            "INSERT INTO {target} "
+                            "(nct_id, intervention_id, substance_key, moiety_key, method) "
+                            "SELECT DISTINCT i.nct_id, i.{id}, x.substance_key, "
+                            "COALESCE(s.moiety_key, x.substance_key), %s::text "
                             "FROM {src} i JOIN _aact_name_map m ON m.raw = i.name "
                             "JOIN {xref} x ON x.id_type = %s AND x.source = %s "
-                            "AND x.id_value = m.norm"
+                            "AND x.id_value = m.norm "
+                            "LEFT JOIN {subst} s ON s.substance_key = x.substance_key"
                         ).format(
                             target=target,
                             id=sql.Identifier(id_col),
                             src=_t(ctx.schema, table),
                             xref=_t(REG_SCHEMA, "substance_xref"),
+                            subst=_t(REG_SCHEMA, "substance"),
                         ),
                         (method, f"{SOURCE}_name", SOURCE),
                     )
@@ -1105,6 +1127,16 @@ def load_release(
     }
     members = table_members(zip_path)
     order = member_order(list(members))
+    # Fail fast: before a table loads, and before a forced run renames a finished schema.
+    absent = unexpected_missing(compare_tables(order, ctx.dictionary)["missing_from_zip"])
+    if absent:
+        return {
+            **result,
+            "reason": (
+                f"tables of the dictionary missing from the zip: {', '.join(absent)} (only "
+                f"{', '.join(KNOWN_ABSENT_TABLES)} may be absent)"
+            ),
+        }
     try:
         decision = _prepare_schema(conn, ctx, force=force, reason=reason)
     except _Invalid as exc:
@@ -1155,6 +1187,9 @@ def load_release(
             "dictionary": {k: v for k, v in result["dictionary"].items() if k != "columns"},
             "tables": {t: s["rows"] for t, s in state.items()},
             "orphans": result["orphans"],
+            # The tables with no nct_id column (search_terms): no orphan count, and the
+            # gate counts them as checked.
+            "missing_nct_id": result["missing_nct_id"],
             "indexes": result["indexes"],
             "names": names,
         }

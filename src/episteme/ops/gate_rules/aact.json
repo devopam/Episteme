@@ -10,7 +10,7 @@
     },
     "max_peak_rss_mb": 2048,
     "min_counts": {
-      "tables_with_rows": 45,
+      "tables_with_rows": 49,
       "studies": 1
     }
   }

@@ -31,7 +31,7 @@ The owner set the limit: "Else, there will be no end to this data gathering exer
 | Largest tables | `reported_events` 5.0 GiB, `outcome_measurements` 3.0 GiB, `design_outcomes` 1.1 GiB, `eligibilities` 0.9 GiB, `detailed_descriptions` 0.8 GiB |
 | Dictionary | `aact_data_dictionary_2026-11-03.csv` (owner download): 52 tables, 472 columns, with types, PK, FK, nullable, deprecated flags, descriptions |
 | Not in the zip | `mesh_headings`, `mesh_terms`, `study_searches` (AACT's own lookup tables; our NLM MeSH covers the first two) |
-| Key | every table has `nct_id`; most have an `id` |
+| Key | every table but `search_terms` has `nct_id`; most have an `id` |
 
 ## 4. AACT
 
@@ -115,7 +115,7 @@ The agent reads trial text from the AACT tables through the tool layer later. No
 
 1. **Typed dates:** extra typed columns on the release's `studies` table, next to the text columns, which stay. The `aact` views expose every column. An empty or bad date loads as NULL and is counted per column.
 2. **Release id:** the `YYYYMMDD` at the start of the zip name, checked as a date; the dictionary date is recorded in the run record. A finished release with the same input fingerprint is skipped. The same id with a different fingerprint is refused unless `--force --reason` is given (audited).
-3. **Interventions to moieties:** `resolve_names(source='aact')` runs inside the load, after the tables and before the view switch, over the distinct names of `interventions` and `intervention_other_names` (the count is reported). A per-release table `intervention_substance (nct_id, intervention_id, substance_key, method)` is materialised, exposed by a view in `aact`; the agent reads it, never re-normalising at query time. Coverage is reported, not a failure, until the sample sets a floor.
+3. **Interventions to moieties:** `resolve_names(source='aact')` runs inside the load, after the tables and before the view switch, over the distinct names of `interventions` and `intervention_other_names` (the count is reported). A per-release table `intervention_substance (nct_id, intervention_id, substance_key, moiety_key, method)` is materialised, exposed by a view in `aact`; the agent reads it, never re-normalising at query time. Coverage is reported, not a failure, until the sample sets a floor.
 4. **EPAR sections:** the label module takes the source as a parameter (no hard-coded `dailymed`); the EPAR sidecar holds sections only. The load and the retire step call it for `ema_epar` as they do for `dailymed`. DailyMed tests must pass unchanged.
 5. **Re-extract:** the section-rule version enters the fingerprint of `product-information` documents only (about 2,200), so other EPAR types are not re-extracted. Article and label rows are replaced together in one transaction, as today, so offsets cannot lag the text.
 6. **Order and repeats:** migration 0011 adds `ordinal integer` and `product text` (both nullable; NULL for DailyMed) to `label_section`. A PDF with several SmPCs gives one row per section per product. Every numbered heading found gets a row: the mapped LOINC code where section 5 lists one, else `smpc:<number>`.

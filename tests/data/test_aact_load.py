@@ -182,7 +182,7 @@ def test_nul_is_stripped_and_counted():
     assert shaper.stats["nul_fields"] == 1
 
 
-def test_missing_dictionary_tables_reported_not_fatal():
+def test_missing_dictionary_tables_are_reported_and_only_the_known_three_are_allowed():
     dictionary = _dictionary(
         [
             ("studies", "nct_id", "text"),
@@ -196,6 +196,23 @@ def test_missing_dictionary_tables_reported_not_fatal():
         "missing_from_zip": ["mesh_headings", "mesh_terms", "study_searches"],
         "not_in_dictionary": ["new_table"],
     }
+    # The three tables that AACT leaves out of the zip are allowed; a table of the
+    # dictionary that the zip leaves out is not.
+    assert la.KNOWN_ABSENT_TABLES == ("mesh_headings", "mesh_terms", "study_searches")
+    assert la.unexpected_missing(report["missing_from_zip"]) == []
+    assert la.unexpected_missing(["conditions", "mesh_terms", "outcomes"]) == [
+        "conditions",
+        "outcomes",
+    ]
+
+
+def test_the_packaged_dictionary_minus_the_known_three_is_the_tables_floor():
+    """The gate floor of ``tables_with_rows`` is the dictionary tables less the three that
+    the zip leaves out: absent tables never enter the load state."""
+    from episteme.ops import gate
+
+    floor = gate.load_rules("aact")["load"]["min_counts"]["tables_with_rows"]
+    assert floor == len(dct.read_dictionary()) - len(la.KNOWN_ABSENT_TABLES) == 49
 
 
 def test_marker_names_hold_the_database(tmp_path):
@@ -260,6 +277,9 @@ def test_text_indexes_use_a_prefix_so_no_value_is_too_long():
         ("nct_id", None),
         ("substance_key", None),
     ]
+    assert la.index_plan(
+        "intervention_substance", ["nct_id", "substance_key", "moiety_key", "method"]
+    ) == [("nct_id", None), ("substance_key", None), ("moiety_key", None)]
     assert la.index_plan("conditions", ["id", "name"]) == []  # no such columns, no index
     # 500 characters of up to 4 bytes stay under the btree key limit (about 2700 bytes).
     assert la.INDEX_PREFIX_CHARS * 4 <= 2700
@@ -410,10 +430,29 @@ def _drop_aact(cur) -> None:
         cur.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(psycopg.sql.Identifier(name)))
 
 
+# The tables of the fixture zips. The pg tests load against the packaged dictionary cut to
+# these and the three tables AACT leaves out, so a fixture zip is a whole release;
+# test_a_dictionary_table_missing_from_the_zip_fails uses the whole dictionary.
+FIXTURE_TABLES = (
+    "studies",
+    "interventions",
+    "intervention_other_names",
+    "conditions",
+    "brief_summaries",
+)
+_FULL_DICTIONARY = dct.read_dictionary
+
+
+def _fixture_dictionary() -> dict[str, list[dict]]:
+    full = _FULL_DICTIONARY()
+    return {t: full[t] for t in (*FIXTURE_TABLES, *la.KNOWN_ABSENT_TABLES)}
+
+
 @pytest.fixture
 def db(_schema, pg_conn, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "proc"))
+    monkeypatch.setattr(dct, "read_dictionary", _fixture_dictionary)
     from episteme.config import get_settings
 
     get_settings.cache_clear()
@@ -729,3 +768,67 @@ def test_views_are_readable_by_the_app_role(db, tmp_path):
         "has_table_privilege('episteme_app', 'aact.studies', 'SELECT'), "
         "has_table_privilege('episteme_app', 'aact.intervention_substance', 'SELECT')",
     ) == [(True, True, True)]
+
+
+@pytest.mark.pg
+def test_a_dictionary_table_missing_from_the_zip_fails(db, tmp_path, monkeypatch):
+    """A dictionary table missing from the zip, other than the known three, fails the load
+    before any table loads; the previous release keeps serving."""
+    assert _load(db, tmp_path)["status"] == "loaded"
+    no_conditions = _members(**{"conditions.txt": None})
+    out = _load(db, tmp_path, no_conditions, name="20261201_export_ctgov.zip")
+    assert out["status"] == "failed" and "conditions" in out["reason"], out
+    assert "mesh_terms" not in out["reason"].split("(")[0]
+    assert _all(db, "SELECT to_regnamespace('aact_r20261201') IS NULL") == [(True,)]
+    from episteme.data.regulatory.load_reg import latest_release
+
+    assert latest_release(db, "aact") == "20261103"
+    db.rollback()
+    # The whole packaged dictionary: a fixture zip lacks most of its tables.
+    monkeypatch.setattr(dct, "read_dictionary", _FULL_DICTIONARY)
+    out = _load(db, tmp_path, name="20261215_export_ctgov.zip")
+    assert out["status"] == "failed" and "outcomes" in out["reason"], out
+
+
+@pytest.mark.pg
+def test_a_table_without_nct_id_is_listed_and_the_gate_measures_the_orphans(db, tmp_path):
+    """search_terms has no nct_id: the load summary lists it in missing_nct_id, so the
+    gate's largest orphan share is a measure, not None."""
+    from episteme.ops import gate_report
+
+    members = _members(
+        **{"search_terms.txt": "id|term|group|created_at|updated_at\n1|heart|causes|x|y\n"}
+    )
+    out = _load(db, tmp_path, members)
+    assert out["status"] == "loaded", out
+    assert out["missing_nct_id"] == ["search_terms"]
+    summary = _all(
+        db,
+        "SELECT new_value FROM episteme._audit WHERE event_type = 'load_commit' "
+        "AND object = 'aact 20261103' ORDER BY seq DESC LIMIT 1",
+    )[0][0]
+    assert summary["missing_nct_id"] == ["search_terms"]
+    assert gate_report.aact_summary_measures(summary)["orphan_share_pct_max"] == 0.0
+
+
+@pytest.mark.pg
+def test_intervention_substance_holds_the_moiety(db, tmp_path):
+    """moiety_key is substance.moiety_key, or the substance itself when that is NULL."""
+    with db.cursor() as cur:
+        cur.execute("UPDATE episteme.substance SET moiety_key = NULL WHERE substance_key = 3")
+    db.commit()
+    assert _load(db, tmp_path)["status"] == "loaded"
+    rows = _all(
+        db,
+        "SELECT DISTINCT nct_id, substance_key, moiety_key FROM aact.intervention_substance "
+        "ORDER BY 1, 2",
+    )
+    assert ("NCT00000001", 2, 1) in rows  # metformin hydrochloride -> metformin
+    assert ("NCT00000002", 3, 3) in rows  # aspirin: no moiety_key, the substance itself
+    idx = {
+        r[0]
+        for r in _all(
+            db, "SELECT indexname FROM pg_indexes WHERE schemaname = %s", ("aact_r20261103",)
+        )
+    }
+    assert "intervention_substance_moiety_key_idx" in idx
