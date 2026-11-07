@@ -12,6 +12,12 @@ writes a failed marker and stops with ``FeedVerificationError``. A download that
 cut short (curl error 18 was seen on the non-EPAR documents feed) is tried once
 more and then recorded as failed; the other feeds still run.
 
+A 429 or 503 is a throttle, not a failure of the file: the whole run pauses (``Retry-After``
+when EMA sends it, else a backoff that doubles per throttle in a row), and the same file is
+asked for again without using one of its attempts. After
+``EPISTEME_EMA_MAX_THROTTLES`` throttles in a row the stage records a failed marker and
+stops with ``RateLimited`` (exit 3); a re-run resumes.
+
 A feed whose row count differs from ``meta.total_records`` is stored with both
 numbers in its marker. The herbal feed does this; the loader decides.
 """
@@ -25,6 +31,8 @@ import sys
 import time
 import zipfile
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +48,7 @@ from episteme.data.checkpoint_markers import (
 )
 from episteme.data.regulatory.feeds import Feed, load_feeds
 from episteme.data.regulatory.parsers import ema_total
+from episteme.ops.stop import stage_guard
 
 _LOG = logging.getLogger(__name__)
 
@@ -56,6 +65,102 @@ class FeedVerificationError(RuntimeError):
 
 class Retryable(RuntimeError):
     """A failed or incomplete download that one more try may fix."""
+
+
+class Throttled(RuntimeError):
+    """EMA answered 429 or 503. ``retry_after`` is the wait the ``Retry-After`` header
+    asks for in seconds, or None when it is missing or unreadable."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class RateLimited(RuntimeError):
+    """Too many throttles in a row: the stage stops (exit 3) and keeps what it fetched."""
+
+
+RATE_LIMIT_MESSAGE = "EMA rate limit: run again later; fetched files are kept"
+_THROTTLE_STATUS = (429, 503)
+WAIT_SLICE_S = 1.0
+MIN_WAIT_S = 1.0
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_retry_after(value: Any) -> float | None:
+    """Seconds from a ``Retry-After`` value: a number of seconds, or an HTTP date. None when
+    the value is missing, unreadable, or a date that has passed."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isascii() and text.isdigit():
+        return float(text)
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    secs = (when - _utcnow()).total_seconds()
+    return secs if secs > 0 else None
+
+
+class ThrottleGate:
+    """The pause rule of one run. ``on_throttle`` waits (through ``sleep``) or, at the
+    ``max_throttles``-th throttle in a row, raises ``RateLimited`` without a wait; ``ok``
+    resets the count. The wait is ``Retry-After`` (capped), else ``backoff_s`` doubled per
+    throttle in a row (capped)."""
+
+    def __init__(
+        self,
+        *,
+        sleep: Callable[[float], None],
+        backoff_s: float | None = None,
+        max_backoff_s: float | None = None,
+        max_throttles: int | None = None,
+    ):
+        settings = get_settings()
+        self.sleep = sleep
+        self.backoff_s = settings.ema_backoff_seconds if backoff_s is None else backoff_s
+        self.max_backoff_s = (
+            settings.ema_max_backoff_seconds if max_backoff_s is None else max_backoff_s
+        )
+        self.max_throttles = settings.ema_max_throttles if max_throttles is None else max_throttles
+        self.count = 0
+
+    def ok(self) -> None:
+        self.count = 0
+
+    def on_throttle(self, exc: Throttled, label: str) -> float:
+        self.count += 1
+        if self.count >= self.max_throttles:
+            raise RateLimited(
+                f"{RATE_LIMIT_MESSAGE} ({label}: {exc}; {self.count} throttles in a row)"
+            ) from exc
+        if exc.retry_after is not None:
+            wait = min(exc.retry_after, self.max_backoff_s)
+        else:
+            wait = min(self.backoff_s * 2 ** (self.count - 1), self.max_backoff_s)
+        wait = max(wait, MIN_WAIT_S)  # a 0 from Retry-After or a setting still waits
+        _LOG.warning(
+            "%s: %s; throttle %d of %d, waiting %.0f s",
+            label,
+            exc,
+            self.count,
+            self.max_throttles,
+            wait,
+        )
+        # Slices, so a pending stop (an interrupt that cannot wake one long sleep) raises
+        # between two slices.
+        left = wait
+        while left > 0:
+            piece = min(WAIT_SLICE_S, left)
+            self.sleep(piece)
+            left -= piece
+        return wait
 
 
 class TooLarge(RuntimeError):
@@ -119,6 +224,10 @@ def download_to(
         raise Retryable(f"request failed: {exc}") from exc
     try:
         ctype = str(resp.headers.get("Content-Type", "")).lower()
+        if resp.status_code in _THROTTLE_STATUS:
+            raise Throttled(
+                f"HTTP {resp.status_code}", parse_retry_after(resp.headers.get("Retry-After"))
+            )
         if resp.status_code != 200:
             # An HTML error page (404, 5xx) is an ordinary error, not the verification page.
             raise Retryable(f"HTTP {resp.status_code}")
@@ -190,18 +299,25 @@ def fetch_ema_feeds(
     sleep: Callable[[float], None] = time.sleep,
     force: bool = False,
     max_files: int | None = None,
+    backoff_s: float | None = None,
+    max_backoff_s: float | None = None,
+    max_throttles: int | None = None,
 ) -> dict:
     """Download every EMA feed in ``feeds`` into ``raw_dir``.
 
     Returns ``{"fetched": [...], "skipped": [...], "failed": {name: reason}}``.
     Raises ``FeedVerificationError`` (after its failed marker) when EMA answers with
-    its verification page. ``session`` and ``sleep`` are seams for tests.
+    its verification page, and ``RateLimited`` (after its failed marker) after too many
+    throttles in a row. ``session`` and ``sleep`` are seams for tests.
     """
     raw_dir = Path(raw_dir)
     settings = get_settings()
     processed_root = Path(processed_root) if processed_root else settings.processed_root
     delay = settings.ema_delay_seconds if delay_s is None else delay_s
     session = session or requests.Session()
+    gate = ThrottleGate(
+        sleep=sleep, backoff_s=backoff_s, max_backoff_s=max_backoff_s, max_throttles=max_throttles
+    )
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     result: dict = {"fetched": [], "skipped": [], "failed": {}}
@@ -222,12 +338,35 @@ def fetch_ema_feeds(
         url = source_url(feed.url_key)
         tmp = raw_dir / f".{final.name}.{os.getpid()}.tmp"
         last_error = ""
-        for attempt in range(1, ATTEMPTS + 1):
-            if requests_made and delay > 0:
+        attempt = 0
+        waited = False
+        while attempt < ATTEMPTS:
+            # The pause after a throttle is the delay: no second wait before the new request.
+            if requests_made and delay > 0 and not waited:
                 sleep(delay)
+            waited = False
             requests_made += 1
             try:
                 stats = _download_once(session, url, feed, tmp)
+            except KeyboardInterrupt:
+                tmp.unlink(missing_ok=True)
+                raise
+            except Throttled as exc:
+                tmp.unlink(missing_ok=True)
+                try:
+                    gate.on_throttle(exc, feed.name)
+                except RateLimited as stop_exc:
+                    mark_failed(
+                        processed_root,
+                        MARKER_SOURCE,
+                        key,
+                        error_class="RateLimited",
+                        message=str(stop_exc),
+                        exc=stop_exc,
+                    )
+                    raise
+                waited = True
+                continue  # the same feed again; this try does not count
             except FeedVerificationError as exc:
                 tmp.unlink(missing_ok=True)
                 mark_failed(
@@ -242,8 +381,10 @@ def fetch_ema_feeds(
             except Retryable as exc:
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
+                attempt += 1
                 _LOG.warning("%s: attempt %d of %d failed: %s", feed.name, attempt, ATTEMPTS, exc)
                 continue
+            gate.ok()
             os.replace(tmp, final)
             mark_success(
                 processed_root, MARKER_SOURCE, key, stats={**stats, "url_key": feed.url_key}
@@ -284,18 +425,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"dry-run: would fetch {feed.url_key} -> {out_dir}/{feed.name}{_EXT[feed.format]}"
             )
         return 0
-    try:
-        result = fetch_ema_feeds(out_dir, feeds, force=args.force, max_files=args.max_files)
-    except FeedVerificationError as exc:
-        print(f"ema: {exc}", file=sys.stderr)
-        return 3
-    print(
-        f"ema: fetched={len(result['fetched'])} skipped={len(result['skipped'])} "
-        f"failed={len(result['failed'])}"
-    )
-    for name, reason in result["failed"].items():
-        print(f"ema: FAILED {name}: {reason}", file=sys.stderr)
-    return 1 if result["failed"] else 0
+    # No lock: a download holds no database and not the heavy lock. Only the stop handlers,
+    # the stop-request file and the parent watchdog apply (conn_ref returns None).
+    with stage_guard(lambda: None, argv=argv) as g:
+        try:
+            result = fetch_ema_feeds(out_dir, feeds, force=args.force, max_files=args.max_files)
+        except (FeedVerificationError, RateLimited) as exc:
+            print(f"ema: {exc}", file=sys.stderr)
+            return g.exit_code(3)
+        print(
+            f"ema: fetched={len(result['fetched'])} skipped={len(result['skipped'])} "
+            f"failed={len(result['failed'])}"
+        )
+        for name, reason in result["failed"].items():
+            print(f"ema: FAILED {name}: {reason}", file=sys.stderr)
+        return g.exit_code(1 if result["failed"] else 0)
 
 
 if __name__ == "__main__":
