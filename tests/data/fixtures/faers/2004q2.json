@@ -1,0 +1,238 @@
+[
+ {
+  "safetyreportid": "4435605-5",
+  "serious": "2",
+  "receivedateformat": "102",
+  "receivedate": "20040726",
+  "receiptdateformat": "102",
+  "receiptdate": "20040503",
+  "primarysource": null,
+  "patient": {
+   "patientonsetage": "62",
+   "patientonsetageunit": "801",
+   "patientweight": "95",
+   "patientsex": "2",
+   "reaction": [
+    {
+     "reactionmeddrapt": "ERYTHEMA"
+    },
+    {
+     "reactionmeddrapt": "FATIGUE"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "FORTEO",
+     "drugbatchnumb": "FF3S14A",
+     "drugauthorizationnumb": "21318",
+     "drugdosagetext": "20 UG DAY",
+     "drugindication": "OSTEOPOROSIS",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20040301",
+     "openfda": {
+      "brand_name": [
+       "FORTEO"
+      ],
+      "generic_name": [
+       "TERIPARATIDE"
+      ],
+      "substance_name": [
+       "TERIPARATIDE"
+      ],
+      "rxcui": [
+       "1435115",
+       "1435117"
+      ],
+      "unii": [
+       "10T9CSU89I"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "COUMADIN"
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "AMITRIPTYLINE HCL",
+     "openfda": {}
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportid": "7547238-2",
+  "serious": "1",
+  "seriousnesshospitalization": "1",
+  "seriousnessother": "1",
+  "receivedateformat": "102",
+  "receivedate": "20110614",
+  "receiptdateformat": "102",
+  "receiptdate": "20040616",
+  "primarysource": {
+   "reportercountry": "UNITED KINGDOM",
+   "qualification": "5"
+  },
+  "patient": {
+   "patientsex": "1",
+   "reaction": [
+    {
+     "reactionmeddrapt": "DECREASED APPETITE"
+    },
+    {
+     "reactionmeddrapt": "MONOCYTE COUNT INCREASED"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "CLOZARIL",
+     "drugauthorizationnumb": "019758",
+     "drugdosagetext": "300 MG/DAY",
+     "drugindication": "SCHIZOPHRENIA",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20040303",
+     "openfda": {
+      "brand_name": [
+       "CLOZARIL"
+      ],
+      "generic_name": [
+       "CLOZAPINE"
+      ],
+      "substance_name": [
+       "CLOZAPINE"
+      ],
+      "rxcui": [
+       "104775",
+       "104776",
+       "197535"
+      ],
+      "unii": [
+       "J60AR2IKIC"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "FOLIC ACID",
+     "drugdosagetext": "5 MG/DAY",
+     "drugadministrationroute": "048",
+     "openfda": {
+      "brand_name": [
+       "VENTRIXYL",
+       "FOLIC ACID",
+       "VENEXA"
+      ],
+      "generic_name": [
+       "FOLIC ACID"
+      ],
+      "substance_name": [
+       "CHOLECALCIFEROL",
+       "RIBOFLAVIN",
+       "NIACINAMIDE"
+      ],
+      "unii": [
+       "1C6V77QF41",
+       "TLM2976OFR",
+       "25X51I8RD4"
+      ],
+      "rxcui": [
+       "310410",
+       "237786"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "MULTI-VITAMINS",
+     "drugadministrationroute": "048"
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportid": "5906429-4",
+  "serious": "2",
+  "receivedateformat": "102",
+  "receivedate": "20081002",
+  "receiptdateformat": "102",
+  "receiptdate": "20040525",
+  "primarysource": {
+   "reportercountry": "UNITED STATES",
+   "qualification": "3"
+  },
+  "patient": {
+   "reaction": [
+    {
+     "reactionmeddrapt": "BLOOD TRIGLYCERIDES INCREASED"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TRICOR",
+     "drugbatchnumb": "UNKNOWN",
+     "drugauthorizationnumb": "021203",
+     "drugindication": "DRUG USE FOR UNKNOWN INDICATION",
+     "drugtreatmentduration": "1",
+     "drugtreatmentdurationunit": "801",
+     "openfda": {}
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "AMLODIPINE",
+     "drugindication": "DRUG USE FOR UNKNOWN INDICATION",
+     "openfda": {
+      "brand_name": [
+       "NORLIQVA",
+       "KATERZIA"
+      ],
+      "generic_name": [
+       "AMLODIPINE"
+      ],
+      "substance_name": [
+       "AMLODIPINE",
+       "AMLODIPINE BENZOATE"
+      ],
+      "rxcui": [
+       "2599173",
+       "2599179",
+       "2184120"
+      ],
+      "unii": [
+       "1J444QC288",
+       "XD75TQ8A2P"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "LANSOPRAZOLE",
+     "drugindication": "DRUG USE FOR UNKNOWN INDICATION",
+     "openfda": {
+      "brand_name": [
+       "LANSOPRAZOLE",
+       "BASIC CARE LANSOPRAZOLE",
+       "EQUATE LANSOPRAZOLE DELAYED RELEASE"
+      ],
+      "generic_name": [
+       "LANSOPRAZOLE"
+      ],
+      "substance_name": [
+       "LANSOPRAZOLE"
+      ],
+      "rxcui": [
+       "311277",
+       "596843",
+       "351261"
+      ],
+      "unii": [
+       "0K5C5T2QPG"
+      ]
+     }
+    }
+   ]
+  }
+ }
+]

@@ -166,6 +166,8 @@ def test_article_body_is_list_source_only():
         "article_body_pubmed",
         "article_body_apollo",
         "article_body_pubchem",
+        "article_body_dailymed",
+        "article_body_ema_epar",
     }
     assert re.search(
         r"CREATE TABLE episteme\.article_body \(.*?\) PARTITION BY LIST \(source\)",
@@ -175,7 +177,8 @@ def test_article_body_is_list_source_only():
     t = doc("08-data-storage-principles.md")
     assert (
         "`LIST (source)` (`pmc`, `DEFAULT`; `bookshelf` via migration 0002, "
-        "`pubmed` via migration 0007, `apollo` and `pubchem` via migration 0009)" in t
+        "`pubmed` via migration 0007, `apollo` and `pubchem` via migration 0009; "
+        "`dailymed` and `ema_epar` via migration 0010)" in t
     )
 
 

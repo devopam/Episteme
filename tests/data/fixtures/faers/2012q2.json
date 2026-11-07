@@ -1,0 +1,151 @@
+[
+ {
+  "safetyreportid": "8486749-2",
+  "serious": "1",
+  "seriousnesshospitalization": "1",
+  "receivedateformat": "102",
+  "receivedate": "20120704",
+  "receiptdateformat": "102",
+  "receiptdate": "20120622",
+  "primarysource": {
+   "reportercountry": "ITALY",
+   "qualification": "3"
+  },
+  "patient": {
+   "patientonsetage": "22",
+   "patientonsetageunit": "801",
+   "patientsex": "2",
+   "reaction": [
+    {
+     "reactionmeddrapt": "PYELONEPHRITIS ACUTE"
+    },
+    {
+     "reactionmeddrapt": "DYSURIA"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYSABRI",
+     "drugbatchnumb": "L04AA23",
+     "drugadministrationroute": "042",
+     "drugindication": "RELAPSING-REMITTING MULTIPLE SCLEROSIS",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20110915",
+     "drugenddateformat": "102",
+     "drugenddate": "20120314"
+    },
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYSABRI",
+     "drugadministrationroute": "042"
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportid": "8573904-6",
+  "serious": "2",
+  "receivedateformat": "102",
+  "receivedate": "20120806",
+  "receiptdateformat": "102",
+  "receiptdate": "20120530",
+  "primarysource": {
+   "reportercountry": "UNITED STATES",
+   "qualification": "5"
+  },
+  "patient": {
+   "patientsex": "2",
+   "reaction": [
+    {
+     "reactionmeddrapt": "OROPHARYNGEAL PAIN"
+    },
+    {
+     "reactionmeddrapt": "COUGH"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "FLUTICASONE PROPIONATE",
+     "drugauthorizationnumb": "021254",
+     "drugdosagetext": "2PUFF TWICE PER DAY",
+     "drugadministrationroute": "055",
+     "drugindication": "ASTHMA",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20120521",
+     "openfda": {
+      "brand_name": [
+       "FLUTICASONE PROPIONATE",
+       "365 WHOLE FOODS MARKET FLUTICASONE PROPIONATE",
+       "ALLERGY RELIEF"
+      ],
+      "generic_name": [
+       "FLUTICASONE PROPIONATE",
+       "FLUTICASONE PROPIONATE NASAL"
+      ],
+      "substance_name": [
+       "FLUTICASONE PROPIONATE"
+      ],
+      "rxcui": [
+       "1797907",
+       "1946583",
+       "1946589"
+      ],
+      "unii": [
+       "O2GMZ0LF5W"
+      ]
+     }
+    },
+    {
+     "drugcharacterization": "2",
+     "medicinalproduct": "MULTIPLE MEDICATIONS"
+    }
+   ]
+  }
+ },
+ {
+  "safetyreportid": "8483817-6",
+  "serious": "2",
+  "receivedateformat": "102",
+  "receivedate": "20120703",
+  "receiptdateformat": "102",
+  "receiptdate": "20120627",
+  "primarysource": {
+   "reportercountry": "UNITED STATES",
+   "qualification": "5"
+  },
+  "patient": {
+   "patientonsetage": "35",
+   "patientonsetageunit": "801",
+   "patientsex": "1",
+   "reaction": [
+    {
+     "reactionmeddrapt": "DEPRESSION"
+    },
+    {
+     "reactionmeddrapt": "AMNESIA"
+    }
+   ],
+   "drug": [
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYSABRI",
+     "drugadministrationroute": "042",
+     "drugindication": "MULTIPLE SCLEROSIS",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20090406",
+     "drugenddateformat": "102",
+     "drugenddate": "20120201"
+    },
+    {
+     "drugcharacterization": "1",
+     "medicinalproduct": "TYSABRI",
+     "drugadministrationroute": "042",
+     "drugstartdateformat": "102",
+     "drugstartdate": "20120201"
+    }
+   ]
+  }
+ }
+]

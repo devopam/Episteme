@@ -16,7 +16,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON] [--zip PATH]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -25,12 +25,19 @@ SOURCE="${1:-}"
 STAGE="${2:-}"
 [ -n "$SOURCE" ] && [ -n "$STAGE" ] || usage
 shift 2 || true
+# The folder of a source's stage wrappers under scripts/data/ (its own name, except for
+# ema_epar, whose wrappers sit with the other EMA ones).
+SRC_DIR="$SOURCE"
+[ "$SOURCE" = "ema_epar" ] && SRC_DIR="ema"
 
 # M5: validate args first, THEN require the audit actor — so `run_pipeline.sh`
 # with no/bad args gives usage(), not "missing required environment variable".
 require_env EPISTEME_ACTOR
 
 FORCE=0
+ALLOW_PARTIAL=0
+ZIP_SET=0
+ZIP_PATH=""
 BULK=0
 SAMPLE=0
 SKIP_GATE=0
@@ -76,6 +83,12 @@ while [ $# -gt 0 ]; do
         # Run gated stages that have no valid pass (needs --reason): one
         # audited gate_override row per such stage.
         --skip-gate) SKIP_GATE=1; shift ;;
+        # openfda_faers load only: go on with a partial input set or below the live
+        # floor (needs --reason): one audited force_override row per check it passes.
+        --allow-partial) ALLOW_PARTIAL=1; shift ;;
+        # aact load only: load this release zip instead of the newest one. The gate pass
+        # check applies as for any other full run.
+        --zip) ZIP_SET=1; ZIP_PATH="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -93,7 +106,7 @@ if [ "${#SKIP_UNITS[@]}" -gt 0 ]; then
     # These load wrappers reach a Python module that has no --skip-unit.
     if [ "$STAGE" = "load" ]; then
         case "$SOURCE" in
-            europepmc_id_mappings|cdisc_ct)
+            europepmc_id_mappings|cdisc_ct|ema|openfda|openfda_faers|aact)
                 die "$SOURCE load does not support --skip-unit" 2 ;;
         esac
     fi
@@ -102,9 +115,31 @@ if [ "$BULK" = "1" ] && [ "$STAGE" != "load" ] && [ "$STAGE" != "graph" ]; then
     log ERROR "--bulk is only valid with the load or graph stage"
     exit 2
 fi
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || [ "$SOURCE" = "openfda_faers" ] || [ "$SOURCE" = "aact" ]; }; then
+    # reg_record partitions, FAERS generations and AACT release schemas carry their own
+    # indexes; the articles index group is not theirs.
+    die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
+fi
+if [ "$ZIP_SET" = "1" ]; then
+    { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
+    [ -n "$ZIP_PATH" ] || die "--zip requires a path" 2
+    # A missing path must not take the next flag ("--zip --skip-gate") as the zip.
+    case "$ZIP_PATH" in
+        --*) die "--zip requires a path, not the flag $ZIP_PATH" 2 ;;
+    esac
+    # A sample run loads its own slice: the whole newest release zip.
+    [ "$SAMPLE" = "0" ] || die "--sample and --zip cannot be used together" 2
+fi
 if [ "$SKIP_GATE" = "1" ]; then
     [ "$SAMPLE" = "0" ] || die "--sample and --skip-gate cannot be used together" 2
     [ -n "$REASON" ] || die "--skip-gate requires --reason" 2
+fi
+if [ "$ALLOW_PARTIAL" = "1" ]; then
+    [ "$SOURCE" = "openfda_faers" ] && [ "$STAGE" = "load" ] \
+        || die "--allow-partial is valid with openfda_faers load only" 2
+    [ -n "$REASON" ] || die "--allow-partial requires --reason" 2
+    # A sample run bypasses the checks anyway: it reads a slice on purpose.
+    [ "$SAMPLE" = "0" ] || die "--sample and --allow-partial cannot be used together" 2
 fi
 if [ "$SAMPLE" = "1" ]; then
     case "$STAGE" in
@@ -149,6 +184,8 @@ declare -A WRAPPER=(
     [hf_corpus]="hf_corpus/download_hf_corpus.sh"
     [dailymed]="dailymed/download_dailymed.sh"
     [openfda]="openfda/download_openfda.sh"
+    [ema]="ema/download_ema.sh"
+    [ema_epar]="ema/download_ema_epar.sh"
     [aact]="aact/download_aact.sh"
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
@@ -159,11 +196,29 @@ declare -A WRAPPER=(
 # chain (dispatch to $HERE/<source>/<stage>_<source>.sh). Every other source is
 # download-only in SP2 (structured serialize = SP4). `_is_lit` gates the
 # extract/load/graph arms below.
-LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf"
+LIT_SOURCES="pubmed apollo europepmc_manuscript europepmc_preprint guidelines bookshelf dailymed ema_epar"
+# dailymed and ema_epar have extract and load, and no graph stage (the label tables of
+# dailymed are loaded with it).
+NO_GRAPH_SOURCES="dailymed ema_epar"
+_has_graph() { case " $NO_GRAPH_SOURCES " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
 _is_lit() { case " $LIT_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 STRUCTURED_SOURCES="chembl uniprot pubchem clinvar reactome mesh ontologies openalex cdisc_ct"
 _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# Regulatory and registry reference data: download, then load one full snapshot per
+# release. ema and openfda load into episteme.reg_record (one partition per release;
+# src/episteme/data/regulatory/load_reg.py); aact loads into its own schema per release,
+# exposed by the views of schema aact (src/episteme/data/aact/load_aact.py).
+REG_SOURCES="ema openfda aact"
+_is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# The FAERS generation loader (src/episteme/data/regulatory/faers/load.py).
+wpath_faers="$HERE/openfda/load_faers.sh"
+
+# These loads read the raw files directly (no extract stage, no staging), so a sample
+# load builds its own raw slice and always does the work (see "sample" below).
+_slice_at_load() { _is_reg "$1" || [ "$1" = "openfda_faers" ]; }
 
 # Early validation — *before* anything that touches the DB (the run_start audit
 # call below). A bad source/stage, or a source+stage combination SP3 does not
@@ -171,7 +226,9 @@ _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) retu
 # DB-dependent run_start with no matching run_end.
 # `corpus` is not a source token — it's the materialize-only alias handled in the
 # dispatch chain below (SOURCE == "corpus" arm). Let it past the WRAPPER lookup.
-if [ "$SOURCE" != "corpus" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
+# `openfda_faers` has no download wrapper of its own (`openfda download all_human`
+# fetches its zips): only its load stage is wired, so it passes the lookup too.
+if [ "$SOURCE" != "corpus" ] && [ "$SOURCE" != "openfda_faers" ] && [ -z "${WRAPPER[$SOURCE]:-}" ]; then
     die "unknown source '$SOURCE' (see scripts/data/_lib/check_prereqs.sh / the roadmap source list)" 3
 fi
 
@@ -179,6 +236,10 @@ case "$STAGE" in
     all|download|extract|load|graph|materialize|enrich|serialize) ;;
     *) usage ;;
 esac
+
+if [ "$SOURCE" = "openfda_faers" ] && [ "$STAGE" != "load" ]; then
+    die "openfda_faers: only 'load' is wired (the zips come from: $0 openfda download all_human)" 3
+fi
 
 # SP2 generalises SP3's C2: --dry-run is meaningful only for `download` (the
 # fetch wrappers have a real EPISTEME_DRY_RUN no-op). Every other stage writes
@@ -206,27 +267,29 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
             if [ "$SOURCE" = "europepmc_id_mappings" ]; then
                 idmapw="$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh"
                 [ -f "$idmapw" ] || die "wrapper not found: $idmapw (not yet implemented?)" 3
+            elif [ "$SOURCE" = "openfda_faers" ]; then
+                [ -f "$wpath_faers" ] || die "wrapper not found: $wpath_faers (not yet implemented?)" 3
             else
-                _is_lit "$SOURCE" || _is_structured "$SOURCE" \
-                    || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured)" 3
-                litw="$HERE/$SOURCE/load_$SOURCE.sh"
+                _is_lit "$SOURCE" || _is_structured "$SOURCE" || _is_reg "$SOURCE" \
+                    || die "$SOURCE $STAGE is not in SP2/SP4 (literature/structured) or the regulatory feeds" 3
+                litw="$HERE/$SRC_DIR/load_$SOURCE.sh"
                 [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             fi
             ;;
         extract)
             _is_lit "$SOURCE" || die "$SOURCE $STAGE is not in SP2 — SP4 (structured serialize)" 3
-            litw="$HERE/$SOURCE/extract_$SOURCE.sh"
+            litw="$HERE/$SRC_DIR/extract_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
         graph)
-            _is_lit "$SOURCE" || [ "$SOURCE" = "mesh" ] \
+            { _is_lit "$SOURCE" && _has_graph "$SOURCE"; } || [ "$SOURCE" = "mesh" ] \
                 || die "$SOURCE graph is not wired" 3
-            litw="$HERE/$SOURCE/graph_$SOURCE.sh"
+            litw="$HERE/$SRC_DIR/graph_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
             ;;
         serialize)
             _is_structured "$SOURCE" || die "$SOURCE $STAGE is not in SP4 — SP2 (literature) territory" 3
-            structw="$HERE/$SOURCE/serialize_$SOURCE.sh"
+            structw="$HERE/$SRC_DIR/serialize_$SOURCE.sh"
             [ -f "$structw" ] || die "wrapper not found: $structw (not yet implemented?)" 3
             ;;
         enrich)
@@ -284,7 +347,10 @@ _chain_stages() { # the stages this run executes, in order (keep in step with th
         echo download serialize load
         if [ "$SOURCE" = "mesh" ]; then echo graph; fi
     elif _is_lit "$SOURCE"; then
-        echo download extract load graph
+        echo download extract load
+        if _has_graph "$SOURCE"; then echo graph; fi
+    elif _is_reg "$SOURCE"; then
+        echo download load
     else
         echo download
     fi
@@ -346,7 +412,7 @@ if [ "$SAMPLE" = "1" ]; then
     SAMPLE_RECORD="$SAMPLE_ROOT/run_record_$STAGE.json"
     # The production raw root (common.sh resolve_dest reads it the same way).
     PROD_RAW_ROOT="${EPISTEME_RAW_ROOT:-${EPISTEME_DATA_ROOT:-.}/01_raw}"
-    if [ "$STAGE" = "load" ]; then
+    if [ "$STAGE" = "load" ] && ! _slice_at_load "$SOURCE"; then
         sample_staging="$SAMPLE_ROOT/02_processed/staging/$SOURCE"
         [ -n "$(ls -A "$sample_staging" 2>/dev/null)" ] \
             || die "--sample load: no sample staging in $sample_staging; run the sample extract first" 2
@@ -643,6 +709,11 @@ run_stage() {
 
 load_args=()
 [ "$FORCE" = "1" ] && load_args=(--force --reason "$REASON")
+# A sample load of a reference feed or FAERS must load again: a marker or a fingerprint of
+# an earlier sample would otherwise make it do nothing, and the gate would measure old data.
+if [ "$SAMPLE" = "1" ] && [ "$STAGE" = "load" ] && _slice_at_load "$SOURCE"; then
+    load_args=(--force --reason "sample run of $SOURCE")
+fi
 
 download_args=()
 extract_args=()
@@ -665,6 +736,11 @@ skip_reason=()
 extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
+[ "$ZIP_SET" = "1" ] && load_args+=(--zip "$ZIP_PATH")
+if [ "$ALLOW_PARTIAL" = "1" ]; then
+    load_args+=(--allow-partial)
+    [ "$FORCE" = "1" ] || load_args+=(--reason "$REASON")
+fi
 
 # SP2 lit `extract` wrappers (bookshelf/extract_bookshelf.sh, ...) accept only
 # --max-files N and --force (plus --skip-unit NAME --reason R when skipping);
@@ -676,6 +752,11 @@ graph_args=()
 lit_extract_args=()
 [ -n "$MAX_FILES" ] && lit_extract_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && lit_extract_args+=(--force)
+# dailymed and ema_epar: --force --reason overrides their extract guards (audited); the
+# reason rides along once (skip_reason already holds it when --skip-unit is used).
+if { [ "$SOURCE" = "dailymed" ] || [ "$SOURCE" = "ema_epar" ]; } && [ "$FORCE" = "1" ] && [ "${#skip_args[@]}" -eq 0 ]; then
+    lit_extract_args+=(--reason "$REASON")
+fi
 lit_extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_reason[@]}"}")
 
 # SP4 structured `serialize` wrappers accept --max-files N and --force (plus
@@ -737,7 +818,7 @@ if [ "$SAMPLE" = "1" ]; then
         "$PASS_ROOT"/_sample/?*) ;;
         *) die "sample: the sample root $SAMPLE_ROOT is not inside $PASS_ROOT/_sample" 1 ;;
     esac
-    if [ "$STAGE" = "load" ]; then
+    if [ "$STAGE" = "load" ] && ! _slice_at_load "$SOURCE"; then
         rm -rf "$SAMPLE_ROOT/02_processed/_ops/$SOURCE/load_success"
     else
         log INFO "sample: building the raw slice in $SAMPLE_ROOT"
@@ -860,16 +941,18 @@ else
     # also get `extract`/`load`/`graph` (dispatch to $HERE/<source>/<stage>_<source>.sh).
     case "$STAGE" in
         download) run_stage download bash "$wpath" "${wrapper_args[@]}" ;;
-        extract)  run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
+        extract)  run_stage extract bash "$HERE/$SRC_DIR/extract_$SOURCE.sh" "${lit_extract_args[@]}" ;;
         load)
             if [ "$SOURCE" = "europepmc_id_mappings" ]; then
                 run_stage load bash "$HERE/europepmc/id_mappings/load_europepmc_id_mappings.sh" "${load_args[@]}"
+            elif [ "$SOURCE" = "openfda_faers" ]; then
+                run_stage load bash "$wpath_faers" "${load_args[@]}"
             else
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
             fi
             ;;
-        graph)    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}" ;;
-        serialize) run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
+        graph)    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}" ;;
+        serialize) run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
                 run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
@@ -880,15 +963,19 @@ else
         all)
             run_stage download bash "$wpath" "${wrapper_args[@]}"
             if _is_structured "$SOURCE"; then
-                run_stage serialize bash "$HERE/$SOURCE/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
+                run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
                 if [ "$SOURCE" = "mesh" ]; then
-                    run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}"
                 fi
             elif _is_lit "$SOURCE"; then
-                run_stage extract bash "$HERE/$SOURCE/extract_$SOURCE.sh" "${lit_extract_args[@]}"
-                run_stage load bash "$HERE/$SOURCE/load_$SOURCE.sh" "${load_args[@]}"
-                run_stage graph bash "$HERE/$SOURCE/graph_$SOURCE.sh" "${graph_args[@]}"
+                run_stage extract bash "$HERE/$SRC_DIR/extract_$SOURCE.sh" "${lit_extract_args[@]}"
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
+                if _has_graph "$SOURCE"; then
+                    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}"
+                fi
+            elif _is_reg "$SOURCE"; then
+                run_stage load bash "$HERE/$SRC_DIR/load_$SOURCE.sh" "${load_args[@]}"
             else
                 log INFO "$SOURCE: only 'download' is wired (extract/serialize = SP2/SP4)"
             fi

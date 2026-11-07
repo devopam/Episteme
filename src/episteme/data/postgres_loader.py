@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from episteme import audit_trail
+from episteme import audit_trail, config
 from episteme.data import article_schema
 from episteme.ops.profile import default_batch_rows
 from episteme.ops.status import current
@@ -72,8 +72,18 @@ BODY_COLUMNS: tuple[str, ...] = (
 LOAD_BATCH_ROWS = default_batch_rows()
 # A batch also ends at this many bytes of row data (2026-10-28): a row of a
 # full-text source is ~30 KB, so 50,000 rows decoded to ~13 GB of Python strings.
-# The same cap as the staging writer's WRITE_BATCH_BYTES.
-LOAD_BATCH_BYTES = 64 * 1024 * 1024
+# The cap is ``config.Settings.load_batch_bytes`` (EPISTEME_LOAD_BATCH_BYTES), read at
+# the point of use. This name keeps today's value and stays importable; a value
+# other than the default, set on the module (tests), wins over the setting.
+LOAD_BATCH_BYTES = config.DEFAULT_LOAD_BATCH_BYTES
+
+
+def _load_batch_bytes() -> int:
+    if LOAD_BATCH_BYTES != config.DEFAULT_LOAD_BATCH_BYTES:
+        return LOAD_BATCH_BYTES
+    return config.get_settings().load_batch_bytes
+
+
 # pyarrow's default pre_buffer keeps every column chunk it has read until the
 # reader is gone: 2,150 MB after 400 read steps of one 4 GB shard (2026-10-28),
 # and the memory grows with the shard. Off, the same read holds 16 MB.
@@ -212,7 +222,7 @@ def _arrow_columns(batches: list[Any], columns: tuple[str, ...], names: set[str]
 
 
 def _iter_batches(
-    staging_path: Path, fmt: str, batch_size: int, batch_bytes: int = LOAD_BATCH_BYTES
+    staging_path: Path, fmt: str, batch_size: int, batch_bytes: int | None = None
 ) -> Iterator[dict[str, list[Any]]]:
     """Per batch of at most ``batch_size`` rows and about ``batch_bytes`` of row
     data: every ``ARTICLE_COLUMNS`` name -> its values, one per row (never the
@@ -221,7 +231,9 @@ def _iter_batches(
     ``None``, as ``dict.get`` did. ``id`` and ``source_file`` are required
     (``KeyError`` if absent), as before. A batch ends before a read step
     (parquet) or a line (JSONL) would take it past either limit; a single larger
-    step or line is its own batch."""
+    step or line is its own batch. ``batch_bytes`` defaults to the load cap."""
+    if batch_bytes is None:
+        batch_bytes = _load_batch_bytes()
     columns = article_schema.ARTICLE_COLUMNS
     if fmt == "parquet":
         import pyarrow.parquet as pq
@@ -594,6 +606,12 @@ def delete_source_files(
         raise ValueError("source_files must not be empty")
     names = sorted(set(source_files))
     with conn.cursor() as cur:
+        from episteme.data.dailymed import labels
+
+        if source in labels.LABEL_SOURCES:
+            # The label tables point at the articles by id: they go first, while the
+            # articles that name them still exist.
+            labels.delete_labels(cur, source, names)
         cur.execute(
             """
             DELETE FROM episteme.article_body b

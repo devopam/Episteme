@@ -58,7 +58,13 @@ if [ "$mode" = "--admin" ]; then
   user_enc="$(urlenc "$user")"
   pw_enc="$(urlenc "$pw")"
   export MCPG_DATABASE_URL="postgresql://${user_enc}:${pw_enc}@${host}:${port}/${primary}"
+  # The admin server also reads episteme_test, as a read-only secondary that
+  # connects as episteme_sys_admin, not as the superuser (2026-10-29).
   unset MCPG_SECONDARY_DATABASE_URLS
+  if [ "$primary" = "episteme" ] && [ -n "${EPISTEME_SYS_ADMIN_PASSWORD:-}" ]; then
+    sa_pw_enc="$(urlenc "$EPISTEME_SYS_ADMIN_PASSWORD")"
+    export MCPG_SECONDARY_DATABASE_URLS="episteme_test=postgresql://episteme_sys_admin:${sa_pw_enc}@${host}:${port}/episteme_test"
+  fi
   export MCPG_ALLOW_ALTER_SYSTEM=true
   export MCPG_ACCESS_MODE=unrestricted         # MCPg registers the ALTER SYSTEM tools only in this mode
   # The server settings docs/10 section 2.4 manages; MCPg's built-in denylist still applies.

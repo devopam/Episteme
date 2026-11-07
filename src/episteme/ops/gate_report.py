@@ -17,7 +17,9 @@ must reach. A measure that cannot be computed is None (or absent): its rule then
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -296,6 +298,304 @@ def measure_load(
         "orphan_bodies": orphans,
         "rows_loaded_equals_staging": None if staging_rows is None else loaded == staging_rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sources with no ``articles`` staging: ema and openfda (``reg_record``) and
+# openfda_faers (typed tables). Each has a measure function in SOURCE_MEASURES,
+# called as ``fn(conn, raw_dir=, run_id=, record=)``. The article measures above
+# stay as they are.
+# ---------------------------------------------------------------------------
+_NAME_CHUNK = 5000
+
+
+def coverage_pct(names: Iterable[str], known: set[str]) -> float | None:
+    """The share (percent) of the distinct ``names`` that are in ``known``; None when there
+    is no name, because a share of nothing is not a pass."""
+    distinct = set(names)
+    if not distinct:
+        return None
+    return _pct(len(distinct & known), len(distinct))
+
+
+def meta_total_equals_rows(checks: dict[str, tuple[int, int | None]]) -> bool | None:
+    """Whether every feed in ``checks`` (name -> (rows, declared total)) holds as many rows
+    as it declares. A feed with no declared total is a failure; no feed is None."""
+    if not checks:
+        return None
+    return all(total is not None and rows == total for rows, total in checks.values())
+
+
+def record_measures(record: dict) -> dict:
+    """The measures of the run record: time, peak memory, failed inputs (0 on exit code 0,
+    the record's own count when it has one, else None)."""
+    if record.get("failed_inputs") is not None:
+        failed = record["failed_inputs"]
+    elif record.get("rc") == 0:
+        failed = 0
+    else:
+        failed = None
+    return {
+        "elapsed_s": record.get("elapsed_s"),
+        "peak_rss_mb": record.get("peak_rss_mb"),
+        "failed_inputs": failed,
+    }
+
+
+def _rows_of_run(cur: Any, run_id: str | None) -> int | None:
+    """The sum of ``rows_affected`` over this run's load audit rows. It is an event sum, not a
+    row count: the recall_lot rows and the per-zip and per-generation rows are in it too. It
+    only tells whether the run did work: 0 for a run that loaded nothing (a marker or
+    fingerprint said the data was current), so ``min_rows`` fails and a pass never certifies
+    data from an earlier run. Never raise ``min_rows`` above 1 from it. None without a run id."""
+    if not run_id:
+        return None
+    cur.execute(
+        "SELECT coalesce(sum(rows_affected), 0) FROM episteme._audit "
+        "WHERE run_id = %s AND event_type IN ('load_commit', 'load_replace')",
+        (run_id,),
+    )
+    return int(cur.fetchone()[0])
+
+
+def _known_names(cur: Any, names: list[str]) -> set[str]:
+    found: set[str] = set()
+    for i in range(0, len(names), _NAME_CHUNK):
+        cur.execute(
+            "SELECT id_value FROM episteme.substance_xref "
+            "WHERE id_type = 'name' AND id_value = ANY(%s)",
+            (names[i : i + _NAME_CHUNK],),
+        )
+        found.update(r[0] for r in cur.fetchall())
+    return found
+
+
+def measure_reg(conn: Any, source: str, *, raw_dir: Path, run_id: str | None, record: dict) -> dict:
+    """Measures of ``ema`` or ``openfda`` after a sample load: for each feed that has files
+    in the slice, the rows of its latest release (``rows_by_dataset``), whether the rows
+    equal the file's own ``meta.total_records`` (``meta_total_equals_rows``, EMA JSON feeds)
+    and the share of its distinct normalised substance names that have a ``name`` row in
+    ``substance_xref`` (``xref_coverage_pct``, feeds with substance fields). ``rows`` is
+    what this run loaded. The release is read first and passed as a value."""
+    from episteme.data.regulatory.load_reg import (
+        EXPECTED_TOTAL,
+        feed_files,
+        input_keys,
+        latest_release,
+        select_feeds,
+    )
+    from episteme.data.regulatory.normalize import norm_name
+
+    rows_by_dataset: dict[str, int] = {}
+    checks: dict[str, tuple[int, int | None]] = {}
+    coverage: dict[str, float | None] = {}
+    with conn.cursor() as cur:
+        for feed in select_feeds(source, None):
+            paths = feed_files(source, feed, raw_dir)
+            if not paths:
+                continue
+            release = latest_release(conn, feed.name)
+            keys = input_keys(paths, raw_dir)
+            rows = 0
+            if release is not None:
+                cur.execute(
+                    "SELECT count(*) FROM episteme.reg_record "
+                    "WHERE dataset = %s AND release_id = %s AND source_file = ANY(%s)",
+                    (feed.name, release, keys),
+                )
+                rows = int(cur.fetchone()[0])
+            rows_by_dataset[feed.name] = rows
+            reader = EXPECTED_TOTAL.get(feed.format)
+            if reader is not None and len(paths) == 1:
+                checks[feed.name] = (rows, reader(paths[0]))
+            if feed.substance_fields and release is not None:
+                cur.execute(
+                    "SELECT DISTINCT n FROM episteme.reg_record r, unnest(r.substance_names) n "
+                    "WHERE r.dataset = %s AND r.release_id = %s AND r.source_file = ANY(%s)",
+                    (feed.name, release, keys),
+                )
+                names = sorted({norm_name(r[0]) for r in cur.fetchall() if r[0]} - {""})
+                coverage[feed.name] = coverage_pct(names, _known_names(cur, names))
+        out: dict[str, Any] = {
+            "rows": _rows_of_run(cur, run_id),
+            "rows_by_dataset": rows_by_dataset,
+            "meta_total_equals_rows": meta_total_equals_rows(checks),
+            "xref_coverage_pct": coverage,
+        }
+    out.update(record_measures(record))
+    return out
+
+
+def temp_bytes_run(record: dict) -> int | None:
+    """The temp bytes the database wrote during the run: the change of
+    ``pg_stat_database.temp_bytes`` between the snapshots that ``gate run`` took before and
+    after the stage. None when a snapshot is missing."""
+    before, after = record.get("db_temp_bytes_before"), record.get("db_temp_bytes_after")
+    if before is None or after is None:
+        return None
+    return max(0, int(after) - int(before))
+
+
+def measure_faers(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) -> dict:
+    """Measures of ``openfda_faers`` after a sample load: the live generation's rows, the
+    duplicate report ids (the de-duplication leaves none), the years it spans and the
+    largest year, the signal rows, the share of drug entries that the bridge links to a
+    substance (``xref_coverage_pct["faers_drug_entry"]``), and
+    ``db_temp_bytes_run``, the temp bytes the database wrote during the run (the change of
+    ``pg_stat_database.temp_bytes`` between snapshots of ``gate run``; includes the signal
+    build). ``peak_rss_mb`` is the client process tree only: the signal build is SQL on the
+    server, whose memory is bounded by ``work_mem`` and is not measured here. ``counts``
+    holds the counts that ``min_counts`` reads, so a build that made nothing fails."""
+    out: dict[str, Any] = {}
+    with conn.cursor() as cur:
+        out["rows"] = _rows_of_run(cur, run_id)
+        cur.execute(
+            "SELECT count(*), count(*) - count(DISTINCT safetyreportid), "
+            "min(receive_year), max(receive_year) FROM episteme.faers_report"
+        )
+        reports, dup, y_min, y_max = cur.fetchone()
+        out.update(
+            faers_reports=int(reports),
+            duplicate_ids=int(dup),
+            receive_year_min=y_min,
+            receive_year_max=y_max,
+        )
+        cur.execute("SELECT count(*) FROM episteme.faers_drug")
+        out["faers_drug_rows"] = int(cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM episteme.faers_reaction")
+        out["faers_reaction_rows"] = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT receive_year, count(*) FROM episteme.faers_report "
+            "GROUP BY 1 ORDER BY 2 DESC, 1 DESC LIMIT 1"
+        )
+        top = cur.fetchone()
+        out["largest_year"] = top[0] if top else None
+        out["largest_year_reports"] = int(top[1]) if top else 0
+        cur.execute("SELECT count(*) FROM episteme.faers_pair_quarter")
+        out["signal_pair_rows"] = int(cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM episteme.faers_event_quarter")
+        out["signal_event_rows"] = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM episteme.faers_entry_substance s "
+            "WHERE s.drug_entry_id = e.drug_entry_id)), count(*) FROM episteme.faers_drug_entry e"
+        )
+        linked, entries = cur.fetchone()
+        out["xref_coverage_pct"] = {
+            "faers_drug_entry": _pct(int(linked), int(entries)) if entries else None
+        }
+    out["db_temp_bytes_run"] = temp_bytes_run(record)
+    out["counts"] = {
+        "faers_reports": out["faers_reports"],
+        "signal_pair_rows": out["signal_pair_rows"],
+        "signal_event_rows": out["signal_event_rows"],
+        "largest_year_reports": out["largest_year_reports"],
+    }
+    out.update(record_measures(record))
+    return out
+
+
+def section_measures(with_sections: int | None, without_sections: int | None) -> dict:
+    """The EPAR SmPC section counts of the ``product-information`` documents and the share
+    (percent) that has sections. Report only: no rule reads the share until the sample sets
+    a floor. No document counted (or no count) gives a share of None."""
+    known = with_sections is not None and without_sections is not None
+    total = with_sections + without_sections if known else 0
+    return {
+        "documents_with_sections": with_sections,
+        "documents_without_sections": without_sections,
+        "sections_share_pct": _pct(with_sections, total) if total else None,
+    }
+
+
+def aact_summary_measures(summary: dict | None) -> dict:
+    """Measures from the summary that ``load_aact`` writes with its ``load_commit`` audit row:
+    the tables with rows and without, the orphan ``nct_id`` share (percent) per table and its
+    largest value (a measure only when every table but ``studies`` is in ``orphans`` or in
+    ``missing_nct_id``, the tables without an ``nct_id`` column), and the share of
+    interventions that ``resolve_names`` tied to a substance
+    (``xref_coverage_pct["aact_intervention"]``, recorded, no limit). No summary (the run
+    loaded nothing) gives None for every value, so the rules fail."""
+    out: dict[str, Any] = {
+        "tables_with_rows": None,
+        "empty_tables": None,
+        "orphan_share_pct": None,
+        "orphan_share_pct_max": None,
+        "xref_coverage_pct": {"aact_intervention": None},
+    }
+    if not summary:
+        return out
+    tables = summary.get("tables") or {}
+    out["tables_with_rows"] = sum(1 for n in tables.values() if n)
+    out["empty_tables"] = sum(1 for n in tables.values() if not n)
+    orphans = summary.get("orphans") or {}
+    shares = {t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0 for t, o in orphans.items()}
+    out["orphan_share_pct"] = shares
+    # The largest share is a measure only when every table but studies was checked: an
+    # empty or partial orphan record must fail the rule, not pass it as 0. A table without
+    # an nct_id column (search_terms) is listed in missing_nct_id and counts as checked.
+    no_nct_id = set(summary.get("missing_nct_id") or [])
+    checked = bool(orphans) and all(
+        t in orphans or t in no_nct_id for t in tables if t != "studies"
+    )
+    out["orphan_share_pct_max"] = max(shares.values()) if checked else None
+    names = summary.get("names") or {}
+    total = int(names.get("interventions") or 0)
+    if total:
+        out["xref_coverage_pct"] = {
+            "aact_intervention": _pct(int(names.get("interventions_matched") or 0), total)
+        }
+    return out
+
+
+def measure_aact(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) -> dict:
+    """Measures of ``aact`` after a sample load. The load summary of this run (its
+    ``load_commit`` audit row for the latest release) gives the tables, the orphan shares and
+    the intervention coverage; a run that loaded nothing has none, so its rules fail. The
+    ``aact.studies`` view is read live: ``studies_equal_distinct_nct_id``. ``counts`` holds
+    what ``min_counts`` reads. ``rows`` is the event sum of the run, as for the other loads."""
+    from episteme.data.aact import load_aact
+
+    summary: dict | None = None
+    out: dict[str, Any] = {}
+    # The live studies check reads the latest release; the summary row of this run's id
+    # ties the result to this run (no row for the run: every summary measure is None).
+    studies = distinct = None
+    with conn.cursor() as cur:
+        out["rows"] = _rows_of_run(cur, run_id)
+        cur.execute(
+            "SELECT release_id FROM episteme.reg_release WHERE dataset = %s AND is_latest",
+            (load_aact.DATASET,),
+        )
+        row = cur.fetchone()
+        release = row[0] if row else None
+        if release is not None and run_id:
+            cur.execute(
+                "SELECT new_value FROM episteme._audit WHERE run_id = %s "
+                "AND event_type = 'load_commit' AND object = %s ORDER BY seq DESC LIMIT 1",
+                (run_id, f"{load_aact.DATASET} {release}"),
+            )
+            found = cur.fetchone()
+            summary = found[0] if found else None
+        if release is not None:
+            cur.execute(
+                f"SELECT count(*), count(DISTINCT nct_id) FROM "
+                f"{load_aact.VIEW_SCHEMA}.{load_aact.STUDIES}"
+            )
+            studies, distinct = (int(v) for v in cur.fetchone())
+    out["release_id"] = release
+    out.update(aact_summary_measures(summary))
+    out["studies_equal_distinct_nct_id"] = None if studies is None else studies == distinct
+    out["counts"] = {"tables_with_rows": out["tables_with_rows"], "studies": studies}
+    out.update(record_measures(record))
+    return out
+
+
+SOURCE_MEASURES: dict[str, Callable[..., dict]] = {
+    "aact": measure_aact,
+    "ema": partial(measure_reg, source="ema"),
+    "openfda": partial(measure_reg, source="openfda"),
+    "openfda_faers": measure_faers,
+}
 
 
 def _display(value: Any) -> Any:

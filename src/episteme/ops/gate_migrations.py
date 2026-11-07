@@ -60,6 +60,15 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme.articles_apollo",
         "table:episteme.articles_pubchem",
     ],
+    "0010_regulatory_sources.sql": [
+        "table:episteme.reg_record",
+        "table:episteme.faers_drug",
+        "table:episteme.label_substance",
+    ],
+    "0011_label_section_ordinal.sql": [
+        "column:episteme.label_section.ordinal",
+        "column:episteme.label_section.product",
+    ],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {

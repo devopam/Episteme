@@ -344,6 +344,13 @@ def test_code_hash_of_an_unimportable_module_raises(tmp_path):
         gate.code_hash("s", "extract", module="pkg.nothing", src_root=tmp_path / "src")
 
 
+def test_faers_load_has_its_own_module_and_wrapper():
+    module, wrapper = gate.stage_module("openfda_faers", "load")
+    assert module == "episteme.data.regulatory.faers.load"
+    assert wrapper == "openfda/load_faers.sh"
+    assert (gate._SCRIPTS_DATA / wrapper).is_file()
+
+
 def test_stage_modules_table():
     assert gate.STAGE_MODULES[("bookshelf", "extract")] == (
         "episteme.data.bookshelf.extract_bookshelf",

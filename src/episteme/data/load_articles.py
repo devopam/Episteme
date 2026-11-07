@@ -75,6 +75,23 @@ def _discover_shards(staging_dir: Path) -> list[Path]:
     return sorted(staging_dir.glob("*.parquet")) + sorted(staging_dir.glob("*.jsonl"))
 
 
+def _pre_load(conn, source: str, shard: Path) -> dict:
+    """Source-specific work inside the shard's transaction, before its articles load.
+
+    Only the sources of ``labels.LABEL_SOURCES`` (``dailymed``, ``ema_epar``) have any:
+    their label tables (``label_section``, ``label_substance``) are replaced by
+    ``source_file`` from the sidecar of the shard (``episteme.data.dailymed.labels``). It
+    runs BEFORE ``load_source_file`` because the old label rows are found through the old
+    articles of the same ``source_file``, which that load deletes.
+    Every other source: nothing runs, and the load is exactly as before.
+    Returns extra stats for the load marker."""
+    from episteme.data.dailymed import labels
+
+    if source not in labels.LABEL_SOURCES:
+        return {}
+    return labels.replace_labels(conn, source, shard)
+
+
 def _filter_only(shards: list[Path], only: list[str] | None) -> list[Path]:
     """``--only`` filter, factored out for direct testing (I1). ``only`` is
     ``None``/empty -> no filtering (backwards compatible); otherwise keep only
@@ -182,9 +199,11 @@ def main(argv: list[str] | None = None) -> int:
                                 reason=args.reason,
                                 run_id=run_id,
                             )
+                        extra = _pre_load(conn, source, shard)
                         result = postgres_loader.load_source_file(
                             conn, source=source, staging_path=shard, run_id=run_id
                         )
+                        result.update(extra)
                         audit_trail.commit(conn)
                         return result
                     except BaseException as exc:
@@ -278,8 +297,14 @@ def main(argv: list[str] | None = None) -> int:
                 _write_load_success(processed_dir, source, name, result)
                 shards_done += 1
                 current().progress(unit=name, units_done=shards_done, units_total=len(shards))
+                labels_note = (
+                    f" label_sections={result['label_sections']}"
+                    f" label_substances={result['label_substances']}"
+                    if "label_sections" in result
+                    else ""
+                )
                 print(
-                    f"ok {name} rows={result['rows']} deleted={result['deleted']} "
+                    f"ok {name}{labels_note} rows={result['rows']} deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
                     f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
                     f"rows_per_sec={result['rows_per_sec']}"

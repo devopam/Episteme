@@ -2,12 +2,13 @@
 -> near-deduplicated, benchmark-decontaminated, Hive-partitioned Parquet shards.
 
 ``materialize`` streams the commercial-subset, successfully-extracted rows out of
-Postgres through a DuckDB ``postgres`` attachment. That attachment is a
-*separate*, read-only connection to the live database -- the psycopg ``conn``
-argument is used ONLY for the ``audit_trail.record`` call, which lands in the
-caller's transaction and is NOT committed here (matching ``postgres_loader`` /
-``graph_builder``). The read is streamed with ``fetchmany`` so the corpus is
-never held in RAM as one frame.
+Postgres (except the sources in the config's ``corpus_excluded_sources``: DailyMed labels
+and EMA EPARs are reference data, looked up, not trained on) through a DuckDB
+``postgres`` attachment. That attachment is a *separate*, read-only connection to the
+live database -- the psycopg ``conn`` argument is used ONLY for the
+``audit_trail.record`` call, which lands in the caller's transaction and is NOT
+committed here (matching ``postgres_loader`` / ``graph_builder``). The read is streamed
+with ``fetchmany`` so the corpus is never held in RAM as one frame.
 
 Two filters run over the row iterator, reusing the ``data.curate`` primitives
 verbatim (this module wires them together, it does not reimplement them):
@@ -49,13 +50,24 @@ from episteme.data.curate.deduplicate_corpus import build_minhash, get_shingles
 # episteme.article_body on `article_id` (= articles.id). ORDER BY content_hash
 # makes the stream deterministic and gives each (source, year) shard its rows in
 # content_hash order for free.
-_SELECT = (
+_SELECT_HEAD = (
     "SELECT a.id, a.source, a.year, a.pmid, a.doi, a.license, a.content_hash, b.text "
     "FROM pg.episteme.articles a "
     "JOIN pg.episteme.article_body b ON b.article_id = a.id "
-    "WHERE a.subset = 'commercial' AND a.extract_status = 'ok' AND b.text IS NOT NULL "
-    "ORDER BY a.content_hash"
+    "WHERE a.subset = 'commercial' AND a.extract_status = 'ok' AND b.text IS NOT NULL"
 )
+
+
+def select_sql(excluded_sources: tuple[str, ...]) -> tuple[str, list[str]]:
+    """The DuckDB read of the corpus rows and its parameters. Rows of
+    ``excluded_sources`` (config ``corpus_excluded_sources``: regulatory reference text,
+    looked up, not trained on) are left out, whatever their licence subset."""
+    params = list(dict.fromkeys(excluded_sources))
+    where = ""
+    if params:
+        where = " AND a.source NOT IN (" + ", ".join("?" for _ in params) + ")"
+    return _SELECT_HEAD + where + " ORDER BY a.content_hash", params
+
 
 # Column order per ADR-0002's Parquet section: hot->cold (frequently scanned
 # columns first -- text, source, year -- then the remaining metadata columns).
@@ -74,10 +86,18 @@ def materialize(
     pg_dsn: str | None = None,
     dedup_threshold: float = 0.8,
     sample_only: bool = True,
+    excluded_sources: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Stream + curate + shard the pretraining corpus. See module docstring."""
+    """Stream + curate + shard the pretraining corpus. See module docstring.
+    ``excluded_sources`` defaults to the config's ``corpus_excluded_sources``."""
     import duckdb
     from datasketch import MinHashLSH
+
+    if excluded_sources is None:
+        from episteme.config import get_settings
+
+        excluded_sources = get_settings().corpus_excluded_sources
+    select, select_params = select_sql(tuple(excluded_sources))
 
     if pg_dsn is None:
         from episteme.data.db.connection import dsn_from_settings
@@ -110,7 +130,7 @@ def materialize(
                 "this exception; check the target server, credentials, and that the "
                 "duckdb postgres extension can install)"
             ) from None
-        cur = d.execute(_SELECT)
+        cur = d.execute(select, select_params)
         while batch := cur.fetchmany(_BATCH):
             for row in batch:
                 id_, source, year, pmid, doi, license_, content_hash, text = row

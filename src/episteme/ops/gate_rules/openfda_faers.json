@@ -1,0 +1,17 @@
+{
+  "load": {
+    "max_failed_inputs": 0,
+    "min_rows": 1,
+    "max_duplicate_ids": 0,
+    "min_xref_coverage_pct": {
+      "faers_drug_entry": 1.0
+    },
+    "max_peak_rss_mb": 4096,
+    "min_counts": {
+      "faers_reports": 1,
+      "signal_pair_rows": 1,
+      "signal_event_rows": 1,
+      "largest_year_reports": 1
+    }
+  }
+}

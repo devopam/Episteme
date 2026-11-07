@@ -1,0 +1,479 @@
+Section,Category,Table,Column,Type,Nullable,PK,FK,References,Unique,Deprecated,Description,Example
+Protocol,Study Overview,studies,nct_id,text,Yes,No,No,,Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00396617
+Protocol,Study Overview,studies,nlm_download_date_description,text,Yes,No,No,,No,Yes,Free-text label describing the ClinicalTrials.gov data-download batch this record came from.,
+Protocol,Study Overview,studies,study_first_submitted_date,date,Yes,No,No,,No,No,The date on which the study sponsor or investigator first submitted a study record to ClinicalTrials.gov. There is typically a delay of a few days between the first submitted date and the record's availability on ClinicalTrials.gov (the first posted date).,2006-11-06
+Protocol,Study Overview,studies,results_first_submitted_date,date,Yes,No,No,,No,No,The date on which the study sponsor or investigator first submits a study record with summary results information. There is typically a delay between the results first submitted date and when summary results information becomes available on ClinicalTrials.gov (the results first posted date).,2017-03-17
+Protocol,Study Overview,studies,disposition_first_submitted_date,date,Yes,No,No,,No,No,"The date on which the study sponsor or investigator first submitted a certification or an extension request to delay submission of results. A sponsor or investigator who submits a certification can delay results submission up to 2 years after this date, unless certain events occur sooner. There is typically a delay between the date the certification or extension request was submitted and the date the information is first available on ClinicalTrials.gov (certification/extension first posted).",2016-12-22
+Protocol,Study Overview,studies,last_update_submitted_date,date,Yes,No,No,,No,No,The most recent date on which the study sponsor or investigator submitted changes to a study record to ClinicalTrials.gov. There is typically a delay of a few days between the last update submitted date and when the date changes are posted on ClinicalTrials.gov (the last update posted date).,2012-06-28
+Protocol,Study Overview,studies,study_first_submitted_qc_date,date,Yes,No,No,,No,No,The date on which the study sponsor or investigator first submits a study record that is consistent with National Library of Medicine (NLM) quality control (QC) review criteria. The sponsor or investigator may need to revise and submit a study record one or more times before NLM's QC review criteria are met. It is the responsibility of the sponsor or investigator to ensure that the study record is consistent with the NLM QC review criteria.,2006-11-06
+Protocol,Study Overview,studies,study_first_posted_date,date,Yes,No,No,,No,No,The date on which the study record was first available on ClinicalTrials.gov after National Library of Medicine (NLM) quality control (QC) review has concluded. There is typically a delay of a few days between the date the study sponsor or investigator submitted the study record and the first posted date.,2006-11-07
+Protocol,Study Overview,studies,study_first_posted_date_type,text,Yes,No,No,,No,No,Whether the study's first-posted date is recorded as `Estimated` or `Actual`.,ESTIMATED
+Protocol,Study Overview,studies,results_first_submitted_qc_date,date,Yes,No,No,,No,No,The date on which the study sponsor or investigator first submits a study record with summary results information that is consistent with National Library of Medicine (NLM) quality control (QC) review criteria. The sponsor or investigator may need to revise and submit results information one or more times before NLM's QC review criteria are met. It is the responsibility of the sponsor or investigator to ensure that the study record is consistent with the NLM QC review criteria.,2021-02-18
+Protocol,Study Overview,studies,results_first_posted_date,date,Yes,No,No,,No,No,The date on which summary results information was first available on ClinicalTrials.gov after National Library of Medicine (NLM) quality control (QC) review has concluded. There is typically a delay between the date the study sponsor or investigator first submits summary results information (the results first submitted date) and the results first posted date. Some results information may be available at an earlier date if Results First Posted with QC Comments.,2021-03-11
+Protocol,Study Overview,studies,results_first_posted_date_type,text,Yes,No,No,,No,No,Whether `results_first_posted_date` is `Estimated` or `Actual`.,ACTUAL
+Protocol,Study Overview,studies,disposition_first_submitted_qc_date,date,Yes,No,No,,No,No,The date the sponsor or investigator first submitted a certification or extension request that met NLM quality-control (QC) review criteria.,2016-12-22
+Protocol,Study Overview,studies,disposition_first_posted_date,date,Yes,No,No,,No,No,The date on which information about a certification to delay submission of results or an extension request was first available on ClinicalTrials.gov. ClinicalTrials.gov does not indicate whether the submission was a certification or extension request. There is typically a delay between the date the study sponsor or investigator submitted the certification or extension request and the first posted date.,2016-12-23
+Protocol,Study Overview,studies,disposition_first_posted_date_type,text,Yes,No,No,,No,No,Whether `disposition_first_posted_date` is `Estimated` or `Actual`.,ESTIMATED
+Protocol,Study Overview,studies,last_update_submitted_qc_date,date,Yes,No,No,,No,No,The most recent date on which the study sponsor or investigator submitted changes to a study record to ClinicalTrials.gov. There is typically a delay of a few days between the last update submitted date and when the date changes are posted on ClinicalTrials.gov (the last update posted date).,2012-06-28
+Protocol,Study Overview,studies,last_update_posted_date,date,Yes,No,No,,No,No,The most recent date on which changes to a study record were made available on ClinicalTrials.gov. There may be a delay between when the changes were submitted to ClinicalTrials.gov by the study's sponsor or investigator (the last update submitted date) and the last update posted date.,2012-07-02
+Protocol,Study Overview,studies,last_update_posted_date_type,text,Yes,No,No,,No,No,Whether `last_update_posted_date` is `Estimated` or `Actual`.,ESTIMATED
+Protocol,Study Overview,studies,start_month_year,text,Yes,No,No,,No,No,"The date the study opened (or is expected to open) for participant enrollment, as originally submitted — raw month/year text (e.g. `2007-12`). See `start_date` for the parsed value.",2007-12
+Protocol,Study Overview,studies,start_date_type,text,Yes,No,No,,No,No,Whether `start_date` is `Estimated` (anticipated) or `Actual` (the study has opened).,ACTUAL
+Protocol,Study Overview,studies,start_date,date,Yes,No,No,,No,No,"The date the study opened for participant enrollment, parsed to a full date — the planned date before it opens, or the actual date the first participant enrolled.",2007-12-31
+Protocol,Study Overview,studies,verification_month_year,text,Yes,No,No,,No,No,"The date the responsible party last verified that the study record is current and accurate, as originally submitted (raw month/year text). See `verification_date` for the parsed value.",2012-06
+Protocol,Study Overview,studies,verification_date,date,Yes,No,No,,No,No,"The date the responsible party last verified that the study record is current and accurate, parsed to a full date — recorded even when no information changed.",2012-06-30
+Protocol,Study Overview,studies,completion_month_year,text,Yes,No,No,,No,No,"Study completion — the date of the last participant's final visit for collecting outcome and adverse-event data, as originally submitted (raw month/year text). See `completion_date` for the parsed value.",2014-03
+Protocol,Study Overview,studies,completion_date_type,text,Yes,No,No,,No,No,Whether `completion_date` is `Estimated` (anticipated) or `Actual` (the study has reached completion).,ESTIMATED
+Protocol,Study Overview,studies,completion_date,date,Yes,No,No,,No,No,"Study completion — the date of the last participant's final visit for collecting primary and secondary outcome and adverse-event data, parsed to a full date.",2014-03-31
+Protocol,Study Overview,studies,primary_completion_month_year,text,Yes,No,No,,No,No,"Primary completion — the date final data were collected for the study's primary outcome measure(s), as originally submitted (raw month/year text). See `primary_completion_date` for the parsed value.",2013-09
+Protocol,Study Overview,studies,primary_completion_date_type,text,Yes,No,No,,No,No,Whether `primary_completion_date` is `Estimated` (anticipated) or `Actual` (the date has been reached).,ESTIMATED
+Protocol,Study Overview,studies,primary_completion_date,date,Yes,No,No,,No,No,"Primary completion — the date final data were collected for the study's primary outcome measure(s), parsed to a full date, whether the study finished as planned or was terminated.",2013-09-30
+Protocol,Study Overview,studies,target_duration,text,Yes,No,No,,No,No,"For patient registries, the planned length of time each participant is followed, given as a number and a unit of time (e.g. `9 Months`).",9 Months
+Protocol,Study Overview,studies,study_type,text,Yes,No,No,,No,No,"The nature of the study: `INTERVENTIONAL` (participants are assigned to interventions under a protocol), `OBSERVATIONAL` (outcomes are assessed without the investigator assigning interventions), or `EXPANDED_ACCESS` (an investigational product made available outside a clinical trial).",INTERVENTIONAL
+Protocol,Study Overview,studies,acronym,text,Yes,No,No,,No,No,"The study's public acronym or short abbreviation, if one was given.",AI - diseases
+Protocol,Study Overview,studies,baseline_population,text,Yes,No,No,,No,No,"A note explaining why the number of participants with baseline measurements differs from the number enrolled or assigned to groups — for example, how the baseline analysis population was determined. Blank when the counts match.",One subject who was randomized to the self-administration arm enrolled and immediately withdrew from the study. Therefor…
+Protocol,Study Overview,studies,brief_title,text,Yes,No,No,,No,No,"The study's short title, written in plain language for the public — usually naming the participants, condition, and intervention.",Voice Prosthesis Made in Porous Titanium After Total Laryngectomy or Pharyngolaryngectomy
+Protocol,Study Overview,studies,official_title,text,Yes,No,No,,No,No,"The study's full official title, matching the title of the protocol.",Voice Prosthesis Made in Porous Titanium After Total Laryngectomy or Pharyngolaryngectomy
+Protocol,Study Overview,studies,overall_status,text,Yes,No,No,,No,No,"The study's overall recruitment status, based on its sites — for example `RECRUITING`, `NOT_YET_RECRUITING`, `ENROLLING_BY_INVITATION`, `ACTIVE_NOT_RECRUITING`, `COMPLETED`, `SUSPENDED`, `TERMINATED`, or `WITHDRAWN`. Expanded-access records use availability statuses instead; `UNKNOWN` marks a record past its completion date with no recent update.",UNKNOWN
+Protocol,Study Overview,studies,last_known_status,text,Yes,No,No,,No,No,"The last known recruitment status of a study that is past due for verification (not confirmed in over 2 years) — for example `RECRUITING`, `NOT_YET_RECRUITING`, or `ACTIVE_NOT_RECRUITING`.",RECRUITING
+Protocol,Study Overview,studies,phase,text,Yes,No,No,,No,No,"For a drug or biologic trial, the trial phase — `EARLY_PHASE1`, `PHASE1`, `PHASE2`, `PHASE3`, or `PHASE4`; `NA` for trials without phases, such as device or behavioral studies.",PHASE1
+Protocol,Study Overview,studies,enrollment,integer,Yes,No,No,,No,No,"The number of participants — the target number while the study is ongoing, or the actual number enrolled once known. See `enrollment_type` for which one this is.",14
+Protocol,Study Overview,studies,enrollment_type,text,Yes,No,No,,No,No,Whether `enrollment` is `ESTIMATED` (the target number) or `ACTUAL` (the number actually enrolled).,ESTIMATED
+Protocol,Study Overview,studies,source,text,Yes,No,No,,No,No,Name of the study's lead sponsor — the organization responsible for the trial.,"University Hospital, Strasbourg, France"
+Protocol,Study Overview,studies,limitations_and_caveats,text,Yes,No,No,,No,No,"A description of significant limitations of the study's results — for example not reaching the target enrollment, or measurement problems that made the data unreliable. Blank when none were reported.",Early termination leading to small numbers of subjects analyzed
+Protocol,Study Overview,studies,number_of_arms,integer,Yes,No,No,,No,No,Number of arms (intervention groups) in an interventional trial. Null for observational studies.,2
+Protocol,Study Overview,studies,number_of_groups,integer,Yes,No,No,,No,No,Number of groups/cohorts in an observational study. Null for interventional trials.,5
+Protocol,Study Overview,studies,why_stopped,text,Yes,No,No,,No,No,"A brief explanation of why the study was stopped early — set only when the status is suspended, terminated, or withdrawn.",Researchers left the institute
+Protocol,Study Overview,studies,has_expanded_access,boolean,Yes,No,No,,No,No,True when the investigational drug or device is also available through expanded access — a separate program for patients who do not qualify for the trial. That access is described in its own record; see `expanded_access_nctid`.,true
+Protocol,Study Overview,studies,expanded_access_type_individual,boolean,Yes,No,No,,No,No,"For expanded access, whether the product is available to individual patients, including emergency use (21 CFR 312.310).",
+Protocol,Study Overview,studies,expanded_access_type_intermediate,boolean,Yes,No,No,,No,No,"For expanded access, whether the product is available to an intermediate-size patient population (21 CFR 312.315).",true
+Protocol,Study Overview,studies,expanded_access_type_treatment,boolean,Yes,No,No,,No,No,"For expanded access, whether the product is available under a treatment IND or treatment protocol, for a wide population (21 CFR 312.320).",
+Protocol,Study Overview,studies,has_dmc,boolean,Yes,No,No,,No,No,True when a data monitoring committee — an independent group that watches participant safety and may recommend stopping the study — has been appointed.,true
+Protocol,Study Overview,studies,is_fda_regulated_drug,boolean,Yes,No,No,,No,No,True when the study evaluates a drug or biologic product regulated by the U.S. FDA.,true
+Protocol,Study Overview,studies,is_fda_regulated_device,boolean,Yes,No,No,,No,No,True when the study evaluates a device product regulated by the U.S. FDA.,true
+Protocol,Study Overview,studies,is_unapproved_device,boolean,Yes,No,No,,No,No,True when at least one device studied has not previously been approved or cleared by the U.S. FDA (formerly called delayed posting).,true
+Protocol,Study Overview,studies,is_ppsd,boolean,Yes,No,No,,No,No,"True when the study is a pediatric postmarket surveillance of an FDA-regulated device, ordered under section 522 of the Federal Food, Drug, and Cosmetic Act.",
+Protocol,Study Overview,studies,is_us_export,boolean,Yes,No,No,,No,No,True when a drug or device studied is manufactured in the United States (or a U.S. territory) and exported for study in another country.,true
+Protocol,Study Overview,studies,biospec_retention,text,Yes,No,No,,No,No,"For observational studies, whether biospecimens are kept in a biorepository: `NONE_RETAINED`, `SAMPLES_WITH_DNA` (DNA can be extracted), or `SAMPLES_WITHOUT_DNA`.",SAMPLES_WITHOUT_DNA
+Protocol,Study Overview,studies,biospec_description,text,Yes,No,No,,No,No,"For observational studies, the types of biospecimens retained — for example whole blood, serum, urine, or tissue.","fever, pulse, blood pressure, oxygen saturation, glucose measurement values"
+Protocol,Study Overview,studies,ipd_time_frame,text,Yes,No,No,,No,No,A description of when individual participant data (IPD) — the de-identified data collected from each participant — will become available and for how long.,6 months after data collection is over
+Protocol,Study Overview,studies,ipd_access_criteria,text,Yes,No,No,,No,No,"A description of the conditions for accessing the study's individual participant data (IPD): with whom it is shared, for what analyses, and by what mechanism.",Researchers who provide a methodologically sound proposal.
+Protocol,Study Overview,studies,ipd_url,text,Yes,No,No,,No,No,A web address with more information about the study's plan to share individual participant data (IPD).,http://www.bgpcf.net
+Protocol,Study Overview,studies,plan_to_share_ipd,text,Yes,No,No,,No,No,"Whether the study plans to share individual participant data (IPD) with other researchers: `YES`, `NO`, or `UNDECIDED`.",NO
+Protocol,Study Overview,studies,plan_to_share_ipd_description,text,Yes,No,No,,No,No,"A description of which individual participant data (IPD) will be shared — or, when the plan is `NO` or `UNDECIDED`, why it will not be shared or is not yet decided.",De-identified individual participant data for all primary and secondary outcome measures will be made available from the…
+Protocol,Study Overview,studies,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-10-15 17:23:16 UTC
+Protocol,Study Overview,studies,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-10-15 17:23:16 UTC
+Protocol,Study Overview,studies,source_class,text,Yes,No,No,,No,No,"The lead sponsor's classification — for example `NIH`, `FED`, `OTHER_GOV`, `INDUSTRY`, `NETWORK`, or `OTHER`.",OTHER
+Protocol,Study Overview,studies,delayed_posting,boolean,Yes,No,No,,No,No,Whether public posting of the study's registration is delayed because it studies a device not yet approved or cleared by the U.S. FDA.,
+Protocol,Study Overview,studies,expanded_access_nctid,text,Yes,No,No,,No,No,"When this study's investigational product is available through expanded access, the NCT number of that separate expanded-access record.",NCT03138629
+Protocol,Study Overview,studies,expanded_access_status_for_nctid,text,Yes,No,No,,No,No,"For a trial that has expanded access, the availability status of that expanded-access record — for example `AVAILABLE`, `NO_LONGER_AVAILABLE`, `TEMPORARILY_NOT_AVAILABLE`, or `APPROVED_FOR_MARKETING`.",NO_LONGER_AVAILABLE
+Protocol,Study Overview,studies,fdaaa801_violation,boolean,Yes,No,No,,No,No,True if ClinicalTrials.gov flagged this trial for an FDAAA 801 results-reporting violation (late or missing required results).,
+Protocol,Study Overview,studies,baseline_type_units_analyzed,text,Yes,No,No,,No,No,"When baseline results are counted in a unit other than participants, the name of that unit — for example `Eyes`, `lesions`, or `implants`.",Eyes
+Protocol,Study Overview,studies,patient_registry,boolean,Yes,No,No,,No,No,True when the study is a patient registry — an observational study that tracks patients' conditions or treatments in real-world care.,true
+Protocol,Study Overview,brief_summaries,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,124479192
+Protocol,Study Overview,brief_summaries,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02124681
+Protocol,Study Overview,brief_summaries,description,text,Yes,No,No,,No,No,"A short, plain-language summary of the study, written for the public.","Current options to treat insulin resistance in diabetes are fairly limited. For this reason, novel treatments would repr…"
+Protocol,Study Overview,detailed_descriptions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,124696411
+Protocol,Study Overview,detailed_descriptions,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT05615467
+Protocol,Study Overview,detailed_descriptions,description,text,Yes,No,No,,No,No,"An extended, more technical description of the study, beyond the brief summary.",The purpose of this research study is to learn whether oxytocin treatment decreases drinking and alcohol craving in peop…
+Protocol,Study Overview,id_information,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,162692089
+Protocol,Study Overview,id_information,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT03331796
+Protocol,Study Overview,id_information,id_source,text,Yes,No,No,,No,No,"The kind of identifier this row holds — e.g. `org_study_id`, `secondary_id`, or `nct_alias` — marking where the ID comes from.",secondary_id
+Protocol,Study Overview,id_information,id_value,text,Yes,No,No,,No,No,"A secondary identifier for the study — an ID other than the NCT number, such as a grant or registry number.",R01AG055526
+Protocol,Study Overview,id_information,id_type,text,Yes,No,No,,No,No,"The kind of secondary identifier — for example `NIH`, `FDA`, `EUDRACT_NUMBER`, or `OTHER`.",NIH
+Protocol,Study Overview,id_information,id_type_description,text,Yes,No,No,,No,No,"For an other-type secondary ID, the name of the organization or registry that issued it.",CTRP (Clinical Trial Reporting Program)
+Protocol,Study Overview,id_information,id_link,text,Yes,No,No,,No,No,"URL link based on SecondaryId and SecondaryIdType, including system-generated links to NIH RePORTER, specifically (associated with the types of federal funding identified as SecondaryIdType)",https://reporter.nih.gov/quickSearch/R01AG055526
+Protocol,Conditions & Keywords,conditions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,218526508
+Protocol,Conditions & Keywords,conditions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT06556875
+Protocol,Conditions & Keywords,conditions,name,text,Yes,No,No,,No,No,Name of a health condition or disease studied by the trial — e.g. 'Normal Weight Obesity'.,Normal Weight Obesity
+Protocol,Conditions & Keywords,conditions,downcase_name,text,Yes,No,No,,No,No,Lowercased copy of `name` for case-insensitive search.,normal weight obesity
+Protocol,Conditions & Keywords,keywords,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,324381000
+Protocol,Conditions & Keywords,keywords,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT05520359
+Protocol,Conditions & Keywords,keywords,name,text,Yes,No,No,,No,No,A free-text keyword the sponsor submitted to describe the trial — e.g. 'Pediatric'.,Pediatric
+Protocol,Conditions & Keywords,keywords,downcase_name,text,Yes,No,No,,No,No,Lowercased copy of `name` for case-insensitive search.,pediatric
+Protocol,Study Design,designs,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,123579530
+Protocol,Study Design,designs,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01892332
+Protocol,Study Design,designs,allocation,text,Yes,No,No,,No,No,"How participants were assigned to arms: `RANDOMIZED` (by chance), `NON_RANDOMIZED` (by a non-random method), or `NA` for a single-arm trial.",NON_RANDOMIZED
+Protocol,Study Design,designs,intervention_model,text,Yes,No,No,,No,No,"The strategy for assigning interventions to participants: `SINGLE_GROUP`, `PARALLEL`, `CROSSOVER`, `FACTORIAL`, or `SEQUENTIAL`.",SINGLE_GROUP
+Protocol,Study Design,designs,observational_model,text,Yes,No,No,,No,No,"For observational studies, the design model — for example `COHORT`, `CASE_CONTROL`, `CASE_ONLY`, or `CASE_CROSSOVER`.",COHORT
+Protocol,Study Design,designs,primary_purpose,text,Yes,No,No,,No,No,"The main objective of the intervention — for example `TREATMENT`, `PREVENTION`, `DIAGNOSTIC`, `SUPPORTIVE_CARE`, `SCREENING`, `HEALTH_SERVICES_RESEARCH`, `BASIC_SCIENCE`, `DEVICE_FEASIBILITY`, or `OTHER`.",TREATMENT
+Protocol,Study Design,designs,time_perspective,text,Yes,No,No,,No,No,"For observational studies, the timing of observations relative to enrollment: `RETROSPECTIVE`, `PROSPECTIVE`, `CROSS_SECTIONAL`, or `OTHER`.",PROSPECTIVE
+Protocol,Study Design,designs,masking,text,Yes,No,No,,No,No,"How many parties were blinded to the assigned intervention: `NONE`, `SINGLE`, `DOUBLE`, `TRIPLE`, or `QUADRUPLE`. The specific roles masked are in `masking_description`.",DOUBLE
+Protocol,Study Design,designs,masking_description,text,Yes,No,No,,No,No,"A description of which parties were masked (blinded) — for example participants, care providers, investigators, or outcome assessors.","Prior to being included in the study, the patient will be mentioned the times when he will receive the medication as wel…"
+Protocol,Study Design,designs,intervention_model_description,text,Yes,No,No,,No,No,"Additional detail about the interventional study model, when the model alone does not capture it.","Two study groups will be generated, each consisting of 54 research subjects, randomly each recipient will receive epidur…"
+Protocol,Study Design,designs,subject_masked,boolean,Yes,No,No,,No,No,True if trial participants are masked (blinded) to their assigned intervention.,true
+Protocol,Study Design,designs,caregiver_masked,boolean,Yes,No,No,,No,No,True if care providers are masked to the assigned intervention.,true
+Protocol,Study Design,designs,investigator_masked,boolean,Yes,No,No,,No,No,True if investigators are masked to the assigned intervention.,true
+Protocol,Study Design,designs,outcomes_assessor_masked,boolean,Yes,No,No,,No,No,True if outcome assessors are masked to the assigned intervention.,true
+Protocol,Study Design,design_outcomes,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,763806752
+Protocol,Study Design,design_outcomes,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT05737745
+Protocol,Study Design,design_outcomes,outcome_type,text,Yes,No,No,,No,No,"Type of planned outcome measure — `primary`, `secondary`, or `other`.",other
+Protocol,Study Design,design_outcomes,measure,text,Yes,No,No,,No,No,The name of a planned (protocol-stage) outcome measure.,Moderate to Vigorous Physical Activity- Support Team Members
+Protocol,Study Design,design_outcomes,time_frame,text,Yes,No,No,,No,No,The time point or period over which the planned outcome is assessed.,Change from baseline to 8 weeks (post-intervention)
+Protocol,Study Design,design_outcomes,population,text,Yes,No,No,,No,No,"The subgroup the planned outcome is measured in, when narrower than all participants. Blank when not specified.",
+Protocol,Study Design,design_outcomes,description,text,Yes,No,No,,No,No,Additional detail about the planned outcome measure.,"Among survivors, compare changes in objective moderate-vigorous physical activity (MVPA) obtained from FitBits between i…"
+Protocol,Arms & Interventions,interventions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,211556799
+Protocol,Arms & Interventions,interventions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04518735
+Protocol,Arms & Interventions,interventions,intervention_type,text,Yes,No,No,,No,No,"The kind of intervention — for example `DRUG`, `DEVICE`, `BIOLOGICAL`, `PROCEDURE`, `BEHAVIORAL`, `DIETARY_SUPPLEMENT`, or `OTHER`.",OTHER
+Protocol,Arms & Interventions,interventions,name,text,Yes,No,No,,No,No,Name of the intervention or treatment.,Antithrombotic Therapy (anticoagulant and/or antiplatelet) before admission for Covid19
+Protocol,Arms & Interventions,interventions,description,text,Yes,No,No,,No,No,Details of the intervention — what it is and how it is given.,Review of medical records during hospitalization and until day 28 post-entry to compare the clinical outcomes depending…
+Protocol,Arms & Interventions,intervention_other_names,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,106037155
+Protocol,Arms & Interventions,intervention_other_names,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00028600
+Protocol,Arms & Interventions,intervention_other_names,intervention_id,integer,Yes,No,Yes,interventions(id),No,No,Foreign key to `interventions`.,211205575
+Protocol,Arms & Interventions,intervention_other_names,name,text,Yes,No,No,,No,No,An alternate name or synonym for the intervention — e.g. a brand name or abbreviation like 'G-CSF'.,G-CSF
+Protocol,Arms & Interventions,design_groups,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,227463014
+Protocol,Arms & Interventions,design_groups,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT03365232
+Protocol,Arms & Interventions,design_groups,group_type,text,Yes,No,No,,No,No,"The role of this arm or group: `EXPERIMENTAL`, `ACTIVE_COMPARATOR`, `PLACEBO_COMPARATOR`, `SHAM_COMPARATOR`, `NO_INTERVENTION`, or `OTHER`.",EXPERIMENTAL
+Protocol,Arms & Interventions,design_groups,title,text,Yes,No,No,,No,No,Short label for the arm or group.,non custom base attachment
+Protocol,Arms & Interventions,design_groups,description,text,Yes,No,No,,No,No,Description of the arm (interventional) or group/cohort (observational).,Alprostadil
+Protocol,Arms & Interventions,design_group_interventions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,278251138
+Protocol,Arms & Interventions,design_group_interventions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT03250247
+Protocol,Arms & Interventions,design_group_interventions,design_group_id,integer,Yes,No,Yes,design_groups(id),No,No,Foreign key to `design_groups`.,227560548
+Protocol,Arms & Interventions,design_group_interventions,intervention_id,integer,Yes,No,Yes,interventions(id),No,No,Foreign key to `interventions`.,211282014
+Protocol,Eligibility,eligibilities,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,124679427
+Protocol,Eligibility,eligibilities,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT06943885
+Protocol,Eligibility,eligibilities,sampling_method,text,Yes,No,No,,No,No,"For observational studies, how participants were sampled: `PROBABILITY_SAMPLE` (a random process) or `NON_PROBABILITY_SAMPLE` (such as convenience sampling).",NON_PROBABILITY_SAMPLE
+Protocol,Eligibility,eligibilities,gender,text,Yes,No,No,,No,No,"Which participants are eligible by sex: `ALL`, `FEMALE`, or `MALE`.",ALL
+Protocol,Eligibility,eligibilities,minimum_age,text,Yes,No,No,,No,No,"The minimum age a participant must be to enroll, with its unit — for example `18 Years`. `N/A` when there is no lower limit.",18 Years
+Protocol,Eligibility,eligibilities,maximum_age,text,Yes,No,No,,No,No,"The maximum age a participant can be to enroll, with its unit — for example `85 Years`. `N/A` when there is no upper limit.",85 Years
+Protocol,Eligibility,eligibilities,healthy_volunteers,boolean,Yes,No,No,,No,No,Whether the study accepts healthy volunteers — participants who do not have the condition under study.,true
+Protocol,Eligibility,eligibilities,population,text,Yes,No,No,,No,No,"For observational studies, a description of the population participants are drawn from — for example a primary-care clinic or a community sample.","Taiwanese adult patients, whose age are between 20 and 65 years old, with obesity and/or cormobidities and metabolic dis…"
+Protocol,Eligibility,eligibilities,criteria,text,Yes,No,No,,No,No,"The full inclusion and exclusion criteria for enrolling in the study, as free text.","Inclusion Criteria:
+
+1. History and physical/neurological examination consistent with acute stroke.
+2. Age≥18.
+3. Last s…"
+Protocol,Eligibility,eligibilities,gender_description,text,Yes,No,No,,No,No,"When eligibility depends on gender, a description of the gender-based criteria.",Male Volunteers
+Protocol,Eligibility,eligibilities,gender_based,boolean,Yes,No,No,,No,No,True if eligibility depends on a gender-related criterion rather than biological sex.,true
+Protocol,Eligibility,eligibilities,adult,boolean,Yes,No,No,,No,No,True if the eligible age range includes adults (18–64).,true
+Protocol,Eligibility,eligibilities,child,boolean,Yes,No,No,,No,No,True if the eligible age range includes children (under 18).,true
+Protocol,Eligibility,eligibilities,older_adult,boolean,Yes,No,No,,No,No,True if the eligible age range includes older adults (65 and over).,true
+Protocol,Contacts & Locations,facilities,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,769729524
+Protocol,Contacts & Locations,facilities,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01808573
+Protocol,Contacts & Locations,facilities,status,text,Yes,No,No,,No,No,"The recruitment status of this specific site — for example `RECRUITING`, `COMPLETED`, `WITHDRAWN`, or `NOT_YET_RECRUITING`.",RECRUITING
+Protocol,Contacts & Locations,facilities,name,text,Yes,No,No,,No,No,Name of the facility or site hosting the study.,Ironwood Cancer and Research Centers
+Protocol,Contacts & Locations,facilities,city,text,Yes,No,No,,No,No,City where the site is located.,Chandler
+Protocol,Contacts & Locations,facilities,state,text,Yes,No,No,,No,No,State or province where the site is located.,Arizona
+Protocol,Contacts & Locations,facilities,zip,text,Yes,No,No,,No,No,Postal (ZIP) code of the site.,85224
+Protocol,Contacts & Locations,facilities,country,text,Yes,No,No,,No,No,Country where the site is located.,United States
+Protocol,Contacts & Locations,facilities,latitude,decimal,Yes,No,No,,No,No,"Latitude of the study site, geocoded from its address.",33.30616
+Protocol,Contacts & Locations,facilities,longitude,decimal,Yes,No,No,,No,No,"Longitude of the study site, geocoded from its address.",-111.84125
+Protocol,Contacts & Locations,facility_contacts,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,98306078
+Protocol,Contacts & Locations,facility_contacts,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT06315257
+Protocol,Contacts & Locations,facility_contacts,facility_id,integer,Yes,No,Yes,facilities(id),No,No,Foreign key to `facilities`.,771723981
+Protocol,Contacts & Locations,facility_contacts,contact_type,text,Yes,No,No,,No,No,Role of this facility contact — `primary` or `backup`.,primary
+Protocol,Contacts & Locations,facility_contacts,name,text,Yes,No,No,,No,No,Name of the contact person at this study location.,"Anna Wilbanks, Research Nurse, MSN, RN, WHNP-BC"
+Protocol,Contacts & Locations,facility_contacts,email,text,Yes,No,No,,No,No,Email address for the location contact.,annaburton@uabmc.edu
+Protocol,Contacts & Locations,facility_contacts,phone,text,Yes,No,No,,No,No,Phone number for the location contact.,205-996-7079
+Protocol,Contacts & Locations,facility_contacts,phone_extension,text,Yes,No,No,,No,No,"Phone extension for the location contact, if any.",TTY8664111010
+Protocol,Contacts & Locations,facility_investigators,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,52734013
+Protocol,Contacts & Locations,facility_investigators,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT07098910
+Protocol,Contacts & Locations,facility_investigators,facility_id,integer,Yes,No,Yes,facilities(id),No,No,Foreign key to `facilities`.,770622366
+Protocol,Contacts & Locations,facility_investigators,role,text,Yes,No,No,,No,No,The investigator's role at this site — for example `PRINCIPAL_INVESTIGATOR` or `SUB_INVESTIGATOR`.,PRINCIPAL_INVESTIGATOR
+Protocol,Contacts & Locations,facility_investigators,name,text,Yes,No,No,,No,No,Name of the investigator at this site.,"Hung Trong Mai, M.D."
+Protocol,Contacts & Locations,countries,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,176794332
+Protocol,Contacts & Locations,countries,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01276249
+Protocol,Contacts & Locations,countries,name,text,Yes,No,No,,No,No,A country in which the study has one or more sites.,Austria
+Protocol,Contacts & Locations,countries,removed,boolean,Yes,No,No,,No,No,True if this country appeared on an earlier version of the record but has since been removed.,true
+Protocol,Contacts & Locations,central_contacts,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,47941579
+Protocol,Contacts & Locations,central_contacts,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT06563466
+Protocol,Contacts & Locations,central_contacts,contact_type,text,Yes,No,No,,No,No,Role of this central contact — `primary` or `backup`.,primary
+Protocol,Contacts & Locations,central_contacts,name,text,Yes,No,No,,No,No,Name of the study's central contact — the point of contact for questions about taking part.,"Ditte H. Rotvig, MD"
+Protocol,Contacts & Locations,central_contacts,phone,text,Yes,No,No,,No,No,Phone number for the central study contact.,+45 31154887
+Protocol,Contacts & Locations,central_contacts,email,text,Yes,No,No,,No,No,Email address for the central study contact.,ditte.hoeyer.rotvig@regionh.dk
+Protocol,Contacts & Locations,central_contacts,phone_extension,text,Yes,No,No,,No,No,"Phone extension for the central study contact, if any.",3135
+Protocol,Contacts & Locations,central_contacts,role,text,Yes,No,No,,No,No,The contact's role; always `CONTACT` for a central study contact.,CONTACT
+Protocol,Sponsors & Collaborators,sponsors,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,199355502
+Protocol,Sponsors & Collaborators,sponsors,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02070705
+Protocol,Sponsors & Collaborators,sponsors,agency_class,text,Yes,No,No,,No,No,"The sponsor or collaborator's classification — for example `NIH`, `FED`, `OTHER_GOV`, `INDUSTRY`, `NETWORK`, or `OTHER`.",NIH
+Protocol,Sponsors & Collaborators,sponsors,lead_or_collaborator,text,Yes,No,No,,No,No,Whether this organization is the trial's `lead` sponsor or a `collaborator`.,collaborator
+Protocol,Sponsors & Collaborators,sponsors,name,text,Yes,No,No,,No,No,Name of a sponsor or collaborator organization for the study.,National Institute for Biomedical Imaging and Bioengineering (NIBIB)
+Protocol,Sponsors & Collaborators,responsible_parties,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,120491170
+Protocol,Sponsors & Collaborators,responsible_parties,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01481831
+Protocol,Sponsors & Collaborators,responsible_parties,responsible_party_type,text,Yes,No,No,,No,No,"Who is accountable for the study: `SPONSOR`, `PRINCIPAL_INVESTIGATOR`, or `SPONSOR_INVESTIGATOR`.",PRINCIPAL_INVESTIGATOR
+Protocol,Sponsors & Collaborators,responsible_parties,name,text,Yes,No,No,,No,No,"Full name of the responsible-party investigator, when the responsible party is an investigator.",Zhan Wang
+Protocol,Sponsors & Collaborators,responsible_parties,title,text,Yes,No,No,,No,No,Title of the responsible-party investigator — for example Principal Investigator.,Principal Investigator
+Protocol,Sponsors & Collaborators,responsible_parties,organization,text,Yes,No,No,,No,No,The responsible-party investigator's organization in an older record format; `affiliation` holds the current value.,New York University School of Medicine
+Protocol,Sponsors & Collaborators,responsible_parties,affiliation,text,Yes,No,No,,No,No,The responsible-party investigator's organizational affiliation.,Shanghai Changzheng Hospital
+Protocol,Sponsors & Collaborators,responsible_parties,old_name_title,text,Yes,No,No,,No,No,The responsible-party investigator's name in an older record format; `name` and `title` hold the current values.,"Stephen J. Oliver, MD"
+Protocol,Sponsors & Collaborators,overall_officials,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,115851517
+Protocol,Sponsors & Collaborators,overall_officials,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00769431
+Protocol,Sponsors & Collaborators,overall_officials,role,text,Yes,No,No,,No,No,"The official's role for the overall study — for example `PRINCIPAL_INVESTIGATOR`, `STUDY_DIRECTOR`, or `STUDY_CHAIR`.",PRINCIPAL_INVESTIGATOR
+Protocol,Sponsors & Collaborators,overall_officials,name,text,Yes,No,No,,No,No,Name of the overall study official.,"David M. Latini, PhD"
+Protocol,Sponsors & Collaborators,overall_officials,affiliation,text,Yes,No,No,,No,No,The official's organizational affiliation.,Baylor College of Medicine
+Protocol,References & Documents,study_references,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,222182710
+Protocol,References & Documents,study_references,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02746874
+Protocol,References & Documents,study_references,pmid,text,Yes,No,No,,No,No,The PubMed identifier (PMID) of a related publication.,31023931
+Protocol,References & Documents,study_references,reference_type,text,Yes,No,No,,No,No,"How the reference relates to the study: `BACKGROUND`, `RESULT`, or `DERIVED` (added automatically from PubMed).",DERIVED
+Protocol,References & Documents,study_references,citation,text,Yes,No,No,,No,No,The full bibliographic citation of the publication.,"Walega D, McCormick Z, Manning D, Avram M. Radiofrequency ablation of genicular nerves prior to total knee replacement h…"
+Protocol,References & Documents,links,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,16304889
+Protocol,References & Documents,links,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04218084
+Protocol,References & Documents,links,url,text,Yes,No,No,,No,No,URL of an external resource the sponsor provided for the trial.,https://pmiform.com/clinical-trial-info-request?StudyID=GBT440-032
+Protocol,References & Documents,links,description,text,Yes,No,No,,No,No,Label or title for a related web link provided with the study.,"To obtain contact information for a study center near you, click here."
+Protocol,References & Documents,ipd_information_types,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,17241566
+Protocol,References & Documents,ipd_information_types,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04907682
+Protocol,References & Documents,ipd_information_types,name,text,Yes,No,No,,No,No,"A type of individual-participant data (IPD) the trial plans to share — e.g. `STUDY_PROTOCOL`, `SAP`, `ICF`.",STUDY_PROTOCOL
+Protocol,References & Documents,documents,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,2454201
+Protocol,References & Documents,documents,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00144846
+Protocol,References & Documents,documents,document_id,text,Yes,No,No,,No,No,"An identifier for the shared document or dataset, as assigned by its repository.",SB030002
+Protocol,References & Documents,documents,document_type,text,Yes,No,No,,No,No,"The kind of shared document or dataset — for example a study protocol, statistical analysis plan, or clinical study report.",Clinical Study Report
+Protocol,References & Documents,documents,url,text,Yes,No,No,,No,No,Web address to access the shared document or dataset.,https://www.clinicalstudydatarequest.com
+Protocol,References & Documents,documents,comment,text,Yes,No,No,,No,No,"A note about the shared document or dataset, such as where to find it or how to request access.",For additional information about this study please refer to the GSK Clinical Study Register
+Protocol,References & Documents,provided_documents,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,14826975
+Protocol,References & Documents,provided_documents,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04701333
+Protocol,References & Documents,provided_documents,document_type,text,Yes,No,No,,No,No,The kind of document uploaded to the study record — for example a study protocol or statistical analysis plan.,Study Protocol and Statistical Analysis Plan
+Protocol,References & Documents,provided_documents,has_protocol,boolean,Yes,No,No,,No,No,Whether the uploaded document includes the study protocol.,true
+Protocol,References & Documents,provided_documents,has_icf,boolean,Yes,No,No,,No,No,Whether the uploaded document includes the informed consent form.,true
+Protocol,References & Documents,provided_documents,has_sap,boolean,Yes,No,No,,No,No,Whether the uploaded document includes the statistical analysis plan.,true
+Protocol,References & Documents,provided_documents,document_date,date,Yes,No,No,,No,No,The date on the uploaded document.,2021-01-13
+Protocol,References & Documents,provided_documents,url,text,Yes,No,No,,No,No,Web address of the uploaded document.,https://ClinicalTrials.gov/ProvidedDocs/33/NCT04701333/Prot_SAP_001.pdf
+Protocol,References & Documents,retractions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,78493
+Protocol,References & Documents,retractions,reference_id,integer,Yes,No,No,,No,No,Identifier of the publication reference that was retracted.,222043121
+Protocol,References & Documents,retractions,pmid,text,Yes,No,No,,No,No,The PubMed identifier (PMID) of the retraction notice for a related publication.,33966085
+Protocol,References & Documents,retractions,source,text,Yes,No,No,,No,No,Citation of the notice that published the retraction — e.g. 'Am J Clin Nutr. 2021 May 8;113(5):1383'.,Am J Clin Nutr. 2021 May 8;113(5):1383
+Protocol,References & Documents,retractions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04037098
+Results,Participant Flow,participant_flows,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,16429332
+Results,Participant Flow,participant_flows,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT03650413
+Results,Participant Flow,participant_flows,recruitment_details,text,Yes,No,No,,No,No,A note on how and where participants were recruited into the study.,"All 143 patients were included in the intent-to-treat (ITT) population, with 128 patients allocated to study treatment a…"
+Results,Participant Flow,participant_flows,pre_assignment_details,text,Yes,No,No,,No,No,A note on any steps participants went through before being assigned to a group.,This is a single-arm open-label extension study. There is only one arm.
+Results,Participant Flow,participant_flows,units_analyzed,text,Yes,No,No,,No,No,"When participant flow is counted in a unit other than participants, the name of that unit — for example `sites`.",sites
+Results,Participant Flow,milestones,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,180168581
+Results,Participant Flow,milestones,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02924571
+Results,Participant Flow,milestones,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,429908521
+Results,Participant Flow,milestones,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,FG000
+Results,Participant Flow,milestones,title,text,Yes,No,No,,No,No,"The participant-flow milestone this row counts — for example `STARTED`, `COMPLETED`, or `NOT_COMPLETED`.",STARTED
+Results,Participant Flow,milestones,period,text,Yes,No,No,,No,No,The flow period this milestone belongs to — for example `Overall Study` or a specific period.,Overall Study
+Results,Participant Flow,milestones,description,text,Yes,No,No,,No,No,"Free-text note about the milestone, when provided. Blank when none.",
+Results,Participant Flow,milestones,count,integer,Yes,No,No,,No,No,"Number of participants reaching this milestone, in this group.",20
+Results,Participant Flow,milestones,milestone_description,text,Yes,No,No,,No,No,"A note about the milestone, when the label needs explanation.",Completed the assessment at Month 6
+Results,Participant Flow,milestones,count_units,text,Yes,No,No,,No,No,"The unit the milestone count is expressed in, when it is not participants.",
+Results,Participant Flow,drop_withdrawals,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,123090833
+Results,Participant Flow,drop_withdrawals,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02095223
+Results,Participant Flow,drop_withdrawals,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,429875946
+Results,Participant Flow,drop_withdrawals,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,FG000
+Results,Participant Flow,drop_withdrawals,period,text,Yes,No,No,,No,No,The flow period this row belongs to — for example `Overall Study` or a specific study period.,Overall Study
+Results,Participant Flow,drop_withdrawals,reason,text,Yes,No,No,,No,No,"The reason participants did not complete the period — for example withdrawal by subject, an adverse event, or lost to follow-up.",Withdrawal by Subject
+Results,Participant Flow,drop_withdrawals,count,integer,Yes,No,No,,No,No,"Number of participants who did not complete the period for this reason, in this group.",1
+Results,Participant Flow,drop_withdrawals,drop_withdraw_comment,text,Yes,No,No,,No,No,"A brief description of the reason for non-completion, if ""Other"" Reason Not Completed Type is selected.",
+Results,Participant Flow,drop_withdrawals,reason_comment,text,Yes,No,No,,No,No,Free-text note expanding on why participants dropped out or withdrew. Blank when none.,
+Results,Participant Flow,drop_withdrawals,count_units,integer,Yes,No,No,,No,No,"Unit for the count when it is not a simple participant count (e.g. eyes, lesions). Blank when participants.",
+Results,Baseline Characteristics,baseline_counts,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,48711455
+Results,Baseline Characteristics,baseline_counts,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01455220
+Results,Baseline Characteristics,baseline_counts,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,429696387
+Results,Baseline Characteristics,baseline_counts,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,BG000
+Results,Baseline Characteristics,baseline_counts,units,text,Yes,No,No,,No,No,"What the baseline counts are of — `Participants`, or another unit of analysis when one is specified.",Participants
+Results,Baseline Characteristics,baseline_counts,scope,text,Yes,No,No,,No,No,Scope of the count — `overall` (whole baseline population) or a specific measure category.,overall
+Results,Baseline Characteristics,baseline_counts,count,integer,Yes,No,No,,No,No,Number of participants counted at baseline for this result group and scope.,15
+Results,Baseline Characteristics,baseline_measurements,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,578531396
+Results,Baseline Characteristics,baseline_measurements,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02731131
+Results,Baseline Characteristics,baseline_measurements,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,431060691
+Results,Baseline Characteristics,baseline_measurements,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,BG000
+Results,Baseline Characteristics,baseline_measurements,classification,text,Yes,No,No,,No,No,The row label when a baseline measure reports several rows — for example a region or subgroup. Used for any measure type; blank for a single-value measure.,United States
+Results,Baseline Characteristics,baseline_measurements,category,text,Yes,No,No,,No,No,The category label when a count-type measure is split into mutually exclusive categories — for example `Female` and `Male`. Blank when the measure is not categorized.,Female
+Results,Baseline Characteristics,baseline_measurements,title,text,Yes,No,No,,No,No,"The name of the baseline or demographic characteristic measured — for example `Age, Continuous`, `Sex/Gender`, `Race`, or a study-specific measure.","Age, Continuous"
+Results,Baseline Characteristics,baseline_measurements,description,text,Yes,No,No,,No,No,"Additional detail about the baseline measure, such as the metric used to characterize it.",Based on Final Stable Treatment in study C02-021
+Results,Baseline Characteristics,baseline_measurements,units,text,Yes,No,No,,No,No,"What the measurement value is expressed in — for example participants, years, or mm Hg.",years
+Results,Baseline Characteristics,baseline_measurements,param_type,text,Yes,No,No,,No,No,"The type of value reported — for example `MEAN`, `MEDIAN`, `NUMBER`, or a count of participants or units. Determines how to read `param_value`.",MEAN
+Results,Baseline Characteristics,baseline_measurements,param_value,text,Yes,No,No,,No,No,"The value of the baseline measure for this group and category, as reported (kept as text). See `param_value_num` for the numeric form.",47.2
+Results,Baseline Characteristics,baseline_measurements,param_value_num,decimal,Yes,No,No,,No,No,"The baseline measure value as a number, parsed from `param_value` — empty when the value is non-numeric.",47.2
+Results,Baseline Characteristics,baseline_measurements,dispersion_type,text,Yes,No,No,,No,No,"The spread reported alongside the value — `STANDARD_DEVIATION`, `INTER_QUARTILE_RANGE`, or `FULL_RANGE`. Its amount is in `dispersion_value`.",STANDARD_DEVIATION
+Results,Baseline Characteristics,baseline_measurements,dispersion_value,text,Yes,No,No,,No,No,"The amount of dispersion for the value, as reported (text form). See `dispersion_value_num` for the numeric form.",9.2
+Results,Baseline Characteristics,baseline_measurements,dispersion_value_num,decimal,Yes,No,No,,No,No,"The dispersion amount as a number, parsed from `dispersion_value`.",9.2
+Results,Baseline Characteristics,baseline_measurements,dispersion_lower_limit,decimal,Yes,No,No,,No,No,The lower bound of the reported dispersion or range around the value (for example the lower end of an inter-quartile or full range).,12.0
+Results,Baseline Characteristics,baseline_measurements,dispersion_upper_limit,decimal,Yes,No,No,,No,No,The upper bound of the reported dispersion or range around the value (for example the upper end of an inter-quartile or full range).,26.0
+Results,Baseline Characteristics,baseline_measurements,explanation_of_na,text,Yes,No,No,,No,No,"An explanation of why the value is not available, when `NA` is reported for this measurement.",
+Results,Baseline Characteristics,baseline_measurements,number_analyzed,integer,Yes,No,No,,No,No,Number of participants analyzed for this baseline measurement (the denominator for the reported value).,15
+Results,Baseline Characteristics,baseline_measurements,number_analyzed_units,text,Yes,No,No,,No,No,Whether the counts for this measure are of `Participants` or of some other unit.,Participants
+Results,Baseline Characteristics,baseline_measurements,population_description,text,Yes,No,No,,No,No,"A note explaining how the number analyzed for this measure was determined, when it differs from the overall number.",Number analyzed for this baseline measure reflects data captured and does account for missing or unknown data.
+Results,Baseline Characteristics,baseline_measurements,calculate_percentage,text,Yes,No,No,,No,No,Whether the baseline value should be shown as a percentage of its denominator count.,
+Results,Outcome Measures,outcomes,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,134398016
+Results,Outcome Measures,outcomes,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01455220
+Results,Outcome Measures,outcomes,outcome_type,text,Yes,No,No,,No,No,"Whether this is a `PRIMARY`, `SECONDARY`, `OTHER_PRE_SPECIFIED`, or `POST_HOC` outcome measure.",PRIMARY
+Results,Outcome Measures,outcomes,title,text,Yes,No,No,,No,No,The name of the outcome measure.,Sexual Dysfunction (as Measured by the Multiple Sclerosis Intimacy and Sexuality Questionnaire (MSISQ-19) )
+Results,Outcome Measures,outcomes,description,text,Yes,No,No,,No,No,"Additional detail about the outcome measure, such as the metric used, when it is not clear from the title.",Change in level of dysfunction demonstrated by the comparison and analysis of Multiple Sclerosis Intimacy and Sexuality…
+Results,Outcome Measures,outcomes,time_frame,text,Yes,No,No,,No,No,"The time point or period over which the measure was assessed — for example `Baseline, 6 months`.","Baseline, 6 months"
+Results,Outcome Measures,outcomes,population,text,Yes,No,No,,No,No,"A description of the participants included in the analysis of this outcome, when it differs from those assigned to the groups — for example an intent-to-treat population.",Intent-to-treat population consisted of all randomized participants who received at least one dose of study drug.
+Results,Outcome Measures,outcomes,anticipated_posting_date,date,Yes,No,No,,No,No,"When results for this outcome have not yet been submitted, the date they are expected, parsed to a full date. See `anticipated_posting_month_year` for the submitted text.",
+Results,Outcome Measures,outcomes,anticipated_posting_month_year,text,Yes,No,No,,No,No,"When results for this outcome have not yet been submitted, the month and year they are expected, as originally submitted (raw text). See `anticipated_posting_date` for the parsed value.",
+Results,Outcome Measures,outcomes,units,text,Yes,No,No,,No,No,"What the measurement value is expressed in — for example participants, mm Hg, or a percentage.",units on a scale
+Results,Outcome Measures,outcomes,units_analyzed,text,Yes,No,No,,No,No,"When the outcome is analyzed by a unit other than participants, the name of that unit — for example `Eyes` or `lesions`.",Eyes
+Results,Outcome Measures,outcomes,dispersion_type,text,Yes,No,No,,No,No,"The spread or precision reported with the measure's values — for example `Standard Deviation`, `Standard Error`, `Inter-Quartile Range`, or a confidence interval.",Standard Deviation
+Results,Outcome Measures,outcomes,param_type,text,Yes,No,No,,No,No,"The type of value the measure reports — for example `MEAN`, `MEDIAN`, `NUMBER`, or a count of participants or units.",MEAN
+Results,Outcome Measures,outcome_measurements,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,1006700294
+Results,Outcome Measures,outcome_measurements,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02222870
+Results,Outcome Measures,outcome_measurements,outcome_id,integer,Yes,No,Yes,outcomes(id),No,No,Foreign key to `outcomes`.,134883381
+Results,Outcome Measures,outcome_measurements,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,431305712
+Results,Outcome Measures,outcome_measurements,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,OG001
+Results,Outcome Measures,outcome_measurements,classification,text,Yes,No,No,,No,No,Category label when the outcome breaks results into rows — e.g. 'Drowsiness'. Blank for a single-value measure.,"Drowsiness (N=30, 0)"
+Results,Outcome Measures,outcome_measurements,category,text,Yes,No,No,,No,No,The category label when a count-type measure is split into mutually exclusive categories (a count of participants or units). Blank when the measure is not categorized.,
+Results,Outcome Measures,outcome_measurements,title,text,Yes,No,No,,No,No,The name of the outcome measure this row reports.,Percentage of Participants Reporting Solicited Injection-site or Systemic Reactions Following Vaccination With the 2014-…
+Results,Outcome Measures,outcome_measurements,description,text,Yes,No,No,,No,No,"Additional detail about the outcome measure, such as the metric used, when it is not already clear from the title.","Solicited Injection-site: 6 to \< 36 months - Tenderness, Erythema, and Swelling; 3 to \< 9 years - Pain, Erythema, and…"
+Results,Outcome Measures,outcome_measurements,units,text,Yes,No,No,,No,No,"What the measurement value counts or is expressed in — for example participants, mm Hg, or a percentage.",Percentage of participants
+Results,Outcome Measures,outcome_measurements,param_type,text,Yes,No,No,,No,No,"The type of value reported — for example `MEAN`, `MEDIAN`, `NUMBER`, or a count of participants or units. Determines how to read `param_value`.",NUMBER
+Results,Outcome Measures,outcome_measurements,param_value,text,Yes,No,No,,No,No,"The measurement value for this outcome, group, and category, as reported (kept as text so values such as `NA` are preserved). See `param_value_num` for the numeric form.",NA
+Results,Outcome Measures,outcome_measurements,param_value_num,decimal,Yes,No,No,,No,No,"The measurement value as a number, parsed from `param_value` — empty when the value is non-numeric, such as `NA`.",0.0
+Results,Outcome Measures,outcome_measurements,dispersion_type,text,Yes,No,No,,No,No,"The spread or precision reported alongside the value — for example `Standard Deviation`, `Standard Error`, `Inter-Quartile Range`, `Full Range`, or a confidence interval. Its amount is in `dispersion_value`.",Standard Deviation
+Results,Outcome Measures,outcome_measurements,dispersion_value,text,Yes,No,No,,No,No,"The amount of dispersion or precision for the value, as reported (text form). See `dispersion_value_num` for the numeric form.",9.33
+Results,Outcome Measures,outcome_measurements,dispersion_value_num,decimal,Yes,No,No,,No,No,"The dispersion or precision amount as a number, parsed from `dispersion_value`.",9.33
+Results,Outcome Measures,outcome_measurements,dispersion_lower_limit,decimal,Yes,No,No,,No,No,The lower bound of the reported dispersion or confidence interval around the value.,20.9
+Results,Outcome Measures,outcome_measurements,dispersion_upper_limit,decimal,Yes,No,No,,No,No,The upper bound of the reported dispersion or confidence interval around the value.,31.7
+Results,Outcome Measures,outcome_measurements,explanation_of_na,text,Yes,No,No,,No,No,"An explanation of why the value is not available, when `NA` is reported for this measurement.",Event was not assessed in this group
+Results,Outcome Measures,outcome_measurements,dispersion_upper_limit_raw,text,Yes,No,No,,No,No,The dispersion or confidence-interval upper bound as originally submitted (raw text); `dispersion_upper_limit` holds the parsed numeric value.,31.7
+Results,Outcome Measures,outcome_measurements,dispersion_lower_limit_raw,text,Yes,No,No,,No,No,The dispersion or confidence-interval lower bound as originally submitted (raw text); `dispersion_lower_limit` holds the parsed numeric value.,20.9
+Results,Outcome Measures,outcome_counts,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,324317389
+Results,Outcome Measures,outcome_counts,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT06006455
+Results,Outcome Measures,outcome_counts,outcome_id,integer,Yes,No,Yes,outcomes(id),No,No,Foreign key to `outcomes`.,134843320
+Results,Outcome Measures,outcome_counts,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,431175978
+Results,Outcome Measures,outcome_counts,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,OG000
+Results,Outcome Measures,outcome_counts,scope,text,Yes,No,No,,No,No,Scope of the count — `Measure` (all participants in the measure) or `Category`.,Measure
+Results,Outcome Measures,outcome_counts,units,text,Yes,No,No,,No,No,Unit of the count — usually 'Participants'.,Participants
+Results,Outcome Measures,outcome_counts,count,integer,Yes,No,No,,No,No,Number of participants analyzed for this outcome and result group.,25
+Results,Outcome Measures,outcome_analyses,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,68313462
+Results,Outcome Measures,outcome_analyses,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00871351
+Results,Outcome Measures,outcome_analyses,outcome_id,integer,Yes,No,Yes,outcomes(id),No,No,Foreign key to `outcomes`.,134797915
+Results,Outcome Measures,outcome_analyses,non_inferiority_type,text,Yes,No,No,,No,No,"The kind of statistical test used to compare the groups: `SUPERIORITY`, `NON_INFERIORITY`, `EQUIVALENCE`, or `OTHER`. Older records may use combined legacy values.",SUPERIORITY_OR_OTHER_LEGACY
+Results,Outcome Measures,outcome_analyses,non_inferiority_description,text,Yes,No,No,,No,No,"A free-text comment about the non-inferiority or equivalence test, when one was used.",Equivalent non-parametric tests
+Results,Outcome Measures,outcome_analyses,param_type,text,Yes,No,No,,No,No,"The type of effect estimate reported for the comparison — for example `Mean Difference`, `Risk Ratio`, `Odds Ratio`, or `Hazard Ratio`. Its value is in `param_value`.",Mean Difference (Net)
+Results,Outcome Measures,outcome_analyses,param_value,decimal,Yes,No,No,,No,No,The estimated effect size for the comparison — the value of the measure named in `param_type`.,-10.6
+Results,Outcome Measures,outcome_analyses,dispersion_type,text,Yes,No,No,,No,No,How the precision of `param_value` is expressed — either `STANDARD_ERROR_OF_MEAN` or `STANDARD_DEVIATION`. Its amount is in `dispersion_value`.,STANDARD_ERROR_OF_MEAN
+Results,Outcome Measures,outcome_analyses,dispersion_value,decimal,Yes,No,No,,No,No,"The amount of dispersion or precision for `param_value`, measured as given in `dispersion_type`.",0.206
+Results,Outcome Measures,outcome_analyses,p_value_modifier,text,Yes,No,No,,No,No,A comparison operator shown before the p-value when it is not exact — for example `<` or `>` (as in p < 0.001).,<
+Results,Outcome Measures,outcome_analyses,p_value,float,Yes,No,No,,No,No,"The p-value from the test comparing the groups. See `p_value_modifier` for an operator such as `<`, and `p_value_description` for context.",0.0001
+Results,Outcome Measures,outcome_analyses,ci_n_sides,text,Yes,No,No,,No,No,Whether the confidence interval is `ONE_SIDED` or `TWO_SIDED`.,TWO_SIDED
+Results,Outcome Measures,outcome_analyses,ci_percent,decimal,Yes,No,No,,No,No,"The confidence level of the interval, as a percentage — for example `95.0`.",95.0
+Results,Outcome Measures,outcome_analyses,ci_lower_limit,decimal,Yes,No,No,,No,No,The lower bound of the confidence interval around `param_value`.,-15.4
+Results,Outcome Measures,outcome_analyses,ci_upper_limit,decimal,Yes,No,No,,No,No,The upper bound of the confidence interval around `param_value`.,-5.8
+Results,Outcome Measures,outcome_analyses,ci_upper_limit_na_comment,text,Yes,No,No,,No,No,"A note explaining why the confidence interval's upper limit is not available, when `NA` is reported.",
+Results,Outcome Measures,outcome_analyses,p_value_description,text,Yes,No,No,,No,No,A free-text note about the p-value — for example the test it came from or the assumptions made.,"One-sided p-value based on log-rank test stratified by geographic region, Programmed Cell Death Ligand 1 (PD-L1) status…"
+Results,Outcome Measures,outcome_analyses,method,text,Yes,No,No,,No,No,"The statistical method used to analyze the outcome data and compute the p-value — for example a t-test, ANOVA, or a regression model.",Hochberg's method
+Results,Outcome Measures,outcome_analyses,method_description,text,Yes,No,No,,No,No,"A free-text note about the statistical method, such as the covariates or model details.","Covariates included demographics, IP or ED index event, primary asthma diagnosis, Charlson score, and pre-index medicati…"
+Results,Outcome Measures,outcome_analyses,estimate_description,text,Yes,No,No,,No,No,A free-text note about how the effect estimate in `param_value` was derived — for example the model used.,Based on Cox regression model with Efron's method of tie handling with treatment as a covariate stratified by geographic…
+Results,Outcome Measures,outcome_analyses,groups_description,text,Yes,No,No,,No,No,A free-text description of the arms or comparison groups included in this analysis.,The primary efficacy endpoint was the comparison of the percentage of treatment-naïve participants with SVR24 after trea…
+Results,Outcome Measures,outcome_analyses,other_analysis_description,text,Yes,No,No,,No,No,A description and results of any other statistical analysis that does not fit the standard test-of-hypothesis or estimation fields.,"Results were compared to historical control population from an electronic health record database, no other data were col…"
+Results,Outcome Measures,outcome_analyses,ci_upper_limit_raw,text,Yes,No,No,,No,No,The confidence interval's upper bound as originally submitted (raw text); `ci_upper_limit` holds the parsed numeric value.,-5.8
+Results,Outcome Measures,outcome_analyses,ci_lower_limit_raw,text,Yes,No,No,,No,No,The confidence interval's lower bound as originally submitted (raw text); `ci_lower_limit` holds the parsed numeric value.,-15.4
+Results,Outcome Measures,outcome_analyses,p_value_raw,text,Yes,No,No,,No,No,"The p-value exactly as submitted (raw text, e.g. `<0.0001`), keeping any operator; `p_value` holds the parsed numeric value and `p_value_modifier` the operator.",<0.0001
+Results,Outcome Measures,outcome_analysis_groups,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,132370000
+Results,Outcome Measures,outcome_analysis_groups,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01912287
+Results,Outcome Measures,outcome_analysis_groups,outcome_analysis_id,integer,Yes,No,Yes,outcome_analyses(id),No,No,Foreign key to `outcome_analyses`.,68330048
+Results,Outcome Measures,outcome_analysis_groups,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,431133361
+Results,Outcome Measures,outcome_analysis_groups,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,OG000
+Results,Adverse Events,reported_events,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,283190577
+Results,Adverse Events,reported_events,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02343939
+Results,Adverse Events,reported_events,result_group_id,integer,Yes,No,Yes,result_groups(id),No,No,Foreign key to `result_groups`.,430963852
+Results,Adverse Events,reported_events,ctgov_group_code,text,Yes,No,No,,No,No,A code marking the arm or comparison group this row reports on. `result_group_id` is the foreign key to that group's full definition in `result_groups`.,EG003
+Results,Adverse Events,reported_events,time_frame,text,Yes,No,No,,No,No,The period over which adverse events were collected.,- All-Cause Mortality: First dose date up to approximately 38 months. - Adverse Events: First dose date up to the last d…
+Results,Adverse Events,reported_events,event_type,text,Yes,No,No,,No,No,Whether this is a serious or a non-serious adverse event — `serious` or `other`.,other
+Results,Adverse Events,reported_events,default_vocab,text,Yes,No,No,,No,No,"Default adverse-event dictionary for the trial (e.g. MedDRA), used when a specific event does not name its own. Blank when not specified.",
+Results,Adverse Events,reported_events,default_assessment,text,Yes,No,No,,No,No,Default way adverse events were collected for the trial — systematic (actively solicited) or non-systematic — used when an event does not specify its own.,
+Results,Adverse Events,reported_events,subjects_affected,integer,Yes,No,No,,No,No,Number of participants in the result group who experienced this adverse event.,1
+Results,Adverse Events,reported_events,subjects_at_risk,integer,Yes,No,No,,No,No,Number of participants in the result group at risk for this adverse event (the denominator).,6
+Results,Adverse Events,reported_events,description,text,Yes,No,No,,No,No,"A note on how adverse events were collected or assessed, including any differences from the standard definitions.",The Safety Analysis Set included all participants who received at least 1 dose of study drug.
+Results,Adverse Events,reported_events,event_count,integer,Yes,No,No,,No,No,Number of times this adverse event occurred — can exceed subjects_affected when a participant had it more than once.,1
+Results,Adverse Events,reported_events,organ_system,text,Yes,No,No,,No,No,"Body-system class the adverse event belongs to, per the coding vocabulary — e.g. 'Respiratory, thoracic and mediastinal disorders'.","Respiratory, thoracic and mediastinal disorders"
+Results,Adverse Events,reported_events,adverse_event_term,text,Yes,No,No,,No,No,"Name of the specific adverse event, per the coding vocabulary — e.g. 'Hiccups'.",Hiccups
+Results,Adverse Events,reported_events,frequency_threshold,integer,Yes,No,No,,No,No,The frequency (percent) an other (non-serious) adverse event must exceed within a group to be reported.,5
+Results,Adverse Events,reported_events,vocab,text,Yes,No,No,,No,No,Dictionary and version used to code this adverse event — e.g. 'MedDRA 21.1'.,MedDRA 21.1
+Results,Adverse Events,reported_events,assessment,text,Yes,No,No,,No,No,How this adverse event was collected — systematic (actively solicited) or non-systematic.,SYSTEMATIC_ASSESSMENT
+Results,Adverse Events,reported_event_totals,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,122208973
+Results,Adverse Events,reported_event_totals,nct_id,text,No,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01081678
+Results,Adverse Events,reported_event_totals,ctgov_group_code,text,No,No,No,,No,No,A code marking the arm or comparison group this row reports on; joins to that group's definition in `result_groups`.,EG000
+Results,Adverse Events,reported_event_totals,event_type,text,Yes,No,No,,No,No,"Category this total covers — `serious`, `other`, or `deaths`.",deaths
+Results,Adverse Events,reported_event_totals,classification,text,No,No,No,,No,No,"Finer label for the total when a category is broken out — e.g. 'Total, all-cause mortality'.","Total, all-cause mortality"
+Results,Adverse Events,reported_event_totals,subjects_affected,integer,Yes,No,No,,No,No,"Number of participants in the group affected by events of this type (for all-cause mortality, the number who died).",10
+Results,Adverse Events,reported_event_totals,subjects_at_risk,integer,Yes,No,No,,No,No,Number of participants in the group assessed for events of this type — the denominator for the frequency.,14
+Results,Adverse Events,reported_event_totals,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-10-16 16:14:33 UTC
+Results,Adverse Events,reported_event_totals,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-10-16 16:14:33 UTC
+Results,Result Groups & Reporting,result_groups,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,431030257
+Results,Result Groups & Reporting,result_groups,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT02074631
+Results,Result Groups & Reporting,result_groups,ctgov_group_code,text,Yes,No,No,,No,No,"A code identifying this arm or comparison group within the study's reported results (e.g. `BG000` for a baseline group, `OG001` for an outcome group). Other results tables reference it through `result_group_id`.",OG000
+Results,Result Groups & Reporting,result_groups,result_type,text,Yes,No,No,,No,No,"Which results section this group is defined for — e.g. `Baseline`, `Outcome`, `Participant Flow`, `Reported Event`.",Outcome
+Results,Result Groups & Reporting,result_groups,title,text,Yes,No,No,,No,No,Short label for the arm/group as shown in the results — e.g. 'Control Group'.,Control Group
+Results,Result Groups & Reporting,result_groups,description,text,Yes,No,No,,No,No,Description of the arm/group and what its participants received.,"Subjects will receive a standard recommended dose of calcium and vitamin D.
+
+Calcium and vitamin D: All subjects will re…"
+Results,Result Groups & Reporting,result_groups,outcome_id,integer,Yes,No,Yes,outcomes(id),No,No,Foreign key to `outcomes`.,134799829
+Results,Result Groups & Reporting,result_agreements,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,16519029
+Results,Result Groups & Reporting,result_agreements,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT00419952
+Results,Result Groups & Reporting,result_agreements,pi_employee,boolean,Yes,No,No,,No,No,Whether the principal investigator is an employee of the sponsor.,true
+Results,Result Groups & Reporting,result_agreements,agreement,text,Yes,No,No,,No,No,Free-text description of any agreement restricting the principal investigator's ability to disclose results. Blank when none.,
+Results,Result Groups & Reporting,result_agreements,restriction_type,text,Yes,No,No,,No,No,"The type of restriction on the investigator disclosing results: `LTE60` (up to 60 days), `GT60` (more than 60 days), or `OTHER`.",OTHER
+Results,Result Groups & Reporting,result_agreements,other_details,text,Yes,No,No,,No,No,"Details of the disclosure restriction, when the type is other.",The PI may use the Multi-Center Study Results and the Site Data for the limited purpose of his or her own research and a…
+Results,Result Groups & Reporting,result_agreements,restrictive_agreement,boolean,Yes,No,No,,No,No,Whether an agreement restricts the principal investigator from discussing or publishing the study results.,true
+Results,Result Groups & Reporting,result_contacts,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,16489346
+Results,Result Groups & Reporting,result_contacts,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT03909607
+Results,Result Groups & Reporting,result_contacts,organization,text,Yes,No,No,,No,No,Organization of the results point of contact.,Maimonides Medical Center
+Results,Result Groups & Reporting,result_contacts,name,text,Yes,No,No,,No,No,Name and title of the results point of contact.,Sergey Motov MD
+Results,Result Groups & Reporting,result_contacts,phone,text,Yes,No,No,,No,No,Phone number for the results point of contact.,718-283-8693
+Results,Result Groups & Reporting,result_contacts,email,text,Yes,No,No,,No,No,Email address for the results point of contact.,smotov@maimonidesmed.org
+Results,Result Groups & Reporting,result_contacts,extension,text,Yes,No,No,,No,No,"Phone extension for the results point of contact, if any.",3533
+Results,Result Groups & Reporting,pending_results,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,7119644
+Results,Result Groups & Reporting,pending_results,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01908946
+Results,Result Groups & Reporting,pending_results,event,text,Yes,No,No,,No,No,"The type of results-submission event: `RELEASE`, `RESET`, or `UNRELEASE`.",RELEASE
+Results,Result Groups & Reporting,pending_results,event_date_description,text,Yes,No,No,,No,No,"The date of the results-submission event, as originally submitted (raw text). See `event_date` for the parsed value.",2016-11-04
+Results,Result Groups & Reporting,pending_results,event_date,date,Yes,No,No,,No,No,"The date of the results-submission event, parsed to a full date. See `event_date_description` for the submitted text.",2016-11-04
+Supporting Data,Derived Data,browse_conditions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,854955791
+Supporting Data,Derived Data,browse_conditions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT04331600
+Supporting Data,Derived Data,browse_conditions,mesh_term,text,Yes,No,No,,No,No,"The MeSH (Medical Subject Headings) term mapped to a condition the trial studies, added for browsing and search.","Pneumonia, Viral"
+Supporting Data,Derived Data,browse_conditions,downcase_mesh_term,text,Yes,No,No,,No,No,Lowercased copy of `mesh_term` for case-insensitive search.,"pneumonia, viral"
+Supporting Data,Derived Data,browse_conditions,mesh_type,text,Yes,No,No,,No,No,How the MeSH condition term relates to the trial — `mesh-list` (directly assigned) or `mesh-ancestor` (a broader parent term).,mesh-ancestor
+Supporting Data,Derived Data,browse_interventions,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,395547695
+Supporting Data,Derived Data,browse_interventions,nct_id,text,Yes,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT01307384
+Supporting Data,Derived Data,browse_interventions,mesh_term,text,Yes,No,No,,No,No,"The MeSH (Medical Subject Headings) term mapped to an intervention in the trial, added for browsing and search.","Arthroplasty, Replacement"
+Supporting Data,Derived Data,browse_interventions,downcase_mesh_term,text,Yes,No,No,,No,No,Lowercased copy of `mesh_term` for case-insensitive search.,"arthroplasty, replacement"
+Supporting Data,Derived Data,browse_interventions,mesh_type,text,Yes,No,No,,No,No,How the MeSH intervention term relates to the trial — `mesh-list` (directly assigned) or `mesh-ancestor` (a broader parent term).,mesh-ancestor
+Supporting Data,Derived Data,calculated_values,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,135458451
+Supporting Data,Derived Data,calculated_values,nct_id,text,Yes,No,Yes,studies(nct_id),Yes,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT05999370
+Supporting Data,Derived Data,calculated_values,number_of_facilities,integer,Yes,No,No,,No,No,"Number of locations (facilities) where the study is conducted, based on the facilities table.",1
+Supporting Data,Derived Data,calculated_values,number_of_nsae_subjects,integer,Yes,No,No,,No,No,Sum of affected participants across all non-serious adverse events reported for the study.,6250
+Supporting Data,Derived Data,calculated_values,number_of_sae_subjects,integer,Yes,No,No,,No,No,Sum of affected participants across all serious adverse events reported for the study.,107
+Supporting Data,Derived Data,calculated_values,registered_in_calendar_year,integer,Yes,No,No,,No,No,Calendar year the study was first registered on ClinicalTrials.gov.,2023
+Supporting Data,Derived Data,calculated_values,nlm_download_date,date,Yes,No,No,,No,No,Date this trial's record was downloaded from ClinicalTrials.gov in the most recent AACT load.,
+Supporting Data,Derived Data,calculated_values,actual_duration,integer,Yes,No,No,,No,No,Number of full months from the study start date to its primary completion date. Set only when both dates are actual rather than estimated; otherwise empty.,30
+Supporting Data,Derived Data,calculated_values,were_results_reported,boolean,Yes,No,No,,No,No,"True when the study has posted results (it has at least one outcome record), false otherwise.",true
+Supporting Data,Derived Data,calculated_values,months_to_report_results,integer,Yes,No,No,,No,No,Number of full months between the study's primary completion date and the date its results were first submitted to ClinicalTrials.gov.,31
+Supporting Data,Derived Data,calculated_values,has_us_facility,boolean,Yes,No,No,,No,No,True when at least one study location is in the United States or a U.S. territory. Empty when the study has no recorded locations.,true
+Supporting Data,Derived Data,calculated_values,has_single_facility,boolean,Yes,No,No,,No,No,True when the study runs at exactly one facility. Empty when the study has no recorded locations.,true
+Supporting Data,Derived Data,calculated_values,minimum_age_num,integer,Yes,No,No,,No,No,"Minimum eligible age for study participants, as a number. The unit is in minimum_age_unit.",65
+Supporting Data,Derived Data,calculated_values,maximum_age_num,integer,Yes,No,No,,No,No,"Maximum eligible age for study participants, as a number. The unit is in maximum_age_unit.",70
+Supporting Data,Derived Data,calculated_values,minimum_age_unit,text,Yes,No,No,,No,No,"Unit for the minimum eligible age (e.g. year, month). Pairs with minimum_age_num.",year
+Supporting Data,Derived Data,calculated_values,maximum_age_unit,text,Yes,No,No,,No,No,"Unit for the maximum eligible age (e.g. year, month). Pairs with maximum_age_num.",year
+Supporting Data,Derived Data,calculated_values,number_of_primary_outcomes_to_measure,integer,Yes,No,No,,No,No,"Number of primary outcome measures defined for the study, from the design_outcomes table.",1
+Supporting Data,Derived Data,calculated_values,number_of_secondary_outcomes_to_measure,integer,Yes,No,No,,No,No,"Number of secondary outcome measures defined for the study, from the design_outcomes table.",3
+Supporting Data,Derived Data,calculated_values,number_of_other_outcomes_to_measure,integer,Yes,No,No,,No,No,"Number of other outcome measures (neither primary nor secondary) defined for the study, from the design_outcomes table.",1
+Supporting Data,MeSH Vocabulary,mesh_headings,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,49083
+Supporting Data,MeSH Vocabulary,mesh_headings,qualifier,text,Yes,No,No,,No,No,MeSH tree category code this heading falls under — e.g. 'A02'.,A02
+Supporting Data,MeSH Vocabulary,mesh_headings,heading,text,Yes,No,No,,No,No,MeSH category heading name — e.g. 'Musculoskeletal System'.,Musculoskeletal System
+Supporting Data,MeSH Vocabulary,mesh_headings,subcategory,text,Yes,No,No,,No,No,Specific MeSH term within the heading — e.g. 'Abdominal Oblique Muscles'.,Abdominal Oblique Muscles
+Supporting Data,MeSH Vocabulary,mesh_terms,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,3119672
+Supporting Data,MeSH Vocabulary,mesh_terms,qualifier,text,Yes,No,No,,No,No,MeSH tree top-level category code — e.g. 'A01'.,A01
+Supporting Data,MeSH Vocabulary,mesh_terms,tree_number,text,Yes,No,No,,No,No,MeSH tree number locating this term in the vocabulary hierarchy.,A01
+Supporting Data,MeSH Vocabulary,mesh_terms,description,text,Yes,No,No,,No,No,"Descriptive text for the MeSH term, when available.",
+Supporting Data,MeSH Vocabulary,mesh_terms,mesh_term,text,Yes,No,No,,No,No,The MeSH controlled-vocabulary term — e.g. 'Body Regions'.,Body Regions
+Supporting Data,MeSH Vocabulary,mesh_terms,downcase_mesh_term,text,Yes,No,No,,No,No,Lowercased copy of `mesh_term` for case-insensitive search.,body regions
+Supporting Data,Search & Metadata,study_searches,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,
+Supporting Data,Search & Metadata,study_searches,save_tsv,boolean,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,study_searches,query,text,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,study_searches,grouping,text,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,study_searches,name,text,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,study_searches,beta_api,boolean,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,study_searches,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,
+Supporting Data,Search & Metadata,study_searches,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,
+Supporting Data,Search & Metadata,study_searches,active,boolean,Yes,No,No,,No,No,,
+Supporting Data,Search & Metadata,search_results,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,
+Supporting Data,Search & Metadata,search_results,nct_id,text,No,No,Yes,studies(nct_id),No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,
+Supporting Data,Search & Metadata,search_results,name,text,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,search_results,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,
+Supporting Data,Search & Metadata,search_results,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,
+Supporting Data,Search & Metadata,search_results,grouping,text,No,No,No,,No,No,,
+Supporting Data,Search & Metadata,search_results,study_search_id,integer,Yes,No,No,,No,No,,
+Supporting Data,Search & Metadata,search_terms,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,1
+Supporting Data,Search & Metadata,search_terms,term,text,No,No,No,,Yes,No,,"""diseases of the heart"""
+Supporting Data,Search & Metadata,search_terms,group,text,Yes,No,No,,No,No,,"""causes of death"""
+Supporting Data,Search & Metadata,search_terms,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-01-16 14:01:13 UTC
+Supporting Data,Search & Metadata,search_terms,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2025-01-16 14:01:13 UTC
+Supporting Data,Search & Metadata,search_term_results,id,integer,No,Yes,No,,Yes,No,Surrogate primary key — the AACT-assigned row id.,40287271
+Supporting Data,Search & Metadata,search_term_results,nct_id,text,No,No,No,,No,No,ClinicalTrials.gov identifier (NCT number) of the trial this row belongs to.,NCT05649319
+Supporting Data,Search & Metadata,search_term_results,search_term_id,integer,No,No,Yes,search_terms(id),No,No,Foreign key to `search_terms`.,2
+Supporting Data,Search & Metadata,search_term_results,created_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2026-05-23 20:02:06 UTC
+Supporting Data,Search & Metadata,search_term_results,updated_at,timestamp,No,No,No,,No,No,AACT load bookkeeping timestamp — not a trial date.,2026-05-23 20:02:06 UTC

@@ -29,6 +29,7 @@ def tree(tmp_path):
         "pubmed/load_pubmed.sh",
         "pubmed/graph_pubmed.sh",
         "chembl/serialize_chembl.sh",
+        "openfda/load_faers.sh",
     ):
         _write(data / rel, FAKE_STAGE)
     fake_py = tmp_path / "fakepy"
@@ -103,7 +104,9 @@ def test_skip_unit_misuse_exits_2_and_runs_no_stage(tree, stage, args):
     assert calls == []
 
 
-@pytest.mark.parametrize("source", ["europepmc_id_mappings", "cdisc_ct"])
+@pytest.mark.parametrize(
+    "source", ["europepmc_id_mappings", "cdisc_ct", "ema", "openfda", "openfda_faers"]
+)
 def test_skip_unit_is_rejected_for_loaders_that_do_not_take_it(tree, source):
     proc, calls = _run(tree, source, "load", "--skip-unit", "a", "--reason", "r")
     assert proc.returncode == 2, proc.stderr
@@ -117,3 +120,64 @@ def test_force_and_skip_unit_pass_reason_once(tree):
     )
     assert proc.returncode == 0, proc.stderr
     assert calls == ["load_pubmed.sh --force --reason why --skip-unit s.jsonl"]
+
+
+def test_faers_load_runs_its_own_wrapper(tree):
+    proc, calls = _run(tree, "openfda_faers", "load")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh"]
+
+
+def test_faers_load_forwards_force_and_reason(tree):
+    proc, calls = _run(tree, "openfda_faers", "load", "--force", "--reason", "why")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh --force --reason why"]
+
+
+@pytest.mark.parametrize("stage", ["download", "all", "extract"])
+def test_faers_wires_the_load_stage_only(tree, stage):
+    # The zips come from `openfda download all_human`; a download here would take the
+    # wrapper's default mode, which is not FAERS.
+    proc, calls = _run(tree, "openfda_faers", stage)
+    assert proc.returncode == 3, proc.stderr
+    assert "only 'load' is wired" in proc.stderr
+    assert calls == []
+
+
+def test_faers_allow_partial_is_forwarded_with_its_reason(tree):
+    proc, calls = _run(tree, "openfda_faers", "load", "--allow-partial", "--reason", "why")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh --allow-partial --reason why"]
+
+
+def test_faers_allow_partial_with_force_passes_the_reason_once(tree):
+    proc, calls = _run(
+        tree, "openfda_faers", "load", "--force", "--allow-partial", "--reason", "why"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_faers.sh --force --reason why --allow-partial"]
+
+
+@pytest.mark.parametrize(
+    ("source", "stage", "args"),
+    [
+        ("openfda_faers", "load", ["--allow-partial"]),  # no reason
+        ("pubmed", "load", ["--allow-partial", "--reason", "r"]),  # not FAERS
+        ("openfda_faers", "load", ["--allow-partial", "--reason", "r", "--sample"]),
+    ],
+)
+def test_allow_partial_misuse_exits_2_and_runs_no_stage(tree, source, stage, args):
+    proc, calls = _run(tree, source, stage, *args)
+    assert proc.returncode == 2, proc.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("source", ["ema", "openfda", "openfda_faers"])
+@pytest.mark.parametrize("stage", ["load", "all"])
+def test_bulk_is_rejected_for_the_regulatory_feeds(tree, source, stage):
+    proc, calls = _run(tree, source, stage, "--bulk")
+    assert proc.returncode == 2, proc.stderr
+    # `all --bulk` is refused earlier still (--bulk needs a named load or graph stage)
+    if stage == "load":
+        assert "does not support --bulk" in proc.stderr
+    assert calls == []

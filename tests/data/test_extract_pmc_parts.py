@@ -372,3 +372,66 @@ def test_concurrent_rebuilds_keep_every_loaded_part_name(tmp_path, raw, spawn_ch
     unit_dir = out / "_ops" / "pmc" / "retire_pending.d"
     assert sorted(p.name for p in unit_dir.glob("*.json")) == ["pmc_b0000.json", "pmc_b0001.json"]
     assert not parts_retire.retire_pending_path(out, "pmc").exists()
+
+
+def test_prologue_phases_are_logged(tmp_path, raw, capfd):
+    """The discover, group and manifest INFO lines reach the run log (stderr)
+    when the stage runs through ``_main``."""
+    _article(raw, 1)
+    rc = pmc._main(["--raw-dir", str(raw), "--processed-dir", str(tmp_path / "out")])
+    assert rc == 0
+    err = capfd.readouterr().err
+    assert "discover: 1 metadata files" in err
+    assert "group: 1 buckets" in err
+    assert "manifests: 1 written" in err
+
+
+def _width_file(out: Path) -> Path:
+    return out / "_ops" / "pmc" / "bucket_width.json"
+
+
+def test_first_run_records_the_width(tmp_path, raw):
+    _article(raw, 1)
+    out = tmp_path / "out"
+    pmc.extract_pmc(raw, out)
+    assert json.loads(_width_file(out).read_text(encoding="utf-8")) == {"bucket_ids": 50_000}
+
+
+def test_changed_bucket_width_is_refused(tmp_path, raw, monkeypatch):
+    import episteme.config as cfg
+
+    _article(raw, 1)
+    out = tmp_path / "out"
+    pmc.extract_pmc(raw, out)
+    before = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    monkeypatch.setenv("EPISTEME_PMC_BUCKET_IDS", "100000")
+    cfg.get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match=r"100000.*50000|50000.*100000") as exc:
+            pmc.extract_pmc(raw, out)
+        assert "Retire the old pmc parts" in str(exc.value)
+    finally:
+        monkeypatch.delenv("EPISTEME_PMC_BUCKET_IDS")
+        cfg.get_settings.cache_clear()
+    after = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert after == before
+
+
+def test_existing_manifests_without_width_file_assume_50000(tmp_path, raw, monkeypatch):
+    import episteme.config as cfg
+
+    _article(raw, 1)
+    out = tmp_path / "out"
+    pmc.extract_pmc(raw, out)
+    _width_file(out).unlink()
+    pmc.extract_pmc(raw, out)  # manifests exist, width is 50000: accepted and recorded
+    assert json.loads(_width_file(out).read_text(encoding="utf-8")) == {"bucket_ids": 50_000}
+    _width_file(out).unlink()
+    monkeypatch.setenv("EPISTEME_PMC_BUCKET_IDS", "100000")
+    cfg.get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="built at 50000"):
+            pmc.extract_pmc(raw, out)
+    finally:
+        monkeypatch.delenv("EPISTEME_PMC_BUCKET_IDS")
+        cfg.get_settings.cache_clear()

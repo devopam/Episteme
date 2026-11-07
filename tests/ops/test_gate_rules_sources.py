@@ -181,3 +181,146 @@ def test_pubchem_load_rules_require_no_orphans_and_equal_rows():
     assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": True}, load) == []
     assert gate.evaluate({"orphan_bodies": 1, "rows_loaded_equals_staging": True}, load)
     assert gate.evaluate({"orphan_bodies": 0, "rows_loaded_equals_staging": False}, load)
+
+
+# --- the regulatory sources (dailymed, ema_epar, ema, openfda, openfda_faers) ----------
+
+REGULATORY = {
+    "dailymed": ("extract", "load"),
+    "ema_epar": ("extract", "load"),
+    "ema": ("load",),
+    "openfda": ("load",),
+    "openfda_faers": ("load",),
+    "aact": ("load",),
+}
+
+
+def test_regulatory_sources_are_gated_and_rules_use_known_keys():
+    for source, stages in REGULATORY.items():
+        rules = gate.load_rules(source)
+        assert rules is not None, source
+        assert set(rules) == set(stages), source  # a stage the gate cannot hash is refused
+        for stage in stages:
+            assert gate.is_gated(source, stage), (source, stage)
+            assert not set(rules[stage]) - gate._KNOWN_KEYS, (source, stage)
+            gate.evaluate({}, rules[stage])  # parses; every rule fails on a missing measure
+        # Every gated source has a slice, or `--sample` cannot run.
+        from episteme.ops import gate_slice
+
+        assert source in gate_slice.SLICES
+
+
+def test_regulatory_loads_need_work_in_this_run():
+    """A sample load that did nothing (a marker or a fingerprint said "current") must not
+    pass: min_rows counts the rows this run's audit rows report."""
+    for source in ("ema", "openfda", "openfda_faers"):
+        load = gate.load_rules(source)["load"]
+        assert load["min_rows"] >= 1, source
+        assert load["max_failed_inputs"] == 0, source
+        assert gate.evaluate({"rows": 0, "failed_inputs": 0}, {"min_rows": load["min_rows"]})
+
+
+def _ema_measures(**over):
+    base = {
+        "rows": 5000,
+        "failed_inputs": 0,
+        "peak_rss_mb": 300,
+        "meta_total_equals_rows": True,
+        "xref_coverage_pct": {},
+    }
+    base.update(over)
+    return base
+
+
+def test_meta_total_rule_fails_on_a_mismatch():
+    rules = gate.load_rules("ema")["load"]
+    assert rules["meta_total_equals_rows"] is True
+    ok = _ema_measures(xref_coverage_pct={d: 100.0 for d in rules["min_xref_coverage_pct"]})
+    assert gate.evaluate(ok, rules) == []
+    fails = gate.evaluate({**ok, "meta_total_equals_rows": False}, rules)
+    assert any("meta_total_equals_rows" in f for f in fails)
+    # No measure (no feed declared a total) is a failure, not a pass.
+    missing = {k: v for k, v in ok.items() if k != "meta_total_equals_rows"}
+    assert any("meta_total_equals_rows" in f for f in gate.evaluate(missing, rules))
+    # The rule off (False) does not check.
+    assert (
+        gate.evaluate({**ok, "meta_total_equals_rows": False}, {"meta_total_equals_rows": False})
+        == []
+    )
+
+
+def test_xref_coverage_rule():
+    rules = {"min_xref_coverage_pct": {"ema_medicines": 90.0, "fda_ndc": 50.0}}
+    ok = {"xref_coverage_pct": {"ema_medicines": 95.5, "fda_ndc": 50.0}}
+    assert gate.evaluate(ok, rules) == []
+    below = gate.evaluate({"xref_coverage_pct": {"ema_medicines": 89.99, "fda_ndc": 80.0}}, rules)
+    assert len(below) == 1 and "ema_medicines" in below[0] and "89.99" in below[0]
+    # A dataset with no measure fails: a minimum must not read a missing value as 0 and
+    # then pass a limit of 0, or read it as fine.
+    gone = gate.evaluate({"xref_coverage_pct": {"fda_ndc": 80.0}}, rules)
+    assert len(gone) == 1 and "ema_medicines" in gone[0] and "missing" in gone[0]
+    assert gate.evaluate({}, rules) and "missing" in gate.evaluate({}, rules)[0]
+    # A dataset with a limit of 0 and no measure still fails.
+    assert gate.evaluate({"xref_coverage_pct": {}}, {"min_xref_coverage_pct": {"x": 0}})
+    # A measure of None (the names could not be counted) fails too.
+    assert gate.evaluate({"xref_coverage_pct": {"x": None}}, {"min_xref_coverage_pct": {"x": 0}})
+
+
+def test_shipped_xref_rules_name_datasets_that_have_substance_fields():
+    from episteme.data.regulatory.feeds import load_feeds
+
+    feeds = load_feeds()
+    for source in ("ema", "openfda"):
+        limits = gate.load_rules(source)["load"]["min_xref_coverage_pct"]
+        for dataset in limits:
+            assert dataset in feeds and feeds[dataset].substance_fields, (source, dataset)
+
+
+def test_dailymed_and_epar_extract_rules():
+    dm = gate.load_rules("dailymed")["extract"]
+    assert dm["allowed_licenses"] == ["public_domain"]
+    assert dm["max_failed_inputs"] == 0 and dm["parts_within_caps"] is True
+    epar = gate.load_rules("ema_epar")["extract"]
+    assert epar["allowed_licenses"] == ["permissive"]
+    # no_text (a scan) is told apart and not counted as failed, so no other failure is hidden.
+    assert epar["max_failed_inputs"] == 0
+    # A scan of an image-only PDF is a failed input (no_text) or an empty row: both are counted.
+    assert "max_empty_text_pct" in epar
+    for rules in (dm, epar):
+        assert rules["max_peak_rss_mb"] <= 4096
+
+
+def _faers_measures(**over):
+    base = {
+        "rows": 10,
+        "failed_inputs": 0,
+        "peak_rss_mb": 100,
+        "duplicate_ids": 0,
+        "xref_coverage_pct": {"faers_drug_entry": 50.0},
+        "counts": {
+            "faers_reports": 100,
+            "signal_pair_rows": 10,
+            "signal_event_rows": 10,
+            "largest_year_reports": 100,
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_a_faers_signal_build_that_made_nothing_fails():
+    rules = gate.load_rules("openfda_faers")["load"]
+    assert gate.evaluate(_faers_measures(), rules) == []
+    for key in ("faers_reports", "signal_pair_rows", "signal_event_rows", "largest_year_reports"):
+        assert key in rules["min_counts"]
+        counts = {**_faers_measures()["counts"], key: 0}
+        fails = gate.evaluate(_faers_measures(counts=counts), rules)
+        assert any("min_counts" in f and key in f for f in fails), key
+        gone = {k: v for k, v in counts.items() if k != key}
+        assert any(
+            key in f and "missing" in f for f in gate.evaluate(_faers_measures(counts=gone), rules)
+        )
+    assert any(
+        "min_counts" in f
+        for f in gate.evaluate({k: v for k, v in _faers_measures().items() if k != "counts"}, rules)
+    )

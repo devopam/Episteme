@@ -111,7 +111,7 @@ Logical table: **`episteme.articles`**
 | Column | Type | Required | Description |
 |--------|------|----------|-------------|
 | `id` | string | yes | Canonical ID: `pmid:<n>`, `pmcid:PMC<n>`, `doi:<…>`, `apollo:<…>`, etc. |
-| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
+| `source` | string | yes | One of `article_schema.SOURCES`: `pubmed`, `pmc`, `bookshelf`, `europepmc_preprint`, `europepmc_manuscript`, `europepmc_lite`, `apollo`, `guidelines`, `chembl`, `uniprot`, `pubchem`, `clinvar`, `reactome`, `mesh`, `ontologies`, `openalex`, `cdisc_ct`, `dailymed`, `ema_epar` (v1.1 used `pmc_oa_comm` / `epmc_*`; the code names differ) |
 | `source_file` | string | yes | Input identity, the unit-of-work key (§4.3): the raw-dir-relative path joined with `__` (structured serializers), or the input basename (literature extractors) |
 | `source_record_id` | string | no | Native id inside the file |
 | `pmid` | string | no | PubMed ID |
@@ -180,7 +180,7 @@ Logical table: **`episteme.articles`**
 |------|------|
 | Row of record | `episteme.articles`: narrow "hot" table, the `ARTICLE_COLUMNS` minus `title`, `abstract`, `body_text`, `text`. No primary key and no unique index on `id`. |
 | Text | `episteme.article_body` holds `article_id` (the row's `id`), `source`, `year` and the four text columns. |
-| Partitioning | `articles`: `LIST (source)`. `pmc` (in `schema.sql`), `bookshelf` (added by migration 0002, `src/episteme/data/db/migrations/0002_container_and_book_parts.sql`) and `pubmed` (added by migration 0007, `0007_pubmed_partition.sql`, with a `DEFAULT` sub-partition for a NULL or out-of-range year) are each sub-partitioned by `RANGE (year)`; migration 0008 (`0008_pmc_bookshelf_default_partition.sql`) gives the `pmc` and `bookshelf` year ladders the same `DEFAULT` sub-partition; migration 0009 (`0009_apollo_pubchem_partitions.sql`) gives `apollo` and `pubchem` plain partitions with no year split; every other source lands in the default partition. `article_body` is `LIST (source)` only, with no year sub-partitions: `article_body_pmc` and `article_body_default` in `schema.sql`, plus `article_body_bookshelf` from migration 0002, `article_body_pubmed` from migration 0007, and `article_body_apollo` and `article_body_pubchem` from migration 0009. |
+| Partitioning | `articles`: `LIST (source)`. `pmc` (in `schema.sql`), `bookshelf` (added by migration 0002, `src/episteme/data/db/migrations/0002_container_and_book_parts.sql`) and `pubmed` (added by migration 0007, `0007_pubmed_partition.sql`, with a `DEFAULT` sub-partition for a NULL or out-of-range year) are each sub-partitioned by `RANGE (year)`; migration 0008 (`0008_pmc_bookshelf_default_partition.sql`) gives the `pmc` and `bookshelf` year ladders the same `DEFAULT` sub-partition; migration 0009 (`0009_apollo_pubchem_partitions.sql`) gives `apollo` and `pubchem` plain partitions with no year split; migration 0010 (`0010_regulatory_sources.sql`) does the same for `dailymed` and `ema_epar`; every other source lands in the default partition. `article_body` is `LIST (source)` only, with no year sub-partitions: `article_body_pmc` and `article_body_default` in `schema.sql`, plus `article_body_bookshelf` from migration 0002, `article_body_pubmed` from migration 0007, `article_body_apollo` and `article_body_pubchem` from migration 0009, and `article_body_dailymed` and `article_body_ema_epar` from migration 0010. |
 | Unknown year | The loader coerces `year` NULL or unparseable to `0` (partition `articles_pmc_y0` for `pmc`). |
 | Staging hand-off | Extract and serialize write one Parquet shard (JSONL if pyarrow is missing) per input under `staging/<source>/`; `load_articles` reads it and loads Postgres. |
 | Lineage | One `episteme._lineage` row per loaded `source_file` (`rows_inserted`, `rows_deleted`, `input_content_hash`, `run_id`). |
@@ -311,6 +311,8 @@ Matching order in `normalize_license` matters: CC0, then the NC/SA/ND variants, 
 | Author manuscripts | `text_mining` | Do not mix into commercial training by default |
 | Apollo | `permissive` -> `commercial` (HF card `apache-2.0`) | The code already assigns this; `docs/02` still lists commercial-use diligence as open |
 | Structured sources | Per source, see 6.3 and `docs/12-source-inventory.md` | Licence rulings live in the serializers |
+| `dailymed` | `commercial` (`public_domain`) | US government work; set by the extractor, see 6.3 |
+| `ema_epar` | `commercial` (`permissive`) | EMA reuse terms, with EMA credited; `license_raw` holds the terms, see 6.3 |
 
 Commercial path:
 
@@ -333,6 +335,17 @@ Caveat for PubChem and ClinVar: they carry contributor-submitted content whose s
 | `uniprot` | `subset` = `text_mining` (hardcoded) | the real licence is CC BY 4.0, but the serializer hardcodes `text_mining` as a governance override instead of calling `subset_from_license` |
 | `cdisc_bc` | none | download-only, no serializer, no `articles` rows; licence **unverified** (repo code is MIT; the README grants CC-BY-4.0 to documentation only and states nothing for `export/` data); no `subset` is ever assigned, and until CDISC confirms a licence for `export/` directly no row from this source may enter a training corpus |
 | `cdisc_usdm` | none | download-only, no serializer, no `articles` rows; licence **unverified** (the repo README grants MIT to code and scripts and CC-BY-4.0 to documentation and minutes; the USDM model files are named in neither); no `subset` is ever assigned, and until CDISC confirms a licence for the model files no row from this source may enter a training corpus |
+
+### 6.4 Regulatory text sources
+
+Two sources write label and assessment text into `episteme.articles` from the regulatory design (`docs/superpowers/specs/2026-11-02-regulatory-sources-design.md`):
+
+| Source | `license` -> `subset` | `license_raw` | Basis |
+|--------|----------------|---------------|-------|
+| `dailymed` | `public_domain` -> `commercial` | `U.S. government work: DailyMed (NLM) / FDA structured product labeling` | DailyMed labels are US government work. The extractor sets `public_domain` itself (`normalize_license` never returns it), so this is the same kind of explicit ruling as 6.3, and `license_raw` keeps the real text. This is a ruling for the source, not a legal determination for each label; it is Claude's reading in the design, to be confirmed by the owner |
+| `ema_epar` | `permissive` -> `commercial` | the EMA legal notice summary: reuse allowed, commercial and non-commercial, if EMA is acknowledged as the source; third-party content excluded | No licence of the vocabulary names the EMA terms exactly. `permissive` (reuse with attribution) is the nearest, and `license_raw` makes the choice auditable. The owner approved loading EMA documents. **Credit EMA** wherever a copy is shown or distributed |
+
+The text sources are `dailymed` and `ema_epar`. Their reference feeds (`ema`, `openfda`, FAERS) do not write to `episteme.articles`: they have their own tables (`docs/08-data-storage-principles.md`) and no `license` column; `docs/02-data-sources.md` records the terms of each feed. `aact` writes no `episteme.articles` rows: the ClinicalTrials.gov tables load into a schema per release (`docs/08-data-storage-principles.md`) and are looked up. `article_schema` splits `SOURCES` into `TRAINING_SOURCES` and `REFERENCE_SOURCES` (`dailymed`, `ema_epar`); a test requires every source in exactly one of them and the config list `corpus_excluded_sources` to cover every reference source, so a new source cannot enter the training corpus by default.
 
 Per-source cadence and script paths: `docs/12-source-inventory.md`.
 
@@ -399,6 +412,8 @@ src/episteme/data/sample_audit.py                 # field-shape report
 src/episteme/data/<source>/extract_<source>.py    # literature extractors
 src/episteme/data/<source>/serialize_<source>.py  # structured serializers
 ```
+
+Regulatory sources: `dailymed` and `ema_epar` follow the literature pattern (extract in bounded parts, then `load_articles`; no graph stage), with their wrappers in `scripts/data/dailymed/` and, for `ema_epar`, in `scripts/data/ema/`. The reference feeds `ema` and `openfda` load into `episteme.reg_record` through `scripts/data/ema/load_ema.sh` and `scripts/data/openfda/load_openfda.sh`. `openfda_faers` loads FAERS by generation through `scripts/data/openfda/load_faers.sh`. `docs/10-data-sources-runbook.md` has one section for each. `aact` loads one schema per release through `scripts/data/aact/load_aact.sh` (section 5.16 of the runbook).
 
 Exceptions: the Europe PMC extractors sit in `src/episteme/data/europepmc/{preprints,manuscripts}/` with plural file names, and their wrappers in `scripts/data/europepmc_{preprint,manuscript}/`. `scripts/data/run_pipeline.sh` is the authority on which wrapper handles which source. The v1.1 names `scripts/data/extract_<source>.sh`, `scripts/data/analyze_source_samples.py`, `src/episteme/data/schema.py` and `src/episteme/data/ops.py` do not exist.
 

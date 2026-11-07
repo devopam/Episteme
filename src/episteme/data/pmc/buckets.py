@@ -14,9 +14,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from episteme import config
 from episteme.data import checkpoint_markers
 
-BUCKET_IDS: int = 50_000
+# The bucket width is ``config.Settings.pmc_bucket_ids`` (EPISTEME_PMC_BUCKET_IDS), read
+# at the point of use. This name keeps today's value and stays importable; a
+# value other than the default, set on the module (tests), wins over the setting.
+BUCKET_IDS: int = config.DEFAULT_PMC_BUCKET_IDS
+
+
+def bucket_ids() -> int:
+    if BUCKET_IDS != config.DEFAULT_PMC_BUCKET_IDS:
+        return BUCKET_IDS
+    return config.get_settings().pmc_bucket_ids
+
 
 _META_RE = re.compile(r"^PMC(\d+)\.(\d+)\.json$")
 
@@ -30,7 +41,7 @@ def parse_meta_name(name: str) -> tuple[int, int] | None:
 
 
 def bucket_of(pmc_id: int) -> int:
-    return pmc_id // BUCKET_IDS
+    return pmc_id // bucket_ids()
 
 
 def bucket_key(bucket: int) -> str:
@@ -133,6 +144,36 @@ def bucket_fingerprint(bucket: Bucket, raw_dir: Path) -> list[list]:
             entries.append([key_and_rel(xml, raw_resolved)[0], st.st_size, st.st_mtime_ns])
     entries.sort(key=lambda e: e[0])
     return entries
+
+
+def check_bucket_width(processed_dir: Path) -> int:
+    """Record the bucket width of this processed dir at the first run, and refuse
+    a run at another width, before anything is written.
+
+    A different width gives different bucket keys: the parts, markers and loaded
+    rows of the old keys would stay while the same articles load again under the
+    new keys, and ``articles`` has no unique index on ``id`` to catch it. With no
+    width file but bucket manifests present, the dir was built at 50,000
+    (production), so that width is stored. Returns the width."""
+    width = bucket_ids()
+    ops = checkpoint_markers.ops_root(processed_dir, "pmc")
+    path = ops / "bucket_width.json"
+    if path.is_file():
+        stored = int(json.loads(path.read_text(encoding="utf-8"))["bucket_ids"])
+    elif (ops / "buckets").is_dir() and any((ops / "buckets").glob("*.json")):
+        stored = config.DEFAULT_PMC_BUCKET_IDS
+        checkpoint_markers.write_marker(path, {"bucket_ids": stored})
+    else:
+        checkpoint_markers.write_marker(path, {"bucket_ids": width})
+        return width
+    if stored != width:
+        raise RuntimeError(
+            f"PMC bucket width is {width} (EPISTEME_PMC_BUCKET_IDS) but {processed_dir} was "
+            f"built at {stored}. A different width gives different bucket keys and would "
+            f"load the same articles twice. Retire the old pmc parts first, or set the "
+            f"width back to {stored}."
+        )
+    return width
 
 
 def _manifest_path(processed_dir: Path, bucket: int) -> Path:
