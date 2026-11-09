@@ -577,6 +577,8 @@ def test_coverage_count_runs_after_the_index_and_analyze(monkeypatch):
     )
     assert insert < index < analyze < coverage
     assert "(nct_id, intervention_id)" in log[index]
+    assert 'ON "aact_20261103"."intervention_substance"' in log[index]
+    assert log[analyze].strip().endswith('"aact_20261103"."intervention_substance"')
     assert out["interventions"] == 7 and out["interventions_matched"] == 3
 
 
