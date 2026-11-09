@@ -51,9 +51,9 @@ recorded with the release.
    compare ``left(col, 500)`` to use it (``WHERE left(name, 500) = left(%s, 500)``). Then
    ``ANALYZE``.
 3. **Row checks.** ``studies`` must be in the zip; its rows must equal its distinct
-   ``nct_id``; a table with zero rows fails; in each other table with ``nct_id``, the share of
-   rows whose ``nct_id`` is NULL or not in ``studies`` must be at most
-   ``EPISTEME_AACT_MAX_ORPHAN_SHARE``.
+   ``nct_id``; a table with zero rows fails (except ``MAY_BE_EMPTY_TABLES``); in each other
+   table with ``nct_id``, the share of rows whose ``nct_id`` is NULL or not in ``studies``
+   must be at most ``EPISTEME_AACT_MAX_ORPHAN_SHARE``.
 4. **Names.** The distinct names of ``interventions.name`` and
    ``intervention_other_names.name`` go through ``load_substance.resolve_names`` (source
    ``aact``: exact normalised match, ``aact_name`` xref rows; no fuzzy match). The release table
@@ -148,6 +148,9 @@ INTERVENTION_SUBSTANCE = "intervention_substance"
 # dictionary table missing from the zip fails the load before a table loads, so the gate's
 # tables_with_rows floor (the dictionary's 52 tables less these three: 49) holds.
 KNOWN_ABSENT_TABLES: tuple[str, ...] = ("mesh_headings", "mesh_terms", "study_searches")
+# Tables the file may ship with a header and no rows. The real file of the 2026-11-05 sample
+# run has `search_results.txt` as the header line only (62 bytes). Any other empty table fails.
+MAY_BE_EMPTY_TABLES: tuple[str, ...] = ("search_results",)
 # A change of the reading or typing rules changes the fingerprint, so a finished release is
 # not taken as current after such a change.
 LOADER_VERSION = 1
@@ -798,13 +801,18 @@ def _build_indexes(conn: psycopg.Connection, schema: str, tables: Sequence[str])
     return built
 
 
+def empty_tables(state: dict[str, dict]) -> list[str]:
+    """The tables with zero rows that the file may not ship empty (``MAY_BE_EMPTY_TABLES``)."""
+    return sorted(t for t, s in state.items() if not s["rows"] and t not in MAY_BE_EMPTY_TABLES)
+
+
 def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> dict:
     """The row checks of spec 4.4; ``_Invalid`` on a breach. Returns ``{"studies": n,
     "orphans": {table: n}, "orphan_shares": {table: share}, "missing_nct_id": [tables]}``;
     ``missing_nct_id`` lists the tables with no ``nct_id`` column (no orphan count)."""
     if STUDIES not in state:
         raise _Invalid("the zip has no studies table")
-    empty = sorted(t for t, s in state.items() if not s["rows"])
+    empty = empty_tables(state)
     if empty:
         raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
     cols = _columns(conn, ctx.schema)
