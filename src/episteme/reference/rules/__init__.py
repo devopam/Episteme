@@ -6,15 +6,18 @@ their sha256, and lists checkable items. Every item keeps the clause of its sour
 Section checks (``check_sections``, ``check_mah_markers``) match draft headings to rule
 sections: case-insensitive, punctuation-insensitive, leading section number optional.
 Both checks use one resolver, so a caller can pass ``list(draft)`` and ``draft``.
+
+Rule data is read-only: mappings are ``MappingProxyType`` and lists are tuples.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from importlib import resources
+from types import MappingProxyType
 from typing import Any, Literal
 
 MAH_MARKER = "MAH data required"
@@ -24,7 +27,7 @@ _REGIONS: dict[str, frozenset[str]] = {
     "ich": frozenset({"ich"}),
     "eu": frozenset({"ich", "eu"}),
 }
-_DOC_BY_REGION = {"ich": "ICH E2C(R2)", "eu": "EU GVP Module VII"}
+_DOC_BY_REGION = {"ich": "ICH E2C(R2)", "eu": "EU GVP"}
 # A leading "Appendix 2", "5.1", "5.1." or "Section 5.1" before the title.
 _NUMBER = re.compile(
     r"^\s*(?:section\s+)?(?P<num>appendix\s+\d+(?:\.\d+)*|\d+(?:\.\d+)*)\.?(?=\s|$)\s*[-–—:.)]*\s*",
@@ -61,9 +64,11 @@ class RuleSet:
     ig_id: str
     ig: str
     version: str
-    source_docs: tuple[dict[str, str], ...]
+    source_docs: tuple[Mapping[str, str], ...]
     sections: tuple[Section, ...] = ()
-    data: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    data: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
 
     def sections_for(self, region: str) -> tuple[Section, ...]:
         allowed = _allowed(region)
@@ -91,7 +96,27 @@ def load_rules(ig_id: str) -> RuleSet:
     path = resources.files(__name__) / "data" / f"{ig_id}.json"
     if not path.is_file():
         raise FileNotFoundError(f"no rule file for {ig_id!r} (expected data/{ig_id}.json)")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return parse_rules(ig_id, json.loads(path.read_text(encoding="utf-8")))
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def parse_rules(ig_id: str, data: Mapping[str, Any]) -> RuleSet:
+    """Build a read-only ``RuleSet`` from rule-file data. Raises ``ValueError`` that
+    names the section when a section has an unknown region."""
+    data = _freeze(data)
+    for s in data.get("sections", ()):
+        if s.get("region") not in _REGIONS:
+            raise ValueError(
+                f"{ig_id}: section {s.get('id')!r} has region {s.get('region')!r};"
+                f" expected one of {sorted(_REGIONS)}"
+            )
     sections = tuple(
         Section(
             id=str(s["id"]),
@@ -110,7 +135,7 @@ def load_rules(ig_id: str) -> RuleSet:
         ig_id=ig_id,
         ig=data["ig"],
         version=data["version"],
-        source_docs=tuple(data["source_docs"]),
+        source_docs=data["source_docs"],
         sections=sections,
         data=data,
     )
@@ -129,9 +154,16 @@ def _split_number(heading: str) -> tuple[str | None, str]:
 
 
 class _Resolver:
-    """Map headings to sections in one pass. A title shared by two sections (for
-    example 6.1 and Appendix 1 "Reference Information") resolves by its number when
-    the heading has one, else to the next unmatched section in rule order."""
+    """Map headings to sections in one pass, in draft order.
+
+    - A heading with a number resolves only to a section with that number, or to an
+      unnumbered section of that title (the EU regional-appendix sub-sections). If
+      neither exists, the heading is unresolved.
+    - A title shared by two sections (6.1 and Appendix 1 "Reference Information";
+      16.5 and A6.5 "Effectiveness of risk minimisation") resolves without a number by
+      position: to the first unmatched candidate after the last resolved section,
+      else to the first unmatched candidate.
+    """
 
     def __init__(self, rules: RuleSet) -> None:
         self._rules = rules
@@ -140,6 +172,7 @@ class _Resolver:
             for name in {_norm(s.title), *(_norm(a) for a in s.aliases)}:
                 self._by_title.setdefault(name, []).append(i)
         self.seen: set[int] = set()
+        self._last = -1
 
     def resolve(self, heading: str) -> tuple[Section | None, bool]:
         """Return ``(section, duplicate)``; ``section`` is ``None`` for an unknown heading."""
@@ -148,19 +181,20 @@ class _Resolver:
         if not candidates:
             return None, False
         if number is not None:
+            sections = self._rules.sections
             numbered = [
-                i
-                for i in candidates
-                if self._rules.sections[i].number
-                and _norm(self._rules.sections[i].number) == number
+                i for i in candidates if sections[i].number and _norm(sections[i].number) == number
             ]
-            if numbered:
-                candidates = numbered
-        for i in candidates:
-            if i not in self.seen:
-                self.seen.add(i)
-                return self._rules.sections[i], False
-        return self._rules.sections[candidates[0]], True
+            candidates = numbered or [i for i in candidates if not sections[i].number]
+            if not candidates:
+                return None, False
+        unseen = [i for i in candidates if i not in self.seen]
+        if not unseen:
+            return self._rules.sections[candidates[0]], True
+        i = next((i for i in unseen if i > self._last), unseen[0])
+        self.seen.add(i)
+        self._last = i
+        return self._rules.sections[i], False
 
 
 def check_sections(
@@ -174,8 +208,7 @@ def check_sections(
     index = {s.id: i for i, s in enumerate(rules.sections)}
     resolver = _Resolver(rules)
     findings: list[Finding] = []
-    present: set[str] = set()
-    last: Section | None = None
+    placed: list[Section] = []
     for heading in headings:
         section, duplicate = resolver.resolve(heading)
         if section is None or section.region not in allowed:
@@ -185,23 +218,49 @@ def check_sections(
                 Finding(section.id, section.clause, f"duplicate section {section.ref}: {heading!r}")
             )
             continue
-        present.add(section.id)
-        if last is not None and index[section.id] < index[last.id]:
-            findings.append(
-                Finding(
-                    section.id,
-                    section.clause,
-                    f"wrong order: section {section.ref} appears after {last.ref}",
-                )
+        placed.append(section)
+    keep = _longest_increasing([index[s.id] for s in placed])
+    for pos, section in enumerate(placed):
+        if pos in keep:
+            continue
+        where = []
+        if pos > 0:
+            where.append(f"after {placed[pos - 1].ref}")
+        if pos + 1 < len(placed):
+            where.append(f"before {placed[pos + 1].ref}")
+        findings.append(
+            Finding(
+                section.id,
+                section.clause,
+                f"wrong order: section {section.ref} is placed {' and '.join(where)}",
             )
-        else:
-            last = section
+        )
+    present = {s.id for s in placed}
     for section in rules.sections_for(region):
         if section.required and section.id not in present:
             findings.append(
                 Finding(section.id, section.clause, f"missing required section {section.ref}")
             )
     return findings
+
+
+def _longest_increasing(values: list[int]) -> set[int]:
+    """Positions of one longest strictly increasing subsequence. On a tie the earlier
+    element is kept, so for a swapped pair the later heading is the one flagged."""
+    if not values:
+        return set()
+    length = [1] * len(values)
+    prev = [-1] * len(values)
+    for i in range(len(values)):
+        for j in range(i):
+            if values[j] < values[i] and length[j] + 1 > length[i]:
+                length[i], prev[i] = length[j] + 1, j
+    pos = max(range(len(values)), key=lambda i: (length[i], -i))
+    keep: set[int] = set()
+    while pos != -1:
+        keep.add(pos)
+        pos = prev[pos]
+    return keep
 
 
 def check_mah_markers(

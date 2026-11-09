@@ -16,6 +16,7 @@ from episteme.reference.rules import (
     check_sections,
     headings,
     load_rules,
+    parse_rules,
 )
 
 GUIDELINE_PDF = "E2C_R2_Guideline.pdf"
@@ -70,7 +71,41 @@ def test_duplicate_section_is_reported(rules):
     draft.insert(draft.index("12. Other Periodic Reports"), "11. Literature")
     findings = check_sections(rules, draft)
     assert _ids(findings) == ["11"]
+    assert findings[0].clause == "3.11"
     assert "duplicate" in findings[0].message
+
+
+def test_one_moved_section_yields_one_order_finding(rules):
+    draft = headings(rules)
+    draft.remove("19. Conclusions and Actions")
+    draft.insert(draft.index("1. Introduction") + 1, "19. Conclusions and Actions")
+    findings = check_sections(rules, draft)
+    assert _ids(findings) == ["19"]
+    assert findings[0].clause == "3.19"
+    assert "wrong order" in findings[0].message
+
+
+@pytest.mark.parametrize("region", ["ich", "eu"])
+def test_165_heading_without_if_applicable(rules, region):
+    full = "16.5. Effectiveness of Risk Minimisation (if applicable)"
+    draft = headings(rules, region)
+    draft[draft.index(full)] = "16.5. Effectiveness of Risk Minimisation"
+    assert check_sections(rules, draft, region=region) == []
+    unnumbered = [
+        "Effectiveness of Risk Minimisation" if h == full else h for h in headings(rules, region)
+    ]
+    assert check_sections(rules, unnumbered, region=region) == []
+
+
+def test_number_that_matches_no_candidate_is_unresolved(rules):
+    # Section 2's title with number 3: no section has both, so the heading is unresolved.
+    draft = headings(rules, "eu")
+    draft[draft.index("2. Worldwide Marketing Approval Status")] = (
+        "3. Worldwide Marketing Approval Status"
+    )
+    findings = check_sections(rules, draft, region="eu")
+    assert _ids(findings) == ["2"]
+    assert "missing" in findings[0].message
 
 
 def test_heading_match_ignores_case_and_number(rules):
@@ -87,6 +122,15 @@ def test_shared_title_resolves_by_number_or_order(rules):
     without_61 = [h for h in draft if h != "6.1. Reference Information"]
     # The numbered heading resolves to Appendix 1, so only 6.1 is missing.
     assert _ids(check_sections(rules, without_61)) == ["6.1"]
+
+
+def test_unnumbered_shared_title_does_not_take_another_slot(rules):
+    # 6.1 is missing; an unnumbered "Reference Information" at the appendix position is A1.
+    draft = [h for h in headings(rules) if h != "6.1. Reference Information"]
+    draft[draft.index("Appendix 1. Reference Information")] = "Reference Information"
+    findings = check_sections(rules, draft)
+    assert _ids(findings) == ["6.1"]
+    assert "missing" in findings[0].message
 
 
 def test_region_ich_ignores_eu_entries(rules):
@@ -128,6 +172,53 @@ def test_rule_file_ids_are_unique(rules):
     assert all(s.clause for s in rules.sections)
     numbered = [s.id for s in rules.sections if s.region == "ich" and s.id[0].isdigit()]
     assert [n for n in numbered if "." not in n] == [str(n) for n in range(1, 21)]
+
+
+# E2C(R2) 2.9.2 table of contents, with 9.1/9.2 (3.9.1/3.9.2), then the 3.20 appendices,
+# then the GVP VII.B.5.20 item 6 regional appendix and VII.C.5.1-5.5.
+SOURCE_ORDER = [
+    "title_page", "exec_summary", "toc",
+    "1", "2", "3", "4", "5", "5.1", "5.2", "6", "6.1", "6.2", "6.3",
+    "7", "7.1", "7.2", "7.3", "7.4", "7.5", "8", "9", "9.1", "9.2", "10", "11", "12", "13",
+    "14", "15", "16", "16.1", "16.2", "16.3", "16.4", "16.5", "17", "17.1", "17.2", "17.3",
+    "18", "18.1", "18.2", "19", "20",
+    "A1", "A2", "A3", "A4", "A5",
+    "A6", "A6.1", "A6.2", "A6.3", "A6.4", "A6.5",
+]  # fmt: skip
+
+
+def test_rule_file_order_matches_source_numbering(rules):
+    assert [s.id for s in rules.sections] == SOURCE_ORDER
+    for s in rules.sections:
+        if s.region == "ich" and s.id[0].isdigit():
+            assert s.number == s.id
+            assert s.clause == f"3.{s.id}"
+        elif s.id in {"A1", "A2", "A3", "A4", "A5", "A6"}:
+            assert s.number == f"Appendix {s.id[1:]}"
+
+
+def test_loader_rejects_unknown_region(rules):
+    data = json.loads(json.dumps(dict(rules.data), default=_plain))
+    data["sections"][5]["region"] = "EU"
+    with pytest.raises(ValueError, match=data["sections"][5]["id"]):
+        parse_rules("ich_e2c_r2", data)
+
+
+def test_rule_data_is_read_only(rules):
+    with pytest.raises(TypeError):
+        rules.data["ig"] = "x"
+    with pytest.raises(TypeError):
+        rules.source_docs[0]["sha256"] = "0" * 64
+
+
+def test_eu_message_names_gvp_once(rules):
+    draft = [h for h in headings(rules, "eu") if h != "Proposed product information"]
+    (finding,) = check_sections(rules, draft, region="eu")
+    assert finding.message.endswith("(EU GVP VII.C.5.1)")
+
+
+def _plain(obj):
+    return dict(obj) if hasattr(obj, "keys") else list(obj)
 
 
 def test_rule_file_names_its_source_sha256(rules):
