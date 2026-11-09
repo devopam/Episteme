@@ -41,7 +41,7 @@ def article(
     if doi:
         ids += f'<article-id pub-id-type="doi">{doi}</article-id>'
     if ppr:
-        ids += f'<article-id pub-id-type="ppr">{ppr}</article-id>'
+        ids += f'<article-id pub-id-type="archive">{ppr}</article-id>'
     permissions = ""
     if lic:
         permissions = (
@@ -313,3 +313,14 @@ def test_same_basename_in_two_directories_gets_two_unit_keys(tmp_path):
     assert ex.unit_key(raw / "PPR1_PPR9.xml.gz", raw) == "PPR1_PPR9"
     # the part names (stored source_file) differ too
     assert ex.part_name(ka, 1) != ex.part_name(kb, 1)
+
+
+def test_archive_typed_id_is_preferred_and_value_match_is_the_fallback(tmp_path):
+    both = article("PPR5").replace(
+        '<article-id pub-id-type="archive">PPR5</article-id>',
+        '<article-id pub-id-type="other">PPR999</article-id>'
+        '<article-id pub-id-type="archive">PPR5</article-id>',
+    )
+    other = article("PPR6", doi="10.1101/x6").replace('pub-id-type="archive"', 'pub-id-type="ppr"')
+    p = write_bulk(tmp_path / "PPR5_PPR6.xml.gz", [both, other])
+    assert [r["source_record_id"] for r in ex.iter_records(p)] == ["PPR5", "PPR6"]

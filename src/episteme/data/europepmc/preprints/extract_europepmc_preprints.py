@@ -126,7 +126,7 @@ def _itertext(el: ET.Element | None) -> str:
 def parse_article(art: ET.Element, source_file: str) -> dict[str, Any] | str:
     """One preprint ``<article>`` element -> a finalized row, or the name of the
     skip reason (``"no_ppr_id"``, ``"no_text"``)."""
-    pmid = pmcid = doi = title = abstract = body = journal = language = ppr = ""
+    pmid = pmcid = doi = title = abstract = body = journal = language = ppr = ppr_fallback = ""
     year: int | None = None
     authors: list[str] = []
     license_raw = ""
@@ -140,8 +140,10 @@ def parse_article(art: ET.Element, source_file: str) -> dict[str, Any] | str:
         if t == "article-id":
             idt = (el.get("pub-id-type") or "").lower()
             val = (el.text or "").strip()
-            if _PPR_RE.match(val):
-                ppr = ppr or val
+            if idt == "archive" and _PPR_RE.match(val):
+                ppr = val  # the preferred match: the real files name the PPR id so
+            elif _PPR_RE.match(val):
+                ppr_fallback = ppr_fallback or val
             elif idt in ("pmid", "pubmed"):
                 pmid = val
             elif idt == "pmcid":
@@ -184,6 +186,7 @@ def parse_article(art: ET.Element, source_file: str) -> dict[str, Any] | str:
                 # The first element named no URL; a nested one may.
                 license_raw = f"{href} {license_raw}".strip()
 
+    ppr = ppr or ppr_fallback
     if not ppr:
         return "no_ppr_id"
     if not body and not abstract:
