@@ -118,6 +118,20 @@ DEFAULT_EMA_READ_TIMEOUT_SECONDS = 60.0
 # Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
 # holds a long transaction on reg_record blocks it); then the feed fails.
 DEFAULT_REG_LOCK_TIMEOUT_S = 300
+# Reference documents (ICH, MedDRA PtC, EMA guidance; episteme.data.reference_docs). EMA
+# answers a client that is not a browser with HTTP 429 at low rates, so the pause between two
+# document requests is long (EPISTEME_EMA_DOC_MIN_INTERVAL_S). ICH and MedDRA files are static
+# and take a short pause (EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S). The ICH pages listed here
+# (EPISTEME_REFERENCE_DOCS_ICH_PAGES, comma separated) are read through the ICH node API.
+DEFAULT_EMA_DOC_MIN_INTERVAL_S = 60
+DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S = 2.0
+DEFAULT_REFERENCE_DOCS_ICH_PAGES = (
+    "e2br3-individual-case-safety-report-icsr-specification-and-related-files",
+    "efficacy-guidelines",
+    "quality-guidelines",
+)
+# A fixed project string, with no e-mail address (EPISTEME_REFERENCE_DOCS_USER_AGENT).
+DEFAULT_REFERENCE_DOCS_USER_AGENT = "Episteme-reference-docs/1.0 (open biomedical data pipeline)"
 DEFAULT_TEACHER_MODEL = "deepseek-chat"
 DEFAULT_TEACHER_BUDGET_TOKENS = 2_000_000
 DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
@@ -199,6 +213,16 @@ def _slice_max_bytes() -> dict[str, int]:
         if source and value:
             out[source] = value
     return out
+
+
+def _reference_docs_ich_pages() -> tuple[str, ...]:
+    """``EPISTEME_REFERENCE_DOCS_ICH_PAGES``: comma separated ICH page slugs. Unset or empty:
+    the default pages."""
+    raw = _get("EPISTEME_REFERENCE_DOCS_ICH_PAGES")
+    if not raw:
+        return DEFAULT_REFERENCE_DOCS_ICH_PAGES
+    pages = tuple(dict.fromkeys(p.strip().strip("/") for p in raw.split(",") if p.strip()))
+    return pages or DEFAULT_REFERENCE_DOCS_ICH_PAGES
 
 
 def _get_non_negative_float_or_default(name: str, default: float) -> float:
@@ -407,6 +431,13 @@ class Settings:
     epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
     epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
     epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
+    # Reference document downloads (EPISTEME_EMA_DOC_MIN_INTERVAL_S,
+    # EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S, EPISTEME_REFERENCE_DOCS_ICH_PAGES,
+    # EPISTEME_REFERENCE_DOCS_USER_AGENT).
+    ema_doc_min_interval_s: int = DEFAULT_EMA_DOC_MIN_INTERVAL_S
+    reference_docs_min_interval_s: float = DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
+    reference_docs_ich_pages: tuple[str, ...] = DEFAULT_REFERENCE_DOCS_ICH_PAGES
+    reference_docs_user_agent: str = DEFAULT_REFERENCE_DOCS_USER_AGENT
     # Largest share of orphan rows (nct_id not in studies) per AACT table
     # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
     aact_max_orphan_share: float = DEFAULT_AACT_MAX_ORPHAN_SHARE
@@ -599,6 +630,15 @@ def get_settings() -> Settings:
         aact_max_orphan_share=_get_non_negative_float_or_default(
             "EPISTEME_AACT_MAX_ORPHAN_SHARE", DEFAULT_AACT_MAX_ORPHAN_SHARE
         ),
+        ema_doc_min_interval_s=_get_positive_int_or_default(
+            "EPISTEME_EMA_DOC_MIN_INTERVAL_S", DEFAULT_EMA_DOC_MIN_INTERVAL_S
+        ),
+        reference_docs_min_interval_s=_get_non_negative_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S", DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
+        ),
+        reference_docs_ich_pages=_reference_docs_ich_pages(),
+        reference_docs_user_agent=_get("EPISTEME_REFERENCE_DOCS_USER_AGENT")
+        or DEFAULT_REFERENCE_DOCS_USER_AGENT,
         slice_max_bytes=_slice_max_bytes(),
         teacher_base_url=_get("TEACHER_BASE_URL"),
         teacher_api_key=_get("EPISTEME_TEACHER_API_KEY"),
