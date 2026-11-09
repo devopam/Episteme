@@ -72,6 +72,7 @@ TOOLS = (
     "tail",
     "grep",
     "cp",
+    "mv",
 )
 
 
