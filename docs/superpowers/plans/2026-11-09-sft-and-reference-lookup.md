@@ -336,7 +336,7 @@ If a licence cannot be confirmed from an official page, record it as "use with c
 
 ---
 
-### Task 13: Reference documents acquisition (`ich_e2`, `meddra_ptc`, `ema_guidance`)
+### Task 13: Reference documents acquisition (`ich`, `meddra_ptc`, `ema_guidance`)
 
 > **Added 2026-11-09 (owner approved). Execution order: run this task after Task 4 and before Task 5.** The number is 13 only so earlier task numbers stay stable.
 
@@ -361,7 +361,7 @@ Why: Tasks 5 and 6 and the Stage B `RuleCheck` examples need the official ICH, M
 - [ ] **Step 2: Run** `uv run pytest tests/data/test_reference_docs.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.** User-Agent: a fixed project string from config (no e-mail address). Run the endpoint guard.
 - [ ] **Step 4: Run** — Expected: PASS. **Commit**: `feat(reference_docs): paced acquisition of ICH, MedDRA PtC and EMA guidance documents`.
-- [ ] **Step 5 (controller, local, foreground):** run the download for `ich_e2` and `meddra_ptc`. Then run `ema_guidance` in chunks of under 10 minutes until the manifest has all paths or EMA still returns 429. Record the result in the ledger. Files already fetched by hand on 2026-11-09 under `D:/episteme/01_raw/ich/e2/` and `D:/episteme/01_raw/meddra_ptc/` are adopted by sha256, not fetched again.
+- [ ] **Step 5 (controller, local, foreground):** run the download for `ich` and `meddra_ptc`. Then run `ema_guidance` in chunks of under 10 minutes until the manifest has all paths or EMA still returns 429. Record the result in the ledger. Files already fetched by hand on 2026-11-09 under `D:/episteme/01_raw/ich/e2/` and `D:/episteme/01_raw/meddra_ptc/` are adopted by sha256, not fetched again.
 
 ---
 
