@@ -181,8 +181,9 @@ url_key = "OPENFDA_CATALOG"
 format = "openfda_json"
 jurisdiction = "US"
 record_key = []
-substance_fields = ["products.ingredient"]
-product_fields = ["application_number"]
+# Each record holds a list of products; names and application numbers sit inside it (file checked 2026-11-09).
+substance_fields = ["products.active_ingredients.name"]
+product_fields = ["products.application_number"]
 cadence = "monthly"
 
 [feeds.fda_shortages]

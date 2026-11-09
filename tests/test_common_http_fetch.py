@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -33,7 +35,8 @@ resume=0; case " $* " in *" -C - "*) resume=1 ;; esac
 if [ "$code" = 0 ]; then
     while [ "$#" -gt 0 ]; do
         if [ "$1" = -o ]; then
-            if [ "$resume" = 1 ]; then echo data >> "$2"; else echo data > "$2"; fi
+            if [ -n "$FAKE_CURL_BODY" ]; then cp "$FAKE_CURL_BODY" "$2"
+            elif [ "$resume" = 1 ]; then echo data >> "$2"; else echo data > "$2"; fi
         fi
         shift
     done
@@ -66,6 +69,10 @@ TOOLS = (
     "wc",
     "cut",
     "cat",
+    "tail",
+    "grep",
+    "cp",
+    "mv",
 )
 
 
@@ -83,6 +90,8 @@ def _run(
     aria2c_code: int | None = None,
     urls: tuple[str, ...] = ("https://example.invalid/d/file.txt",),
     session: tuple[str, ...] = (),
+    extra_env: dict[str, str] | None = None,
+    precreate: dict[str, bytes] | None = None,
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
@@ -130,8 +139,14 @@ def _run(
             "FAKE_ARIA2C_CODE": str(aria2c_code or 0),
             "FAKE_ARIA2C_SESSION": " ".join(session),
             "URLS": " ".join(urls),
+            "FAKE_CURL_BODY": "",
+            "PYTHON": Path(sys.executable).as_posix(),
         }
     )
+    env.update(extra_env or {})
+    for rel, data in (precreate or {}).items():
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dest / rel).write_bytes(data)
     proc = subprocess.run(
         [_bash(), "-c", script], env=env, capture_output=True, text=True, timeout=60
     )
@@ -244,3 +259,162 @@ def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
     assert "retrying 1 unfinished file(s)" in proc.stderr
     assert (out / "a.txt").read_text() == "complete-a"
     assert (out / "b.txt").read_text() == "data\n"
+
+
+def _skip_script_env(tmp_path: Path, name: str, content: bytes, dry_run: bool = False):
+    lib = tmp_path / "scripts" / "data" / "_lib"
+    shutil.copytree(LIB, lib)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    n = len(content)
+    head = f"#!/usr/bin/env bash\nprintf 'Content-Length: {n}\r\n'\n"
+    (fake / "curl").write_bytes(head.encode())
+    (fake / "curl").chmod(0o755)
+    data = tmp_path / "d" / name
+    data.parent.mkdir()
+    data.write_bytes(content)
+    script = (
+        'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
+        'export PATH="$fb:$PATH"; . "$LIB/common.sh"; '
+        'size_match_skip "$F" https://example.invalid/f && echo SKIP || echo FETCH'
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
+    env.update(
+        {
+            "LIB": lib.as_posix(),
+            "FAKEBIN": fake.as_posix(),
+            "F": data.as_posix(),
+            "PYTHON": Path(sys.executable).as_posix(),
+        }
+    )
+    if dry_run:
+        env["EPISTEME_DRY_RUN"] = "1"
+    proc = subprocess.run(
+        [_bash(), "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
+    return proc.stdout.strip().splitlines()[-1], data
+
+
+def _good_zip(tmp_path: Path) -> bytes:
+    z = tmp_path / "good.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("a.xml", "<a/>" * 50)
+    return z.read_bytes()
+
+
+def _damaged(tmp_path: Path) -> bytes:
+    """Full size, tail zeroed: the central directory is gone, as after a stopped aria2c."""
+    good = _good_zip(tmp_path)
+    return good[:-30] + bytes(30)
+
+
+def test_size_match_skip_keeps_an_intact_zip(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path))
+    assert out == "SKIP" and data.is_file()
+
+
+def test_size_match_skip_moves_a_damaged_full_size_zip_aside(tmp_path):
+    # 2026-11-05: full-size DailyMed zips left by a stopped download passed the size check.
+    damaged = _damaged(tmp_path)
+    out, data = _skip_script_env(tmp_path, "x.zip", damaged)
+    assert out == "FETCH"
+    assert not data.exists()
+    bad = list(data.parent.glob("_bad_*/x.zip.bad"))
+    assert len(bad) == 1 and bad[0].read_bytes() == damaged
+
+
+def test_dry_run_does_not_move_a_damaged_zip(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _damaged(tmp_path), dry_run=True)
+    assert out == "FETCH" and data.is_file()
+
+
+def test_a_non_zip_file_is_not_tested(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.gz", b"not a zip at all")
+    assert out == "SKIP" and data.is_file()
+
+
+def test_a_zip_that_downloads_damaged_is_recorded_failed_and_moved(tmp_path):
+    # the fake curl writes "data" (not a zip): the fetch "succeeds" but the file is damaged
+    proc, _ = _run(tmp_path, "0", urls=("https://example.invalid/d/x.zip",))
+    assert proc.returncode != 0
+    dest = tmp_path / "out"
+    assert not (dest / "x.zip").exists()
+    assert len(list(dest.glob("_bad_*/x.zip.bad"))) == 1
+
+
+def _zero_middle_zip(tmp_path: Path) -> bytes:
+    """A stored zip whose middle is zero-filled: tail and central directory intact."""
+    z = tmp_path / "mid.zip"
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("a.xml", bytes(range(256)) * 40)
+    raw = bytearray(z.read_bytes())
+    raw[3000:6000] = bytes(3000)
+    return bytes(raw)
+
+
+def test_size_skip_reads_only_the_directory_so_a_zero_filled_middle_passes_it(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _zero_middle_zip(tmp_path))
+    assert out == "SKIP" and data.is_file()
+
+
+def test_a_fresh_download_with_a_zero_filled_middle_fails_the_full_crc_test(tmp_path):
+    body = tmp_path / "body.zip"
+    body.write_bytes(_zero_middle_zip(tmp_path))
+    proc, _ = _run(
+        tmp_path,
+        "0",
+        urls=("https://example.invalid/d/x.zip",),
+        extra_env={"FAKE_CURL_BODY": body.as_posix()},
+    )
+    dest = tmp_path / "out"
+    assert proc.returncode != 0
+    assert not (dest / "x.zip").exists()
+    assert len(list(dest.glob("_bad_*/x.zip.bad"))) == 1
+
+
+def test_an_intact_fresh_zip_is_kept(tmp_path):
+    body = tmp_path / "body.zip"
+    body.write_bytes(_good_zip(tmp_path))
+    proc, _ = _run(
+        tmp_path,
+        "0",
+        urls=("https://example.invalid/d/x.zip",),
+        extra_env={"FAKE_CURL_BODY": body.as_posix()},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "out" / "x.zip").is_file()
+
+
+def test_a_python_that_does_not_run_never_quarantines_a_zip(tmp_path):
+    # the Microsoft Store stub: found on PATH, exits non-zero for everything
+    stub = tmp_path / "stub_python"
+    stub.write_bytes(b"#!/usr/bin/env bash" + chr(10).encode() + b"exit 9" + chr(10).encode())
+    stub.chmod(0o755)
+    body = tmp_path / "body.zip"
+    body.write_bytes(_good_zip(tmp_path))
+    proc, _ = _run(
+        tmp_path,
+        "0",
+        urls=("https://example.invalid/d/x.zip",),
+        extra_env={"FAKE_CURL_BODY": body.as_posix(), "PYTHON": stub.as_posix()},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "out" / "x.zip").is_file()
+    assert not list((tmp_path / "out").glob("_bad_*"))
+
+
+def test_a_zip_that_curl_did_not_finish_is_recorded_once_and_not_quarantined(tmp_path):
+    # HEAD then fetch both answer 22 (permanent): the partial file stays for a resume
+    proc, _ = _run(
+        tmp_path,
+        "22 22",
+        urls=("https://example.invalid/d/x.zip",),
+        precreate={"x.zip": b"partial"},
+    )
+    dest = tmp_path / "out"
+    assert proc.returncode != 0
+    assert (dest / "x.zip").read_bytes() == b"partial"
+    assert not list(dest.glob("_bad_*"))
+    failed = (dest / ".failed_files.txt").read_text(encoding="utf-8").splitlines()
+    assert len(failed) == 1

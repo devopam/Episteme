@@ -449,7 +449,7 @@ def _fixture_dictionary() -> dict[str, list[dict]]:
 
 
 @pytest.fixture
-def db(_schema, pg_conn, monkeypatch, tmp_path):
+def db(_schema, pg_conn, clean_substance, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "proc"))
     monkeypatch.setattr(dct, "read_dictionary", _fixture_dictionary)

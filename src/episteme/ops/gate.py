@@ -65,6 +65,10 @@ _EXTRACT_MODULES = {
     "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
     "dailymed": ("episteme.data.dailymed.extract_dailymed", "dailymed/extract_dailymed.sh"),
     "ema_epar": ("episteme.data.ema.extract_epar", "ema/extract_ema_epar.sh"),
+    "europepmc_preprint": (
+        "episteme.data.europepmc.preprints.extract_europepmc_preprints",
+        "europepmc_preprint/extract_europepmc_preprint.sh",
+    ),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
@@ -113,6 +117,7 @@ EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pmc", "load"): ("episteme.data.pmc.retire",),
     ("dailymed", "load"): ("episteme.data.dailymed.retire",),
     ("ema_epar", "load"): ("episteme.data.ema.retire",),
+    ("europepmc_preprint", "load"): ("episteme.data.europepmc.preprints.retire",),
 }
 
 
@@ -1025,6 +1030,27 @@ def _cmd_migrations_check(_args: argparse.Namespace) -> int:
     return 1 if missing else 0
 
 
+def _cmd_substance_check(_args: argparse.Namespace) -> int:
+    """Refuse (exit 1, message on stdout) when ``episteme.substance`` of the configured
+    database holds fewer than ``Settings.sample_min_substances`` rows. A sample load of
+    ``ema``, ``openfda`` or ``openfda_faers`` measures xref coverage against it: with a few
+    fixture substances the figure (0.26% on 2026-11-05) says nothing."""
+    from episteme.config import get_settings
+
+    minimum = get_settings().sample_min_substances
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.substance")
+        n = int(cur.fetchone()[0])
+    if n < minimum:
+        print(
+            f"episteme.substance holds {n} rows, fewer than {minimum} "
+            "(EPISTEME_SAMPLE_MIN_SUBSTANCES); load the substance data first with "
+            "scripts/data/openfda/load_substance.sh"
+        )
+        return 1
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m episteme.ops.gate", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1063,6 +1089,11 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("migrations-check", help="list migrations not applied to the database")
     p.set_defaults(fn=_cmd_migrations_check)
+
+    p = sub.add_parser(
+        "substance-check", help="refuse when episteme.substance is too small for a sample load"
+    )
+    p.set_defaults(fn=_cmd_substance_check)
     return ap
 
 

@@ -910,3 +910,49 @@ def test_run_record_of_another_source_has_no_feed_config(tmp_path, monkeypatch):
     argv = ["run", "--record", str(rec), "--source", SRC, "--stage", "extract"]
     assert gate.main([*argv, "--", sys.executable, "-c", "pass"]) == 0
     assert "feeds" not in json.loads(rec.read_text(encoding="utf-8"))
+
+
+class _CountCur:
+    def __init__(self, n):
+        self.n = n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        assert "episteme.substance" in sql
+
+    def fetchone(self):
+        return (self.n,)
+
+
+class _CountConn:
+    def __init__(self, n):
+        self.n = n
+
+    def cursor(self):
+        return _CountCur(self.n)
+
+
+def test_substance_check_refuses_below_the_minimum(monkeypatch, capsys):
+    monkeypatch.setenv("EPISTEME_SAMPLE_MIN_SUBSTANCES", "1000")
+    from episteme.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        _fake_connect(monkeypatch, _CountConn(3))
+        assert gate.main(["substance-check"]) == 1
+        out = capsys.readouterr().out
+        assert "3 rows" in out and "scripts/data/openfda/load_substance.sh" in out
+        _fake_connect(monkeypatch, _CountConn(1000))
+        assert gate.main(["substance-check"]) == 0
+        assert capsys.readouterr().out == ""
+        monkeypatch.setenv("EPISTEME_SAMPLE_MIN_SUBSTANCES", "5")
+        get_settings.cache_clear()
+        _fake_connect(monkeypatch, _CountConn(3))
+        assert gate.main(["substance-check"]) == 1
+    finally:
+        get_settings.cache_clear()

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SP2 literature-extract wrapper: Europe PMC preprint per-ID PPR*.xml -> staging
-# shards. Thin shell over `python -m
+# SP2 literature-extract wrapper: Europe PMC preprint bulk files (PPR<a>_PPR<b>.xml.gz)
+# -> staging parts. Thin shell over `python -m
 # episteme.data.europepmc.preprints.extract_europepmc_preprints`. Accepts only
 # --max-files N and --force (forwarded via "$@"); run_pipeline.sh builds that
 # arg list (lit_extract_args) — NOT the SP3 download wrapper_args superset.

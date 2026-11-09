@@ -153,6 +153,9 @@ DEFAULT_EPAR_MAX_WITHDRAWN_SHARE = 0.1
 # Changing it moves documents between buckets: the extract records the width under
 # _ops/ema_epar/ and refuses a run at another width.
 DEFAULT_EPAR_BUCKET_IDS = 8000
+# A sample load of ema, openfda or openfda_faers needs real substance data in the target
+# database: the coverage figures mean nothing against a few fixture rows.
+DEFAULT_SAMPLE_MIN_SUBSTANCES = 1000
 # The AACT loader refuses a release in which more than this share of a table's rows have an
 # nct_id that is not in studies (AACT has known orphans). Provisional: the first sample sets it.
 DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
@@ -382,6 +385,7 @@ class Settings:
     # Largest share of orphan rows (nct_id not in studies) per AACT table
     # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
     aact_max_orphan_share: float = DEFAULT_AACT_MAX_ORPHAN_SHARE
+    sample_min_substances: int = DEFAULT_SAMPLE_MIN_SUBSTANCES
     # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
     # Per-source sample slice caps, lower-case source name -> bytes.
@@ -553,6 +557,9 @@ def get_settings() -> Settings:
         ),
         epar_bucket_ids=_get_positive_int_or_default(
             "EPISTEME_EPAR_BUCKET_IDS", DEFAULT_EPAR_BUCKET_IDS
+        ),
+        sample_min_substances=_get_positive_int_or_default(
+            "EPISTEME_SAMPLE_MIN_SUBSTANCES", DEFAULT_SAMPLE_MIN_SUBSTANCES
         ),
         aact_max_orphan_share=_get_non_negative_float_or_default(
             "EPISTEME_AACT_MAX_ORPHAN_SHARE", DEFAULT_AACT_MAX_ORPHAN_SHARE

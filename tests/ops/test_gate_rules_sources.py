@@ -8,7 +8,7 @@ import pytest
 
 from episteme.ops import gate
 
-SOURCES = ["bookshelf", "europepmc_manuscript", "apollo", "pmc"]
+SOURCES = ["bookshelf", "europepmc_manuscript", "apollo", "pmc", "europepmc_preprint"]
 
 
 @pytest.mark.parametrize("source", SOURCES)
@@ -324,3 +324,62 @@ def test_a_faers_signal_build_that_made_nothing_fails():
         "min_counts" in f
         for f in gate.evaluate({k: v for k, v in _faers_measures().items() if k != "counts"}, rules)
     )
+
+
+def test_orange_book_paths_reach_names_and_application_numbers():
+    from episteme.data.regulatory.feeds import load_feeds
+    from episteme.data.regulatory.load_reg import field_values
+
+    feed = load_feeds()["fda_orangebook"]
+    # the shape of a real record (file of 2026-11)
+    row = {
+        "approval_date": "1982-01-01",
+        "products": [
+            {
+                "application_number": "ANDA018297",
+                "active_ingredients": [{"name": "ALLOPURINOL", "strength": "100MG"}],
+            }
+        ],
+    }
+    assert [v for p in feed.substance_fields for v in field_values(row, p)] == ["ALLOPURINOL"]
+    assert [v for p in feed.product_fields for v in field_values(row, p)] == ["ANDA018297"]
+    assert "fda_orangebook" in gate.load_rules("openfda")["load"]["min_xref_coverage_pct"]
+
+
+def test_europepmc_preprint_extract_rules_pass_a_bulk_file_shaped_output_and_fail_bad_ones():
+    # Shape of the first real bulk file: 10,000 records, 9,992 with a body, 9,884 with an
+    # abstract, none empty (a record with neither is skipped); licences CC BY / NC / ND.
+    rules = gate.load_rules("europepmc_preprint")["extract"]
+    ok = {
+        "rows": 9_990,
+        "failed_inputs": 0,
+        "duplicate_ids": 0,
+        "duplicate_ids_in_shard": 0,
+        "empty_text_pct": 0.0,
+        "null_pct": {"body_text": 0.1, "abstract": 1.2, "title": 0.0},
+        "license_counts": {"CC BY": 9000, "CC BY-NC": 300, "CC BY-ND": 100, "unknown": 590},
+        "peak_rss_mb": 900.0,
+        "max_rows_per_source_file": 5000,
+        "max_est_bytes_per_source_file": 1_000_000,
+        "part_rows": 20_000,
+        "part_bytes": 64_000_000,
+    }
+    assert gate.evaluate(ok, rules) == []
+    assert gate.evaluate({**ok, "rows": 0}, rules)
+    assert gate.evaluate({**ok, "duplicate_ids_in_shard": 1}, rules)
+    assert gate.evaluate({**ok, "null_pct": {**ok["null_pct"], "body_text": 40.0}}, rules)
+    assert gate.evaluate({**ok, "peak_rss_mb": 4000.0}, rules)
+    assert gate.evaluate({**ok, "license_counts": {"public_domain": 1}}, rules)
+
+
+def test_europepmc_preprint_slice_is_the_largest_bulk_file(tmp_path):
+    from episteme.ops import gate_slice
+
+    raw = tmp_path / "europepmc" / "preprints_bulk"
+    raw.mkdir(parents=True)
+    (raw / "PPR1_PPR9.xml.gz").write_bytes(b"x" * 10)
+    (raw / "PPR10_PPR19.xml.gz").write_bytes(b"x" * 30)
+    (raw / "pprid.txt.gz").write_bytes(b"x" * 99)
+    got = gate_slice.select("europepmc_preprint", tmp_path)
+    assert [p.name for p in got] == ["PPR10_PPR19.xml.gz"]
+    assert gate_slice.SLICES["europepmc_preprint"].raw_subpath == raw.relative_to(tmp_path)

@@ -168,6 +168,57 @@ resolve_dest() { # resolve_dest SOURCE [SUBPATH] -> <raw root>/SOURCE[/SUBPATH]
     printf '%s\n' "$root/$src${sub:+/$sub}"
 }
 
+_zip_python() { # print a Python that runs (checked once per shell), else nothing
+    if [ -z "${_ZIP_PY_CHECKED:-}" ]; then
+        _ZIP_PY_CHECKED=1; _ZIP_PY=""
+        local c
+        c="$(_http_fetch_python)" || c=""
+        # `command -v python` can find a stub (the Microsoft Store one on Windows) that
+        # exits non-zero: a missing interpreter must never read as a damaged zip.
+        if [ -n "$c" ] && "$c" -c 'import zipfile' >/dev/null 2>&1; then _ZIP_PY="$c"; fi
+    fi
+    printf '%s\n' "$_ZIP_PY"
+}
+
+zip_intact() { # zip_intact FILE [full] — 0 intact, 1 damaged, 2 cannot be tested
+    # 2026-11-05: 10 DailyMed zips were full size but damaged by a stopped download
+    # (aria2c -s16 writes segments apart), and the size-skip kept them. Without `full` only
+    # the central directory is read (cheap, for the size-skip path); `full` also checks the
+    # CRC of every member (after a fresh download). With no working tool the answer is 2:
+    # the caller warns and accepts the file, it never moves it.
+    local f="$1" mode="${2:-}" py rc
+    py="$(_zip_python)"
+    if [ -n "$py" ]; then
+        "$py" -I -c '
+import sys, zipfile
+try:
+    z = zipfile.ZipFile(sys.argv[1])
+    if sys.argv[2] == "full" and z.testzip() is not None:
+        sys.exit(3)
+    z.namelist()
+except Exception:
+    sys.exit(3)
+' "$f" "$mode" >/dev/null 2>&1
+        rc=$?
+        case "$rc" in 0) return 0 ;; 3) return 1 ;; esac
+    fi
+    if command -v unzip >/dev/null 2>&1; then
+        if [ "$mode" = "full" ]; then unzip -tq "$f" >/dev/null 2>&1; else unzip -l "$f" >/dev/null 2>&1; fi
+        return
+    fi
+    log WARN "zip_intact: no working python or unzip -- cannot test $f"
+    return 2
+}
+
+quarantine_bad() { # quarantine_bad FILE — move a damaged file to <dir>/_bad_<UTC date>/<name>.bad
+    local f="$1" d name bad
+    d="$(dirname "$f")"; name="$(basename "$f")"
+    bad="$d/_bad_$(date -u +%Y%m%d)"
+    mkdir -p "$bad" && mv -f "$f" "$bad/$name.bad" || return 1
+    rm -f "$f.aria2"
+    log WARN "quarantine_bad: damaged $name moved to $bad/$name.bad"
+}
+
 size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS this url (local matches remote size)
     local local_path="$1" url="$2"
     [ -s "$local_path" ] || return 1
@@ -179,7 +230,19 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
     remote_len="$(curl -sSIL --connect-timeout 20 --max-time 90 "$url" 2>/dev/null \
         | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' | tail -n1)"
     local_len="$(wc -c < "$local_path" | tr -d '[:space:]')"
-    [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ]
+    [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ] || return 1
+    # a size match is not enough for a zip: a damaged file can have the full size
+    case "$local_path" in
+        *.zip|*.ZIP)
+            zip_intact "$local_path"
+            if [ "$?" -eq 1 ]; then
+                # a dry run moves nothing: it only says that the file would be fetched
+                [ "${EPISTEME_DRY_RUN:-0}" = "1" ] || quarantine_bad "$local_path"
+                return 1
+            fi
+            ;;
+    esac
+    return 0
 }
 
 _safe_rel() { # _safe_rel REL — reject absolute paths and any '..' path component
@@ -293,6 +356,24 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         [ -z "$pyx" ] || "$pyx" -m episteme.ops.status long-end --run-id "$EPISTEME_RUN_ID" >/dev/null 2>&1 || true
         [ "$brc" -eq 0 ] || rc=$brc
         start=$((start + batch))
+    done
+    # A zip that came down damaged never counts as done: full CRC test, then move it aside and
+    # record it. A URL this run already recorded as failed (curl did not finish) is left alone:
+    # its partial file stays for the next resume and is counted once.
+    local zl zurl zrel
+    for zl in "${urls[@]}"; do
+        zurl="${zl%%$'\t'*}"; zrel="${zl#*$'\t'}"; [ "$zrel" = "$zl" ] && zrel="$(basename "$zurl")"
+        case "$zrel" in *.zip|*.ZIP) ;; *) continue ;; esac
+        _safe_rel "$zrel" || continue
+        [ -f "$dest_dir/$zrel" ] || continue
+        if [ -f "$failed_file" ] && tail -n +"$((failed_before + 1))" "$failed_file" | cut -f1 | grep -qxF "$zurl"; then
+            continue
+        fi
+        zip_intact "$dest_dir/$zrel" full
+        if [ "$?" -eq 1 ]; then
+            quarantine_bad "$dest_dir/$zrel"
+            _hf_record_failed "$dest_dir" "$zurl" "$zrel" "damaged zip"
+        fi
     done
     local failed_now=0
     [ ! -f "$failed_file" ] || failed_now="$(wc -l < "$failed_file")"

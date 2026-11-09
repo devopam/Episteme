@@ -66,7 +66,7 @@ def _schema():
 
 
 @pytest.fixture
-def db(_schema, pg_conn, monkeypatch, tmp_path):
+def db(_schema, pg_conn, clean_substance, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "processed"))
     from episteme.config import get_settings
@@ -245,7 +245,7 @@ def test_exact_duplicates_are_dropped_before_the_total_check(db, tmp_path):
 def test_non_exact_repeat_keeps_the_last_row_and_is_counted(db, tmp_path):
     feed = _feed()
     rows = [{"url": "u1", "x": 1}, {"url": "u2", "x": 1}, {"url": "u1", "x": 2}]
-    f = _ema_file(tmp_path / "a.json", rows, total=3)
+    f = _ema_file(tmp_path / "a.json", rows, total=2)
     res = load_reg.load_release(db, feed, f, "2026-11", run_id="r")
     db.commit()
     assert res["status"] == "loaded" and res["rows"] == 2 and res["conflicts"] == 1

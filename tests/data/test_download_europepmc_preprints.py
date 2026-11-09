@@ -1,151 +1,202 @@
-"""SP2 Task 7 — europepmc_preprint REST-harvest downloader (mocked network).
+"""europepmc_preprint downloader: bulk files discovered from the folder listing.
 
-EBI discontinued the bulk Europe PMC preprint feed (2026-09-08 spike): the FTP
-dir now holds only ``pprid.txt.gz`` (~73k ``PPR...`` ids) + a privacy notice.
-``download_preprints`` fetches that id list, then GETs each preprint's
-``{europepmc_base}/{id}/fullTextXML`` and writes ``raw_dir/{id}.xml``, with a
-``raw_dir/.harvest_state`` resume list.
-
-All tests monkeypatch ``requests.get`` (and ``time.sleep``) in the module
-namespace — no real network, no ``responses`` dependency.
+A fake session stands in for the network; no test calls EBI.
 """
 
 from __future__ import annotations
 
-import gzip
-from collections import Counter
+from episteme.data.europepmc.preprints import download_europepmc_preprints as dl
 
-import episteme.data.europepmc.preprints.download_europepmc_preprints as dl
-from episteme.data.europepmc.preprints.download_europepmc_preprints import download_preprints
+BASE = "https://ebi.example/pub/databases/pmc/preprints"
+LISTING = """<html><body><pre>
+<a href="?C=N;O=D">Name</a> <a href="/pub/databases/pmc/">Parent Directory</a>
+<a href="PPR7001_PPR208218.xml.gz">PPR7001_PPR208218.xml.gz</a>  2026-10-31 149M
+<a href="PPR1082914_PPR1327385.xml.gz">PPR1082914_PPR1327385.xml.gz</a>  2026-10-31 148M
+<a href="PPR208220_PPR297873.xml.gz">PPR208220_PPR297873.xml.gz</a>  2026-10-31 171M
+<a href="pprid.txt.gz">pprid.txt.gz</a>
+<a href="privacy_notice.txt">privacy_notice.txt</a>
+<a href="../x/PPR1_PPR2.xml.gz">evil</a>
+<a href="PPR7001_PPR208218.xml.gz.md5">md5</a>
+</pre></body></html>"""
 
 
 class FakeResp:
-    def __init__(self, status_code: int = 200, content: bytes = b""):
+    def __init__(self, status_code=200, content=b"", headers=None, text=""):
         self.status_code = status_code
         self.content = content
+        self.headers = headers or {}
+        self.text = text
 
-    def raise_for_status(self) -> None:
+    def raise_for_status(self):
         if self.status_code >= 400:
-            raise AssertionError(f"unexpected raise_for_status on {self.status_code}")
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=1 << 20):
+        for i in range(0, len(self.content), chunk_size):
+            yield self.content[i : i + chunk_size]
+
+    def close(self):
+        pass
 
 
-def _fake_get(idlist_bytes: bytes, responses: dict[str, list[tuple[int, bytes]]] | None = None):
-    """Build a fake ``requests.get``.
+class FakeSession:
+    """GET of the base returns the listing; GET of a file returns its bytes (a
+    Range request returns the tail); HEAD returns the length."""
 
-    ``responses`` maps a PPR id -> an ordered list of ``(status, body)`` returned
-    on successive calls (the last entry repeats). Any id not in the map returns
-    ``200 <article/>``.
-    """
-    responses = responses or {}
-    calls = {"idlist": 0, "perid": Counter()}
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+        self.gets: list[tuple[str, dict]] = []
 
-    def _get(url, timeout=None, **kw):
-        if url.endswith("pprid.txt.gz"):
-            calls["idlist"] += 1
-            return FakeResp(200, gzip.compress(idlist_bytes))
-        ppr = url.rstrip("/").split("/")[-2]  # .../{id}/fullTextXML
-        seq = responses.get(ppr, [(200, b"<article/>")])
-        idx = min(calls["perid"][ppr], len(seq) - 1)
-        calls["perid"][ppr] += 1
-        status, body = seq[idx]
-        return FakeResp(status, body)
+    def get(self, url, **kw):
+        self.gets.append((url, kw.get("headers") or {}))
+        if url.rstrip("/") == BASE:
+            return FakeResp(text=LISTING)
+        name = url.rsplit("/", 1)[1]
+        data = self.files[name]
+        rng = (kw.get("headers") or {}).get("Range")
+        if rng:
+            start = int(rng.split("=")[1].rstrip("-"))
+            if start >= len(data):
+                return FakeResp(416)
+            return FakeResp(206, data[start:], {"Content-Length": str(len(data) - start)})
+        return FakeResp(200, data, {"Content-Length": str(len(data))})
 
-    return _get, calls
-
-
-def test_harvest_writes_per_id_xml(tmp_path, monkeypatch):
-    get, _calls = _fake_get(b"PPR1\nPPR2\n")
-    monkeypatch.setattr(dl.requests, "get", get)
-
-    res = download_preprints(tmp_path, max_files=2)
-    assert res["ids"] == 2
-    assert res["fetched"] == 2
-    assert res["errors"] == 0
-    assert (tmp_path / "PPR1.xml").exists()
-    assert (tmp_path / "PPR2.xml").exists()
-    state = (tmp_path / ".harvest_state").read_text(encoding="utf-8").split()
-    assert set(state) == {"PPR1", "PPR2"}
-
-    # re-run: both already done -> skipped, nothing fetched
-    get2, _ = _fake_get(b"PPR1\nPPR2\n")
-    monkeypatch.setattr(dl.requests, "get", get2)
-    res2 = download_preprints(tmp_path, max_files=2)
-    assert res2["fetched"] == 0
-    assert res2["skipped"] == 2
+    def head(self, url, **kw):
+        name = url.rsplit("/", 1)[1]
+        return FakeResp(200, headers={"Content-Length": str(len(self.files[name]))})
 
 
-def test_harvest_404_counts_error_and_continues(tmp_path, monkeypatch):
-    get, _calls = _fake_get(b"PPR1\nPPR2\n", {"PPR2": [(404, b"")]})
-    monkeypatch.setattr(dl.requests, "get", get)
+FILES = {
+    "PPR7001_PPR208218.xml.gz": b"a" * 50,
+    "PPR208220_PPR297873.xml.gz": b"b" * 70,
+    "PPR1082914_PPR1327385.xml.gz": b"c" * 30,
+}
 
-    res = download_preprints(tmp_path, max_files=5)
+
+def _settings(monkeypatch):
+    class S:
+        europepmc_preprint_base = BASE
+
+    monkeypatch.setattr(dl, "get_settings", lambda: S)
+
+
+def test_listing_discovers_bulk_files_by_pattern_sorted_by_first_id():
+    assert dl.parse_listing(LISTING) == [
+        "PPR7001_PPR208218.xml.gz",
+        "PPR208220_PPR297873.xml.gz",
+        "PPR1082914_PPR1327385.xml.gz",
+    ]
+
+
+def test_download_fetches_new_files_and_skips_size_matched(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "preprints_bulk"
+    raw.mkdir()
+    (raw / "PPR7001_PPR208218.xml.gz").write_bytes(b"a" * 50)  # already there, same size
+    sess = FakeSession(FILES)
+    res = dl.download_bulk(raw, session=sess)
+    assert res == {"files": 3, "fetched": 2, "skipped": 1, "errors": 0}
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 70
+    assert (raw / "PPR1082914_PPR1327385.xml.gz").read_bytes() == b"c" * 30
+    assert not list(raw.glob("*.part"))
+    fetched = [u.rsplit("/", 1)[1] for u, _ in sess.gets if u.endswith(".gz")]
+    assert "PPR7001_PPR208218.xml.gz" not in fetched
+    # second run: nothing to do
+    assert dl.download_bulk(raw, session=FakeSession(FILES))["fetched"] == 0
+
+
+def test_a_file_of_the_wrong_size_is_fetched_again(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR7001_PPR208218.xml.gz").write_bytes(b"a" * 10)  # short
+    res = dl.download_bulk(raw, session=FakeSession(FILES))
+    assert res["fetched"] == 3
+    assert (raw / "PPR7001_PPR208218.xml.gz").read_bytes() == b"a" * 50
+
+
+def test_interrupted_download_resumes_from_the_part_file(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR208220_PPR297873.xml.gz.part").write_bytes(b"b" * 20)
+    sess = FakeSession(FILES)
+    dl.download_bulk(raw, session=sess)
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 70
+    ranges = [h.get("Range") for u, h in sess.gets if u.endswith("PPR208220_PPR297873.xml.gz")]
+    assert ranges == ["bytes=20-"]
+
+
+def test_max_files_caps_new_fetches_and_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    res = dl.download_bulk(raw, session=FakeSession(FILES), max_files=1)
     assert res["fetched"] == 1
+    raw2 = tmp_path / "c"
+    res = dl.download_bulk(raw2, session=FakeSession(FILES), dry_run=True)
+    assert res["fetched"] == 0 and res["files"] == 3
+    assert not raw2.exists()
+    assert "would fetch 3" in capsys.readouterr().out
+
+
+def test_force_fetches_again(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    dl.download_bulk(raw, session=FakeSession(FILES))
+    assert dl.download_bulk(raw, session=FakeSession(FILES), force=True)["fetched"] == 3
+
+
+def test_force_with_max_files_touches_only_the_files_it_fetches(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    for name, data in FILES.items():
+        (raw / name).write_bytes(b"old" + data)  # wrong size, present
+    res = dl.download_bulk(raw, session=FakeSession(FILES), force=True, max_files=1)
+    assert res["fetched"] == 1
+    kept = [n for n in FILES if (raw / n).read_bytes().startswith(b"old")]
+    assert len(kept) == 2  # the two files beyond the cap are untouched
+
+
+def test_force_keeps_the_old_file_when_the_fetch_fails(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    old = b"old copy"
+    (raw / "PPR7001_PPR208218.xml.gz").write_bytes(old)
+
+    class Failing(FakeSession):
+        def get(self, url, **kw):
+            if url.endswith("PPR7001_PPR208218.xml.gz"):
+                raise RuntimeError("network down")
+            return super().get(url, **kw)
+
+    res = dl.download_bulk(raw, session=Failing(FILES), force=True)
     assert res["errors"] == 1
-    assert (tmp_path / "PPR1.xml").exists()
-    assert not (tmp_path / "PPR2.xml").exists()
-    # 404 id NOT written to .harvest_state -> a later run can retry it
-    state = (tmp_path / ".harvest_state").read_text(encoding="utf-8").split()
-    assert state == ["PPR1"]
+    assert (raw / "PPR7001_PPR208218.xml.gz").read_bytes() == old
 
 
-def test_harvest_backoff_on_503(tmp_path, monkeypatch):
-    slept: list[float] = []
-    monkeypatch.setattr(dl.time, "sleep", lambda s: slept.append(s))
-    get, _calls = _fake_get(b"PPR1\n", {"PPR1": [(503, b""), (503, b""), (200, b"<article/>")]})
-    monkeypatch.setattr(dl.requests, "get", get)
-
-    res = download_preprints(tmp_path, max_files=1)
-    assert res["fetched"] == 1
-    assert res["errors"] == 0
-    assert (tmp_path / "PPR1.xml").exists()
-    assert len(slept) >= 2  # backed off before each retry
+def test_a_part_file_as_big_as_the_file_is_dropped_and_fetched_fresh(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR208220_PPR297873.xml.gz.part").write_bytes(b"x" * 70)  # full size, stale
+    (raw / "PPR1082914_PPR1327385.xml.gz.part").write_bytes(b"x" * 99)  # bigger
+    dl.download_bulk(raw, session=FakeSession(FILES))
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 70
+    assert (raw / "PPR1082914_PPR1327385.xml.gz").read_bytes() == b"c" * 30
 
 
-def test_dry_run_writes_nothing(tmp_path, monkeypatch):
-    get, _calls = _fake_get(b"PPR1\nPPR2\nPPR3\n")
-    monkeypatch.setattr(dl.requests, "get", get)
+def test_a_416_answer_to_the_resume_request_starts_over(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR208220_PPR297873.xml.gz.part").write_bytes(b"x" * 20)
 
-    res = download_preprints(tmp_path, max_files=5, dry_run=True)
-    assert res["ids"] == 3
-    assert res["fetched"] == 0
-    assert list(tmp_path.iterdir()) == []
-    assert not (tmp_path / ".harvest_state").exists()
+    class NoHead(FakeSession):
+        def head(self, url, **kw):  # the size is unknown: only the 416 can tell
+            raise RuntimeError("no HEAD")
 
-
-def test_dry_run_offline_safe(tmp_path, monkeypatch):
-    def _boom(*a, **k):
-        raise OSError("EBI unreachable")
-
-    monkeypatch.setattr(dl.requests, "get", _boom)
-    res = download_preprints(tmp_path, max_files=5, dry_run=True)
-    assert res == {"ids": 0, "fetched": 0, "skipped": 0, "errors": 0}
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_since_is_a_documented_noop(tmp_path, monkeypatch, capsys):
-    get, _calls = _fake_get(b"PPR1\n")
-    monkeypatch.setattr(dl.requests, "get", get)
-    download_preprints(tmp_path, max_files=1, since="2026-01-01")
-    captured = capsys.readouterr()
-    msg = (captured.out + captured.err).lower()
-    assert "since" in msg and "no-op" in msg
-
-
-def test_main_dry_run_rc0(tmp_path, monkeypatch):
-    get, _calls = _fake_get(b"PPR1\nPPR2\n")
-    monkeypatch.setattr(dl.requests, "get", get)
-    rc = dl.main(["--raw-dir", str(tmp_path), "--max-files", "5", "--dry-run"])
-    assert rc == 0
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_main_returns_0_even_when_all_ids_error(tmp_path, monkeypatch):
-    """A resumed harvest where every remaining id 404s must NOT fail the stage
-    (run_stage would log 'stage failed' + a failure-path run_end audit row on a
-    non-zero rc) — a per-id 404/429/503 is an expected, individually-logged
-    outcome, never fatal. Regression test for a rc=1-on-fetched==0-errors>0 bug
-    caught in review."""
-    get, _calls = _fake_get(b"PPR1\nPPR2\n", {"PPR1": [(404, b"")], "PPR2": [(404, b"")]})
-    monkeypatch.setattr(dl.requests, "get", get)
-    rc = dl.main(["--raw-dir", str(tmp_path), "--max-files", "5"])
-    assert rc == 0
+    sess = NoHead({**FILES, "PPR208220_PPR297873.xml.gz": b"b" * 10})  # the part is bigger
+    dl.download_bulk(raw, session=sess)
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 10

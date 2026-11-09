@@ -70,6 +70,17 @@ def _select_bookshelf(raw: Path) -> list[Path]:
     return [files[i] for i in sorted(picked)]
 
 
+def _select_europepmc_preprint(raw: Path) -> list[Path]:
+    """The largest bulk file: the sample covers the largest real unit (about 10,000 to 25,000
+    records, 150 to 280 MB), as the rule for samples asks."""
+    from episteme.data.europepmc.preprints.extract_europepmc_preprints import discover
+
+    files = discover(raw)
+    if not files:
+        raise SliceError(f"europepmc_preprint: no PPR<a>_PPR<b>.xml.gz bulk file under {raw}")
+    return [max(files, key=lambda p: (_size(p), p.name))]
+
+
 def _europepmc_date(p: Path) -> str:
     m = _EUROPEPMC_DATE.search(p.name)
     return m.group(1) if m else ""
@@ -614,6 +625,12 @@ SLICES: dict[str, SliceSpec] = {
         _is_archive,
     ),
     "apollo": SliceSpec("apollo", 4 * GB, _select_apollo, Path("apollo")),
+    "europepmc_preprint": SliceSpec(
+        "europepmc_preprint",
+        1 * GB,
+        _select_europepmc_preprint,
+        Path("europepmc/preprints_bulk"),
+    ),
     "pubchem": SliceSpec("pubchem", 1 * GB, _select_pubchem, Path("pubchem"), build=_build_pubchem),
     "pmc": SliceSpec(
         "pmc",

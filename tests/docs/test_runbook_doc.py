@@ -314,4 +314,4 @@ def test_fast_path_uses_wired_stages_and_bounds_only_download():
             assert stage in {"download", "serialize", "all"}, rest  # never on load or graph
     # openalex is structured: the fast path must not use extract or graph for it
     assert not any(r[0] == "openalex" and r[1] in {"extract", "graph"} for r in inv)
-    assert "EUROPEPMC_PREPRINT_BASE" in sec and "would harvest 0 ids" in sec
+    assert "EUROPEPMC_PREPRINT_BASE" in sec and "an unreachable base is an error" in sec

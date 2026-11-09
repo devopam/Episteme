@@ -81,19 +81,6 @@ def _manuscript(raw: Path) -> Path:
     return p
 
 
-def _preprint(raw: Path) -> Path:
-    p = raw / "PPR1.xml"
-    arts = "".join(
-        "<article><front><article-meta>"
-        f'<article-id pub-id-type="doi">10.1101/x{i}</article-id>'
-        "<title-group><article-title>T</article-title></title-group>"
-        f"</article-meta></front><body><p>{_BODY} {i}</p></body></article>"
-        for i in range(N)
-    )
-    p.write_text(f'<?xml version="1.0" encoding="UTF-8"?><set>{arts}</set>', encoding="utf-8")
-    return p
-
-
 def _pubmed(raw: Path) -> Path:
     p = raw / "pubmed_units.xml.gz"
     arts = "".join(
@@ -116,13 +103,6 @@ CASES = [
         "europepmc_manuscript",
         "iter_rows_from_archive",
         _manuscript,
-    ),
-    (
-        "preprint",
-        "episteme.data.europepmc.preprints.extract_europepmc_preprints",
-        "europepmc_preprint",
-        "iter_articles",
-        _preprint,
     ),
     (
         "guidelines",

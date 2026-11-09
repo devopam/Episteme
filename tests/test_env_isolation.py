@@ -6,7 +6,7 @@ writes the project ``.env``'s real values directly into ``os.environ``
 (correct, required behavior for production). Nothing restored ``os.environ``
 afterward, so whichever test happened to be first (in whatever collection
 order) to reach ``get_settings()`` — directly, or via an imported module such
-as ``download_europepmc_preprints.download_preprints()`` — leaked real
+as ``download_europepmc_preprints.download_bulk()`` — leaked real
 ``.env`` values into ``os.environ`` for the rest of the pytest session.
 
 The fix in ``tests/conftest.py`` is two layers, both unconditional and

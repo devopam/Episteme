@@ -2,13 +2,13 @@
 # SP2 knowledge-graph wrapper: europepmc_preprint raw dir -> episteme.article_cites
 # / article_mesh (+ article_parts). Thin shell over `python -m
 # episteme.data.graph_builder --source europepmc_preprint --raw-dir
-# <raw>/europepmc/preprints`. graph_builder.main() takes only --source/--raw-dir,
+# <raw>/europepmc/preprints_bulk`. graph_builder.main() takes only --source/--raw-dir,
 # so run_pipeline.sh passes NO extra args; "$@" is kept for forward-compat.
 #
 # NOTE ON LOCATION: see extract_europepmc_preprint.sh in this same directory —
 # run_pipeline.sh's extract/load/graph dispatch requires this flat
 # scripts/data/europepmc_preprint/ path (literal $SOURCE); --raw-dir below still
-# points at the nested europepmc/preprints raw directory the downloader writes.
+# points at the nested europepmc/preprints_bulk raw directory the downloader writes.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
@@ -25,4 +25,4 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 exec "$PY" -m episteme.data.graph_builder --source europepmc_preprint \
-    --raw-dir "${EPISTEME_RAW_ROOT:-./01_raw}/europepmc/preprints" "$@"
+    --raw-dir "${EPISTEME_RAW_ROOT:-./01_raw}/europepmc/preprints_bulk" "$@"

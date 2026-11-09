@@ -75,6 +75,13 @@ case "$*" in
         echo "migcheck $db" >> "$CALLS"
         if [ -n "${MISSING_MIG:-}" ]; then echo "$MISSING_MIG: missing episteme.x"; exit 1; fi
         exit "${RC_MIG:-0}" ;;
+    *"episteme.ops.gate substance-check"*)
+        echo "subcheck $db" >> "$CALLS"
+        if [ -n "${FEW_SUBSTANCES:-}" ]; then
+            echo "episteme.substance holds 3 rows; load scripts/data/openfda/load_substance.sh"
+            exit 1
+        fi
+        exit "${RC_SUB:-0}" ;;
     *"-m episteme.ops."*) exec "$REAL_PY" "$@" ;;
 esac
 exit 0
@@ -733,3 +740,30 @@ def test_the_sample_run_record_holds_the_start_hashes(tree):
     )
     assert len(rec["code_hash"]) == 64
     assert len(rec["rules_hash"]) == 64
+
+
+def test_sample_ema_load_refuses_when_substance_is_small(tree):
+    proc, calls, audit = _run(
+        tree, "ema", "load", "--sample", CHECK_load="no pass", FEW_SUBSTANCES="1"
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "load_substance.sh" in proc.stderr
+    assert "subcheck secondary" in calls
+    assert _stages(calls) == [] and audit == []
+
+
+def test_sample_openfda_faers_load_checks_substance_and_a_failed_check_exits_1(tree):
+    proc, calls, audit = _run(
+        tree, "openfda_faers", "load", "--sample", CHECK_load="no pass", RC_SUB="3"
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "substance-check failed (rc=3)" in proc.stderr
+    assert _stages(calls) == [] and audit == []
+
+
+def test_sample_load_of_another_source_does_not_check_substance(tree):
+    _sample_staging(tree[1])
+    _, calls, _ = _run(
+        tree, "bookshelf", "load", "--sample", CHECK_load="no pass", FEW_SUBSTANCES="1"
+    )
+    assert not any(c.startswith("subcheck") for c in calls)
