@@ -326,12 +326,21 @@ def test_a_faers_signal_build_that_made_nothing_fails():
     )
 
 
-def test_orange_book_has_no_substance_fields_and_no_coverage_rule():
+def test_orange_book_paths_reach_names_and_application_numbers():
     from episteme.data.regulatory.feeds import load_feeds
+    from episteme.data.regulatory.load_reg import field_values
 
-    assert load_feeds()["fda_orangebook"].substance_fields == ()
-    limits = gate.load_rules("openfda")["load"]["min_xref_coverage_pct"]
-    assert "fda_orangebook" not in limits
-    # a sample whose measure holds only the feeds with substance fields passes the rule
-    measures = {"xref_coverage_pct": {k: 100.0 for k in limits}}
-    assert gate.evaluate(measures, {"min_xref_coverage_pct": limits}) == []
+    feed = load_feeds()["fda_orangebook"]
+    # the shape of a real record (file of 2026-11)
+    row = {
+        "approval_date": "1982-01-01",
+        "products": [
+            {
+                "application_number": "ANDA018297",
+                "active_ingredients": [{"name": "ALLOPURINOL", "strength": "100MG"}],
+            }
+        ],
+    }
+    assert [v for p in feed.substance_fields for v in field_values(row, p)] == ["ALLOPURINOL"]
+    assert [v for p in feed.product_fields for v in field_values(row, p)] == ["ANDA018297"]
+    assert "fda_orangebook" in gate.load_rules("openfda")["load"]["min_xref_coverage_pct"]

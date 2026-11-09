@@ -181,9 +181,9 @@ url_key = "OPENFDA_CATALOG"
 format = "openfda_json"
 jurisdiction = "US"
 record_key = []
-# No substance fields: the sample run of 2026-11-05 found none in the file, so the feed has no substance names and no coverage measure or rule.
-substance_fields = []
-product_fields = ["application_number"]
+# Each record holds a list of products; names and application numbers sit inside it (file checked 2026-11-09).
+substance_fields = ["products.active_ingredients.name"]
+product_fields = ["products.application_number"]
 cadence = "monthly"
 
 [feeds.fda_shortages]
