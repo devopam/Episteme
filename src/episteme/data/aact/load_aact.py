@@ -59,8 +59,10 @@ recorded with the release.
    ``aact``: exact normalised match, ``aact_name`` xref rows; no fuzzy match). The release table
    ``intervention_substance (nct_id, intervention_id, substance_key, moiety_key, method)``
    holds each intervention's matched substances (``method`` ``normalised_name`` or
-   ``normalised_other_name``). ``substance_key`` is the matched substance; ``moiety_key`` is
-   its active moiety (``substance.moiety_key``, or the substance itself when that is NULL),
+   ``normalised_other_name``), indexed on ``(nct_id, intervention_id)`` and analysed before the
+   coverage count (a new table has no statistics; the count was planned as a nested loop).
+   ``substance_key`` is the matched substance; ``moiety_key`` is its active moiety
+   (``substance.moiety_key``, or the substance itself when that is NULL),
    the key that the FAERS signal tables count on. Coverage is reported, not checked.
 5. **Switch,** one transaction under ``lock_timeout`` (``EPISTEME_REG_LOCK_TIMEOUT_S``): every
    view in ``aact`` is dropped and one view per table of the release is created (``SELECT``
@@ -920,6 +922,16 @@ def _resolve_interventions(conn: psycopg.Connection, ctx: _Ctx) -> dict:
                         ),
                         (method, f"{SOURCE}_name", SOURCE),
                     )
+                # A table made a moment ago has no statistics and no index. Without them the
+                # coverage query below was planned as a nested loop over every intervention
+                # (it ran 6.5 hours). Index first, then ANALYZE: the planner then sees the
+                # row count and the lookup key.
+                cur.execute(
+                    sql.SQL("CREATE INDEX {} ON {} (nct_id, intervention_id)").format(
+                        sql.Identifier(f"{INTERVENTION_SUBSTANCE}_nct_idx"), target
+                    )
+                )
+                cur.execute(sql.SQL("ANALYZE {}").format(target))
                 coverage = {"interventions": 0, "interventions_matched": 0}
                 if sources and sources[0][0] == "interventions":
                     cur.execute(

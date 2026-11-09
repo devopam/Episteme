@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from episteme.data.regulatory.feeds import Feed
+from episteme.data.regulatory.feeds import Feed, load_feeds
 from episteme.data.regulatory.load_reg import (
+    parse_date,
     partition_names,
     prepare_rows,
     release_id_for,
@@ -155,6 +156,48 @@ def test_missing_key_falls_back_to_hash_and_is_counted():
 def test_dates(raw, iso):
     (out,), _ = prepare_rows(_feed(), [{"url": "u", "date": raw}], "f.json")
     assert (str(out["event_date"]) if out["event_date"] else None) == iso
+
+
+@pytest.mark.parametrize(
+    ("raw", "order", "iso"),
+    [
+        ("09/20/2023", "mdy", "2023-09-20"),
+        ("03/10/2026", "mdy", "2026-03-10"),
+        ("03/10/2026", "dmy", "2026-10-03"),
+        ("09/20/2023", "dmy", None),
+        ("20230920", "mdy", "2023-09-20"),
+    ],
+)
+def test_slash_date_order_is_per_feed(raw, order, iso):
+    got = parse_date(raw, order)
+    assert (str(got) if got else None) == iso
+    (out,), stats = prepare_rows(_feed(date_order=order), [{"url": "u", "date": raw}], "f.json")
+    assert (str(out["event_date"]) if out["event_date"] else None) == iso
+    assert stats["bad_dates"] == (0 if iso else 1)
+
+
+def test_default_order_is_dmy_and_unknown_order_is_refused():
+    assert _feed().date_order == "dmy"
+    assert str(parse_date("03/10/2026")) == "2026-10-03"
+    with pytest.raises(ValueError):
+        parse_date("03/10/2026", "ymd")
+
+
+def test_fda_shortages_reads_mdy_and_ema_feeds_read_dmy(tmp_path):
+    feeds = load_feeds()
+    assert feeds["fda_shortages"].date_order == "mdy"
+    ema = [f for f in feeds.values() if f.jurisdiction == "EU"]
+    assert ema and all(f.date_order == "dmy" for f in ema)
+    assert {f.name for f in feeds.values() if f.date_order != "dmy"} == {"fda_shortages"}
+    bad = tmp_path / "f.toml"
+    bad.write_text(
+        '[feeds.x]\nurl_key = "K"\nformat = "ema_json"\njurisdiction = "EU"\n'
+        "record_key = []\nsubstance_fields = []\nproduct_fields = []\n"
+        'cadence = "monthly"\ndate_order = "ymd"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="date_order"):
+        load_feeds(bad)
 
 
 def test_partition_names_are_safe_unique_and_short():

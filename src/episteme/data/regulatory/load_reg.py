@@ -72,7 +72,7 @@ SOURCES = ("ema", "openfda")
 EXPECTED_TOTAL: dict[str, Callable[[Path], int | None]] = {"ema_json": ema_total}
 _NAME_STEM = 16
 _HASH_LEN = 8
-_DATE_FORMATS = ("%Y%m%d", "%d/%m/%Y")
+_SLASH_FORMATS = {"dmy": "%d/%m/%Y", "mdy": "%m/%d/%Y"}
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +152,13 @@ def field_values(row: dict, path: str) -> list[str]:
     return out
 
 
-def parse_date(value: Any) -> date | None:
-    """A date from an ISO string (a time part is ignored), ``YYYYMMDD``,
-    ``DD/MM/YYYY`` or a date object; ``None`` otherwise."""
+def parse_date(value: Any, order: str = "dmy") -> date | None:
+    """A date from an ISO string (a time part is ignored), ``YYYYMMDD``, a slash date or a
+    date object; ``None`` otherwise. ``order`` is the order of a slash date: ``dmy``
+    (``DD/MM/YYYY``, the default) or ``mdy`` (``MM/DD/YYYY``). It comes from the feed;
+    the two orders are never tried in turn, as ``03/10/2026`` would be read wrong."""
+    if order not in _SLASH_FORMATS:
+        raise ValueError(f"unknown date order {order!r}")
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -166,7 +170,7 @@ def parse_date(value: Any) -> date | None:
         return date.fromisoformat(v[:10])
     except ValueError:
         pass
-    for fmt in _DATE_FORMATS:
+    for fmt in ("%Y%m%d", _SLASH_FORMATS[order]):
         try:
             return datetime.strptime(v, fmt).date()
         except ValueError:
@@ -243,7 +247,7 @@ class RowPreparer:
         if feed.date_field:
             raw = field_values(row, feed.date_field)
             if raw:
-                event_date = parse_date(raw[0])
+                event_date = parse_date(raw[0], feed.date_order)
                 if event_date is None:
                     stats["bad_dates"] += 1
         return {
