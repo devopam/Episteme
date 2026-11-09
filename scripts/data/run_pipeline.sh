@@ -438,6 +438,21 @@ if [ "$SAMPLE" = "1" ]; then
             die "--sample load: migrations-check failed (rc=$mig_rc)" 1
         fi
     fi
+    if [ "$STAGE" = "load" ]; then
+        case "$SOURCE" in
+            ema|openfda|openfda_faers)
+                # The coverage figures of these sources need real substance data.
+                sub_rc=0
+                sub_out="$("$PY" -m episteme.ops.gate substance-check)" || sub_rc=$?
+                sub_out="${sub_out//$''/}"
+                if [ "$sub_rc" -eq 1 ] && [ -n "$sub_out" ]; then
+                    die "--sample load: $sub_out" 2
+                elif [ "$sub_rc" -ne 0 ]; then
+                    die "--sample load: substance-check failed (rc=$sub_rc)" 1
+                fi
+                ;;
+        esac
+    fi
     # `gate run` starts the stage from Python: on Windows it needs the path of
     # this bash, or the system search finds the WSL bash in System32 first.
     if command -v cygpath >/dev/null 2>&1; then

@@ -1530,6 +1530,7 @@ All of them are read in `src/episteme/config.py` (the only module that reads the
 | `EPISTEME_EPAR_MAX_PAGES`, `EPISTEME_EPAR_MAX_BYTES` | Size limits of one EPAR PDF |
 | `EPISTEME_EPAR_MAX_WITHDRAWN_SHARE` | Share of the known documents that the feed may drop |
 | `EPISTEME_EPAR_BUCKET_IDS` | Width of an EPAR bucket, in document ids (a change rebuilds every bucket) |
+| `EPISTEME_SAMPLE_MIN_SUBSTANCES` | Minimum rows in `episteme.substance` of the target database for a `--sample` load of `ema`, `openfda` or `openfda_faers` (default 1000); below it the run refuses (exit 2) and names `scripts/data/openfda/load_substance.sh` |
 | `EPISTEME_AACT_MAX_ORPHAN_SHARE` | Largest share of rows per AACT table whose `nct_id` is not in `studies` (default 0.05); a breach fails the load and the previous release keeps serving |
 | `EPISTEME_LOAD_BATCH_BYTES`, `EPISTEME_WRITE_BATCH_BYTES` | Byte caps of a load batch and of a staging write batch |
 | `EPISTEME_PMC_BUCKET_IDS` | Width of a PMC bucket (a change rebuilds every bucket) |
