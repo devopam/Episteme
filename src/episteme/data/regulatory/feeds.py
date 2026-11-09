@@ -51,6 +51,12 @@ class Feed:
     cadence: str
     # Document types whose files are fetched and read as text (ema_epar_documents only).
     document_types: tuple[str, ...] = ()
+    # Order of a slash date in ``date_field``: "dmy" (DD/MM/YYYY, the default, EMA) or "mdy"
+    # (MM/DD/YYYY, US feeds). Set it per feed; a feed that does not declare it reads "dmy".
+    date_order: str = "dmy"
+
+
+DATE_ORDERS = ("dmy", "mdy")
 
 
 def load_feeds(path: Path | None = None) -> dict[str, Feed]:
@@ -62,6 +68,12 @@ def load_feeds(path: Path | None = None) -> dict[str, Feed]:
         missing = [k for k in _REQUIRED if k not in entry]
         if missing:
             raise ValueError(f"feed {name!r} in {src.name} lacks: {', '.join(missing)}")
+        date_order = str(entry.get("date_order", "dmy"))
+        if date_order not in DATE_ORDERS:
+            raise ValueError(
+                f"feed {name!r} in {src.name}: date_order {date_order!r} is not one of "
+                f"{', '.join(DATE_ORDERS)}"
+            )
         out[name] = Feed(
             name=name,
             url_key=str(entry["url_key"]),
@@ -73,6 +85,7 @@ def load_feeds(path: Path | None = None) -> dict[str, Feed]:
             date_field=entry.get("date_field") or None,
             cadence=str(entry["cadence"]),
             document_types=tuple(entry.get("document_types") or ()),
+            date_order=date_order,
         )
     return out
 
