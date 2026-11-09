@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 import zipfile
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import ijson
+import psutil
 import requests
 
 from episteme.config import get_settings, source_url
@@ -45,6 +47,7 @@ from episteme.data.checkpoint_markers import (
     is_success,
     mark_failed,
     mark_success,
+    success_marker_path,
 )
 from episteme.data.regulatory.feeds import Feed, load_feeds
 from episteme.data.regulatory.parsers import ema_total
@@ -55,7 +58,7 @@ _LOG = logging.getLogger(__name__)
 MARKER_SOURCE = "ema_download"
 ATTEMPTS = 2  # the first try and one retry
 _EXT = {"ema_json": ".json", "article57_xlsx": ".xlsx"}
-_CONNECT_READ_TIMEOUT = (30, 300)
+_CONNECT_TIMEOUT_S = 30
 _CHUNK = 1 << 20
 
 
@@ -96,6 +99,9 @@ def parse_retry_after(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text:
         return None
+    if text.isdigit() and not text.isascii():
+        _LOG.debug("Retry-After %r holds non-ASCII digits; using the backoff", text)
+        return None
     if text.isascii() and text.isdigit():
         return float(text)
     try:
@@ -106,6 +112,37 @@ def parse_retry_after(value: Any) -> float | None:
         when = when.replace(tzinfo=timezone.utc)
     secs = (when - _utcnow()).total_seconds()
     return secs if secs > 0 else None
+
+
+_TEMP_RE = re.compile(r"^\..+\.(\d+)\.tmp$")
+
+
+def remove_stale_temps(directory: Path) -> int:
+    """Delete the ``.<name>.<pid>.tmp`` files of ``directory`` whose PID is not a running
+    process (a run that was killed between the transfer and the rename). Returns the count."""
+    removed = 0
+    if not directory.is_dir():
+        return 0
+    for path in directory.iterdir():
+        m = _TEMP_RE.match(path.name)
+        if m is None or not path.is_file():
+            continue
+        pid = int(m.group(1))
+        if pid == os.getpid() or psutil.pid_exists(pid):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+        _LOG.info("removed the leftover temporary file %s", path.name)
+    return removed
+
+
+def drop_success_marker(processed_root: Path, source: str, key: str) -> None:
+    """A refresh of an item failed: the old file may stay, but its success marker goes, so
+    the next run fetches the item again."""
+    success_marker_path(processed_root, source, key).unlink(missing_ok=True)
 
 
 class ThrottleGate:
@@ -211,15 +248,18 @@ def download_to(
     max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """One request into ``tmp``, then ``check(tmp)`` proves the bytes are a whole file
-    and returns stats. Raises ``FeedVerificationError`` (status 200 with HTML, or a body
-    that starts like HTML) or ``Retryable``. ``check`` may raise either too; this is the
-    one place the EMA feeds and the EPAR documents share their transfer rules.
+    and returns stats. Raises ``Throttled`` for status 429 and 503, ``FeedVerificationError``
+    (status 200 with HTML, or a body that starts like HTML) or ``Retryable``. ``check`` may
+    raise the last two too; this is the one place the EMA feeds and the EPAR documents share
+    their transfer rules.
 
     With ``max_bytes``, a body over the cap raises ``TooLarge``: at once when
     ``Content-Length`` says so, else as soon as the stream passes the cap (the caller
     deletes ``tmp``). The EMA feeds pass no cap."""
     try:
-        resp = session.get(url, stream=True, timeout=_CONNECT_READ_TIMEOUT)
+        resp = session.get(
+            url, stream=True, timeout=(_CONNECT_TIMEOUT_S, get_settings().ema_read_timeout_seconds)
+        )
     except (requests.RequestException, OSError) as exc:
         raise Retryable(f"request failed: {exc}") from exc
     try:
@@ -319,6 +359,7 @@ def fetch_ema_feeds(
         sleep=sleep, backoff_s=backoff_s, max_backoff_s=max_backoff_s, max_throttles=max_throttles
     )
     raw_dir.mkdir(parents=True, exist_ok=True)
+    remove_stale_temps(raw_dir)
 
     result: dict = {"fetched": [], "skipped": [], "failed": {}}
     requests_made = 0
@@ -350,12 +391,14 @@ def fetch_ema_feeds(
                 stats = _download_once(session, url, feed, tmp)
             except KeyboardInterrupt:
                 tmp.unlink(missing_ok=True)
+                drop_success_marker(processed_root, MARKER_SOURCE, key)
                 raise
             except Throttled as exc:
                 tmp.unlink(missing_ok=True)
                 try:
                     gate.on_throttle(exc, feed.name)
                 except RateLimited as stop_exc:
+                    drop_success_marker(processed_root, MARKER_SOURCE, key)
                     mark_failed(
                         processed_root,
                         MARKER_SOURCE,
@@ -369,6 +412,7 @@ def fetch_ema_feeds(
                 continue  # the same feed again; this try does not count
             except FeedVerificationError as exc:
                 tmp.unlink(missing_ok=True)
+                drop_success_marker(processed_root, MARKER_SOURCE, key)
                 mark_failed(
                     processed_root,
                     MARKER_SOURCE,
@@ -384,14 +428,15 @@ def fetch_ema_feeds(
                 attempt += 1
                 _LOG.warning("%s: attempt %d of %d failed: %s", feed.name, attempt, ATTEMPTS, exc)
                 continue
-            gate.ok()
             os.replace(tmp, final)
             mark_success(
                 processed_root, MARKER_SOURCE, key, stats={**stats, "url_key": feed.url_key}
             )
+            gate.ok()
             result["fetched"].append(feed.name)
             break
         else:
+            drop_success_marker(processed_root, MARKER_SOURCE, key)
             mark_failed(
                 processed_root,
                 MARKER_SOURCE,

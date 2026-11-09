@@ -10,6 +10,7 @@ license rules) live next to the code that uses them, not here.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -112,6 +113,8 @@ DEFAULT_EMA_DELAY_SECONDS = 5.0
 DEFAULT_EMA_BACKOFF_SECONDS = 60.0
 DEFAULT_EMA_MAX_BACKOFF_SECONDS = 600.0
 DEFAULT_EMA_MAX_THROTTLES = 5
+# Seconds a read from EMA may stall before the request fails (a stop waits at most this long).
+DEFAULT_EMA_READ_TIMEOUT_SECONDS = 60.0
 # Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
 # holds a long transaction on reg_record blocks it); then the feed fails.
 DEFAULT_REG_LOCK_TIMEOUT_S = 300
@@ -200,8 +203,18 @@ def _get_non_negative_float_or_default(name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         value = -1.0
-    if not value >= 0:  # also rejects nan
-        _LOG.warning("%s must be a number >= 0, got %r; using %s", name, raw, default)
+    if not (value >= 0 and math.isfinite(value)):  # also rejects nan and inf
+        _LOG.warning("%s must be a finite number >= 0, got %r; using %s", name, raw, default)
+        return default
+    return value
+
+
+def _get_positive_float_or_default(name: str, default: float) -> float:
+    """A finite float > 0; unset, invalid or not above 0 logs a warning (when set) and gives
+    ``default``."""
+    value = _get_non_negative_float_or_default(name, default)
+    if value <= 0:
+        _LOG.warning("%s must be a number > 0, got %r; using %s", name, _get(name), default)
         return default
     return value
 
@@ -339,6 +352,8 @@ class Settings:
     ema_backoff_seconds: float = DEFAULT_EMA_BACKOFF_SECONDS
     ema_max_backoff_seconds: float = DEFAULT_EMA_MAX_BACKOFF_SECONDS
     ema_max_throttles: int = DEFAULT_EMA_MAX_THROTTLES
+    # Read timeout of an EMA request (EPISTEME_EMA_READ_TIMEOUT_SECONDS).
+    ema_read_timeout_seconds: float = DEFAULT_EMA_READ_TIMEOUT_SECONDS
     # Seconds to wait for the reg_record partition DDL lock (EPISTEME_REG_LOCK_TIMEOUT_S).
     reg_lock_timeout_s: int = DEFAULT_REG_LOCK_TIMEOUT_S
     # Seconds to wait for the FAERS generation swap's lock (EPISTEME_FAERS_LOCK_TIMEOUT_S).
@@ -501,6 +516,9 @@ def get_settings() -> Settings:
         ),
         ema_max_throttles=_get_positive_int_or_default(
             "EPISTEME_EMA_MAX_THROTTLES", DEFAULT_EMA_MAX_THROTTLES
+        ),
+        ema_read_timeout_seconds=_get_positive_float_or_default(
+            "EPISTEME_EMA_READ_TIMEOUT_SECONDS", DEFAULT_EMA_READ_TIMEOUT_SECONDS
         ),
         reg_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REG_LOCK_TIMEOUT_S", DEFAULT_REG_LOCK_TIMEOUT_S

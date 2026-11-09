@@ -66,6 +66,8 @@ from episteme.data.regulatory.download_ema import (
     ThrottleGate,
     TooLarge,
     download_to,
+    drop_success_marker,
+    remove_stale_temps,
 )
 from episteme.data.regulatory.feeds import load_feeds
 from episteme.data.regulatory.parsers import ema_total, parse
@@ -255,6 +257,7 @@ def fetch_documents(
             f"documents share a stored file name (and so a marker): {', '.join(clash)}"
         )
     (raw_dir / SUBDIR).mkdir(parents=True, exist_ok=True)
+    remove_stale_temps(raw_dir / SUBDIR)
 
     requests_made = 0
     for d, key in zip(selected, keys, strict=True):
@@ -284,12 +287,14 @@ def fetch_documents(
                 )
             except KeyboardInterrupt:
                 tmp.unlink(missing_ok=True)
+                drop_success_marker(processed_root, MARKER_SOURCE, key)
                 raise
             except Throttled as exc:
                 tmp.unlink(missing_ok=True)
                 try:
                     gate.on_throttle(exc, f"document {d['id']}")
                 except RateLimited as stop_exc:
+                    drop_success_marker(processed_root, MARKER_SOURCE, key)
                     mark_failed(
                         processed_root,
                         MARKER_SOURCE,
@@ -303,6 +308,7 @@ def fetch_documents(
                 continue  # the same document again; this try does not count
             except FeedVerificationError as exc:
                 tmp.unlink(missing_ok=True)
+                drop_success_marker(processed_root, MARKER_SOURCE, key)
                 mark_failed(
                     processed_root,
                     MARKER_SOURCE,
@@ -317,6 +323,7 @@ def fetch_documents(
                 # retried; the other documents go on.
                 tmp.unlink(missing_ok=True)
                 last_error = str(exc)
+                drop_success_marker(processed_root, MARKER_SOURCE, key)
                 mark_failed(
                     processed_root,
                     MARKER_SOURCE,
@@ -335,7 +342,6 @@ def fetch_documents(
                     "document %s: attempt %d of %d failed: %s", d["id"], attempt, ATTEMPTS, exc
                 )
                 continue
-            gate.ok()
             os.replace(tmp, final)
             mark_success(
                 processed_root,
@@ -343,11 +349,13 @@ def fetch_documents(
                 key,
                 stats={**stats, "last_updated": updated, "document_id": d["id"]},
             )
+            gate.ok()
             # A failed marker of an earlier try is stale.
             failed_marker_path(processed_root, MARKER_SOURCE, key).unlink(missing_ok=True)
             result["fetched"].append(d["id"])
             break
         else:
+            drop_success_marker(processed_root, MARKER_SOURCE, key)
             mark_failed(
                 processed_root,
                 MARKER_SOURCE,

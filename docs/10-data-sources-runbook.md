@@ -534,7 +534,7 @@ bash scripts/data/run_pipeline.sh <source> <stage> --skip-unit NAME --reason "TE
 | 143 | Stopped with SIGTERM, or the parent runner died. |
 | 75 | Refused: a lock is busy and `--no-wait` is set (section 4.8). `migrate_database.sh` and `bulk_load_indexes.sh` run directly always wait, so they never exit 75. In a `run_pipeline.sh` run with `--bulk` and `--no-wait`, the index drop exits 75 when the advisory lock is busy; the rebuild always waits. |
 
-When a stage fails, `run_pipeline.sh` passes 130, 143 and 75 through and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
+When a stage fails, `run_pipeline.sh` passes 130, 143 and 75 through (and 3 for the `ema` and `ema_epar` download stages: the verification page and the EMA rate-limit stop) and turns every other non-zero stage code into 1. So exit 2 and 3 come from its own argument checks before `run_start`, or from the `--bulk` index drop or rebuild, which keep their own code (section 4.6). For example, a `--skip-unit` NAME that matches no unit makes the stage exit 2 and `run_pipeline.sh` exit 1. The `run_end` reason still names the stage.
 
 **Stop handling.** Ctrl-C and SIGTERM stop the stage at once. A load or graph stage first cancels the running SQL statement.
 
@@ -1395,14 +1395,15 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema download
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema load
 ```
 
-- **Download.** One file at a time. `EPISTEME_EMA_DELAY_SECONDS` seconds pass between two requests (default 5). The stage runs inside `stage_guard` without a lock: a stop request (`EPISTEME_STOP_FILE`) or a dead parent ends it cleanly with exit 143 or 130. Files already written stay. The URLs come from the `EMA_*` keys of `scripts/data/_lib/sources.env`. A file is written under a temporary name and renamed when it is whole. Each feed has a success or failed marker, so a re-run skips finished feeds. A file that is cut short is tried once more, then marked failed; the other feeds still run.
+- **Download.** One file at a time. `EPISTEME_EMA_DELAY_SECONDS` seconds pass between two requests (default 5, was 2). The stage runs inside `stage_guard` without a lock: a stop request (`EPISTEME_STOP_FILE`) or a dead parent ends it cleanly with exit 143 or 130. Files already written stay. The URLs come from the `EMA_*` keys of `scripts/data/_lib/sources.env`. A file is written under a temporary name and renamed when it is whole. Each feed has a success or failed marker, so a re-run skips finished feeds. A file that is cut short is tried once more, then marked failed; the other feeds still run.
 - **The verification stop (exit 3).** EMA can answer an automated request with a human-verification page (status 200 and HTML). That page is never data. The stage writes a failed marker for the feed, stops at once, and exits 3 with `FeedVerificationError`. It does not retry and it does not try to get around the check. What to do:
   1. Wait. Do not run the download again in a loop.
   2. Raise `EPISTEME_EMA_DELAY_SECONDS` if the delay was short.
   3. Run `ema download` again later. Finished feeds are skipped, so the re-run resumes with the feed that stopped.
   4. If the page returns every time, tell the owner. A person can fetch the file by hand into `<raw>/ema/<feed name>.json` (`.xlsx` for Article 57); the loader reads the file as it is.
 - **The throttle pause.** HTTP 429 and 503 are a throttle, not a failure of the file. The whole run pauses and the same file is asked for again. The retry does not use one of the attempts of the file. The wait is the `Retry-After` header (seconds or an HTTP date) when EMA sends it, capped by `EPISTEME_EMA_MAX_BACKOFF_SECONDS`. Without the header the wait is `EPISTEME_EMA_BACKOFF_SECONDS`, doubled for each throttle in a row, capped by `EPISTEME_EMA_MAX_BACKOFF_SECONDS`. A successful download resets the count. The wait is done in slices of 1 s at most, so a stop request ends it at once. The least wait is 1 s.
-- **The rate-limit stop (exit 3).** After `EPISTEME_EMA_MAX_THROTTLES` throttles in a row the stage writes a failed marker for the feed (`RateLimited`), stops, and exits 3 with the message `EMA rate limit: run again later; fetched files are kept`. What to do: wait, then run `ema download` again. Finished feeds are skipped. Exit 3 has two causes: the verification page and the rate-limit stop. The message tells which one.
+- **The rate-limit stop (exit 3).** After `EPISTEME_EMA_MAX_THROTTLES` throttles in a row the stage writes a failed marker for the feed (`RateLimited`), stops, and exits 3 with the message `EMA rate limit: run again later; fetched files are kept`. What to do: wait, then run `ema download` again. Finished feeds are skipped. Exit 3 has two causes: the verification page and the rate-limit stop. The message tells which one. `run_pipeline.sh` passes this exit 3 through for `ema download` and `ema_epar download` (every other stage code except 130, 143 and 75 becomes 1); `run_queue.sh` treats any non-zero code as a stop. Non-finite values (`inf`, `nan`) of the wait keys are refused: the default is used and a warning is logged.
+- **Forced refresh and leftovers.** When a forced refresh (`--force`) of a file fails for any reason, its success marker is removed (the old file may stay), so the next run fetches it again. At the start of a run the stage removes the temporary files (`.<name>.<pid>.tmp`) of processes that are no longer running.
 - **Herbal feed.** `ema_herbal` has 251 rows and declares `meta.total_records` 204 (the rows include exact duplicates). The download stores the file with both numbers in its marker. The load drops exact duplicate rows before it compares the count with the declared total.
 - **Article 57 header.** The workbook has a header row below some title rows (row 7 in the file seen). The parser takes the first row that has at least three of the known column names as the header. If no row qualifies the feed fails with `no header row found`.
 - **Load.** One release per feed, cut by the `cadence` of `src/episteme/data/regulatory/feeds.toml`. The load fails a feed when the rows (after duplicates) differ from its `meta.total_records`, and the old latest release then stays latest. Section 5.13 has the rules of `reg_record`.
@@ -1509,10 +1510,11 @@ All of them are read in `src/episteme/config.py` (the only module that reads the
 
 | Key | What it sets |
 |---|---|
-| `EPISTEME_EMA_DELAY_SECONDS` | Seconds between two EMA requests (feeds and PDFs); default 5 |
+| `EPISTEME_EMA_DELAY_SECONDS` | Seconds between two EMA requests (feeds and PDFs); default 5 (was 2) |
 | `EPISTEME_EMA_BACKOFF_SECONDS` | First wait after a 429 or 503 without `Retry-After`; doubles per throttle in a row; default 60 |
 | `EPISTEME_EMA_MAX_BACKOFF_SECONDS` | Cap of every throttle wait, `Retry-After` included; default 600 |
 | `EPISTEME_EMA_MAX_THROTTLES` | Throttles in a row that stop the stage with exit 3; default 5 |
+| `EPISTEME_EMA_READ_TIMEOUT_SECONDS` | Seconds a read from EMA may stall before the request fails (a stop during a stalled read waits at most this long); default 60 |
 | `EPISTEME_REG_LOCK_TIMEOUT_S` | Seconds the `reg_record` partition DDL waits for its lock |
 | `EPISTEME_FAERS_LOCK_TIMEOUT_S` | Seconds the FAERS swap waits for its lock |
 | `EPISTEME_FAERS_MIN_LIVE_SHARE` | Floor of a new FAERS generation, as a share of the live report count |

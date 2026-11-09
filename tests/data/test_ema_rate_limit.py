@@ -6,9 +6,12 @@ Fake sessions only: no test calls EMA, and ``sleep`` is injected so no test wait
 from __future__ import annotations
 
 import json
+import logging
+import os
 import signal
 from datetime import datetime, timezone
 
+import psutil
 import pytest
 
 from episteme.config import get_settings
@@ -353,6 +356,146 @@ def test_feed_success_resets_the_count(fenv):
     )
     out = fd.fetch_ema_feeds(fenv["raw"], {"ema_a": a, "ema_b": b}, session=s, **fenv["kw"])
     assert out["fetched"] == ["ema_a", "ema_b"]
+
+
+# ---------------------------------------------------------------------------
+# a failed forced refresh, stale temporary files, settings, logging
+# ---------------------------------------------------------------------------
+def test_a_forced_refresh_that_hits_the_rate_limit_drops_the_success_marker(env):
+    a = doc(1)
+    dl.fetch_documents(env["raw"], [a], session=_sess(env, (a, [_pdf_resp("old")])), **env["kw"])
+    marker = success_marker_path(env["proc"], dl.MARKER_SOURCE, "epar__1.pdf")
+    assert marker.is_file()
+    with pytest.raises(RateLimited):
+        dl.fetch_documents(
+            env["raw"], [a], session=_sess(env, (a, [throttle()])), force=True, **env["kw"]
+        )
+    assert (env["raw"] / "epar" / "1.pdf").is_file()  # the old file may stay
+    assert not marker.exists()
+    # The next run, without --force, fetches the document again.
+    out = dl.fetch_documents(
+        env["raw"], [a], session=_sess(env, (a, [_pdf_resp("new")])), **env["kw"]
+    )
+    assert out["fetched"] == ["1"] and out["skipped"] == []
+
+
+def test_a_forced_refresh_that_fails_for_another_reason_drops_the_success_marker(env):
+    a = doc(1)
+    dl.fetch_documents(env["raw"], [a], session=_sess(env, (a, [_pdf_resp("old")])), **env["kw"])
+    marker = success_marker_path(env["proc"], dl.MARKER_SOURCE, "epar__1.pdf")
+    out = dl.fetch_documents(
+        env["raw"],
+        [a],
+        session=_sess(env, (a, [FakeResp(b"x", 404, "text/plain")])),
+        force=True,
+        **env["kw"],
+    )
+    assert "1" in out["failed"] and not marker.exists()
+
+
+def test_a_feed_forced_refresh_that_hits_the_rate_limit_drops_the_success_marker(fenv):
+    a = _feed("ema_a")
+    fd.fetch_ema_feeds(
+        fenv["raw"],
+        {"ema_a": a},
+        session=_fsess(fenv, (a, [FakeResp(_json_body(2))])),
+        **fenv["kw"],
+    )
+    marker = success_marker_path(fenv["proc"], fd.MARKER_SOURCE, "ema_a.json")
+    assert marker.is_file()
+    with pytest.raises(RateLimited):
+        fd.fetch_ema_feeds(
+            fenv["raw"],
+            {"ema_a": a},
+            session=_fsess(fenv, (a, [throttle()])),
+            force=True,
+            **fenv["kw"],
+        )
+    assert (fenv["raw"] / "ema_a.json").is_file() and not marker.exists()
+    out = fd.fetch_ema_feeds(
+        fenv["raw"],
+        {"ema_a": a},
+        session=_fsess(fenv, (a, [FakeResp(_json_body(3))])),
+        **fenv["kw"],
+    )
+    assert out["fetched"] == ["ema_a"]
+
+
+def _dead_pid() -> int:
+    pid = 4_000_000
+    while psutil.pid_exists(pid):
+        pid -= 1
+    return pid
+
+
+def test_epar_run_removes_temp_files_of_dead_processes_only(env):
+    epar = env["raw"] / "epar"
+    epar.mkdir(parents=True)
+    dead = epar / f".7.pdf.{_dead_pid()}.tmp"
+    alive = epar / f".8.pdf.{os.getppid()}.tmp"  # the parent of the test process runs
+    other = epar / "notes.tmp"
+    for f in (dead, alive, other):
+        f.write_bytes(b"x")
+    a = doc(1)
+    dl.fetch_documents(env["raw"], [a], session=_sess(env, (a, [_pdf_resp("a")])), **env["kw"])
+    assert not dead.exists() and alive.exists() and other.exists()
+
+
+def test_feed_run_removes_temp_files_of_dead_processes_only(fenv):
+    fenv["raw"].mkdir(parents=True)
+    dead = fenv["raw"] / f".ema_a.json.{_dead_pid()}.tmp"
+    alive = fenv["raw"] / f".ema_b.json.{os.getppid()}.tmp"
+    for f in (dead, alive):
+        f.write_bytes(b"x")
+    a = _feed("ema_a")
+    fd.fetch_ema_feeds(
+        fenv["raw"],
+        {"ema_a": a},
+        session=_fsess(fenv, (a, [FakeResp(_json_body(2))])),
+        **fenv["kw"],
+    )
+    assert not dead.exists() and alive.exists()
+
+
+@pytest.mark.parametrize(
+    "name", ["EPISTEME_EMA_BACKOFF_SECONDS", "EPISTEME_EMA_MAX_BACKOFF_SECONDS"]
+)
+@pytest.mark.parametrize("bad", ["inf", "-inf", "nan", "1e999"])
+def test_a_non_finite_wait_setting_falls_back_to_the_default(monkeypatch, name, bad):
+    monkeypatch.setenv(name, bad)
+    get_settings.cache_clear()
+    s = get_settings()
+    assert (s.ema_backoff_seconds, s.ema_max_backoff_seconds) == (60.0, 600.0)
+
+
+def test_the_read_timeout_is_a_setting_and_reaches_the_request(env, monkeypatch):
+    assert get_settings().ema_read_timeout_seconds == 60.0
+    monkeypatch.setenv("EPISTEME_EMA_READ_TIMEOUT_SECONDS", "12")
+    get_settings.cache_clear()
+    assert get_settings().ema_read_timeout_seconds == 12.0
+    for bad in ("0", "-3", "inf", "x"):
+        monkeypatch.setenv("EPISTEME_EMA_READ_TIMEOUT_SECONDS", bad)
+        get_settings.cache_clear()
+        assert get_settings().ema_read_timeout_seconds == 60.0
+    monkeypatch.setenv("EPISTEME_EMA_READ_TIMEOUT_SECONDS", "12")
+    get_settings.cache_clear()
+    seen: list = []
+
+    class Recording(FakeSession):
+        def get(self, url, **kwargs):
+            seen.append(kwargs["timeout"])
+            return super().get(url, **kwargs)
+
+    a = doc(1)
+    s = Recording({a["document_url"]: [_pdf_resp("a")]})
+    dl.fetch_documents(env["raw"], [a], session=s, **env["kw"])
+    assert seen == [(30, 12.0)]
+
+
+def test_a_non_ascii_digit_retry_after_is_logged_at_debug(caplog):
+    with caplog.at_level(logging.DEBUG, logger=fd._LOG.name):
+        assert fd.parse_retry_after("٣٠") is None
+    assert "non-ASCII" in caplog.text
 
 
 # ---------------------------------------------------------------------------
