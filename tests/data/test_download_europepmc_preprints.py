@@ -56,6 +56,8 @@ class FakeSession:
         rng = (kw.get("headers") or {}).get("Range")
         if rng:
             start = int(rng.split("=")[1].rstrip("-"))
+            if start >= len(data):
+                return FakeResp(416)
             return FakeResp(206, data[start:], {"Content-Length": str(len(data) - start)})
         return FakeResp(200, data, {"Content-Length": str(len(data))})
 
@@ -142,3 +144,59 @@ def test_force_fetches_again(tmp_path, monkeypatch):
     raw = tmp_path / "b"
     dl.download_bulk(raw, session=FakeSession(FILES))
     assert dl.download_bulk(raw, session=FakeSession(FILES), force=True)["fetched"] == 3
+
+
+def test_force_with_max_files_touches_only_the_files_it_fetches(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    for name, data in FILES.items():
+        (raw / name).write_bytes(b"old" + data)  # wrong size, present
+    res = dl.download_bulk(raw, session=FakeSession(FILES), force=True, max_files=1)
+    assert res["fetched"] == 1
+    kept = [n for n in FILES if (raw / n).read_bytes().startswith(b"old")]
+    assert len(kept) == 2  # the two files beyond the cap are untouched
+
+
+def test_force_keeps_the_old_file_when_the_fetch_fails(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    old = b"old copy"
+    (raw / "PPR7001_PPR208218.xml.gz").write_bytes(old)
+
+    class Failing(FakeSession):
+        def get(self, url, **kw):
+            if url.endswith("PPR7001_PPR208218.xml.gz"):
+                raise RuntimeError("network down")
+            return super().get(url, **kw)
+
+    res = dl.download_bulk(raw, session=Failing(FILES), force=True)
+    assert res["errors"] == 1
+    assert (raw / "PPR7001_PPR208218.xml.gz").read_bytes() == old
+
+
+def test_a_part_file_as_big_as_the_file_is_dropped_and_fetched_fresh(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR208220_PPR297873.xml.gz.part").write_bytes(b"x" * 70)  # full size, stale
+    (raw / "PPR1082914_PPR1327385.xml.gz.part").write_bytes(b"x" * 99)  # bigger
+    dl.download_bulk(raw, session=FakeSession(FILES))
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 70
+    assert (raw / "PPR1082914_PPR1327385.xml.gz").read_bytes() == b"c" * 30
+
+
+def test_a_416_answer_to_the_resume_request_starts_over(tmp_path, monkeypatch):
+    _settings(monkeypatch)
+    raw = tmp_path / "b"
+    raw.mkdir()
+    (raw / "PPR208220_PPR297873.xml.gz.part").write_bytes(b"x" * 20)
+
+    class NoHead(FakeSession):
+        def head(self, url, **kw):  # the size is unknown: only the 416 can tell
+            raise RuntimeError("no HEAD")
+
+    sess = NoHead({**FILES, "PPR208220_PPR297873.xml.gz": b"b" * 10})  # the part is bigger
+    dl.download_bulk(raw, session=sess)
+    assert (raw / "PPR208220_PPR297873.xml.gz").read_bytes() == b"b" * 10

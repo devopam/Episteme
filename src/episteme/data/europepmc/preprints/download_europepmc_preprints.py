@@ -16,7 +16,8 @@ The per-id REST route (one ``fullTextXML`` request per preprint, ``pprid.txt.gz`
 requests.
 
 ``--dry-run`` lists what would be fetched and writes nothing. ``--force`` fetches
-again. ``--max-files`` caps the number of files fetched in a run.
+again (only the files that the cap lets through; the old file stays until the new one is
+complete). ``--max-files`` caps the number of files fetched in a run.
 
 No ``os.environ`` reads: the endpoint comes from ``episteme.config.get_settings()``.
 """
@@ -24,6 +25,7 @@ No ``os.environ`` reads: the endpoint comes from ``episteme.config.get_settings(
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -58,23 +60,39 @@ def _remote_size(session: Any, url: str) -> int | None:
         return None
 
 
-def _fetch(session: Any, url: str, dest: Path) -> None:
-    """Fetch ``url`` into ``dest`` through ``dest.part``; resume from a part file."""
+def _fetch(session: Any, url: str, dest: Path, *, fresh: bool = False) -> None:
+    """Fetch ``url`` into ``dest`` through ``dest.part``; resume from a part file.
+
+    ``dest`` is replaced (``os.replace``) only after the whole file is in the part file, so
+    an old good copy survives a failed fetch. A part file that is as big as the file on the
+    server or bigger is stale: it is dropped and the file is fetched from the start. A 416
+    answer to a ``Range`` request means the same."""
     part = dest.with_name(dest.name + ".part")
+    if fresh:
+        part.unlink(missing_ok=True)
     have = part.stat().st_size if part.is_file() else 0
-    headers = {"Range": f"bytes={have}-"} if have else {}
-    resp = session.get(url, stream=True, headers=headers, timeout=_TIMEOUT)
-    try:
-        resp.raise_for_status()
-        mode = "ab"
-        if have and resp.status_code != 206:  # the server sent the whole file
-            mode = "wb"
-        with part.open(mode) as fh:
-            for chunk in resp.iter_content(chunk_size=_CHUNK):
-                fh.write(chunk)
-    finally:
-        resp.close()
-    part.replace(dest)
+    if have:
+        remote = _remote_size(session, url)
+        if remote is not None and have >= remote:
+            part.unlink()
+            have = 0
+    for attempt in (1, 2):
+        headers = {"Range": f"bytes={have}-"} if have else {}
+        resp = session.get(url, stream=True, headers=headers, timeout=_TIMEOUT)
+        try:
+            if resp.status_code == 416 and have and attempt == 1:
+                part.unlink(missing_ok=True)  # the part does not fit the file: start over
+                have = 0
+                continue
+            resp.raise_for_status()
+            mode = "ab" if have and resp.status_code == 206 else "wb"
+            with part.open(mode) as fh:
+                for chunk in resp.iter_content(chunk_size=_CHUNK):
+                    fh.write(chunk)
+        finally:
+            resp.close()
+        break
+    os.replace(part, dest)
 
 
 def download_bulk(
@@ -111,18 +129,16 @@ def download_bulk(
     for name in names:
         dest = raw_dir / name
         url = f"{base}/{name}"
-        if force:
-            dest.unlink(missing_ok=True)
-            dest.with_name(name + ".part").unlink(missing_ok=True)
-        elif dest.is_file() and dest.stat().st_size > 0:
+        if not force and dest.is_file() and dest.stat().st_size > 0:
             size = _remote_size(session, url)
             if size is not None and size == dest.stat().st_size:
                 skipped += 1
                 continue
+        # The cap comes first: a file that is not fetched is never touched, also with force.
         if max_files and fetched >= max_files:
             continue
         try:
-            _fetch(session, url, dest)
+            _fetch(session, url, dest, fresh=force)
             fetched += 1
         except Exception as exc:  # noqa: BLE001 - one file must not stop the others
             print(f"WARN: {name}: {exc}", file=sys.stderr)
