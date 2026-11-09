@@ -201,7 +201,7 @@ Every source, every teacher output and the base model carry one class. Design: `
 | Use with caution | RAG with citation; out of SFT until the open point is closed |
 | Download-only | No corpus and no training |
 
-The assessment below is from official pages where found. It is a project ruling, not a legal determination. Confirm each source again before first use.
+The source table below is carried from the spec and was not re-read in this task. Only the items in 2.7.1 and 2.8 were verified on official pages. It is a project ruling, not a legal determination. Confirm each source again before first use.
 
 | Class | Sources |
 |-------|---------|
@@ -211,16 +211,16 @@ The assessment below is from official pages where found. It is a project ruling,
 
 #### 2.7.1 Guideline and ICSR standard packages (read 2026-11-09)
 
-Rules from a document may enter the rule store only when its class is "use freely". Keep the ICH credit, mark every adaptation, and do not imply ICH endorsement. The ICH notice excludes third-party content and the ICH logo. The notice says "under a public license" and names no licence; it has no non-commercial term. Claude's reading: this allows commercial use. The owner may ask counsel to confirm.
+Rules from a document may enter the rule store only when its class is "use freely". Keep the ICH credit, mark every adaptation, and do not imply ICH endorsement. The ICH notice excludes third-party content and the ICH logo. **The ICH class is a conditional project ruling.** The notice grants use, reproduction, adaptation and modification with credit and has no non-commercial term, but it says "under a public license" and names no licence. The owner (or counsel) confirms. Rule files encode only section titles, clause numbers, data element ids and rules in our own words; no ICH text is copied.
 
 | Item | Official page read | Key licence words (paraphrase) | Class |
 |------|--------------------|--------------------------------|-------|
-| ICH E2C(R2) PBRER | `database.ich.org/sites/default/files/E2C_R2_Guideline.pdf` (legal notice, front page) | May be used, reproduced, adapted, modified, translated or distributed under a public license; credit ICH; label changes; no sponsor impression | Use freely, with attribution |
-| ICH E2B(R3) IG v5.03 (Step 4, 18 July 2025) | `database.ich.org`, ICH E2B(R3) IG PDF (legal notice, page 3) | Same ICH notice. Third-party content inside the IG (for example ISO, MedDRA, UCUM, EDQM) is excluded | Use freely, with attribution (IG text only) |
+| ICH E2C(R2) PBRER | `database.ich.org/sites/default/files/E2C_R2_Guideline.pdf` (legal notice, front page) | May be used, reproduced, adapted, modified, translated or distributed under a public license; credit ICH; label changes; no sponsor impression | Use freely, with attribution (conditional project ruling; owner or counsel confirms) |
+| ICH E2B(R3) IG v5.03 (Step 4, 18 July 2025) | `database.ich.org`, ICH E2B(R3) IG PDF (legal notice, page 3) | Same ICH notice. Third-party content inside the IG (for example ISO, MedDRA, UCUM, EDQM) is excluded | Use freely, with attribution (IG text only; conditional project ruling; owner or counsel confirms) |
 | ICH E2B(R3) XML schema and message files | ICH E2B page: the fetch tool returned no content on 2026-11-09 | Not verified. FDA lists a schema set, but no terms were read | Use with caution: not verified |
-| ICH E6(R3) GCP (Step 4, 16 June 2026) | `database.ich.org`, E6(R3) final consolidated PDF (legal notice, front matter) | Same ICH notice; the ICH logo is excluded | Use freely, with attribution |
+| ICH E6(R3) GCP (Step 4, 16 June 2026) | `database.ich.org`, E6(R3) final consolidated PDF (legal notice, front matter) | Same ICH notice; the ICH logo is excluded | Use freely, with attribution (conditional project ruling; owner or counsel confirms) |
 | ICH E3 clinical study reports (1995) | `database.ich.org/sites/default/files/E3_Guideline.pdf` | The PDF carries no legal notice. The ICH copyright page returned no content | Use with caution: no notice found |
-| FDA regional E2B(R3) IG (final, Aug 2024, docket FDA-2016-D-1280) | FDA guidance page; `fda.gov/about-fda/about-website/website-policies` | The guidance page states no terms. FDA states its web content is public domain unless noted. ICH text inside keeps the ICH notice | Use freely (FDA text); third-party text excluded |
+| FDA regional E2B(R3) IG (final, Aug 2024, docket FDA-2016-D-1280) | FDA guidance page; `fda.gov/about-fda/about-website/website-policies` | The guidance page states no terms of its own. The class rests on FDA's website policy: web content is public domain unless noted. ICH text inside keeps the ICH notice | Use freely (FDA text; class rests on FDA's website policy); third-party text excluded |
 | EU ICSR IG (EMA/51938/2013, Rev 2) | `ema.europa.eu/en/about-us/legal-notice` | EMA legal notice: reuse in whole or in part, commercial and non-commercial, with EMA credit in each copy; third-party content excluded. The guide itself was not read (HTTP 429) | Use with caution: guide not read |
 | HL7 v3 ICSR artefacts (ISO/HL7 27953) | ISO and HL7 catalogue entries (search result only) | An ISO/HL7 standard; the catalogue says reuse needs a fee or licence. HL7's own terms were not read | Download-only (ISO standard text) |
 
@@ -228,10 +228,10 @@ Rules from a document may enter the rule store only when its class is "use freel
 
 | Input | Role | Licence evidence (read 2026-11-09) | Class |
 |-------|------|------------------------------------|-------|
-| **Qwen3 (1.7B read; 0.6B and 4B same family)** | Base model for the SFT model | Hugging Face model card `huggingface.co/Qwen/Qwen3-1.7B` states `apache-2.0` | Use freely: Apache 2.0. Keep the licence and notices with the weights |
+| **Qwen3 (1.7B)** | Base model for the SFT model | Hugging Face model card `huggingface.co/Qwen/Qwen3-1.7B` states `apache-2.0` | Use freely: Apache 2.0. Keep the licence and notices with the weights |
 | **DeepSeek Open Platform API** | Teacher that writes Stage B examples (public data only) | Terms of service section 4.2 (`cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html`): Inputs and Outputs may be used for "training other models (such as model distillation)", subject to law and the Terms | Use freely for outputs under these terms. Each example keeps its teacher name. Open-weight DeepSeek-R1 is not used as teacher |
 
-Qwen3.5 and the other candidate base models are not verified here. Verify the model card before any of them is used.
+Only the 1.7B card was read. The 0.6B and 4B cards must be verified before use. Qwen3.5 and the other candidate base models are not verified here. Verify the model card before any of them is used.
 
 ---
 
