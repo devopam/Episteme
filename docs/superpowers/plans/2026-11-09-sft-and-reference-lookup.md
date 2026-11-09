@@ -180,7 +180,7 @@ If a licence cannot be confirmed from an official page, record it as "use with c
 **Interfaces:**
 - Consumes: Task 13 manifest (`reference_docs` manifest entries: `source`, `path`, `sha256`).
 - Produces:
-  - Rule file shape: `{"ig": "ICH E2C(R2)", "version": "Step 4, 2012-12-17", "source_docs": [{"source": "ich_e2", "file": "E2C_R2_Guideline.pdf", "sha256": "..."}], "sections": [{"id": "1", "title": "Introduction", "required": true, "mah_data": false, "clause": "3.1", "region": "ich"}, ...]}`. `mah_data: true` marks sections that need company data (exposure, own tabulations, reference safety information as CCSI). `region: "eu"` entries come from GVP Module VII (EU regional appendix and EU-specific requirements); a `region="ich"` check ignores them.
+  - Rule file shape: `{"ig": "ICH E2C(R2)", "version": "Step 4, 2012-12-17", "source_docs": [{"source": "ich", "file": "E2C_R2_Guideline.pdf", "sha256": "..."}], "sections": [{"id": "1", "title": "Introduction", "required": true, "mah_data": false, "clause": "3.1", "region": "ich"}, ...]}`. `mah_data: true` marks sections that need company data (exposure, own tabulations, reference safety information as CCSI). `region: "eu"` entries come from GVP Module VII (EU regional appendix and EU-specific requirements); a `region="ich"` check ignores them.
   - `load_rules(ig_id: str) -> RuleSet` (ids: `ich_e2c_r2`, `ich_e2b_r3`).
   - `Finding(rule_id: str, clause: str, message: str)`.
   - `check_sections(rules: RuleSet, headings: list[str], *, region: Literal["ich","eu"] = "ich") -> list[Finding]` — missing required section, wrong order, duplicate section.
