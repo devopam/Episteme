@@ -65,6 +65,10 @@ _EXTRACT_MODULES = {
     "pmc": ("episteme.data.pmc.extract_pmc", "pmc/extract_pmc.sh"),
     "dailymed": ("episteme.data.dailymed.extract_dailymed", "dailymed/extract_dailymed.sh"),
     "ema_epar": ("episteme.data.ema.extract_epar", "ema/extract_ema_epar.sh"),
+    "europepmc_preprint": (
+        "episteme.data.europepmc.preprints.extract_europepmc_preprints",
+        "europepmc_preprint/extract_europepmc_preprint.sh",
+    ),
 }
 LOAD_MODULE = "episteme.data.load_articles"
 
@@ -113,6 +117,7 @@ EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pmc", "load"): ("episteme.data.pmc.retire",),
     ("dailymed", "load"): ("episteme.data.dailymed.retire",),
     ("ema_epar", "load"): ("episteme.data.ema.retire",),
+    ("europepmc_preprint", "load"): ("episteme.data.europepmc.preprints.retire",),
 }
 
 
