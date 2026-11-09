@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Cut from ICH E2B(R3) code list CL1 (ICH, use freely with attribution). -->
+<gc:CodeList xmlns:gc="http://docs.oasis-open.org/codelist/ns/genericode/1.0/">
+	<Identification>
+		<ShortName>ich-type-of-message-in-batch</ShortName>
+		<LongName>Type of Messages in Batch</LongName>
+		<Version>2.0</Version>
+		<CanonicalUri>2.16.840.1.113883.3.989.2.1.1.1</CanonicalUri>
+		<CanonicalVersionUri>2.16.840.1.113883.3.989.2.1.1.1.2</CanonicalVersionUri>
+	</Identification>
+	<ColumnSet>
+		<Column Use="required" Id="code"><ShortName>numeric-code</ShortName><Data Type="unsignedShort"/></Column>
+		<Column Use="optional" Id="en"><ShortName>english-label</ShortName><Data Type="string" Lang="en"/></Column>
+		<Column Use="optional" Id="cf"><ShortName>current flag</ShortName><Data Type="string" Lang="en"/></Column>
+	</ColumnSet>
+	<SimpleCodeList>
+		<Row>
+			<Value ColumnRef="code"><SimpleValue>1</SimpleValue></Value>
+			<Value ColumnRef="en"><SimpleValue>ichicsr</SimpleValue></Value>
+			<Value ColumnRef="cf"><SimpleValue>y</SimpleValue></Value>
+		</Row>
+		<Row>
+			<Value ColumnRef="code"><SimpleValue>9</SimpleValue></Value>
+			<Value ColumnRef="en"><SimpleValue>retired example</SimpleValue></Value>
+			<Value ColumnRef="cf"><SimpleValue>n</SimpleValue></Value>
+		</Row>
+	</SimpleCodeList>
+</gc:CodeList>
