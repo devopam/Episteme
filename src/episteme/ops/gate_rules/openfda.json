@@ -6,7 +6,6 @@
       "fda_enforcement": 0.0,
       "fda_ndc": 1.0,
       "fda_drugsfda": 0.0,
-      "fda_orangebook": 0.0,
       "fda_shortages": 0.0
     },
     "max_peak_rss_mb": 2048
