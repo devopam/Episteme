@@ -184,7 +184,7 @@ def test_a_retry_that_succeeds_stores_the_file(env):
 
 def test_server_error_is_retried_once_then_fails(env):
     a = _feed("ema_a")
-    session = FakeSession({_url(a): [FakeResp(b"oops", 503, "text/plain")]})
+    session = FakeSession({_url(a): [FakeResp(b"oops", 500, "text/plain")]})
     out = fetch_ema_feeds(env["raw"], {"ema_a": a}, session=session, **env["kw"])
     assert "ema_a" in out["failed"] and len(session.calls) == 2
 
@@ -210,7 +210,7 @@ def test_delay_default_comes_from_settings(tmp_path, monkeypatch):
         assert cfg.get_settings().ema_delay_seconds == 7.0
         monkeypatch.delenv("EPISTEME_EMA_DELAY_SECONDS")
         cfg.get_settings.cache_clear()
-        assert cfg.get_settings().ema_delay_seconds == 2.0
+        assert cfg.get_settings().ema_delay_seconds == 5.0
     finally:
         cfg.get_settings.cache_clear()
 
@@ -247,7 +247,7 @@ def test_a_truncated_gzip_encoded_response_is_still_caught_by_parsing(env):
     assert "ema_a" in out["failed"] and len(session.calls) == 2
 
 
-@pytest.mark.parametrize("status", [404, 503])
+@pytest.mark.parametrize("status", [404, 500])
 def test_an_html_error_page_is_an_ordinary_error_not_the_verification_page(env, status):
     a, b = _feed("ema_a"), _feed("ema_b")
     page = b"<html><body>Not here</body></html>"

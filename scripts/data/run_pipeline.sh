@@ -694,10 +694,16 @@ run_stage() {
         _status_set "$name" "$state" "${unit_args[@]+"${unit_args[@]}"}" --reason "$reason"
         STATUS_OPEN=""
         _run_end "$reason"
-        # A stop and a lock refusal pass through; every other stage failure is
+        # A stop and a lock refusal pass through, and so does exit 3 of the EMA
+        # downloads (verification page, rate limit); every other stage failure is
         # exit 1 (exit 2 stays for the dispatcher's own rejections before run_start).
         case "$rc" in
             130|143|75) exit "$rc" ;;
+            3)
+                case "$SOURCE:$name" in
+                    ema:download|ema_epar:download) exit 3 ;;
+                esac
+                exit 1 ;;
             *) exit 1 ;;
         esac
     fi

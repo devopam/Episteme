@@ -145,7 +145,14 @@ def _foreign_lock() -> str:
     )
 
 
-def _run(tree, stage: str, *args: str, script: str = "run_pipeline.sh", **env_over: str):
+def _run(
+    tree,
+    stage: str,
+    *args: str,
+    script: str = "run_pipeline.sh",
+    source: str = "pubmed",
+    **env_over: str,
+):
     data, tmp = tree
     env = {k: v for k, v in os.environ.items() if not k.startswith(("EPISTEME_", "PG"))}
     env.update(
@@ -164,7 +171,7 @@ def _run(tree, stage: str, *args: str, script: str = "run_pipeline.sh", **env_ov
     )
     env.update(env_over)
     argv = [BASH, str(data / script)]
-    argv += ["pubmed", stage, *args] if script == "run_pipeline.sh" else [stage, *args]
+    argv += [source, stage, *args] if script == "run_pipeline.sh" else [stage, *args]
     proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=300)
     return proc, _lines(tmp / "calls.log"), _lines(tmp / "audit.log")
 
@@ -569,3 +576,24 @@ def test_every_python_cli_capture_strips_a_trailing_cr():
             strip1 = b"${" + n + b"%$'" + cr + b"'}"
             strip2 = b"${" + n + b"//$'" + cr + b"'/}"
             assert strip1 in text or strip2 in text, f"{rel}: no CR strip for {name}"
+
+
+@pytest.mark.parametrize(
+    ("source", "rel", "rc_var"),
+    [
+        ("ema", "ema/download_ema.sh", "RC_download_ema"),
+        ("ema_epar", "ema/download_ema_epar.sh", "RC_download_ema_epar"),
+    ],
+)
+def test_the_ema_downloads_pass_exit_3_through(tree, source, rel, rc_var):
+    _write(tree[0] / rel, FAKE_STAGE)
+    proc, _, audit = _run(tree, "download", source=source, **{rc_var: "3"})
+    assert proc.returncode == 3, proc.stderr
+    assert _status(tree[1])["state"] == "failed"
+    ends = [a for a in audit if a.startswith("run_end")]
+    assert len(ends) == 1 and "failed at stage download" in ends[0]
+
+
+def test_exit_3_of_another_stage_is_still_turned_into_1(tree):
+    proc, _, _ = _run(tree, "load", RC_load_pubmed="3")
+    assert proc.returncode == 1, proc.stderr
