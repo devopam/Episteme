@@ -64,3 +64,9 @@ def test_literature_unknown_substance_is_a_gap(mesh):
     res = literature(mesh, 999, None, **KW)
     assert res.claims == ()
     assert res.coverage.missing == ("article_mesh",)
+
+
+def test_empty_article_mesh_is_a_gap(ref_db):
+    res = literature(ref_db, 1, None, **KW)
+    assert res.claims == ()
+    assert res.coverage.missing == ("article_mesh",)

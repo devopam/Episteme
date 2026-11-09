@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import psycopg
 
-from episteme.reference._scope import SCHEMA, relation_exists, substance_scope
+from episteme.reference._scope import source_ready, substance_scope
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
 DATASETS = ("article_mesh",)
@@ -69,7 +69,7 @@ def literature(
     if scope is None:
         note = f"substance {substance_key} not found"
         return LookupResult((), Coverage(matched=0, missing=DATASETS, notes=(note,)))
-    if not all(relation_exists(conn, f"{SCHEMA}.{t}") for t in ("article_mesh", "articles")):
+    if not source_ready(conn, ("article_mesh", "articles"), "article_mesh"):
         return LookupResult((), Coverage(matched=0, missing=DATASETS))
     if not scope.names or limit <= 0:
         return LookupResult((), Coverage(matched=0))

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import psycopg
+from psycopg import sql
 
 from episteme.data.regulatory.normalize import norm_name
 
@@ -44,6 +45,19 @@ def relation_exists(conn: psycopg.Connection, name: str) -> bool:
     """Whether ``name`` (``schema.relation``) exists, by ``to_regclass``."""
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
+        return bool(cur.fetchone()[0])
+
+
+def source_ready(conn: psycopg.Connection, tables: tuple[str, ...], probe: str) -> bool:
+    """Whether every ``episteme`` table in ``tables`` exists and ``probe`` holds a row.
+    The migrations create these tables empty, so an unloaded source is a gap, not "no
+    data"."""
+    if not all(relation_exists(conn, f"{SCHEMA}.{t}") for t in tables):
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier(SCHEMA, probe))
+        )
         return bool(cur.fetchone()[0])
 
 

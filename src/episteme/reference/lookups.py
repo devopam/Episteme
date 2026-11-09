@@ -27,6 +27,7 @@ from episteme.reference._scope import (
     SubstanceScope,
     latest_release,
     relation_exists,
+    source_ready,
     substance_scope,
 )
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
@@ -41,6 +42,7 @@ __all__ = [
     "latest_release",
     "relation_exists",
     "safety_actions",
+    "source_ready",
     "substance_scope",
     "trials",
 ]
@@ -193,7 +195,10 @@ def _reg_lookup(
                 if undated:
                     notes.append(f"{ds}: {undated} records with no date not checked")
             cur.execute(query, params)
-            claims.extend(_reg_claim(ds, release, r) for r in cur.fetchall())
+            found = [_reg_claim(ds, release, r) for r in cur.fetchall()]
+        if any(c.value is None for c in found):
+            notes.append(f"{ds}: status field not found")
+        claims.extend(found)
     if not scope.names:
         notes.append(f"substance {substance_key} has no name to match")
     return LookupResult(
@@ -249,7 +254,7 @@ def current_label(
         return _no_substance("current_label", substance_key)
     notes = (LABEL_HISTORY_GAP,)
     tables = ("label_section", "label_substance", "articles")
-    if not all(relation_exists(conn, f"{SCHEMA}.{t}") for t in tables):
+    if not source_ready(conn, tables, "label_section"):
         return LookupResult((), Coverage(matched=0, missing=("dailymed",), notes=notes))
     rows: list[tuple] = []
     if scope.uniis:
@@ -323,6 +328,20 @@ def trials(
     return LookupResult(claims, Coverage(matched=len(claims)))
 
 
+# Quarters that overlap the interval and have no faers_quarter_totals row (not loaded).
+_FAERS_GAPS_SQL = """
+SELECT q::date FROM generate_series(
+  date_trunc('quarter', %(start)s::date::timestamp), %(end)s::date::timestamp,
+  interval '3 months') AS q
+WHERE NOT EXISTS (SELECT 1 FROM episteme.faers_quarter_totals t WHERE t.quarter = q::date)
+ORDER BY 1
+"""
+
+
+def _quarter_label(quarter: date) -> str:
+    return f"{quarter.year}Q{(quarter.month - 1) // 3 + 1}"
+
+
 _FAERS_SQL = """
 SELECT m.quarter, m.reports_suspect, m.reports_any, t.reports
 FROM episteme.faers_moiety_quarter m
@@ -350,14 +369,19 @@ def faers_counts(
         return _no_substance("faers_counts", substance_key)
     notes = (FAERS_QUARTER_RULE,)
     tables = ("faers_moiety_quarter", "faers_quarter_totals")
-    if not all(relation_exists(conn, f"{SCHEMA}.{t}") for t in tables):
+    if not source_ready(conn, tables, "faers_quarter_totals"):
         return LookupResult((), Coverage(matched=0, missing=("faers",), notes=notes))
     with conn.cursor() as cur:
-        cur.execute(_FAERS_SQL, {"moiety": scope.moiety_key, "start": start, "end": end})
+        params = {"moiety": scope.moiety_key, "start": start, "end": end}
+        cur.execute(_FAERS_SQL, params)
         rows = cur.fetchall()
+        cur.execute(_FAERS_GAPS_SQL, params)
+        gaps = [_quarter_label(r[0]) for r in cur.fetchall()]
+    if gaps:
+        notes += (f"no FAERS data for quarters: {', '.join(gaps)}",)
     claims = []
     for quarter, suspect, any_role, total in rows:
-        label = f"{quarter.year}Q{(quarter.month - 1) // 3 + 1}"
+        label = _quarter_label(quarter)
         of_total = f"of {total} reports received" if total is not None else "total not available"
         claims.append(
             Claim(

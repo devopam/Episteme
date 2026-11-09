@@ -326,3 +326,75 @@ def test_lookups_write_nothing(ref_db):
     current_label(ref_db, 2, **KW)
     trials(ref_db, 1, **KW)
     faers_counts(ref_db, 1, date(2025, 1, 1), date(2025, 12, 31), **KW)
+
+
+def test_missing_status_field_is_noted_once_per_dataset(ref_db):
+    add_release(
+        ref_db,
+        "fda_drugsfda",
+        "2026-10",
+        [
+            {
+                "record_key": "NDA-1",
+                "substance_names": ["metformin"],
+                "payload": {"products": [{"marketing_status": "Prescription"}]},
+            },
+            {"record_key": "NDA-2", "substance_names": ["metformin"], "payload": {"x": 1}},
+            {"record_key": "NDA-3", "substance_names": ["metformin hydrochloride"]},
+        ],
+        latest=True,
+    )
+    add_release(
+        ref_db,
+        "ema_medicines",
+        "2026-10",
+        [
+            {
+                "record_key": "EMEA/H/C/1",
+                "substance_names": ["metformin"],
+                "jurisdiction": "EU",
+                "payload": {"medicine_status": "Authorised"},
+            }
+        ],
+        latest=True,
+    )
+    res = approval_status(ref_db, 1, **KW)
+    values = {c.provenance.record_key: c.value for c in res.claims}
+    assert values == {
+        "NDA-1": "Prescription",
+        "NDA-2": None,
+        "NDA-3": None,
+        "EMEA/H/C/1": "Authorised",
+    }
+    status_notes = [n for n in res.coverage.notes if n.endswith("status field not found")]
+    assert status_notes == ["fda_drugsfda: status field not found"]
+
+
+def test_empty_label_tables_are_a_gap(ref_db):
+    res = current_label(ref_db, 1, **KW)
+    assert res.claims == ()
+    assert res.coverage.missing == ("dailymed",)
+    assert res.coverage.notes == (LABEL_HISTORY_GAP,)
+
+
+def test_empty_faers_tables_are_a_gap(ref_db):
+    res = faers_counts(ref_db, 1, date(2025, 1, 1), date(2025, 12, 31), **KW)
+    assert res.claims == ()
+    assert res.coverage.missing == ("faers",)
+
+
+def test_faers_quarters_without_totals_are_noted(ref_db):
+    with ref_db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.faers_moiety_quarter "
+            "(substance_key, quarter, reports_suspect, reports_any) VALUES (1, '2025-01-01', 5, 8)"
+        )
+        cur.execute(
+            "INSERT INTO episteme.faers_quarter_totals (quarter, reports) "
+            "VALUES ('2025-01-01', 1000)"
+        )
+    ref_db.commit()
+    res = faers_counts(ref_db, 1, date(2025, 2, 1), date(2025, 9, 30), **KW)
+    assert [c.value for c in res.claims] == ["5"]
+    assert res.coverage.missing == ()
+    assert "no FAERS data for quarters: 2025Q2, 2025Q3" in res.coverage.notes
