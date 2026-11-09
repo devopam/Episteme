@@ -225,17 +225,20 @@ def test_unit_is_written_in_bounded_parts_and_counts_skips(tmp_path, monkeypatch
     rows = _rows(proc)
     assert len(rows) == 5
     assert {r["source_file"] for r in rows} == {
-        "PPR1_PPR9__part00001",
-        "PPR1_PPR9__part00002",
-        "PPR1_PPR9__part00003",
+        "PPR00000001_PPR00000009__part00001",
+        "PPR00000001_PPR00000009__part00002",
+        "PPR00000001_PPR00000009__part00003",
     }
-    marker = json.loads(success_marker_path(proc, "europepmc_preprint", "PPR1_PPR9").read_text())
+    marker = json.loads(
+        success_marker_path(proc, "europepmc_preprint", "PPR00000001_PPR00000009").read_text()
+    )
     st = marker["stats"]
     assert st["parts"] == 3 and st["n_rows"] == 5 and st["skipped_no_ppr_id"] == 1
-    assert st["parts_list"] == [f"PPR1_PPR9__part0000{i}" for i in (1, 2, 3)]
+    assert st["parts_list"] == [f"PPR00000001_PPR00000009__part0000{i}" for i in (1, 2, 3)]
     assert (
         max(
-            sum(1 for r in rows if r["source_file"] == f"PPR1_PPR9__part0000{i}") for i in (1, 2, 3)
+            sum(1 for r in rows if r["source_file"] == f"PPR00000001_PPR00000009__part0000{i}")
+            for i in (1, 2, 3)
         )
         == 2
     )
@@ -270,16 +273,18 @@ def test_changed_unit_is_rewritten_and_loaded_parts_go_to_retire(tmp_path, monke
     ex.extract_europepmc_preprints(raw, proc)
     # parts 2 and 3 were loaded
     for n in (2, 3):
-        m = load_success_marker_path(proc, "europepmc_preprint", f"PPR1_PPR9__part0000{n}.parquet")
+        m = load_success_marker_path(
+            proc, "europepmc_preprint", f"PPR00000001_PPR00000009__part0000{n}.parquet"
+        )
         m.parent.mkdir(parents=True, exist_ok=True)
         m.write_text("{}")
     write_bulk(f, _many(2))  # the file shrinks: one part
     res = ex.extract_europepmc_preprints(raw, proc)
     assert res["rows"] == 2
-    assert {r["source_file"] for r in _rows(proc)} == {"PPR1_PPR9__part00001"}
+    assert {r["source_file"] for r in _rows(proc)} == {"PPR00000001_PPR00000009__part00001"}
     assert parts_retire.read_retire_pending(proc, "europepmc_preprint") == [
-        "PPR1_PPR9__part00002",
-        "PPR1_PPR9__part00003",
+        "PPR00000001_PPR00000009__part00002",
+        "PPR00000001_PPR00000009__part00003",
     ]
 
 
@@ -290,8 +295,8 @@ def test_unparseable_unit_fails_with_a_marker_and_no_unit_marker(tmp_path):
         fh.write(b"<articles><article>")
     res = ex.extract_europepmc_preprints(raw, proc)
     assert res["failed"] == 1 and res["ok"] == 0
-    assert failed_marker_path(proc, "europepmc_preprint", "PPR1_PPR9").is_file()
-    assert not success_marker_path(proc, "europepmc_preprint", "PPR1_PPR9").exists()
+    assert failed_marker_path(proc, "europepmc_preprint", "PPR00000001_PPR00000009").is_file()
+    assert not success_marker_path(proc, "europepmc_preprint", "PPR00000001_PPR00000009").exists()
 
 
 def test_max_files_limits_units(tmp_path):
@@ -308,9 +313,9 @@ def test_same_basename_in_two_directories_gets_two_unit_keys(tmp_path):
     raw = tmp_path / "raw"
     ka, kb = ex.unit_key(a, raw), ex.unit_key(b, raw)
     assert ka != kb
-    assert ka == "a__PPR1_PPR9" and kb == "b__PPR1_PPR9"
+    assert ka == "a__PPR00000001_PPR00000009" and kb == "b__PPR00000001_PPR00000009"
     # a flat file keeps its bare stem
-    assert ex.unit_key(raw / "PPR1_PPR9.xml.gz", raw) == "PPR1_PPR9"
+    assert ex.unit_key(raw / "PPR1_PPR9.xml.gz", raw) == "PPR00000001_PPR00000009"
     # the part names (stored source_file) differ too
     assert ex.part_name(ka, 1) != ex.part_name(kb, 1)
 
@@ -324,3 +329,98 @@ def test_archive_typed_id_is_preferred_and_value_match_is_the_fallback(tmp_path)
     other = article("PPR6", doi="10.1101/x6").replace('pub-id-type="archive"', 'pub-id-type="ppr"')
     p = write_bulk(tmp_path / "PPR5_PPR6.xml.gz", [both, other])
     assert [r["source_record_id"] for r in ex.iter_records(p)] == ["PPR5", "PPR6"]
+
+
+def test_stored_source_file_differs_for_same_name_files_in_two_folders(tmp_path, monkeypatch):
+    # `discover` is flat (non-recursive: the downloader writes nowhere else), so two same-name
+    # files in sub-folders never reach `extract_europepmc_preprints`; the unit function itself
+    # still keys on input_key, and this test runs it on both paths.
+    _caps(monkeypatch, 100)
+    raw, proc = tmp_path / "raw", tmp_path / "proc"
+    a = write_bulk(raw / "a" / "PPR1_PPR9.xml.gz", _many(1))
+    b = write_bulk(raw / "b" / "PPR1_PPR9.xml.gz", _many(1, start=50))
+    for f in (a, b):
+        assert ex.process_unit(f, raw_dir=raw, processed_dir=proc, force=False)["ok"]
+    stored = {r["source_file"] for r in _rows(proc)}
+    assert stored == {
+        "a__PPR00000001_PPR00000009__part00001",
+        "b__PPR00000001_PPR00000009__part00001",
+    }
+
+
+def test_unchanged_file_is_skipped_without_reading_it(tmp_path, monkeypatch):
+    raw, proc = tmp_path / "raw", tmp_path / "proc"
+    write_bulk(raw / "PPR1_PPR9.xml.gz", _many(2))
+    assert ex.extract_europepmc_preprints(raw, proc)["rows"] == 2
+
+    def no_hash(_p):
+        raise AssertionError("the file was read for a hash")
+
+    monkeypatch.setattr(ex, "sha256_of", no_hash)
+    again = ex.extract_europepmc_preprints(raw, proc)
+    assert (again["ok"], again["failed"]) == (0, 0)
+
+
+def test_new_mtime_with_the_same_bytes_hashes_once_and_keeps_the_parts(tmp_path, monkeypatch):
+    import os
+
+    raw, proc = tmp_path / "raw", tmp_path / "proc"
+    f = write_bulk(raw / "PPR1_PPR9.xml.gz", _many(2))
+    ex.extract_europepmc_preprints(raw, proc)
+    st = f.stat()
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    calls = []
+    real = ex.sha256_of
+    monkeypatch.setattr(ex, "sha256_of", lambda p: calls.append(p) or real(p))
+    res = ex.extract_europepmc_preprints(raw, proc)
+    assert (res["ok"], res["rows"]) == (0, 0) and len(calls) == 1  # skipped after one hash
+    assert len(_rows(proc)) == 2
+    # the marker now holds the new mtime: the next run reads nothing
+    ex.extract_europepmc_preprints(raw, proc)
+    assert len(calls) == 1
+
+
+def test_same_size_new_content_is_extracted_again(tmp_path):
+    import os
+
+    raw, proc = tmp_path / "raw", tmp_path / "proc"
+    f = write_bulk(raw / "PPR1_PPR9.xml.gz", [article("PPR1", doi="10.1101/aa")])
+    ex.extract_europepmc_preprints(raw, proc)
+    st = f.stat()
+    write_bulk(f, [article("PPR1", doi="10.1101/bb")])
+    assert f.stat().st_size == st.st_size
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    res = ex.extract_europepmc_preprints(raw, proc)
+    assert res["ok"] == 1
+    assert [r["doi"] for r in _rows(proc)] == ["10.1101/bb"]
+
+
+# --- one DOI, two PPR ids -------------------------------------------------------
+def test_two_records_with_one_doi_in_one_file_keep_the_first_and_count_the_other(tmp_path):
+    p = write_bulk(
+        tmp_path / "PPR5_PPR6.xml.gz",
+        [article("PPR5", doi="10.1101/same"), article("PPR6", doi="10.1101/same")],
+    )
+    skips = ex.Counter()
+    rows = list(ex.iter_records(p, skips))
+    assert [r["source_record_id"] for r in rows] == ["PPR5"]
+    assert skips["skipped_duplicate_id"] == 1
+
+
+def test_two_files_with_one_doi_load_in_range_order_so_the_higher_range_stays(
+    tmp_path, monkeypatch
+):
+    _caps(monkeypatch, 100)
+    raw, proc = tmp_path / "raw", tmp_path / "proc"
+    low = write_bulk(raw / "PPR208220_PPR297873.xml.gz", [article("PPR300", doi="10.1101/same")])
+    high = write_bulk(
+        raw / "PPR1082914_PPR1327385.xml.gz", [article("PPR1100000", doi="10.1101/same")]
+    )
+    assert high.name < low.name  # the plain file names sort the wrong way round
+    ex.extract_europepmc_preprints(raw, proc)
+    shards = sorted(p.name for p in (proc / "staging" / "europepmc_preprint").glob("*.parquet"))
+    # load_articles loads shards in this order: the row of the higher range comes last
+    assert shards[0].startswith("PPR00208220_PPR00297873")
+    assert shards[1].startswith("PPR01082914_PPR01327385")
+    by_file = {r["source_file"].split("__")[0]: r["source_record_id"] for r in _rows(proc)}
+    assert by_file["PPR01082914_PPR01327385"] == "PPR1100000"

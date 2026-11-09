@@ -9,15 +9,16 @@ stores under ``<raw>/europepmc/preprints_bulk/``. Each file holds one
 
 **Unit.** One bulk file is one unit. Its key is ``input_key(path, raw_dir)``
 without the ``.xml.gz`` suffix (for a file directly under ``raw_dir``:
-``PPR7001_PPR208218``). The unit has a success marker and parts
+``PPR00007001_PPR00208218``, ids padded to 8 digits). The unit has a success marker and parts
 ``<key>__partNNNNN`` capped by the profile's ``part_rows`` / ``part_bytes``
 (``bucket_parts.write_parts``). The unit is read as a stream: ``iterparse`` hands
 over one record at a time and the record is cleared after it is parsed, so the
 memory use is one record, never the file.
 
-**Resume.** The unit marker holds a fingerprint of the file (size and sha256). A
-unit whose marker ``inputs`` equal the fingerprint is skipped (unless
-``--force``); any other unit is written again from part 1 after its old parts
+**Resume.** The unit marker holds a fingerprint of the file (size, mtime and sha256). A
+unit whose size and mtime equal the marker's is skipped without reading the file
+(unless ``--force``); on a change the sha256 decides (same bytes: the marker is
+refreshed and the unit is skipped); any other unit is written again from part 1 after its old parts
 are deleted. The names of parts that were loaded go to
 ``retire_pending.d/<key>.json`` first; ``retire`` (run by ``load`` after a good
 load) deletes their rows.
@@ -279,31 +280,56 @@ def discover(raw_dir: Path) -> list[Path]:
     )
 
 
+_RANGE_RE = re.compile(r"PPR(\d+)_PPR(\d+)$")
+
+
 def unit_key(path: Path, raw_dir: Path) -> str:
-    """The unit key: ``input_key`` without the ``.xml.gz`` suffix."""
+    """The unit key: ``input_key`` without the ``.xml.gz`` suffix, with the two ids of the
+    file name padded to 8 digits (``PPR00007001_PPR00208218``). ``load_articles`` loads the
+    shards in order of their names, so the padding makes that order the numeric order of the
+    ranges: when two files hold one DOI, the row of the higher range loads last and stays."""
     k = input_key(path, raw_dir)
-    return k[: -len(_SUFFIX)] if k.endswith(_SUFFIX) else k
+    k = k[: -len(_SUFFIX)] if k.endswith(_SUFFIX) else k
+    return _RANGE_RE.sub(lambda m: f"PPR{int(m[1]):08d}_PPR{int(m[2]):08d}", k)
 
 
 def part_name(key: str, n: int) -> str:
     return f"{key}__part{n:05d}"
 
 
-def fingerprint(path: Path) -> list[str]:
-    """``["size:<bytes>", "sha256:<hex>"]`` of the file, read in 1 MiB blocks."""
+def stat_fingerprint(path: Path) -> list[str]:
+    """``["size:<bytes>", "mtime_ns:<ns>"]``: the cheap first test of a resume."""
+    st = Path(path).stat()
+    return [f"size:{st.st_size}", f"mtime_ns:{st.st_mtime_ns}"]
+
+
+def sha256_of(path: Path) -> str:
+    """The sha256 of the file, read in 1 MiB blocks."""
     h = hashlib.sha256()
-    size = 0
     with Path(path).open("rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
-            size += len(block)
-    return [f"size:{size}", f"sha256:{h.hexdigest()}"]
+    return h.hexdigest()
+
+
+def fingerprint(path: Path) -> list[str]:
+    """``["size:<bytes>", "mtime_ns:<ns>", "sha256:<hex>"]``: the marker's ``inputs``."""
+    return [*stat_fingerprint(path), f"sha256:{sha256_of(path)}"]
 
 
 def _part_caps() -> tuple[int, int]:
     """``(part_rows, part_bytes)`` from the runtime profile (a test seam)."""
     profile = get_profile()
     return profile.part_rows, profile.part_bytes
+
+
+def _skipped(key: str, done: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_file": key,
+        "skipped": True,
+        "reason": "success_marker",
+        **{k: int(done.get(k) or 0) for k in _SKIP_KEYS},
+    }
 
 
 def process_unit(
@@ -318,18 +344,24 @@ def process_unit(
     t0 = time.time()
     progress: dict[str, Any] = {"part": None, "rows": 0}
     try:
-        fp = fingerprint(path)
+        cur = stat_fingerprint(path)
+        fp: list[str] | None = None
         if not force:
             done = bucket_parts.read_bucket_marker(processed_dir, SOURCE, key)
-            if done is not None and done["inputs"] == fp:
-                return {
-                    "source_file": key,
-                    "skipped": True,
-                    "reason": "success_marker",
-                    **{k: int(done.get(k) or 0) for k in _SKIP_KEYS},
-                }
+            if done is not None:
+                have = set(done["inputs"])
+                if set(cur) <= have:  # same size and mtime: no need to read the file
+                    return _skipped(key, done)
+                # size or mtime changed: the content decides (sha256 only on a change)
+                fp = [*cur, f"sha256:{sha256_of(path)}"]
+                if cur[0] in have and fp[2] in have:
+                    # the same bytes under a new mtime: keep the parts, refresh the marker
+                    mark_success(processed_dir, SOURCE, key, stats={**done, "inputs": fp})
+                    return _skipped(key, done)
             if is_success(processed_dir, SOURCE, key):
                 _LOG.warning("%s: input or marker changed; writing the unit again", key)
+        if fp is None:
+            fp = [*cur, f"sha256:{sha256_of(path)}"]
         # The unit marker goes first: a stop during the rewrite leaves no marker
         # with an old parts_list.
         success_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
