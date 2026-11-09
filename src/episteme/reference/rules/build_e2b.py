@@ -606,8 +606,7 @@ def build_rules(
     manual = [
         {"element": r["element"], "name": r["name"], "text": r["rule"]}
         for r in rows
-        if CONFORMANCE[_norm(r["conformance_raw"]) or ""] == "conditional"
-        and r["element"] not in checked
+        if r["conformance"] == "conditional" and r["element"] not in checked
     ]
     data = {
         "ig": "ICH E2B(R3)",
@@ -637,7 +636,9 @@ def build_rules(
         },
     }
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    # LF on every platform, so a rebuild gives the committed bytes.
+    text = json.dumps(data, indent=1, ensure_ascii=False) + "\n"
+    out.write_text(text, encoding="utf-8", newline="\n")
     return data
 
 
