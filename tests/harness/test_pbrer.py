@@ -26,8 +26,24 @@ def _claim(text: str, source: str = "src") -> Claim:
     )
 
 
+ALLOWED = {n for names in SECTION_SOURCES.values() for n in names}
+
+
+def substance_result(key: int = 7) -> LookupResult:
+    c = Claim(
+        text="Examplinib (UNII ABC)",
+        value=str(key),
+        method="fetched",
+        provenance=Provenance("substance", None, None, str(key), None),
+        confidence=1.0,
+        confidence_basis="exact",
+    )
+    return LookupResult((c,), Coverage(1))
+
+
 def make_lookup(empty=(), calls=None):
     def lookup(name: str, kwargs: dict) -> LookupResult:
+        assert name in ALLOWED, f"unknown tool {name}"
         if calls is not None:
             calls.append((name, kwargs))
         if name in empty:
@@ -41,7 +57,7 @@ def make_lookup(empty=(), calls=None):
 
 
 def facts(**kw):
-    return assemble_facts(make_lookup(**kw), 7, START, END, tenant="t", caller="c")
+    return assemble_facts(make_lookup(**kw), substance_result(), START, END, tenant="t", caller="c")
 
 
 def test_section_sources_match_spec_map():
@@ -57,7 +73,7 @@ def test_section_sources_match_spec_map():
 
 def test_assemble_passes_kwargs():
     calls: list = []
-    assemble_facts(make_lookup(calls=calls), 7, START, END, tenant="t", caller="c")
+    assemble_facts(make_lookup(calls=calls), substance_result(), START, END, tenant="t", caller="c")
     by = dict(calls)
     assert by["safety_actions"]["start"] == START and by["safety_actions"]["end"] == END
     assert "start" not in by["trials"]
@@ -84,7 +100,8 @@ def test_mah_sections_carry_the_marker(region):
 
 def test_empty_lookup_section_states_the_gap():
     draft = skeleton(facts(empty=("trials", "approval_status")))
-    assert draft[TRIALS_HEADING] == "Coverage gap: trials_src\nCoverage gap: trials note"
+    lines = draft[TRIALS_HEADING].splitlines()
+    assert lines[:2] == ["Coverage gap: trials_src", "Coverage note: trials note"]
     assert "Coverage gap: approval_status_src" in draft["2. Worldwide Marketing Approval Status"]
     assert all(b.strip() for b in draft.values())
 
@@ -132,7 +149,65 @@ def test_gate_rejects_marker_with_other_content():
     assert "plus other content" in findings[0].message
 
 
-def test_gate_allows_marker_with_skeleton_gap_text():
+def test_gate_rejects_marker_with_gap_looking_text():
     draft = skeleton(facts())
-    draft["6.1. Reference Information"] = f"{MAH_MARKER}\n{pbrer.GAP_PREFIX}label history"
+    draft["6.1. Reference Information"] = f"{MAH_MARKER}\nCoverage gap: invented"
+    assert [f.rule_id for f in gate(draft)] == ["6.1"]
+
+
+def test_unresolved_substance_states_the_gap_and_calls_nothing():
+    calls: list = []
+    f = assemble_facts(
+        make_lookup(calls=calls),
+        LookupResult((), Coverage(0, missing=("substance",))),
+        START,
+        END,
+        tenant="t",
+        caller="c",
+    )
+    assert calls == []
+    draft = skeleton(f)
+    assert pbrer.GAP_PREFIX + "substance" in draft["2. Worldwide Marketing Approval Status"]
     assert gate(draft) == []
+
+
+def test_notes_are_not_labelled_gaps():
+    body = skeleton(facts(empty=("trials",)))[TRIALS_HEADING]
+    assert "Coverage gap: trials_src" in body
+    assert "Coverage note: trials note" in body
+    assert "Coverage gap: trials note" not in body
+
+
+def test_placeholders_are_marked_and_listed():
+    draft = skeleton(facts())
+    un = pbrer.unfilled_sections(draft)
+    assert "19. Conclusions and Actions" in un
+    assert "10. Non-Clinical Data" in un
+    assert "2. Worldwide Marketing Approval Status" not in un
+    assert gate(draft) == []
+    draft["19. Conclusions and Actions"] = "Written prose."
+    assert "19. Conclusions and Actions" not in pbrer.unfilled_sections(draft)
+
+
+def test_faers_label_follows_the_mapping(monkeypatch):
+    monkeypatch.setattr(pbrer, "SECTION_SOURCES", {**SECTION_SOURCES, "10": ("faers_counts",)})
+    monkeypatch.setitem(pbrer.SECTION_SOURCES, "9", ("trials",))
+    draft = skeleton(
+        assemble_facts(make_lookup(), substance_result(), START, END, tenant="t", caller="c")
+    )
+    assert "(FAERS)" in draft["10. Non-Clinical Data"]
+    assert "(FAERS)" not in draft["9. Information from Other Clinical Trials and Sources"]
+
+
+def test_trials_and_literature_carry_the_interval_note():
+    draft = skeleton(facts())
+    assert "Coverage note: " + pbrer.INTERVAL_NOTES["trials"] in draft[TRIALS_HEADING]
+    assert "not filtered to the reporting interval" in pbrer.INTERVAL_NOTES["literature"]
+    assert "AACT lists all sponsors" in pbrer.INTERVAL_NOTES["trials"]
+    lit = draft["11. Literature"]
+    assert "not filtered to the reporting interval" in lit
+
+
+def test_title_page_shows_substance_and_interval():
+    body = skeleton(facts())["Title Page"]
+    assert "Examplinib" in body and "2025-01-01" in body and "2025-12-31" in body

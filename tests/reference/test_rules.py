@@ -267,3 +267,12 @@ def test_titles_match_source_pdf(rules):
         s.title for s in rules.sections if s.region == "ich" and _squash(s.title) not in text
     ]
     assert missing == []
+
+
+def test_check_mah_markers_strict_wants_the_marker_alone():
+    rules = load_rules("ich_e2c_r2")
+    head = "5.2. Cumulative and Interval Patient Exposure from Marketing Experience"
+    assert check_mah_markers(rules, {head: "MAH data required"}, strict=True) == []
+    bad = {head: "MAH data required\nmore"}
+    assert check_mah_markers(rules, bad) == []
+    assert [f.rule_id for f in check_mah_markers(rules, bad, strict=True)] == ["5.2"]

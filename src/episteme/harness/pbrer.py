@@ -13,11 +13,10 @@ from datetime import date
 from typing import Literal
 
 from episteme.reference.claims import Claim, Coverage, LookupResult
+from episteme.reference.lookups import FAERS_LABEL
 from episteme.reference.rules import (
     MAH_MARKER,
     Finding,
-    RuleSet,
-    _Resolver,
     check_mah_markers,
     check_sections,
     load_rules,
@@ -34,15 +33,25 @@ SECTION_SOURCES: dict[str, tuple[str, ...]] = {
     "9": ("faers_counts",),
     "11": ("literature",),
 }
-FAERS_LABEL = "US public spontaneous reports (FAERS)"
 GAP_PREFIX = "Coverage gap: "
+NOTE_PREFIX = "Coverage note: "
+# Start of every text the skeleton writes as a stand-in; ``unfilled_sections`` finds it.
+SKELETON_PLACEHOLDER = "[skeleton] "
+# Lookups with no interval filter: their sections say so (spec section 6).
+INTERVAL_NOTES: dict[str, str] = {
+    "trials": (
+        "not filtered to the reporting interval; AACT lists all sponsors"
+        " (E2C(R2) section 7 covers MAH trials, section 9.1 other trials)"
+    ),
+    "literature": "not filtered to the reporting interval",
+}
 # Sections whose prose the model writes from the facts above (spec section 6).
 PROSE_SECTIONS = frozenset(
     {"15", "16", "16.1", "16.2", "16.3", "16.4", "16.5"}
     | {"17", "17.1", "17.2", "17.3", "18", "18.1", "18.2", "19"}
 )
-PROSE_BODY = "To be drafted from the facts in the sections above."
-NO_SOURCE_BODY = "No public source is mapped to this section in v1."
+PROSE_BODY = SKELETON_PLACEHOLDER + "to be drafted from the facts in the sections above."
+NO_SOURCE_BODY = SKELETON_PLACEHOLDER + "no public source is mapped to this section in v1."
 
 _NEEDS_DATES = {"safety_actions", "faers_counts"}
 
@@ -74,16 +83,24 @@ def _merge(results: list[LookupResult]) -> LookupResult:
 
 def assemble_facts(
     lookup: Lookup,
-    substance_key: int,
+    substance: LookupResult,
     start: date,
     end: date,
     *,
     tenant: str,
     caller: str,
 ) -> PbrerFacts:
-    """Run the lookups of ``SECTION_SOURCES`` and keep one merged result per section."""
-    base = {"substance_key": substance_key, "tenant": tenant, "caller": caller}
-    substance = lookup("substance", dict(base))
+    """Run the lookups of ``SECTION_SOURCES`` and keep one merged result per section.
+
+    ``substance`` is the ``resolve_entity`` result; its first claim's value is the key.
+    With no claim, no lookup runs and every source section states the resolution gap."""
+    interval = (start, end)
+    if not substance.claims or substance.claims[0].value is None:
+        gap = LookupResult(
+            (), Coverage(0, missing=("substance",), notes=("substance not resolved",))
+        )
+        return PbrerFacts(substance, interval, {sid: gap for sid in SECTION_SOURCES})
+    base = {"substance_key": int(substance.claims[0].value), "tenant": tenant, "caller": caller}
     sections: dict[str, LookupResult] = {}
     for section_id, names in SECTION_SOURCES.items():
         results = []
@@ -93,9 +110,12 @@ def assemble_facts(
                 kwargs.update(start=start, end=end)
             if name == "literature":
                 kwargs["topic"] = None
-            results.append(lookup(name, kwargs))
+            r = lookup(name, kwargs)
+            if name in INTERVAL_NOTES:
+                r = _merge([r, LookupResult((), Coverage(0, notes=(INTERVAL_NOTES[name],)))])
+            results.append(r)
         sections[section_id] = _merge(results)
-    return PbrerFacts(substance=substance, interval=(start, end), sections=sections)
+    return PbrerFacts(substance, interval, sections)
 
 
 def _claim_line(c: Claim) -> str:
@@ -109,18 +129,25 @@ def _claim_line(c: Claim) -> str:
 
 
 def _gap_lines(r: LookupResult) -> list[str]:
-    return [GAP_PREFIX + g for g in (*r.coverage.missing, *r.coverage.notes)]
+    return [GAP_PREFIX + g for g in r.coverage.missing] + [
+        NOTE_PREFIX + n for n in r.coverage.notes
+    ]
+
+
+def _title_page(facts: PbrerFacts) -> str:
+    start, end = facts.interval
+    name = facts.substance.claims[0].text if facts.substance.claims else "not resolved"
+    return f"Substance: {name}\nReporting interval: {start.isoformat()} to {end.isoformat()}"
 
 
 def _body(section_id: str, mah_data: bool, result: LookupResult | None) -> str:
-    gaps = _gap_lines(result) if result is not None else []
     if mah_data:
-        # Company data only: no public fact goes here.
-        return "\n".join([MAH_MARKER, *gaps])
+        # Company data only: no public fact and no other text goes here.
+        return MAH_MARKER
     if result is None:
         return PROSE_BODY if section_id in PROSE_SECTIONS else NO_SOURCE_BODY
-    lines = [_claim_line(c) for c in result.claims] + gaps
-    if section_id == "9":
+    lines = [_claim_line(c) for c in result.claims] + _gap_lines(result)
+    if "faers_counts" in SECTION_SOURCES.get(section_id, ()):
         lines.insert(0, FAERS_LABEL)
     return "\n".join(lines) if lines else GAP_PREFIX + "no matching records"
 
@@ -129,37 +156,24 @@ def skeleton(facts: PbrerFacts, *, region: Literal["ich", "eu"] = "ich") -> dict
     """Every E2C(R2) section of ``region`` in rule order: heading -> body."""
     rules = load_rules("ich_e2c_r2")
     return {
-        s.heading: _body(s.id, s.mah_data, facts.sections.get(s.id))
+        s.heading: _title_page(facts)
+        if s.id == "title_page"
+        else _body(s.id, s.mah_data, facts.sections.get(s.id))
         for s in rules.sections_for(region)
     }
 
 
-def _extra_content(rules: RuleSet, draft: dict[str, str]) -> list[Finding]:
-    """A mah_data body may hold the marker and skeleton gap lines, nothing else."""
-    resolver = _Resolver(rules)
-    findings = []
-    for heading, body in draft.items():
-        section, _ = resolver.resolve(heading)
-        if section is None or not section.mah_data or MAH_MARKER not in (body or ""):
-            continue
-        rest = [ln.strip() for ln in body.replace(MAH_MARKER, "").splitlines() if ln.strip()]
-        if any(not ln.startswith(GAP_PREFIX) for ln in rest):
-            findings.append(
-                Finding(
-                    section.id,
-                    section.clause,
-                    f"section {section.ref} holds {MAH_MARKER!r} plus other content;"
-                    " no company data is supplied in v1",
-                )
-            )
-    return findings
+def unfilled_sections(draft: dict[str, str]) -> list[str]:
+    """Headings whose body is still skeleton placeholder text. The gate does not reject
+    them in v1: not drafted is not invented."""
+    return [h for h, b in draft.items() if (b or "").startswith(SKELETON_PLACEHOLDER)]
 
 
 def gate(draft: dict[str, str], *, region: Literal["ich", "eu"] = "ich") -> list[Finding]:
-    """Rule-store checks: section completeness and order, and the MAH markers."""
+    """Rule-store checks: section completeness and order, and the MAH markers (a
+    mah_data section holds the marker alone, because v1 supplies no company data)."""
     rules = load_rules("ich_e2c_r2")
     return [
         *check_sections(rules, list(draft), region=region),
-        *check_mah_markers(rules, draft),
-        *_extra_content(rules, draft),
+        *check_mah_markers(rules, draft, strict=True),
     ]

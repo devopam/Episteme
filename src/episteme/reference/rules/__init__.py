@@ -264,18 +264,34 @@ def _longest_increasing(values: list[int]) -> set[int]:
 
 
 def check_mah_markers(
-    rules: RuleSet, sections: dict[str, str], *, supplied: Collection[str] = ()
+    rules: RuleSet,
+    sections: dict[str, str],
+    *,
+    supplied: Collection[str] = (),
+    strict: bool = False,
 ) -> list[Finding]:
     """Every ``mah_data`` section in ``sections`` (heading -> body) must contain
     ``MAH data required``, unless its section id is in ``supplied`` (the caller gave
-    company data). v1 never supplies data."""
+    company data). v1 never supplies data.
+
+    With ``strict``, the body must be the marker alone (after strip): a marker plus any
+    other content is a finding, because no company data is supplied."""
     resolver = _Resolver(rules)
     findings: list[Finding] = []
     for heading, body in sections.items():
         section, _ = resolver.resolve(heading)
         if section is None or not section.mah_data or section.id in supplied:
             continue
-        if MAH_MARKER not in (body or ""):
+        if strict and MAH_MARKER in (body or "") and (body or "").strip() != MAH_MARKER:
+            findings.append(
+                Finding(
+                    section.id,
+                    section.clause,
+                    f"section {section.ref} holds {MAH_MARKER!r} plus other content;"
+                    " no company data is supplied",
+                )
+            )
+        elif MAH_MARKER not in (body or ""):
             findings.append(
                 Finding(
                     section.id,
