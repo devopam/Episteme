@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -130,6 +132,7 @@ def _run(
             "FAKE_ARIA2C_CODE": str(aria2c_code or 0),
             "FAKE_ARIA2C_SESSION": " ".join(session),
             "URLS": " ".join(urls),
+            "PYTHON": Path(sys.executable).as_posix(),
         }
     )
     proc = subprocess.run(
@@ -244,3 +247,85 @@ def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
     assert "retrying 1 unfinished file(s)" in proc.stderr
     assert (out / "a.txt").read_text() == "complete-a"
     assert (out / "b.txt").read_text() == "data\n"
+
+
+def _skip_script_env(tmp_path: Path, name: str, content: bytes, dry_run: bool = False):
+    lib = tmp_path / "scripts" / "data" / "_lib"
+    shutil.copytree(LIB, lib)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    n = len(content)
+    head = f"#!/usr/bin/env bash\nprintf 'Content-Length: {n}\r\n'\n"
+    (fake / "curl").write_bytes(head.encode())
+    (fake / "curl").chmod(0o755)
+    data = tmp_path / "d" / name
+    data.parent.mkdir()
+    data.write_bytes(content)
+    script = (
+        'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
+        'export PATH="$fb:$PATH"; . "$LIB/common.sh"; '
+        'size_match_skip "$F" https://example.invalid/f && echo SKIP || echo FETCH'
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
+    env.update(
+        {
+            "LIB": lib.as_posix(),
+            "FAKEBIN": fake.as_posix(),
+            "F": data.as_posix(),
+            "PYTHON": Path(sys.executable).as_posix(),
+        }
+    )
+    if dry_run:
+        env["EPISTEME_DRY_RUN"] = "1"
+    proc = subprocess.run(
+        [_bash(), "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
+    return proc.stdout.strip().splitlines()[-1], data
+
+
+def _good_zip(tmp_path: Path) -> bytes:
+    z = tmp_path / "good.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("a.xml", "<a/>" * 50)
+    return z.read_bytes()
+
+
+def _damaged(tmp_path: Path) -> bytes:
+    """Full size, tail zeroed: the central directory is gone, as after a stopped aria2c."""
+    good = _good_zip(tmp_path)
+    return good[:-30] + bytes(30)
+
+
+def test_size_match_skip_keeps_an_intact_zip(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path))
+    assert out == "SKIP" and data.is_file()
+
+
+def test_size_match_skip_moves_a_damaged_full_size_zip_aside(tmp_path):
+    # 2026-11-05: full-size DailyMed zips left by a stopped download passed the size check.
+    damaged = _damaged(tmp_path)
+    out, data = _skip_script_env(tmp_path, "x.zip", damaged)
+    assert out == "FETCH"
+    assert not data.exists()
+    bad = list(data.parent.glob("_bad_*/x.zip.bad"))
+    assert len(bad) == 1 and bad[0].read_bytes() == damaged
+
+
+def test_dry_run_does_not_move_a_damaged_zip(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _damaged(tmp_path), dry_run=True)
+    assert out == "FETCH" and data.is_file()
+
+
+def test_a_non_zip_file_is_not_tested(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.gz", b"not a zip at all")
+    assert out == "SKIP" and data.is_file()
+
+
+def test_a_zip_that_downloads_damaged_is_recorded_failed_and_moved(tmp_path):
+    # the fake curl writes "data" (not a zip): the fetch "succeeds" but the file is damaged
+    proc, _ = _run(tmp_path, "0", urls=("https://example.invalid/d/x.zip",))
+    assert proc.returncode != 0
+    dest = tmp_path / "out"
+    assert not (dest / "x.zip").exists()
+    assert len(list(dest.glob("_bad_*/x.zip.bad"))) == 1

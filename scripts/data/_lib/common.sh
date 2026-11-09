@@ -168,6 +168,33 @@ resolve_dest() { # resolve_dest SOURCE [SUBPATH] -> <raw root>/SOURCE[/SUBPATH]
     printf '%s\n' "$root/$src${sub:+/$sub}"
 }
 
+zip_intact() { # zip_intact FILE — exit 0 when the zip central directory reads (a damaged or cut file fails)
+    # 2026-11-05: 10 DailyMed zips were full size but damaged by a stopped download
+    # (aria2c preallocates), and the size-skip kept them. Reading the central directory
+    # is cheap; it does not test every member. With no tool to read a zip, the file is
+    # accepted with a warning (the check cannot be made).
+    local f="$1" py
+    if py="$(_http_fetch_python)" && [ -n "$py" ]; then
+        "$py" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).namelist()' "$f" >/dev/null 2>&1
+        return
+    fi
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -l "$f" >/dev/null 2>&1
+        return
+    fi
+    log WARN "zip_intact: no python or unzip -- cannot test $f"
+    return 0
+}
+
+quarantine_bad() { # quarantine_bad FILE — move a damaged file to <dir>/_bad_<UTC date>/<name>.bad
+    local f="$1" d name bad
+    d="$(dirname "$f")"; name="$(basename "$f")"
+    bad="$d/_bad_$(date -u +%Y%m%d)"
+    mkdir -p "$bad" && mv -f "$f" "$bad/$name.bad" || return 1
+    rm -f "$f.aria2"
+    log WARN "quarantine_bad: damaged $name moved to $bad/$name.bad"
+}
+
 size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS this url (local matches remote size)
     local local_path="$1" url="$2"
     [ -s "$local_path" ] || return 1
@@ -179,7 +206,18 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
     remote_len="$(curl -sSIL --connect-timeout 20 --max-time 90 "$url" 2>/dev/null \
         | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' | tail -n1)"
     local_len="$(wc -c < "$local_path" | tr -d '[:space:]')"
-    [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ]
+    [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ] || return 1
+    # a size match is not enough for a zip: a damaged file can have the full size
+    case "$local_path" in
+        *.zip|*.ZIP)
+            if ! zip_intact "$local_path"; then
+                # a dry run moves nothing: it only says that the file would be fetched
+                [ "${EPISTEME_DRY_RUN:-0}" = "1" ] || quarantine_bad "$local_path"
+                return 1
+            fi
+            ;;
+    esac
+    return 0
 }
 
 _safe_rel() { # _safe_rel REL — reject absolute paths and any '..' path component
@@ -293,6 +331,18 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         [ -z "$pyx" ] || "$pyx" -m episteme.ops.status long-end --run-id "$EPISTEME_RUN_ID" >/dev/null 2>&1 || true
         [ "$brc" -eq 0 ] || rc=$brc
         start=$((start + batch))
+    done
+    # A zip that came down damaged never counts as done: move it aside and record it.
+    local zl zurl zrel
+    for zl in "${urls[@]}"; do
+        zurl="${zl%%$'\t'*}"; zrel="${zl#*$'\t'}"; [ "$zrel" = "$zl" ] && zrel="$(basename "$zurl")"
+        case "$zrel" in *.zip|*.ZIP) ;; *) continue ;; esac
+        _safe_rel "$zrel" || continue
+        [ -f "$dest_dir/$zrel" ] || continue
+        if ! zip_intact "$dest_dir/$zrel"; then
+            quarantine_bad "$dest_dir/$zrel"
+            _hf_record_failed "$dest_dir" "$zurl" "$zrel" "damaged zip"
+        fi
     done
     local failed_now=0
     [ ! -f "$failed_file" ] || failed_now="$(wc -l < "$failed_file")"
