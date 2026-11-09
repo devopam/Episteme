@@ -444,7 +444,7 @@ if [ "$SAMPLE" = "1" ]; then
                 # The coverage figures of these sources need real substance data.
                 sub_rc=0
                 sub_out="$("$PY" -m episteme.ops.gate substance-check)" || sub_rc=$?
-                sub_out="${sub_out//$''/}"
+                sub_out="${sub_out//$'\r'/}"
                 if [ "$sub_rc" -eq 1 ] && [ -n "$sub_out" ]; then
                     die "--sample load: $sub_out" 2
                 elif [ "$sub_rc" -ne 0 ]; then
