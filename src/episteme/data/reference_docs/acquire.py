@@ -475,12 +475,14 @@ def fetch(
     min_interval_s: float,
     budget_s: float | None,
     refresh: bool = False,
+    adopt_only: bool = False,
     max_wait_s: float = DEFAULT_MAX_WAIT_S,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = _sliced_sleep,
 ) -> int:
     """Fetch ``refs`` one at a time. Returns 0 (done), 3 (stopped; run again to resume) or 1
-    (done, but some files failed). See the module text."""
+    (done, but some files failed). See the module text. With ``adopt_only`` no request is
+    made: files already on disk are adopted into the manifest and the rest are left."""
     raw_dir = Path(raw_dir)
     keys: dict[str, str] = {}
     for ref in refs:
@@ -496,6 +498,7 @@ def fetch(
     state: dict[str, Any] = {"last": None}
     manifests: dict[str, dict[str, dict[str, Any]]] = {}
     failed: list[str] = []
+    counts = {"skipped": 0, "adopted": 0, "fetched": 0, "versioned": 0, "left": 0}
 
     def pace() -> None:
         wait = 0.0
@@ -650,7 +653,9 @@ def fetch(
             manifest_path = source_dir / MANIFEST_NAME
             latest = manifests.setdefault(ref.source, _read_manifest(manifest_path))
             known = latest.get(ref.url)
+            _LOG.debug("check %s: in_manifest=%s on_disk=%s", dest, bool(known), dest.exists())
             if known and not refresh and intact(source_dir, known):
+                counts["skipped"] += 1
                 _LOG.info("skip (in manifest): %s", ref.rel_path)
                 kept = source_dir / str(known["rel_path"])
                 if kept.suffix.lower() == ".zip" and not kept.with_name(kept.stem).is_dir():
@@ -664,12 +669,20 @@ def fetch(
                 # A file put there by hand (or by an earlier layout): adopt it by sha256,
                 # with no request.
                 _LOG.info("adopt (on disk, not in manifest): %s", ref.rel_path)
+                counts["adopted"] += 1
                 if not record(
                     ref, dest, _sha256_file(dest), dest.stat().st_size, None, adopted=True
                 ):
                     failed.append(ref.url)
                 continue
+            if adopt_only:
+                counts["left"] += 1
+                _LOG.info("left (not on disk, adopt-only): %s", ref.rel_path)
+                continue
             part = dest.with_name(dest.name + ".part")
+            _LOG.info(
+                "fetch %s (in_manifest=%s, on_disk=%s)", ref.rel_path, bool(known), dest.exists()
+            )
             got = download(ref, part)
             if got is None:
                 part.unlink(missing_ok=True)
@@ -677,6 +690,7 @@ def fetch(
                 continue
             sha, size = got
             supersedes = None
+            kept_on_disk = False
             if known:
                 prior = source_dir / str(known["rel_path"])
                 if known.get("sha256") == sha:
@@ -703,6 +717,7 @@ def fetch(
                 if _sha256_file(dest) == sha:  # a file put there by hand: adopt it
                     part.unlink(missing_ok=True)
                     target = dest
+                    kept_on_disk = True
                 else:
                     target = _versioned(dest, _utcnow().strftime("%Y%m%d"))
                     supersedes = _rel(dest, source_dir)
@@ -713,11 +728,19 @@ def fetch(
                 target = dest
             if part.exists():
                 os.replace(part, target)
-            if not record(ref, target, sha, size, supersedes, adopted=False):
+            if not record(ref, target, sha, size, supersedes, adopted=kept_on_disk):
                 failed.append(ref.url)
+            elif supersedes:
+                counts["versioned"] += 1
+            elif kept_on_disk:
+                counts["adopted"] += 1
+            else:
+                counts["fetched"] += 1
     except _Stop as stop:
         _LOG.warning("stopping: %s; fetched files are kept; run again to resume", stop)
+        _LOG.info("summary: %s failed=%d", counts, len(failed))
         return 3
+    _LOG.info("summary: %s failed=%d", counts, len(failed))
     return 1 if failed else 0
 
 
@@ -731,6 +754,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-files", type=int, default=None, help="plan at most N files")
     p.add_argument("--budget-s", type=float, default=None, help="stop (exit 3) after N seconds")
     p.add_argument("--refresh", action="store_true", help="ask upstream again for known files")
+    p.add_argument(
+        "--adopt-only",
+        action="store_true",
+        help="make no request: adopt files already on disk into the manifest, leave the rest",
+    )
     p.add_argument("--output-dir", type=Path, default=None, help="raw root (default: settings)")
     return p
 
@@ -747,7 +775,10 @@ def plan(source: str, session: Any) -> list[DocRef]:
 def main(argv: list[str] | None = None) -> int:
     from episteme.ops.stop import stage_guard
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # force: the log must show the adopt and skip lines even if a handler already exists.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True
+    )
     args = build_parser().parse_args(argv)
     settings = get_settings()
     raw_dir = args.output_dir or settings.raw_root
@@ -772,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
             min_interval_s=interval,
             budget_s=args.budget_s,
             refresh=args.refresh,
+            adopt_only=args.adopt_only,
         )
         print(f"{args.source}: planned={len(refs)} exit={rc}")
         return g.exit_code(rc)

@@ -10,7 +10,8 @@
 # a browser to get round the limit; never touch /search/.
 # ICH and MedDRA wait EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S (default 2) between requests.
 # Flags: --dry-run (plans; the ICH and MedDRA plans read the API), --max-files N,
-# --budget-s SECONDS (stop with exit 3 after that time), --force (with --reason).
+# --budget-s SECONDS (stop with exit 3 after that time), --adopt-only (no request: adopt
+# files already on disk into the manifest), --force (with --reason).
 # Licence: ICH and MedDRA PtC documents carry the ICH public-licence notice (use with ICH
 # credit, mark changes). EMA: reuse with credit. MedDRA terminology is out of scope.
 set -uo pipefail
@@ -42,6 +43,7 @@ while [ $# -gt 0 ]; do
         --dry-run)   args+=(--dry-run); shift ;;
         --max-files) args+=(--max-files "${2:-}"); shift; [ $# -gt 0 ] && shift ;;
         --budget-s)  args+=(--budget-s "${2:-}"); shift; [ $# -gt 0 ] && shift ;;
+        --adopt-only) args+=(--adopt-only); shift ;;
         --force)     args+=(--refresh); shift ;;
         --reason)    shift; [ $# -gt 0 ] && shift ;;   # run_pipeline already enforced it
         -*)          log WARN "download_reference_docs.sh: ignoring $1"; shift ;;

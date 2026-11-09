@@ -703,3 +703,76 @@ def test_deleted_unpack_folder_is_made_again_without_a_request(tmp_path):
     assert rc == 0
     assert session.calls == []
     assert (folder / "a.txt").read_bytes() == b"A"
+
+
+# ----------------------------------------------------------------------------- fix round 2
+
+
+@pytest.fixture
+def _restore_logging():
+    import logging
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    for h in handlers:
+        root.addHandler(h)
+    root.setLevel(level)
+
+
+def _plan_two(monkeypatch, raw):
+    refs = [_ref("a.pdf", rel="E2A/a.pdf"), _ref("b.pdf", rel="E2B/b.pdf")]
+    net = FakeSession({r.url: FakeResp(body=b"from network") for r in refs})
+    monkeypatch.setattr(acquire, "plan", lambda source, session: refs)
+    monkeypatch.setattr(acquire.requests, "Session", lambda: net)
+    return refs, net
+
+
+def test_cli_adopts_files_on_disk_and_logs_it_at_info(
+    tmp_path, monkeypatch, capsys, _restore_logging
+):
+    import logging
+
+    # a handler at WARNING already on the root logger (as under some launchers)
+    logging.basicConfig(level=logging.WARNING)
+    refs, net = _plan_two(monkeypatch, tmp_path)
+    hand = tmp_path / SOURCE / "E2A" / "a.pdf"
+    hand.parent.mkdir(parents=True)
+    hand.write_bytes(b"by hand")
+    mtime = hand.stat().st_mtime_ns
+    rc = acquire.main([SOURCE, "--output-dir", str(tmp_path)])
+    assert rc == 0
+    assert hand.read_bytes() == b"by hand" and hand.stat().st_mtime_ns == mtime
+    assert [u for u, _ in net.calls] == [refs[1].url]  # only the missing file is requested
+    recs = {r["rel_path"]: r for r in _manifest(tmp_path)}
+    assert recs["E2A/a.pdf"]["adopted"] is True
+    assert recs["E2B/b.pdf"]["adopted"] is False
+    err = capsys.readouterr().err
+    assert "adopt (on disk, not in manifest): E2A/a.pdf" in err
+    assert "fetch E2B/b.pdf" in err
+    assert "summary:" in err and "'adopted': 1" in err
+
+
+def test_adopt_only_makes_no_request(tmp_path):
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+    (tmp_path / SOURCE).mkdir()
+    (tmp_path / SOURCE / "a.pdf").write_bytes(b"by hand")
+    session = FakeSession({})
+    rc, _ = _run([a, b], tmp_path, session, adopt_only=True)
+    assert rc == 0
+    assert session.calls == []
+    assert [r["rel_path"] for r in _manifest(tmp_path)] == ["a.pdf"]
+
+
+def test_same_bytes_on_disk_after_a_refresh_are_labelled_adopted(tmp_path):
+    ref = _ref("a.pdf")
+    (tmp_path / SOURCE).mkdir()
+    dest = tmp_path / SOURCE / "a.pdf"
+    dest.write_bytes(b"same")
+    mtime = dest.stat().st_mtime_ns
+    rc, _ = _run([ref], tmp_path, FakeSession({ref.url: FakeResp(body=b"same")}), refresh=True)
+    assert rc == 0
+    assert dest.stat().st_mtime_ns == mtime
+    assert _manifest(tmp_path)[0]["adopted"] is True
