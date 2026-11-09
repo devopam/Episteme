@@ -376,7 +376,7 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 | `openfda_faers` | no (the zips come from `openfda download all_human`) | no | no | yes (typed tables, by generation) | no | no | no | not allowed (section 5.12) |
 | `aact` | yes | no | no | yes (to its own schema per release) | no | no | no | download, load (section 5.16) |
 | `europepmc_abstracts`, `hf_corpus`, `cdisc_bc`, `cdisc_usdm` | yes | no | no | no | no | no | no | download only |
-| `ich_e2`, `meddra_ptc`, `ema_guidance` | yes | no | no | no | no | no | no | download only (section 5.17) |
+| `ich`, `meddra_ptc`, `ema_guidance` | yes | no | no | no | no | no | no | download only (section 5.17) |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
 
 Any combination not marked yes exits 3 with a message such as `chembl extract is not in SP2 - SP4 (structured serialize)`. Row counts and table effects: `docs/09-extraction-contract.md`.
@@ -1580,27 +1580,27 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh aact load --zip /path
 - **EPAR section counts.** The `ema_epar` extract counts the `product-information` documents with and without SmPC sections (`documents_with_sections`, `documents_without_sections` in the extract result and in `failed_inputs.json`). A `product-information` document with no text (a scan) is in neither count: it is counted apart as `documents_no_text`, and it is also a `no_text` failed document. The gate report shows the share as `sections_share_pct`. A document without sections is a gap: the agent compares US and EU sections only for documents that have them. Real EPAR text decides the heading rules at the sample: check the shape of the headings of the sample documents, then set a floor.
 - **Gate.** `aact` is gated for `load` (section 4.9). The sample loads the whole file into `episteme_test` and takes about the time of a full load. Run it when the disk is quiet, and run one heavy job at a time.
 
-### 5.17 Reference documents (`ich_e2`, `meddra_ptc`, `ema_guidance`)
+### 5.17 Reference documents (`ich`, `meddra_ptc`, `ema_guidance`)
 
 These sources fetch the official ICH, MedDRA Points to Consider and EMA guidance documents, so that rules for safety reporting are built from official files and not by hand. They are download-only: no extract, no load, no corpus row. All three use one wrapper, `scripts/data/reference_docs/download_reference_docs.sh`, and one module, `episteme.data.reference_docs.acquire`.
 
 ```bash
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich_e2 download --dry-run
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich_e2 download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich download --dry-run
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich download
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh meddra_ptc download
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_guidance download --max-files 2
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_guidance download --budget-s 540
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich_e2 download --force --reason "ask ICH again for changed files"
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich download --force --reason "ask ICH again for changed files"
 ```
 
-- **Where the files go.** `<raw>/<source>/<rel_path>`. `ich_e2` uses one folder per guideline code (`E2A/`, `E2C(R2)` as `E2C_R2`) and one folder per page for links in page text. `meddra_ptc` and `ema_guidance` keep the files flat. A `.zip` is unpacked to a sibling folder named after the zip. A member that would leave that folder is refused (zip-slip): the zip is deleted, nothing is written to the manifest, and the run ends with exit 1 after the other files.
+- **Where the files go.** `<raw>/<source>/<rel_path>`. `ich` uses one folder per guideline code (`E2A/`, `E2C(R2)` as `E2C_R2`) and one folder per page for links in page text. `meddra_ptc` and `ema_guidance` keep the files flat. A `.zip` is unpacked to a sibling folder named after the zip. A member that would leave that folder is refused (zip-slip): the zip is deleted, nothing is written to the manifest, and the run ends with exit 1 after the other files.
 - **Manifest.** `<raw>/<source>/_manifest.jsonl` has one line per stored file: `source`, `url`, `rel_path`, `title`, `sha256`, `bytes`, `fetched_at`, `version`, `step_date`, `licence`, `input_key`, `members` (zip member count, else null) and `supersedes`. `input_key` is the path relative to the raw root, as for every other source. Two files with the same `input_key` stop the run before any request.
 - **Adoption.** A file that already sits at its `<raw>/<source>/<rel_path>` and has no manifest line is adopted: the manifest gets a line with `adopted: true` (sha256 of the file on disk) and no request is made. Files fetched by hand under another layout must be moved into this one first.
 - **Resume.** A file whose url is in the manifest, and whose stored file still has the recorded size and sha256, is skipped without a request. A run that stops (exit 3) is resumed by running the same command again.
 - **Changed files.** `--force --reason "<why>"` asks upstream again for every file. The same bytes add nothing. New bytes for the same url are kept as a new file with a date suffix (`name.<yyyymmdd>.pdf`), the old file stays, the manifest gets a new line with `supersedes`, and the run logs `version change`.
-- **Pace.** `ich_e2` and `meddra_ptc` wait `EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S` (default 2) between requests. `ema_guidance` waits `EPISTEME_EMA_DOC_MIN_INTERVAL_S` (default 60). EMA answers non-browser clients with HTTP 429 at low rates. On a 429 or 503 the run waits for `Retry-After` and tries that file once more. A second throttle in a row, a `Retry-After` of more than 15 minutes, an HTML page where a document should be (the verification page), or `--budget-s` used up ends the run with exit 3. Fetched files stay. Never fetch EMA through a browser to get round the limit. Never request `/search/` (robots.txt, CAPTCHA). The SPOR API is out of scope.
+- **Pace.** `ich` and `meddra_ptc` wait `EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S` (default 2) between requests. `ema_guidance` waits `EPISTEME_EMA_DOC_MIN_INTERVAL_S` (default 60). EMA answers non-browser clients with HTTP 429 at low rates. On a 429 or 503 the run waits for `Retry-After` and tries that file once more. A second throttle in a row, a `Retry-After` of more than 15 minutes, or `--budget-s` used up ends the run with exit 3. For `ema_guidance` these also end the run with exit 3: an HTML page where a document should be (the verification page), HTTP 403 (a block), and a connection error or timeout. For `ich` and `meddra_ptc` an HTML answer, a 403 or a connection error fails that file only; the run goes on and ends with exit 1. Fetched files stay. Never fetch EMA through a browser to get round the limit. Never request `/search/` (robots.txt, CAPTCHA). The SPOR API is out of scope.
 - **Chunks for EMA.** Run `ema_guidance download --budget-s 540` (under 10 minutes) until the manifest holds all 55 paths. The list is `src/episteme/data/reference_docs/ema_documents.txt` (paths only; the host is `EMA_BASE` in `sources.env`).
-- **Plans.** `ich_e2` reads the ICH node API for each page in `EPISTEME_REFERENCE_DOCS_ICH_PAGES` (default: the E2B(R3) package page, `efficacy-guidelines`, `quality-guidelines`). Video files are not fetched. `meddra_ptc` reads the English guidance list and takes the Points to Consider item only (Word, PDF and spreadsheet files, and the best-practices document). `--dry-run` for these two still calls the API.
+- **Plans.** `ich` reads the ICH node API for each page in `EPISTEME_REFERENCE_DOCS_ICH_PAGES` (default: the E2B(R3) package page, `efficacy-guidelines`, `quality-guidelines`). Video files are not fetched. `meddra_ptc` reads the English guidance list and takes the Points to Consider item only (Word, PDF and spreadsheet files, and the best-practices document). `--dry-run` for these two still calls the API. The ICH plan waits `EPISTEME_REFERENCE_DOCS_API_PAUSE_S` (default 1) between API calls. A file link is kept only when its host is the host of `ICH_API_BASE` or `ICH_FILES_BASE` (`ich`) or of `MEDDRA_API_BASE` (`meddra_ptc`); other hosts are logged and dropped. No source fetches a path under `/search`. Two files with one name in one folder get a short hash of the url in the name.
 - **User-Agent.** A fixed project string (`EPISTEME_REFERENCE_DOCS_USER_AGENT`). It holds no e-mail address.
 - **Licence.** ICH and MedDRA Points to Consider documents carry the ICH public-licence notice: use with ICH credit, mark every change, do not imply ICH endorsement (docs/02 s2.7.1; a conditional project ruling). EMA: reuse with credit. MedDRA terminology is licensed and out of scope. Each manifest line carries the licence text.
 - **Exit codes.** 0 done; 3 stopped, run again; 1 done but some files failed (HTTP error, short read or refused zip); 2 bad arguments.
@@ -1666,7 +1666,7 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | Daily | `pubmed download updates`, then `extract` and `load`; PMC delta if running continuous sync; author-manuscript incrementals (`europepmc_manuscript download incr`) when Europe PMC is up |
 | Weekly | `europepmc_lite download` then `enrich`; review failed markers under `<processed>/_ops/<source>/` |
 | Monthly | `europepmc_id_mappings download` (after the `head` integrity check) then `load`; `europepmc_abstracts download` |
-| On demand | `ich_e2`, `meddra_ptc` and `ema_guidance` download (section 5.17); `ema_guidance` in chunks with `--budget-s` until all 55 files are stored |
+| On demand | `ich`, `meddra_ptc` and `ema_guidance` download (section 5.17); `ema_guidance` in chunks with `--budget-s` until all 55 files are stored |
 | On upstream release | Rerun `download` for the structured sources; `serialize` and `load`; `cdisc_bc` with `--force --reason`; `cdisc_usdm` on a new USDM release (no `--force` needed: a new tag gets a new folder) |
 | After each major pull | `--report` field-shape smoke check (section 6.3); `source_inventory.sh` |
 | Before and after any production or go-live change | `verify_audit_trail.sh`; the docs/11 section 8 checklist |
@@ -1689,4 +1689,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 |---|---|---|
 | v1 | 2026-08-31 | Initial runbook from the acquisition phase and sample audit |
 | v2 | 2026-09-21 | SP5 rewrite: single operator runbook. Covers every wired source through `run_pipeline.sh`, the DB-mode guard, migrations 0002/0003 by hand, `episteme_test` targeting, `openalex` bounded fetch, `cdisc_bc`, verification. Dated status board replaced by `docs/12-source-inventory.md`; per-source facts checked against the wrappers |
-| v3 | 2026-11-09 | Section 5.17: reference documents (`ich_e2`, `meddra_ptc`, `ema_guidance`), download-only |
+| v3 | 2026-11-09 | Section 5.17: reference documents (`ich`, `meddra_ptc`, `ema_guidance`), download-only |

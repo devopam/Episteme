@@ -190,12 +190,12 @@ declare -A WRAPPER=(
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
     [cdisc_usdm]="cdisc_usdm/download_cdisc_usdm.sh"
-    [ich_e2]="reference_docs/download_reference_docs.sh"
+    [ich]="reference_docs/download_reference_docs.sh"
     [meddra_ptc]="reference_docs/download_reference_docs.sh"
     [ema_guidance]="reference_docs/download_reference_docs.sh"
 )
 
-# ich_e2, meddra_ptc and ema_guidance (reference documents) are download-only: they sit in
+# ich, meddra_ptc and ema_guidance (reference documents) are download-only: they sit in
 # WRAPPER and in no stage list, so extract, load and the rest are refused for them.
 
 # SP2 literature sources: the six that get the full extract -> load -> graph
@@ -723,7 +723,7 @@ run_stage() {
             3)
                 case "$SOURCE:$name" in
                     ema:download|ema_epar:download) exit 3 ;;
-                    ich_e2:download|meddra_ptc:download|ema_guidance:download) exit 3 ;;
+                    ich:download|meddra_ptc:download|ema_guidance:download) exit 3 ;;
                 esac
                 exit 1 ;;
             *) exit 1 ;;
@@ -801,7 +801,7 @@ struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"$
 wrapper_args=()
 # The reference document sources share one wrapper: it takes the source as its first argument.
 case "$SOURCE" in
-    ich_e2|meddra_ptc|ema_guidance) wrapper_args+=("$SOURCE") ;;
+    ich|meddra_ptc|ema_guidance) wrapper_args+=("$SOURCE") ;;
 esac
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")

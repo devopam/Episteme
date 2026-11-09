@@ -21,7 +21,7 @@ from episteme.data.reference_docs.acquire import DocRef, ZipSlipError, extract_z
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "reference_docs"
 REPO = Path(__file__).resolve().parents[2]
-SOURCE = "ich_e2"
+SOURCE = "ich"
 
 
 class FakeResp:
@@ -107,9 +107,9 @@ def _endpoints(monkeypatch):
         acquire,
         "source_url",
         lambda name: {
-            "ICH_API_BASE": "https://ich.test/api/v1",
-            "ICH_FILES_BASE": "https://files.test",
-            "MEDDRA_API_BASE": "https://meddra.test/api",
+            "ICH_API_BASE": "https://admin.ich.org/api/v1",
+            "ICH_FILES_BASE": "https://database.ich.org",
+            "MEDDRA_API_BASE": "https://admin.meddra.org/api",
             "MEDDRA_PTC_TAXONOMY": "tax-1",
             "EMA_BASE": "https://ema.test",
         }[name],
@@ -120,7 +120,7 @@ def _endpoints(monkeypatch):
 
 
 def test_plan_ich_reads_files_from_node_json():
-    api = "https://ich.test/api/v1/nodes?alias=/page/{}&loadEntities[]=paragraph"
+    api = "https://admin.ich.org/api/v1/nodes?alias=/page/{}&loadEntities[]=paragraph"
     session = FakeSession(
         {
             api.format("efficacy-guidelines"): FakeResp(
@@ -134,7 +134,7 @@ def test_plan_ich_reads_files_from_node_json():
     )
     by_url = {r.url: r for r in refs}
     e2a = by_url["https://database.ich.org/sites/default/files/E2A_Guideline.pdf"]
-    assert e2a.source == "ich_e2"
+    assert e2a.source == "ich"
     assert e2a.rel_path == "E2A/E2A_Guideline.pdf"
     assert e2a.title == "ICH E2A Guideline"
     assert e2a.version == "Step 5"
@@ -154,7 +154,7 @@ def test_plan_ich_reads_files_from_node_json():
 
 
 def test_plan_meddra_lists_english_docs():
-    url = "https://meddra.test/api/guidances-page?taxonomy=tax-1&_format=json"
+    url = "https://admin.meddra.org/api/guidances-page?taxonomy=tax-1&_format=json"
     session = FakeSession({url: FakeResp(payload=_fixture("meddra_guidances_trimmed.json"))})
     refs = acquire.plan_meddra(session)
     names = {r.rel_path for r in refs}
@@ -270,13 +270,13 @@ def test_retry_after_over_the_cap_stops_without_waiting(tmp_path):
 
 
 def test_html_page_instead_of_document_stops_with_3(tmp_path):
-    ref = _ref("d.pdf")
+    ref = _ref("d.pdf", source="ema_guidance")
     session = FakeSession(
         {ref.url: FakeResp(body=b"<html>verify</html>", headers={"Content-Type": "text/html"})}
     )
     rc, _ = _run([ref], tmp_path, session)
     assert rc == 3
-    assert not (tmp_path / SOURCE / "d.pdf").exists()
+    assert not (tmp_path / "ema_guidance" / "d.pdf").exists()
 
 
 def test_missing_file_is_a_failure_but_the_rest_goes_on(tmp_path):
@@ -391,7 +391,7 @@ def test_manifest_keys_on_input_key(tmp_path):
     assert rc == 0
     rec = _manifest(tmp_path)[0]
     dest = tmp_path / SOURCE / "E2A" / "a.pdf"
-    assert rec["input_key"] == input_key(dest, tmp_path) == "ich_e2__E2A__a.pdf"
+    assert rec["input_key"] == input_key(dest, tmp_path) == "ich__E2A__a.pdf"
     assert rec["sha256"] == hashlib.sha256(body).hexdigest()
     assert rec["bytes"] == len(body)
     assert rec["url"] == ref.url
@@ -454,7 +454,7 @@ def test_file_on_disk_without_manifest_is_adopted_without_a_request(tmp_path):
     rec = _manifest(tmp_path)[0]
     assert rec["adopted"] is True
     assert rec["sha256"] == hashlib.sha256(b"by hand").hexdigest()
-    assert rec["input_key"] == "ich_e2__E2A__a.pdf"
+    assert rec["input_key"] == "ich__E2A__a.pdf"
     # the next run skips it through the manifest
     rc, _ = _run([ref], tmp_path, session)
     assert rc == 0 and session.calls == []
@@ -472,3 +472,234 @@ def test_a_refresh_after_adoption_keeps_a_changed_upstream_file_apart(tmp_path):
     assert rc == 0
     assert dest.read_bytes() == b"old"
     assert len(_manifest(tmp_path)) == 2
+
+
+# ----------------------------------------------------------------------------- fix round 1
+
+
+def _node(links_html: str, files=()):
+    return {
+        "items": [
+            {
+                "mainWidgets": {
+                    "items": [
+                        {
+                            "text": links_html,
+                            "entries": [
+                                {
+                                    "code": "E9",
+                                    "status": "Step 4",
+                                    "details": {"stepDate": "1 May 2000"},
+                                    "fileGroups": [
+                                        {"files": [{"title": "t", "uri": u} for u in files]}
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+
+def test_plan_ich_drops_off_host_and_search_links():
+    url = "https://admin.ich.org/api/v1/nodes?alias=/page/p&loadEntities[]=paragraph"
+    html_text = (
+        '<a href="https://admin.ich.org/x/ok.pdf">ok</a>'
+        '<a href="https://www.ema.europa.eu/en/documents/a_en.pdf">ema</a>'
+        '<a href="https://admin.ich.org/search/find.pdf">search</a>'
+    )
+    node = _node(
+        html_text,
+        files=[
+            "/sites/default/files/rel.pdf",
+            "https://evil.test/x.pdf",
+            "https://database.ich.org/search/y.pdf",
+        ],
+    )
+    refs = acquire.plan_ich(
+        FakeSession({url: FakeResp(payload=node)}), ["p"], pause_s=0, sleep=lambda s: None
+    )
+    assert sorted(r.url for r in refs) == [
+        "https://admin.ich.org/x/ok.pdf",
+        "https://database.ich.org/sites/default/files/rel.pdf",
+    ]
+
+
+def test_plan_ich_pause_comes_from_settings():
+    base = "https://admin.ich.org/api/v1/nodes?alias=/page/{}&loadEntities[]=paragraph"
+    session = FakeSession(
+        {base.format("a"): FakeResp(payload={"items": []}), base.format("b"): FakeResp(payload={})}
+    )
+    sleeps: list[float] = []
+    acquire.plan_ich(session, ["a", "b"], sleep=sleeps.append)
+    assert sleeps == [acquire.get_settings().reference_docs_api_pause_s]
+    assert sleeps == [1.0]
+
+
+def test_plan_meddra_drops_off_host_urls():
+    url = "https://admin.meddra.org/api/guidances-page?taxonomy=tax-1&_format=json"
+    payload = [
+        {
+            "language": "English",
+            "items": [
+                {
+                    "title": "Points to Consider",
+                    "documentCollection": [
+                        {
+                            "documentTitle": "X Release 1.0",
+                            "guidanceFilePdf": {"url": "https://admin.meddra.org/f/a.pdf"},
+                            "guidanceFileDoc": {
+                                "url": "https://www.ema.europa.eu/en/documents/a.docx"
+                            },
+                            "guidanceFileSpreadsheet": {
+                                "url": "https://admin.meddra.org/search/b.xlsx"
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    refs = acquire.plan_meddra(FakeSession({url: FakeResp(payload=payload)}))
+    assert [r.url for r in refs] == ["https://admin.meddra.org/f/a.pdf"]
+
+
+def test_fetch_refuses_a_search_url(tmp_path):
+    ref = _ref("s.pdf", url="https://ema.test/en/search/s.pdf")
+    with pytest.raises(ValueError, match="search"):
+        fetch([ref], tmp_path, session=FakeSession({}), min_interval_s=0, budget_s=None)
+
+
+def test_clashing_file_names_get_distinct_names():
+    url = "https://admin.ich.org/api/v1/nodes?alias=/page/p&loadEntities[]=paragraph"
+    node = _node(
+        "", files=["https://database.ich.org/a/same.pdf", "https://database.ich.org/b/same.pdf"]
+    )
+    refs = acquire.plan_ich(
+        FakeSession({url: FakeResp(payload=node)}), ["p"], pause_s=0, sleep=lambda s: None
+    )
+    names = [r.rel_path for r in refs]
+    assert len(names) == 2 and len(set(names)) == 2
+    assert names[0] == "E9/same.pdf" and names[1].startswith("E9/same__")
+    assert names[1].endswith(".pdf")
+    again = acquire.plan_ich(
+        FakeSession({url: FakeResp(payload=node)}), ["p"], pause_s=0, sleep=lambda s: None
+    )
+    assert [r.rel_path for r in again] == names
+
+
+def test_ema_names_that_clash_are_made_distinct(tmp_path):
+    f = tmp_path / "p.txt"
+    f.write_text("/en/documents/a/x_en.pdf\n/en/documents/b/x_en.pdf\n", encoding="utf-8")
+    refs = acquire.plan_ema(f)
+    assert len({r.rel_path for r in refs}) == 2
+
+
+def test_content_encoded_download_is_not_a_short_read(tmp_path):
+    ref = _ref("c.xml")
+    body = b"<a>decoded body, longer than the encoded size</a>"
+    resp = FakeResp(body=body, headers={"Content-Length": "10", "Content-Encoding": "gzip"})
+    rc, _ = _run([ref], tmp_path, FakeSession({ref.url: resp}))
+    assert rc == 0
+    assert (tmp_path / SOURCE / "c.xml").read_bytes() == body
+
+
+def test_short_read_without_encoding_is_a_failure(tmp_path):
+    ref = _ref("c.pdf")
+    resp = FakeResp(body=b"abc", headers={"Content-Length": "10"})
+    rc, _ = _run([ref], tmp_path, FakeSession({ref.url: resp}))
+    assert rc == 1
+    assert not (tmp_path / SOURCE / "c.pdf").exists()
+    assert not list((tmp_path / SOURCE).glob("*.part"))
+
+
+class RaisingSession(FakeSession):
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        raise acquire.requests.ConnectionError("boom")
+
+
+def test_connection_error_fails_the_file_for_ich_and_continues(tmp_path):
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+
+    class Mixed(FakeSession):
+        def get(self, url, **kwargs):
+            if url == a.url:
+                self.calls.append((url, kwargs))
+                raise acquire.requests.Timeout("slow")
+            return super().get(url, **kwargs)
+
+    rc, _ = _run([a, b], tmp_path, Mixed({b.url: FakeResp(body=b"b")}))
+    assert rc == 1
+    assert (tmp_path / SOURCE / "b.pdf").exists()
+
+
+def test_connection_error_stops_ema_with_3(tmp_path):
+    a = _ref("a.pdf", source="ema_guidance")
+    b = _ref("b.pdf", source="ema_guidance")
+    session = RaisingSession({})
+    rc, _ = _run([a, b], tmp_path, session)
+    assert rc == 3
+    assert len(session.calls) == 1
+
+
+def test_html_answer_is_a_failed_file_for_ich_but_a_stop_for_ema(tmp_path):
+    html_resp = {"Content-Type": "text/html; charset=utf-8"}
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+    session = FakeSession(
+        {a.url: FakeResp(body=b"<html></html>", headers=html_resp), b.url: FakeResp(body=b"ok")}
+    )
+    rc, _ = _run([a, b], tmp_path, session)
+    assert rc == 1
+    assert (tmp_path / SOURCE / "b.pdf").exists()
+    e = _ref("e.pdf", source="ema_guidance")
+    f = _ref("f.pdf", source="ema_guidance")
+    session = FakeSession(
+        {e.url: FakeResp(body=b"<html></html>", headers=html_resp), f.url: FakeResp(body=b"ok")}
+    )
+    rc, _ = _run([e, f], tmp_path, session)
+    assert rc == 3
+    assert len(session.calls) == 1
+
+
+def test_403_stops_ema_but_is_a_failed_file_for_ich(tmp_path):
+    e = _ref("e.pdf", source="ema_guidance")
+    f = _ref("f.pdf", source="ema_guidance")
+    session = FakeSession({e.url: FakeResp(status=403), f.url: FakeResp(body=b"ok")})
+    rc, _ = _run([e, f], tmp_path, session)
+    assert rc == 3
+    assert len(session.calls) == 1
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+    session = FakeSession({a.url: FakeResp(status=403), b.url: FakeResp(body=b"ok")})
+    rc, _ = _run([a, b], tmp_path, session)
+    assert rc == 1
+    assert len(session.calls) == 2
+
+
+def test_damaged_stored_file_is_restored_when_upstream_is_unchanged(tmp_path):
+    ref = _ref("a.pdf")
+    _run([ref], tmp_path, FakeSession({ref.url: FakeResp(body=b"whole file")}))
+    stored = tmp_path / SOURCE / "a.pdf"
+    stored.write_bytes(b"damaged")
+    session = FakeSession({ref.url: FakeResp(body=b"whole file")})
+    rc, _ = _run([ref], tmp_path, session)
+    assert rc == 0
+    assert stored.read_bytes() == b"whole file"
+    assert len(_manifest(tmp_path)) == 1
+
+
+def test_deleted_unpack_folder_is_made_again_without_a_request(tmp_path):
+    import shutil
+
+    ref = _ref("pack.zip")
+    body = _zip_bytes({"a.txt": b"A"})
+    _run([ref], tmp_path, FakeSession({ref.url: FakeResp(body=body)}))
+    folder = tmp_path / SOURCE / "pack"
+    shutil.rmtree(folder)
+    session = FakeSession({})
+    rc, _ = _run([ref], tmp_path, session)
+    assert rc == 0
+    assert session.calls == []
+    assert (folder / "a.txt").read_bytes() == b"A"

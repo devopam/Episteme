@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Episteme acquisition wrapper: official reference documents. The first argument names the
-# source (run_pipeline.sh passes it): ich_e2 (ICH guideline files), meddra_ptc (MedDRA Points
+# source (run_pipeline.sh passes it): ich (ICH guideline files), meddra_ptc (MedDRA Points
 # to Consider) or ema_guidance (EMA guidance documents). Download-only: no load stage.
 # Files go to <raw root>/<source>/ with a _manifest.jsonl (sha256, size, licence, input_key).
 # A known file is skipped without a request; --force asks upstream again (a changed file is
@@ -22,8 +22,8 @@ require_env EPISTEME_ACTOR
 
 SOURCE="${1:-}"
 case "$SOURCE" in
-    ich_e2|meddra_ptc|ema_guidance) shift ;;
-    *) die "reference_docs: first argument must be ich_e2, meddra_ptc or ema_guidance (got '${SOURCE}')" ;;
+    ich|meddra_ptc|ema_guidance) shift ;;
+    *) die "reference_docs: first argument must be ich, meddra_ptc or ema_guidance (got '${SOURCE}')" ;;
 esac
 
 PY="${PYTHON:-}"

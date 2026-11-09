@@ -125,6 +125,8 @@ DEFAULT_REG_LOCK_TIMEOUT_S = 300
 # (EPISTEME_REFERENCE_DOCS_ICH_PAGES, comma separated) are read through the ICH node API.
 DEFAULT_EMA_DOC_MIN_INTERVAL_S = 60
 DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S = 2.0
+# Seconds between two node API calls of the ICH plan (EPISTEME_REFERENCE_DOCS_API_PAUSE_S).
+DEFAULT_REFERENCE_DOCS_API_PAUSE_S = 1.0
 DEFAULT_REFERENCE_DOCS_ICH_PAGES = (
     "e2br3-individual-case-safety-report-icsr-specification-and-related-files",
     "efficacy-guidelines",
@@ -437,6 +439,7 @@ class Settings:
     ema_doc_min_interval_s: int = DEFAULT_EMA_DOC_MIN_INTERVAL_S
     reference_docs_min_interval_s: float = DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
     reference_docs_ich_pages: tuple[str, ...] = DEFAULT_REFERENCE_DOCS_ICH_PAGES
+    reference_docs_api_pause_s: float = DEFAULT_REFERENCE_DOCS_API_PAUSE_S
     reference_docs_user_agent: str = DEFAULT_REFERENCE_DOCS_USER_AGENT
     # Largest share of orphan rows (nct_id not in studies) per AACT table
     # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
@@ -637,6 +640,9 @@ def get_settings() -> Settings:
             "EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S", DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
         ),
         reference_docs_ich_pages=_reference_docs_ich_pages(),
+        reference_docs_api_pause_s=_get_non_negative_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_API_PAUSE_S", DEFAULT_REFERENCE_DOCS_API_PAUSE_S
+        ),
         reference_docs_user_agent=_get("EPISTEME_REFERENCE_DOCS_USER_AGENT")
         or DEFAULT_REFERENCE_DOCS_USER_AGENT,
         slice_max_bytes=_slice_max_bytes(),

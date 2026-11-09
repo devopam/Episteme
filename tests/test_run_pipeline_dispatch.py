@@ -411,11 +411,11 @@ def test_cdisc_usdm_is_download_only(tmp_path, stage):
     assert f"cdisc_usdm {stage} is not in SP" in proc.stderr
 
 
-@pytest.mark.parametrize("token", ["ich_e2", "meddra_ptc", "ema_guidance"])
+@pytest.mark.parametrize("token", ["ich", "meddra_ptc", "ema_guidance"])
 @pytest.mark.parametrize("stage", ["serialize", "extract", "load", "graph"])
 def test_reference_docs_sources_are_download_only(tmp_path, token, stage):
     # In WRAPPER only: early validation dies 3 before any request. No dry-run test here: the
-    # ich_e2 and meddra_ptc plans read a live API.
+    # ich and meddra_ptc plans read a live API.
     proc = _run([token, stage], tmp_path, FAST_TIMEOUT)
     assert proc.returncode == 3, proc.stderr[-2000:]
     assert "unknown source" not in proc.stderr

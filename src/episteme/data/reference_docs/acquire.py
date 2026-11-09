@@ -2,7 +2,7 @@
 
 Three sources, one downloader:
 
-* ``ich_e2``: ICH guideline files. The ICH site is a single-page app; its node API lists each
+* ``ich``: ICH guideline files. The ICH site is a single-page app; its node API lists each
   guideline with ``code``, ``status``, ``details.stepDate`` and ``fileGroups[].files[]``. Links
   that sit inside the page text (the E2B(R3) package page) are read too.
 * ``meddra_ptc``: the MedDRA Points to Consider documents, from the guidance API.
@@ -51,7 +51,7 @@ from episteme.data.checkpoint_markers import input_key
 
 _LOG = logging.getLogger(__name__)
 
-SOURCES = ("ich_e2", "meddra_ptc", "ema_guidance")
+SOURCES = ("ich", "meddra_ptc", "ema_guidance")
 LICENCE_ICH = (
     "ICH public licence: use, reproduce, adapt with ICH credit; mark every change; "
     "no implied ICH endorsement; third-party content excluded"
@@ -143,6 +143,27 @@ def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", text))).strip()
 
 
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _url_allowed(url: str, hosts: set[str]) -> bool:
+    """True when the url is http(s), on one of ``hosts``, and not under ``/search``."""
+    parts = urlsplit(url)
+    return parts.scheme in ("http", "https") and _host(url) in hosts and "/search" not in parts.path
+
+
+def _distinct(rel: str, url: str, used: dict[str, str]) -> str:
+    """``rel`` itself, or, when another url already holds it, ``rel`` with a short hash of the
+    url before the extension. ``used`` maps the lower-case path to the url."""
+    if used.get(rel.lower(), url) != url:
+        p = PurePosixPath(rel)
+        tag = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+        rel = str(p.with_name(f"{p.stem}__{tag}{p.suffix}"))
+    used[rel.lower()] = url
+    return rel
+
+
 _ANCHOR = re.compile(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', re.S | re.I)
 
 
@@ -152,30 +173,39 @@ def plan_ich(
     *,
     api_base: str | None = None,
     files_base: str | None = None,
-    pause_s: float = 1.0,
+    pause_s: float | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[DocRef]:
     """Read the ICH node API for each page and list the document files.
 
     A guideline entry (``code`` with ``fileGroups``) gives one ref per file, stored under a
     directory named after its code. A link inside a ``text`` field gives one ref under a
-    directory named after the page. A url that appears twice is listed once.
+    directory named after the page. A url that appears twice is listed once. Only the hosts
+    of ``ICH_API_BASE`` and ``ICH_FILES_BASE`` are kept; a link to another host is logged and
+    dropped, and so is any path under ``/search``. Two urls with one file name in one folder
+    get distinct names.
     """
     api = (api_base or source_url("ICH_API_BASE")).rstrip("/")
     files = files_base or source_url("ICH_FILES_BASE")
+    hosts = {_host(api), _host(files)}
+    pause = get_settings().reference_docs_api_pause_s if pause_s is None else pause_s
     refs: list[DocRef] = []
     seen: set[str] = set()
+    used: dict[str, str] = {}
 
     def add(uri: str, directory: str, title: str, version: str | None, step: str | None) -> None:
         url = urljoin(files.rstrip("/") + "/", uri)
         if url in seen:
             return
         seen.add(url)
+        if not _url_allowed(url, hosts):
+            _LOG.warning("ICH plan: dropped %s (host or path not allowed)", url)
+            return
         refs.append(
             DocRef(
-                source="ich_e2",
+                source="ich",
                 url=url,
-                rel_path=f"{directory}/{_safe_name(url)}",
+                rel_path=_distinct(f"{directory}/{_safe_name(url)}", url, used),
                 title=title,
                 version=version,
                 step_date=step,
@@ -210,7 +240,7 @@ def plan_ich(
 
     for number, page in enumerate(pages):
         if number:
-            sleep(pause_s)
+            sleep(pause)
         url = f"{api}/nodes?alias=/page/{page}&loadEntities[]=paragraph"
         walk(_get_json(session, url, _headers()), f"page_{_safe_dir(page)}")
     return refs
@@ -229,19 +259,26 @@ def plan_meddra(
     Only the item that holds the Points to Consider is read. The per-version items (release
     notes, introductory guides) are left out: their licence is not checked. The HTML renderings
     sit on a third-party host and are left out too; the Word, PDF and spreadsheet files stay.
+    Only the host of ``MEDDRA_API_BASE`` is kept; any path under ``/search`` is dropped.
     """
     api = (api_base or source_url("MEDDRA_API_BASE")).rstrip("/")
     tax = taxonomy or source_url("MEDDRA_PTC_TAXONOMY")
     payload = _get_json(session, f"{api}/guidances-page?taxonomy={tax}&_format=json", _headers())
     languages = payload if isinstance(payload, list) else [payload]
+    hosts = {_host(api)}
     refs: list[DocRef] = []
     seen: set[str] = set()
+    used: dict[str, str] = {}
 
     def add(url: str, title: str, version: str | None, date: str | None) -> None:
         if url in seen:
             return
         seen.add(url)
-        refs.append(DocRef("meddra_ptc", url, _safe_name(url), title, version, date, LICENCE_ICH))
+        if not _url_allowed(url, hosts):
+            _LOG.warning("MedDRA plan: dropped %s (host or path not allowed)", url)
+            return
+        rel = _distinct(_safe_name(url), url, used)
+        refs.append(DocRef("meddra_ptc", url, rel, title, version, date, LICENCE_ICH))
 
     for block in languages:
         if not isinstance(block, dict):
@@ -272,6 +309,7 @@ def plan_ema(paths_file: Path | None = None, *, base: str | None = None) -> list
     path = Path(paths_file) if paths_file else EMA_PATHS_FILE
     refs: list[DocRef] = []
     seen: set[str] = set()
+    used: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -283,11 +321,9 @@ def plan_ema(paths_file: Path | None = None, *, base: str | None = None) -> list
         seen.add(line)
         name = _safe_name(line)
         title = re.sub(r"_en$", "", PurePosixPath(name).stem).replace("-", " ")
-        refs.append(DocRef("ema_guidance", root + line, name, title, None, None, LICENCE_EMA))
-    names = [r.rel_path for r in refs]
-    if len(names) != len(set(names)):
-        dup = sorted({n for n in names if names.count(n) > 1})
-        raise ValueError(f"EMA paths share a file name: {dup}")
+        url = root + line
+        name = _distinct(name, url, used)
+        refs.append(DocRef("ema_guidance", url, name, title, None, None, LICENCE_EMA))
     return refs
 
 
@@ -424,7 +460,11 @@ def _rel(dest: Path, source_dir: Path) -> str:
 
 
 class _Stop(Exception):
-    """Rate limit, verification page or budget: fetch returns 3."""
+    """Rate limit, block, verification page, EMA connection error or budget: fetch returns 3."""
+
+
+class _NetError(Exception):
+    """A connection error or timeout (a ``requests.RequestException`` of the session)."""
 
 
 def fetch(
@@ -444,6 +484,8 @@ def fetch(
     raw_dir = Path(raw_dir)
     keys: dict[str, str] = {}
     for ref in refs:
+        if "/search" in urlsplit(ref.url).path:
+            raise ValueError(f"a /search url is never fetched: {ref.url}")
         dest = _destination(raw_dir, ref)
         key = input_key(dest, raw_dir)
         if key in keys and keys[key] != ref.url:
@@ -476,8 +518,10 @@ def fetch(
                     stream=True,
                     timeout=(_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S),
                 )
-            finally:
+            except requests.RequestException as exc:
                 state["last"] = clock()
+                raise _NetError(str(exc)) from exc
+            state["last"] = clock()
             if resp.status_code not in (429, 503):
                 return resp
             resp.close()
@@ -498,8 +542,18 @@ def fetch(
 
     def download(ref: DocRef, part: Path) -> tuple[str, int] | None:
         """Write the body to ``part``; return (sha256, bytes), or None when the file failed."""
-        resp = request(ref)
+        ema = ref.source == "ema_guidance"
+        resp = None
         try:
+            try:
+                resp = request(ref)
+            except _NetError as exc:
+                if ema:
+                    raise _Stop(f"connection error for {ref.url}: {exc}") from exc
+                _LOG.error("request failed for %s: %s", ref.url, exc)
+                return None
+            if resp.status_code == 403 and ema:
+                raise _Stop(f"HTTP 403 for {ref.url}: EMA blocks this client")
             if resp.status_code != 200:
                 _LOG.error("HTTP %d for %s", resp.status_code, ref.url)
                 return None
@@ -507,26 +561,35 @@ def fetch(
             if ctype.startswith("text/html") and not ref.rel_path.lower().endswith(
                 (".htm", ".html")
             ):
-                raise _Stop(
-                    f"an HTML page instead of a document for {ref.url} (verification page?)"
-                )
+                if ema:
+                    raise _Stop(
+                        f"an HTML page instead of a document for {ref.url} (verification page?)"
+                    )
+                _LOG.error("HTML page instead of a document for %s", ref.url)
+                return None
             h = hashlib.sha256()
             size = 0
             part.parent.mkdir(parents=True, exist_ok=True)
-            with open(part, "wb") as out:
-                for chunk in resp.iter_content(chunk_size=_CHUNK):
-                    if chunk:
-                        out.write(chunk)
-                        h.update(chunk)
-                        size += len(chunk)
+            try:
+                with open(part, "wb") as out:
+                    for chunk in resp.iter_content(chunk_size=_CHUNK):
+                        if chunk:
+                            out.write(chunk)
+                            h.update(chunk)
+                            size += len(chunk)
+            except requests.RequestException as exc:
+                if ema:
+                    raise _Stop(f"transfer failed for {ref.url}: {exc}") from exc
+                _LOG.error("transfer failed for %s: %s", ref.url, exc)
+                return None
             declared = resp.headers.get("Content-Length")
-            if declared and str(declared).isdigit() and int(declared) != size:
+            # With Content-Encoding set, requests writes the decoded bytes and Content-Length
+            # counts the encoded ones: the two cannot be compared (as in download_ema.py).
+            encoded = bool(str(resp.headers.get("Content-Encoding", "")).strip())
+            if not encoded and declared and str(declared).isdigit() and int(declared) != size:
                 _LOG.error("short read for %s: %d of %s bytes", ref.url, size, declared)
                 return None
             return h.hexdigest(), size
-        except requests.RequestException as exc:
-            _LOG.error("request failed for %s: %s", ref.url, exc)
-            return None
         finally:
             close = getattr(resp, "close", None)
             if close is not None:
@@ -589,6 +652,13 @@ def fetch(
             known = latest.get(ref.url)
             if known and not refresh and intact(source_dir, known):
                 _LOG.info("skip (in manifest): %s", ref.rel_path)
+                kept = source_dir / str(known["rel_path"])
+                if kept.suffix.lower() == ".zip" and not kept.with_name(kept.stem).is_dir():
+                    try:
+                        unpack(kept)  # the unpacked folder was deleted: make it again
+                    except (ZipSlipError, zipfile.BadZipFile) as exc:
+                        _LOG.error("refused %s: %s", ref.url, exc)
+                        failed.append(ref.url)
                 continue
             if not known and not refresh and dest.is_file():
                 # A file put there by hand (or by an earlier layout): adopt it by sha256,
@@ -667,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def plan(source: str, session: Any) -> list[DocRef]:
     settings = get_settings()
-    if source == "ich_e2":
+    if source == "ich":
         return plan_ich(session, settings.reference_docs_ich_pages)
     if source == "meddra_ptc":
         return plan_meddra(session)
