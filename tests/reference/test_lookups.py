@@ -208,7 +208,7 @@ def test_faers_claims_are_computed_and_labelled(ref_db):
     for c in res.claims:
         assert c.method == "computed"
         assert c.text.endswith("(US public spontaneous reports (FAERS))")
-        assert c.text.endswith(FAERS_LABEL)
+        assert c.text.endswith(f"({FAERS_LABEL})")
         assert c.provenance.jurisdiction == "US"
     assert "2025Q1" in res.claims[0].text and "1000" in res.claims[0].text
     assert res.claims[0].provenance.record_key == "faers_moiety_quarter:1:2025-01-01"

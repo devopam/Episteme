@@ -63,7 +63,7 @@ PBRER_DATASETS: dict[str, tuple[str, ...]] = {
 }
 
 LABEL_HISTORY_GAP = "change history not determinable"
-FAERS_LABEL = "(US public spontaneous reports (FAERS))"
+FAERS_LABEL = "US public spontaneous reports (FAERS)"
 FAERS_QUARTER_RULE = "quarters that overlap the interval are counted whole"
 
 # Payload fields shown in a claim, read with .get(): a missing key is skipped. The first
@@ -387,7 +387,7 @@ def faers_counts(
             Claim(
                 text=(
                     f"{label}: {suspect} reports name the substance as suspect, {any_role} "
-                    f"in any role, {of_total} {FAERS_LABEL}"
+                    f"in any role, {of_total} ({FAERS_LABEL})"
                 ),
                 value=str(suspect),
                 method="computed",
