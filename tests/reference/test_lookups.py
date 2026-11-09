@@ -16,6 +16,7 @@ from episteme.reference.lookups import (
     current_label,
     faers_counts,
     safety_actions,
+    substance_scope,
     trials,
 )
 
@@ -285,6 +286,35 @@ def test_trials_report_status_phase_and_results(ref_db):
     assert "results posted: no" in second.text
     assert first.provenance.release == "20261103"
     assert res.coverage.missing == ()
+
+
+def test_moiety_input_finds_rows_named_by_the_salt(ref_db):
+    """The moiety key (1) reaches its salt (2): an approval named only by the salt, a
+    label that lists only the salt UNII, a trial matched only to the salt."""
+    scope = substance_scope(ref_db, 1)
+    assert scope.keys == (1, 2)
+    assert scope.moiety_key == 1
+    assert set(scope.uniis) == {"UNIIMET01", "UNIIMET02"}
+    assert "metformin hydrochloride" in scope.names
+    assert "aspirin" not in scope.names
+    add_release(
+        ref_db,
+        "fda_drugsfda",
+        "2026-10",
+        [
+            {"record_key": "NDA-SALT", "substance_names": ["metformin hydrochloride"]},
+            {"record_key": "NDA-ASP", "substance_names": ["aspirin"]},
+        ],
+        latest=True,
+    )
+    assert _keys(approval_status(ref_db, 1, **KW)) == ["NDA-SALT"]
+    _label(ref_db)  # set1 lists only UNIIMET02, the salt
+    assert _keys(current_label(ref_db, 1, **KW)) == [
+        "dailymed:set1#34067-9",
+        "dailymed:set1#34084-4",
+    ]
+    _aact(ref_db, latest=True)  # NCT02 is matched only to the salt
+    assert _keys(trials(ref_db, 1, **KW)) == ["NCT01", "NCT02"]
 
 
 def test_lookups_write_nothing(ref_db):

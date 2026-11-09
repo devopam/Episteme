@@ -1,10 +1,10 @@
 """Literature for a substance, from MeSH indexing. Read-only; no vectors, no text scan.
 
 A PubMed record matches when one of its MeSH descriptors (``article_mesh``) has a name
-equal to the substance's preferred name or a synonym (the names of
-``lookups.substance_scope``). The descriptor name is compared with SQL ``lower()``; the
-substance names are ``casefold`` forms. The two differ only outside ASCII (for example
-``ß``), where a match can be missed.
+equal to a preferred name or synonym of a member of the substance's moiety family (the
+names of ``_scope.substance_scope``). The descriptor name is compared with SQL
+``lower()``; the substance names are ``casefold`` forms. The two differ only outside
+ASCII (for example ``ß``), where a match can be missed.
 
 ``topic``, when given, must also be on the record: a descriptor name or a qualifier name
 (case-insensitive) of the same PMID, for example ``adverse effects``.
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import psycopg
 
+from episteme.reference._scope import SCHEMA, relation_exists, substance_scope
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
-from episteme.reference.lookups import SCHEMA, relation_exists, substance_scope
 
 DATASETS = ("article_mesh",)
 

@@ -6,33 +6,47 @@ relation is missing, or that has no ``is_latest`` release, is named in
 ``coverage.missing``; the other sources still answer. No function falls back to an
 older release, and no function raises for a missing or empty schema.
 
-Substance scope: the substance itself and its active moiety (``COALESCE(moiety_key,
-substance_key)``). Names come from the ``name`` rows of ``substance_xref`` for those keys
-plus their preferred names (``norm_name`` form, as ``reg_record.substance_names``). The
-FAERS signal tables count moieties, so ``faers_counts`` reads the moiety key only.
+Substance scope: the input's whole moiety family (``_scope.substance_scope``): the moiety
+and every salt or ester whose moiety it is. Approvals and actions match the family's
+names, labels its UNIIs, trials its keys; the FAERS signal tables count the family as
+its moiety key.
 
 ``tenant`` and ``caller`` are accepted for a stable signature; v1 does not use them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import psycopg
 from psycopg import sql
 
-from episteme.data.regulatory.normalize import norm_name
+from episteme.reference._scope import (
+    SCHEMA,
+    SubstanceScope,
+    latest_release,
+    relation_exists,
+    substance_scope,
+)
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
-SCHEMA = "episteme"
+__all__ = [
+    "PBRER_DATASETS",
+    "SCHEMA",
+    "SubstanceScope",
+    "approval_status",
+    "current_label",
+    "faers_counts",
+    "latest_release",
+    "relation_exists",
+    "safety_actions",
+    "substance_scope",
+    "trials",
+]
 # The schema of the AACT views of the latest release (load_aact.VIEW_SCHEMA). A module
 # constant so that a test can point it at its own schema.
 AACT_SCHEMA = "aact"
-# xref id types that hold a normalised name. ema_name / aact_name rows repeat values of
-# name rows (resolve_names adds them only on an exact match), so name is enough.
-NAME_ID_TYPES = ("name",)
 
 APPROVAL_DATASETS = ("fda_drugsfda", "ema_medicines", "ema_article57", "ema_outside_eu")
 SAFETY_DATASETS = ("fda_enforcement", "ema_referrals", "ema_dhpc", "ema_psusa")
@@ -91,82 +105,9 @@ WHERE dataset = %(ds)s AND release_id = %(rel)s AND substance_names && %(names)s
 """
 
 
-@dataclass(frozen=True)
-class SubstanceScope:
-    """The keys, UNIIs and normalised names of a substance and its moiety."""
-
-    substance_key: int
-    moiety_key: int
-    keys: tuple[int, ...]
-    uniis: tuple[str, ...]
-    names: tuple[str, ...]
-
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-def relation_exists(conn: psycopg.Connection, name: str) -> bool:
-    """Whether ``name`` (``schema.relation``) exists, by ``to_regclass``."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
-        return bool(cur.fetchone()[0])
-
-
-def latest_release(conn: psycopg.Connection, dataset: str) -> str | None:
-    """The ``is_latest`` ``release_id`` of ``dataset``, or ``None`` (also when
-    ``reg_release`` does not exist)."""
-    if not relation_exists(conn, f"{SCHEMA}.reg_release"):
-        return None
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT release_id FROM episteme.reg_release WHERE dataset = %s AND is_latest",
-            (dataset,),
-        )
-        row = cur.fetchone()
-    return row[0] if row else None
-
-
-def substance_scope(conn: psycopg.Connection, substance_key: int) -> SubstanceScope | None:
-    """The scope of ``substance_key``, or ``None`` when the substance tables or the
-    substance do not exist."""
-    if not (
-        relation_exists(conn, f"{SCHEMA}.substance")
-        and relation_exists(conn, f"{SCHEMA}.substance_xref")
-    ):
-        return None
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COALESCE(moiety_key, substance_key) FROM episteme.substance "
-            "WHERE substance_key = %s",
-            (substance_key,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        moiety = int(row[0])
-        keys = tuple(dict.fromkeys((int(substance_key), moiety)))
-        cur.execute(
-            "SELECT unii, preferred_name FROM episteme.substance "
-            "WHERE substance_key = ANY(%s) ORDER BY substance_key",
-            (list(keys),),
-        )
-        subs = cur.fetchall()
-        cur.execute(
-            "SELECT DISTINCT id_value FROM episteme.substance_xref "
-            "WHERE substance_key = ANY(%s) AND id_type = ANY(%s) ORDER BY id_value",
-            (list(keys), list(NAME_ID_TYPES)),
-        )
-        xref_names = [r[0] for r in cur.fetchall()]
-    names = [norm_name(p) for _, p in subs if p] + xref_names
-    return SubstanceScope(
-        substance_key=int(substance_key),
-        moiety_key=moiety,
-        keys=keys,
-        uniis=tuple(u for u, _ in subs if u),
-        names=tuple(n for n in dict.fromkeys(names) if n),
-    )
-
-
 def _no_substance(function: str, substance_key: int) -> LookupResult:
     note = f"substance {substance_key} not found"
     return LookupResult(
@@ -300,9 +241,9 @@ def current_label(
     conn: psycopg.Connection, substance_key: int, *, tenant: str, caller: str
 ) -> LookupResult:
     """The sections of the current DailyMed labels whose ``label_substance.unii`` is the
-    substance's or its moiety's UNII. The claim value is the section title; the release
-    is the SPL version (``articles.book_meta``). The extract keeps only the newest SPL
-    version per set id, so the change history is always a gap."""
+    UNII of a member of the substance's moiety family. The claim value is the section
+    title; the release is the SPL version (``articles.book_meta``). The extract keeps
+    only the newest SPL version per set id, so the change history is always a gap."""
     scope = substance_scope(conn, substance_key)
     if scope is None:
         return _no_substance("current_label", substance_key)
@@ -351,8 +292,8 @@ ORDER BY st.nct_id
 def trials(
     conn: psycopg.Connection, substance_key: int, *, tenant: str, caller: str
 ) -> LookupResult:
-    """AACT studies with an intervention matched to the substance or its moiety
-    (``intervention_substance.substance_key``), with status, phase and whether results
+    """AACT studies with an intervention matched to a member of the substance's moiety
+    family (``intervention_substance.substance_key``), with status, phase and whether results
     are posted (``studies.results_first_posted_date``)."""
     scope = substance_scope(conn, substance_key)
     if scope is None:
