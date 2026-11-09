@@ -13,7 +13,8 @@ inside a savepoint, and the savepoint is rolled back.
 Row rules (see the module tests):
 
 * Exact duplicate rows are dropped and counted first. The row count that is checked
-  against EMA's ``meta.total_records`` is the count after that step.
+  against EMA's ``meta.total_records`` is the number of distinct record keys left
+  after that step (a key may repeat with other content, see below).
 * A dataset with an empty ``record_key`` list uses a hash of the row as its key.
 * A non-exact repeat of a ``record_key`` is not dropped silently: it is counted
   (``conflicts``) and the last row seen is kept. It is not a failure.
@@ -430,8 +431,15 @@ def _check_counts(feed: Feed, paths: Sequence[Path], prep: RowPreparer) -> int |
     total = reader(paths[0])
     if total is None:
         raise _Invalid("the feed declares no meta.total_records")
-    if rows_after != total:
-        raise _Invalid(f"{rows_after} rows after dropping duplicates, meta.total_records = {total}")
+    # EMA's total counts records, and a record key can repeat with other content (the
+    # non-exact repeat is counted as a conflict and the last row is kept): compare the
+    # total with the distinct keys that are left after the exact duplicates went.
+    keys = prep.distinct_keys
+    if keys != total:
+        raise _Invalid(
+            f"{keys} distinct record keys after dropping exact duplicates "
+            f"({rows_after} rows), meta.total_records = {total}"
+        )
     return total
 
 
