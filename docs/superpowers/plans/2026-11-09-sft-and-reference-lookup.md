@@ -46,8 +46,11 @@
 | `src/episteme/reference/lookups.py` | PBRER v1 lookup functions |
 | `src/episteme/reference/literature.py` | MeSH-based literature lookup with citations |
 | `src/episteme/reference/rules/__init__.py` | rule-store loader and checkers |
-| `src/episteme/reference/rules/data/ich_e2c_r2.json` | PBRER section list (one IG version) |
-| `src/episteme/reference/rules/data/ich_e2b_r3_basic.json` | basic E2B(R3) element rules |
+| `src/episteme/reference/rules/data/ich_e2c_r2.json` | PBRER section list (one IG version), with source file sha256 |
+| `src/episteme/reference/rules/build_e2b.py` | converter: ICH business-rules xlsx + code lists → rule JSON |
+| `src/episteme/reference/rules/data/ich_e2b_r3.json` | E2B(R3) element rules and code lists (generated) |
+| `src/episteme/data/reference_docs/acquire.py` | paced fetch of ICH, MedDRA PtC and EMA guidance documents (Task 13) |
+| `scripts/data/reference_docs/download_reference_docs.sh` | pipeline wrapper for Task 13 |
 | `src/episteme/harness/__init__.py` | package |
 | `src/episteme/harness/pbrer.py` | fact assembly per PBRER section; draft skeleton |
 | `src/episteme/harness/loop.py` | tool schema, chat loop against an OpenAI-compatible server |
@@ -167,42 +170,50 @@ If a licence cannot be confirmed from an official page, record it as "use with c
 
 ### Task 5: Rule store and the E2C(R2) PBRER section list
 
+> **Amended 2026-11-09 (owner approved).** Run Task 13 before this task. The rules come from the official documents that Task 13 fetches, not from memory. Each rule file names its source file and that file's sha256.
+
 **Files:**
 - Create: `src/episteme/reference/rules/__init__.py`, `src/episteme/reference/rules/data/ich_e2c_r2.json`
 - Modify: `pyproject.toml` (package data, if the build does not already include `*.json` under `src/episteme`)
 - Test: `tests/reference/test_rules.py`
 
 **Interfaces:**
+- Consumes: Task 13 manifest (`reference_docs` manifest entries: `source`, `path`, `sha256`).
 - Produces:
-  - Rule file shape: `{"ig": "ICH E2C(R2)", "version": "Step 4, 2012-12-17", "clause_base": "...", "sections": [{"id": "1", "title": "Introduction", "required": true, "mah_data": false, "clause": "3.1"}, ...]}`. `mah_data: true` marks sections that need company data (exposure, own tabulations, reference safety information as CCSI).
-  - `load_rules(ig_id: str) -> RuleSet` (ids: `ich_e2c_r2`, `ich_e2b_r3_basic`).
+  - Rule file shape: `{"ig": "ICH E2C(R2)", "version": "Step 4, 2012-12-17", "source_docs": [{"source": "ich_e2", "file": "E2C_R2_Guideline.pdf", "sha256": "..."}], "sections": [{"id": "1", "title": "Introduction", "required": true, "mah_data": false, "clause": "3.1", "region": "ich"}, ...]}`. `mah_data: true` marks sections that need company data (exposure, own tabulations, reference safety information as CCSI). `region: "eu"` entries come from GVP Module VII (EU regional appendix and EU-specific requirements); a `region="ich"` check ignores them.
+  - `load_rules(ig_id: str) -> RuleSet` (ids: `ich_e2c_r2`, `ich_e2b_r3`).
   - `Finding(rule_id: str, clause: str, message: str)`.
-  - `check_sections(rules: RuleSet, headings: list[str]) -> list[Finding]` — missing required section, wrong order, duplicate section.
+  - `check_sections(rules: RuleSet, headings: list[str], *, region: Literal["ich","eu"] = "ich") -> list[Finding]` — missing required section, wrong order, duplicate section.
   - `check_mah_markers(rules: RuleSet, sections: dict[str, str]) -> list[Finding]` — every `mah_data` section body contains `MAH data required` unless the caller supplied data (v1 never does).
 
-- [ ] **Step 1: Write the section list** from the ICH E2C(R2) guideline table of contents (sections 1–20 and appendices), each with its clause number; source the text only after Task 1 marks ICH as "use freely".
-- [ ] **Step 2: Write failing tests**: `test_complete_ordered_draft_has_no_findings`; `test_missing_section_is_named_with_clause`; `test_wrong_order_is_reported`; `test_duplicate_section_is_reported`; `test_mah_section_without_marker_fails`; `test_rule_file_ids_are_unique`.
+- [ ] **Step 1: Write the section list** from the table of contents of `E2C_R2_Guideline.pdf` (text via `pypdf`, already a dependency), sections 1–20 and appendices, each with its clause number. Use the E2C(R2) Q&A document for clarifications and cite the Q&A number in a `"note"` field. Add the EU entries from GVP Module VII with `region: "eu"`. If the GVP VII PDF is not yet in the Task 13 manifest (EMA rate limit), write the ICH entries only and add `"pending": ["GVP Module VII"]` to the rule file.
+- [ ] **Step 2: Write failing tests**: `test_complete_ordered_draft_has_no_findings`; `test_missing_section_is_named_with_clause`; `test_wrong_order_is_reported`; `test_duplicate_section_is_reported`; `test_mah_section_without_marker_fails`; `test_rule_file_ids_are_unique`; `test_rule_file_names_its_source_sha256`; `test_titles_match_source_pdf` (skips unless `EPISTEME_RAW_DIR` has the PDF and its sha256 matches; then every section title appears in the extracted text after whitespace and case normalisation).
 - [ ] **Step 3: Run** `uv run pytest tests/reference/test_rules.py -q` — Expected: FAIL.
 - [ ] **Step 4: Implement** the loader (`importlib.resources`) and the two checks. Heading match: case-insensitive, leading section number optional.
 - [ ] **Step 5: Run** — Expected: PASS. **Commit**: `feat(reference): versioned rule store with the E2C(R2) PBRER sections`.
 
 ---
 
-### Task 6: Basic E2B(R3) ICSR checks
+### Task 6: E2B(R3) ICSR checks from the official business rules
+
+> **Amended 2026-11-09 (owner approved).** The rule file is generated from the ICH spreadsheet `11_ICH E2B(R3) Core Data Elements and Business Rules ver.1.00.xlsx` (sheet `ICSR`, 282 rows) and the code lists in `7_E2B Bilingual Code Lists v2.11/*.gc.xml`, both in the IG package v1.11 that Task 13 fetches. It is not hand-written. EU regional rules come from the EMA EU ICSR IG business-rules spreadsheet when Task 13 has it; until then `region="eu"` returns one finding: `EU regional rules not loaded`. E2D(R1) is a reference for report type and seriousness semantics only; no expedited-reporting engine in this task.
 
 **Files:**
-- Create: `src/episteme/reference/rules/data/ich_e2b_r3_basic.json`, `src/episteme/reference/rules/icsr.py`
-- Test: `tests/reference/test_icsr.py`, fixtures `tests/fixtures/icsr/valid_min.xml`, `tests/fixtures/icsr/missing_mandatory.xml`
+- Create: `src/episteme/reference/rules/build_e2b.py` (converter: xlsx + code lists → JSON), `src/episteme/reference/rules/data/ich_e2b_r3.json` (generated, committed), `src/episteme/reference/rules/icsr.py`
+- Test: `tests/reference/test_build_e2b.py`, `tests/reference/test_icsr.py`, fixtures `tests/fixtures/icsr/valid_min.xml`, `tests/fixtures/icsr/missing_mandatory.xml`, `tests/fixtures/icsr/business_rules_mini.xlsx` (5 rows, built in the test with `openpyxl`), `tests/fixtures/icsr/cl_mini.gc.xml`
 
 **Interfaces:**
-- Consumes: Task 5 `load_rules`, `Finding`.
-- Produces: `check_icsr(xml_bytes: bytes, *, region: Literal["ich","fda","eu"] = "ich") -> list[Finding]`. Scope exactly as spec section 7: mandatory and conditional elements, code lists, lengths and formats, date precision, batch/message header consistency. MedDRA codes: only shape (8 digits) and the version element present. No XSD step in this task (left for later; note it in the rule file `"notes"`).
+- Consumes: Task 5 `load_rules`, `Finding`; Task 13 manifest.
+- Produces:
+  - `build_rules(xlsx: Path, codelist_dir: Path, out: Path, *, source_sha256: dict[str, str]) -> dict` — one rule per data element: `{"element": "C.1.1", "name": ..., "conformance": "mandatory"|"conditional"|"optional", "condition": <text from the sheet>, "length": int|None, "format": "AN"|"N"|"DT"|..., "codelist": "CL1"|None, "xpath": ...}`; code lists as `{"CL1": {"oid": ..., "codes": [...]}}`. Unknown columns or a changed header row raise `ValueError` naming the column (the spreadsheet layout is the contract).
+  - CLI `python -m episteme.reference.rules.build_e2b --raw <ig_v1_11 dir> --out src/episteme/reference/rules/data/ich_e2b_r3.json`.
+  - `check_icsr(xml_bytes: bytes, *, region: Literal["ich","fda","eu"] = "ich") -> list[Finding]`. Scope as spec section 7: mandatory elements, the conditional rules that the sheet states as a machine-checkable condition (others listed under `"manual"` in the rule file, not checked), code lists, lengths and formats, date precision, batch/message header consistency. MedDRA codes: only shape (8 digits) and the version element present. No XSD step (note it in `"notes"`); the reference and example instances in the IG package are the acceptance set.
 
-- [ ] **Step 1: Encode** the element rules from the ICH E2B(R3) IG (and the FDA/EU regional deltas for `region`), each with its data element id (for example `C.1.1`) and clause. Only if Task 1 marked the package "use freely"; otherwise stop and report BLOCKED.
-- [ ] **Step 2: Write failing tests**: `test_minimal_valid_icsr_passes`; `test_missing_mandatory_element_is_named` (asserts the element id in the finding); `test_conditional_rule_fires`; `test_bad_date_precision_is_reported`; `test_meddra_code_shape_only` (an 8-digit code passes, `"abc"` fails, no term lookup happens); `test_malformed_xml_returns_one_finding_not_an_exception`; `test_xml_with_external_entity_is_refused` (parse with external entities and DTD loading disabled).
-- [ ] **Step 3: Run** `uv run pytest tests/reference/test_icsr.py -q` — Expected: FAIL.
-- [ ] **Step 4: Implement** with `xml.etree.ElementTree` behind `defusedxml` if it is already a dependency, else ElementTree with a pre-check that refuses any `<!DOCTYPE`.
-- [ ] **Step 5: Run** — Expected: PASS. **Commit**: `feat(reference): basic E2B(R3) ICSR checks`.
+- [ ] **Step 1: Write failing converter tests**: `test_build_reads_mandatory_and_length`; `test_build_attaches_codelist_codes`; `test_build_rejects_changed_header`; `test_build_records_source_sha256`.
+- [ ] **Step 2: Implement** `build_rules` with `openpyxl` (read-only mode) and `defusedxml` for the code lists. Run the CLI once on the real package (controller, local) and commit the generated JSON.
+- [ ] **Step 3: Write failing check tests**: `test_minimal_valid_icsr_passes`; `test_missing_mandatory_element_is_named` (asserts the element id in the finding); `test_conditional_rule_fires`; `test_bad_date_precision_is_reported`; `test_code_outside_codelist_is_reported`; `test_meddra_code_shape_only` (an 8-digit code passes, `"abc"` fails, no term lookup happens); `test_malformed_xml_returns_one_finding_not_an_exception`; `test_xml_with_external_entity_is_refused`; `test_eu_region_without_eu_rules_reports_not_loaded`; `test_ich_example_instances_pass` (skips unless `EPISTEME_RAW_DIR` has the IG package; each file in `6_Example Instances` gives no mandatory or code-list finding).
+- [ ] **Step 4: Implement** `icsr.py` with `defusedxml.ElementTree` (already a dependency).
+- [ ] **Step 5: Run** `uv run pytest tests/reference/test_build_e2b.py tests/reference/test_icsr.py -q` — Expected: PASS. **Commit**: `feat(reference): E2B(R3) ICSR checks generated from the ICH business rules`.
 
 ---
 
@@ -322,6 +333,35 @@ If a licence cannot be confirmed from an official page, record it as "use with c
 - [ ] **Step 2: Add a runbook section** "SFT data and training handoff": run `corpus materialize`, then `build_slice`, then `generate_batch` per kind with the budget env keys named (not their values); what to copy to the rented GPU host (Stage A parts, Stage B JSONL, manifests); training is out of repo scope this round; GGUF export (Q4_K_M, Q5_K_M) and the model card fields from spec 9.5; then `python -m episteme.bench.runner` on the laptop against the GGUF served by llama.cpp at `EPISTEME_HARNESS_BASE_URL`.
 - [ ] **Step 3: Drift log entry** in `docs/project-incubation-baseline.md`: what landed; deferred items (training rounds, owner review of PBRER cases, XSD validation, label history store, other document types); the legacy `src/episteme/model/train_supervised_finetuning.py` and `evaluate_benchmarks.py` load MedMCQA and MedQA, which are now "use with caution": not to be used for SFT data until the open point closes.
 - [ ] **Step 4: Run** `uv run pytest tests/docs -q` — Expected: PASS. **Commit** the four files: `docs: GraphRAG design (13), SFT handoff runbook, drift log`.
+
+---
+
+### Task 13: Reference documents acquisition (`ich_e2`, `meddra_ptc`, `ema_guidance`)
+
+> **Added 2026-11-09 (owner approved). Execution order: run this task after Task 4 and before Task 5.** The number is 13 only so earlier task numbers stay stable.
+
+Why: Tasks 5 and 6 and the Stage B `RuleCheck` examples need the official ICH, MedDRA PtC and EMA documents. They must be fetched by a repeatable, scheduled pipeline, not by hand. Facts from research on 2026-11-09:
+- ICH: the site is a single-page app. Its JSON API (`<ICH_API_BASE>/nodes?alias=/page/<page>&loadEntities[]=paragraph`) lists each guideline with `code`, `status`, `details.stepDate` and `fileGroups[].files[].{title,uri}`. The files are static. Pages: the E2 pages, `e2br3-individual-case-safety-report-icsr-specification-and-related-files`, `efficacy-guidelines`, `quality-guidelines`. Licence: use freely, with attribution (owner confirmed 2026-11-09).
+- MedDRA PtC: `<MEDDRA_API_BASE>/guidances-page?taxonomy=<english id>&_format=json` lists the documents. The documents carry the ICH public-licence notice, so use freely with attribution. MedDRA terminology stays licensed and is out of scope.
+- EMA: server-rendered pages. Documents are at `/en/documents/<type>/<slug>_en.<ext>`. Non-browser clients get HTTP 429 at even low rates. Pace at least `EPISTEME_EMA_DOC_MIN_INTERVAL_S` (default 60) between requests, honour `Retry-After`, and stop cleanly with exit code 3 for resume (same contract as `download_ema.py`). Never fetch through a browser to get round the limit, and never touch `/search/` (robots.txt, CAPTCHA). The SPOR API is out of scope (owner decision 2026-11-09). SPOR lists come later as an owner-signed-in web export.
+
+**Files:**
+- Create: `src/episteme/data/reference_docs/__init__.py`, `src/episteme/data/reference_docs/acquire.py`, `src/episteme/data/reference_docs/ema_documents.txt` (EMA document paths only, no host; the 55 paths from the 2026-11-09 research), `scripts/data/reference_docs/download_reference_docs.sh`
+- Modify: `scripts/data/_lib/sources.env` (`ICH_API_BASE`, `ICH_FILES_BASE`, `MEDDRA_API_BASE`, `MEDDRA_PTC_TAXONOMY`, `EMA_BASE` if not already present), `src/episteme/config.py` (`ema_doc_min_interval_s: int = 60`, `reference_docs_ich_pages: tuple[str, ...]`), `docs/02-data-sources.md` (three rows: source, licence class, cadence), `scripts/data/run_pipeline.sh` registration (download stage only; no load stage in this task)
+- Test: `tests/data/test_reference_docs.py`
+
+**Interfaces:**
+- Produces:
+  - `plan_ich(session, pages) -> list[DocRef]`, `plan_meddra(session) -> list[DocRef]`, `plan_ema(paths_file) -> list[DocRef]`, where `DocRef(source: str, url: str, rel_path: str, title: str, version: str | None, step_date: str | None, licence: str)`.
+  - `fetch(refs: list[DocRef], raw_dir: Path, *, session, min_interval_s: float, budget_s: float | None) -> int` — skips files already in the manifest with the same size and sha256; writes `<raw_dir>/<source>/<rel_path>` via a `.part` file; appends `<raw_dir>/<source>/_manifest.jsonl` (`source`, `url`, `rel_path`, `sha256`, `bytes`, `fetched_at`, `version`, `step_date`, `licence`, `input_key`). It returns 0 when done and 3 when it stops for rate limit or budget (resume).
+  - Zip handling: unpack each fetched `.zip` to a sibling directory named after the zip stem. Refuse any member path that leaves that directory (zip-slip). Record the member count in the manifest.
+  - A changed upstream file (same URL, new sha256) is kept as a new file with a `.<yyyymmdd>` suffix, never overwritten, and logged as a version change.
+
+- [ ] **Step 1: Write failing tests** with a stubbed `requests.Session` (no network): `test_plan_ich_reads_files_from_node_json` (fixture: trimmed node JSON); `test_plan_meddra_lists_english_docs`; `test_fetch_skips_unchanged_file`; `test_fetch_keeps_changed_upstream_file_as_new_version`; `test_429_with_retry_after_waits_then_stops_with_3`; `test_min_interval_is_respected` (fake clock); `test_zip_slip_member_is_refused`; `test_manifest_keys_on_input_key`; `test_no_url_literal_outside_sources_env` (runs the endpoint guard).
+- [ ] **Step 2: Run** `uv run pytest tests/data/test_reference_docs.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.** User-Agent: a fixed project string from config (no e-mail address). Run the endpoint guard.
+- [ ] **Step 4: Run** — Expected: PASS. **Commit**: `feat(reference_docs): paced acquisition of ICH, MedDRA PtC and EMA guidance documents`.
+- [ ] **Step 5 (controller, local, foreground):** run the download for `ich_e2` and `meddra_ptc`. Then run `ema_guidance` in chunks of under 10 minutes until the manifest has all paths or EMA still returns 429. Record the result in the ledger. Files already fetched by hand on 2026-11-09 under `D:/episteme/01_raw/ich/e2/` and `D:/episteme/01_raw/meddra_ptc/` are adopted by sha256, not fetched again.
 
 ---
 
