@@ -194,6 +194,7 @@
   "CL8: 01_ICH E2B(R3) Codelist Set.gc.xml gives version 2.16.840.1.113883.3.989.2.1.1.8.2; E2B CL8 ich-study-type.gc.xml gives 2.16.840.1.113883.3.989.2.1.1.8.2.1. The file is used.",
   "CL25: 01_ICH E2B(R3) Codelist Set.gc.xml gives version 2.16.840.1.113883.3.989.2.1.1.25.3; E2B CL25 ich-dose-strength-unit.xml gives 2.16.840.1.113883.3.989.2.1.1.25.2.3. The file is used.",
   "CL14: codes ['046'] have current flag 'n'; the check reports them as retired.",
+  "E.i.4: reference-instance path PORR_IN049016UV/controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/high/@value is dropped; it is a minority path for E.i.4 and belongs to E.i.5.",
   "G.k.9.i.1: not named in the reference instance; no path.",
   "D.8.r.2b: rule 'either MPID or PhPID, but NOT both' is not checked; the two identifiers share one XML element or have no path.",
   "D.8.r.3b: rule 'either MPID or PhPID, but NOT both' is not checked; the two identifiers share one XML element or have no path.",
@@ -2417,7 +2418,7 @@
     "true"
    ],
    "xpath": [
-    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='21']/value"
+    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='21']/value/@value"
    ]
   },
   {
@@ -2453,7 +2454,7 @@
     "true"
    ],
    "xpath": [
-    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='35']/value"
+    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='35']/value/@value"
    ]
   },
   {
@@ -2471,7 +2472,7 @@
     "true"
    ],
    "xpath": [
-    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='12']/value"
+    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/outboundRelationship2/observation[code/@code='12']/value/@value"
    ]
   },
   {
@@ -2507,11 +2508,7 @@
    "not_future": true,
    "xpath": [
     "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/low/@value",
-    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/comp/low/@value",
-    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/high/@value"
-   ],
-   "ambiguous_with": [
-    "E.i.5"
+    "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/comp/low/@value"
    ]
   },
   {
@@ -2530,9 +2527,6 @@
    "xpath": [
     "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/high/@value",
     "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']/effectiveTime/comp/high/@value"
-   ],
-   "ambiguous_with": [
-    "E.i.4"
    ]
   },
   {
@@ -3301,7 +3295,7 @@
    "condition": "Until ISO IDMP TermID is available, use version number in the ICH E2B(R3) code list 14.",
    "length": 10,
    "format": "AN",
-   "codelist": "CL14",
+   "codelist": null,
    "xpath": [
     "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='4']/component/substanceAdministration/outboundRelationship2/substanceAdministration/routeCode/@codeSystemVersion"
    ]
@@ -3346,7 +3340,7 @@
    "condition": "Until ISO IDMP TermID is available, use version number in the ICH E2B(R3) code list 14.",
    "length": 10,
    "format": "AN",
-   "codelist": "CL14",
+   "codelist": null,
    "xpath": [
     "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='4']/component/substanceAdministration/outboundRelationship2/substanceAdministration/inboundRelationship/observation[code/@code='28']/value/@codeSystemVersion"
    ]
@@ -3779,23 +3773,26 @@
    "members": [
     "C.1.6.1.r.1",
     "C.1.6.1.r.2"
-   ]
+   ],
+   "outside": []
   },
   "C.1.9.1.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/subjectOf1/controlActEvent/id[@root='2.16.840.1.113883.3.989.2.1.3.3']",
    "members": [
     "C.1.9.1.r.1",
     "C.1.9.1.r.2"
-   ]
+   ],
+   "outside": []
   },
   "C.1.10.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/outboundRelationship/relatedInvestigation/subjectOf2/controlActEvent/id[@root='2.16.840.1.113883.3.989.2.1.3.2']",
    "members": [
     "C.1.10.r"
-   ]
+   ],
+   "outside": []
   },
   "C.2.r": {
-   "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/outboundRelationship",
+   "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/outboundRelationship/relatedInvestigation[code/@code='2']/subjectOf2/controlActEvent/author/assignedEntity",
    "members": [
     "C.2.r.1.1",
     "C.2.r.1.2",
@@ -3809,7 +3806,9 @@
     "C.2.r.2.6",
     "C.2.r.2.7",
     "C.2.r.3",
-    "C.2.r.4",
+    "C.2.r.4"
+   ],
+   "outside": [
     "C.2.r.5"
    ]
   },
@@ -3818,14 +3817,16 @@
    "members": [
     "C.4.r.1",
     "C.4.r.2"
-   ]
+   ],
+   "outside": []
   },
   "C.5.1.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf1/researchStudy/authorization/studyRegistration",
    "members": [
     "C.5.1.r.1",
     "C.5.1.r.2"
-   ]
+   ],
+   "outside": []
   },
   "D.7.1.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='1']/component/observation",
@@ -3837,7 +3838,8 @@
     "D.7.1.r.4",
     "D.7.1.r.5",
     "D.7.1.r.6"
-   ]
+   ],
+   "outside": []
   },
   "D.8.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='2']/component/substanceAdministration",
@@ -3853,7 +3855,8 @@
     "D.8.r.6b",
     "D.8.r.7a",
     "D.8.r.7b"
-   ]
+   ],
+   "outside": []
   },
   "D.9.2.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='32']/value",
@@ -3861,7 +3864,8 @@
     "D.9.2.r.1a",
     "D.9.2.r.1b",
     "D.9.2.r.2"
-   ]
+   ],
+   "outside": []
   },
   "D.9.4.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='5']/outboundRelationship2/observation[code/@code='8']/value",
@@ -3869,7 +3873,8 @@
     "D.9.4.r.1a",
     "D.9.4.r.1b",
     "D.9.4.r.2"
-   ]
+   ],
+   "outside": []
   },
   "D.10.7.1.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/player1/role[code/@code='PRN']/subjectOf2/organizer[code/@code='1']/component/observation",
@@ -3880,7 +3885,8 @@
     "D.10.7.1.r.3",
     "D.10.7.1.r.4",
     "D.10.7.1.r.5"
-   ]
+   ],
+   "outside": []
   },
   "D.10.8.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/player1/role[code/@code='PRN']/subjectOf2/organizer[code/@code='2']/component/substanceAdministration",
@@ -3896,7 +3902,8 @@
     "D.10.8.r.6b",
     "D.10.8.r.7a",
     "D.10.8.r.7b"
-   ]
+   ],
+   "outside": []
   },
   "E.i": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/observation[code/@code='29']",
@@ -3920,7 +3927,8 @@
     "E.i.7",
     "E.i.8",
     "E.i.9"
-   ]
+   ],
+   "outside": []
   },
   "F.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='3']/component/observation",
@@ -3937,12 +3945,12 @@
     "F.r.5",
     "F.r.6",
     "F.r.7"
-   ]
+   ],
+   "outside": []
   },
   "G.k": {
-   "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment",
+   "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='4']/component/substanceAdministration",
    "members": [
-    "G.k.1",
     "G.k.2.1.1a",
     "G.k.2.1.1b",
     "G.k.2.1.2a",
@@ -3960,6 +3968,9 @@
     "G.k.8",
     "G.k.10.r",
     "G.k.11"
+   ],
+   "outside": [
+    "G.k.1"
    ]
   },
   "G.k.2.3.r": {
@@ -3970,7 +3981,8 @@
     "G.k.2.3.r.2b",
     "G.k.2.3.r.3a",
     "G.k.2.3.r.3b"
-   ]
+   ],
+   "outside": []
   },
   "G.k.4.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='4']/component/substanceAdministration/outboundRelationship2/substanceAdministration",
@@ -3994,7 +4006,8 @@
     "G.k.4.r.11.1",
     "G.k.4.r.11.2a",
     "G.k.4.r.11.2b"
-   ]
+   ],
+   "outside": []
   },
   "G.k.7.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/subject1/primaryRole/subjectOf2/organizer[code/@code='4']/component/substanceAdministration/inboundRelationship/observation[code/@code='19']/value",
@@ -4002,7 +4015,8 @@
     "G.k.7.r.1",
     "G.k.7.r.2a",
     "G.k.7.r.2b"
-   ]
+   ],
+   "outside": []
   },
   "G.k.9.i": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment",
@@ -4015,26 +4029,29 @@
     "G.k.9.i.3.2a",
     "G.k.9.i.3.2b",
     "G.k.9.i.4"
-   ]
+   ],
+   "outside": []
   },
   "H.3.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/adverseEventAssessment/component1/observationEvent[code/@code='15']/value",
    "members": [
     "H.3.r.1a",
     "H.3.r.1b"
-   ]
+   ],
+   "outside": []
   },
   "H.5.r": {
    "path": "controlActProcess[code/@code='PORR_TE049016UV']/subject/investigationEvent[code/@code='PAT_ADV_EVNT']/component/observationEvent[code/@code='36']/value",
    "members": [
     "H.5.r.1a",
     "H.5.r.1b"
-   ]
+   ],
+   "outside": []
   }
  },
  "rules": [
   {
-   "kind": "same_as",
+   "kind": "same_root",
    "element": "N.2.r.1",
    "other": "C.1.1",
    "text": "The value is the same as C.1.1.Therefore the notation would be:\n<id extension=\"message identifier\" root=\"2.16.840.1.113883.3.989.2.1.3.1\"/>"
@@ -4487,6 +4504,12 @@
    "element": "H.5.r.1b",
    "name": "Case Summary and Reporter’s Comments Language",
    "text": ""
+  },
+  {
+   "element": "N.2.r.1",
+   "name": "Message Identifier",
+   "text": "The value is the same as C.1.1.Therefore the notation would be:\n<id extension=\"message identifier\" root=\"2.16.840.1.113883.3.989.2.1.3.1\"/>",
+   "note": "Equality of the value with C.1.1 is not checked; only the root OID is (ruling R13). The ICH examples use different values."
   }
  ],
  "codelists": {

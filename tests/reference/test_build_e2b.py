@@ -11,7 +11,7 @@ import openpyxl
 import pytest
 
 from episteme.reference.rules import parse_rules
-from episteme.reference.rules.build_e2b import build_rules
+from episteme.reference.rules.build_e2b import _drop_errata, build_rules, main
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "icsr"
 
@@ -197,3 +197,44 @@ def test_build_paths_from_reference_instance(inputs, tmp_path):
     ]
     assert els["C.5.4"]["xpath"] is None
     assert "ref.xml" in {d["file"] for d in data["source_docs"]}
+
+
+def test_cli_records_source_and_package_sha256(inputs, tmp_path):
+    xlsx, cl_dir = inputs
+    raw = tmp_path / "raw"
+    (raw / "7_E2B Code Lists").mkdir(parents=True)
+    (raw / "5_Reference Instances").mkdir()
+    shutil.copy(xlsx, raw / "11_Core Data Elements and Business Rules.xlsx")
+    for f in cl_dir.iterdir():
+        shutil.copy(f, raw / "7_E2B Code Lists" / f.name)
+    ref = raw / "5_Reference Instances" / "00_ICH_ICSR_Reference_Instance.xml"
+    ref.write_text(REFERENCE, encoding="utf-8")
+    package = tmp_path / "IG_Complete_Package.zip"
+    package.write_bytes(b"zip bytes")
+    out = tmp_path / "out.json"
+    assert main(["--raw", str(raw), "--out", str(out), "--package-zip", str(package)]) == 0
+    docs = {d["file"]: d["sha256"] for d in json.loads(out.read_text("utf-8"))["source_docs"]}
+    assert docs["IG_Complete_Package.zip"] == hashlib.sha256(b"zip bytes").hexdigest()
+    assert docs[ref.name] == hashlib.sha256(ref.read_bytes()).hexdigest()
+    assert docs["11_Core Data Elements and Business Rules.xlsx"] == (
+        hashlib.sha256(xlsx.read_bytes()).hexdigest()
+    )
+
+
+def test_minority_path_shared_with_another_element_is_dropped():
+    # E.i.4 is labelled once on a <high> element (an erratum of the reference instance);
+    # E.i.5 owns that path. Two elements that really share a node keep it.
+    found = {
+        "E.i.4": {
+            "paths": ["e/low/@value", "e/high/@value"],
+            "counts": {"e/low/@value": 4, "e/high/@value": 1},
+        },
+        "E.i.5": {"paths": ["e/high/@value"], "counts": {"e/high/@value": 3}},
+        "C.3.3.3": {"paths": ["n/given/text()"], "counts": {"n/given/text()": 1}},
+        "C.3.3.4": {"paths": ["n/given/text()"], "counts": {"n/given/text()": 1}},
+    }
+    notes = _drop_errata(found)
+    assert found["E.i.4"]["paths"] == ["e/low/@value"]
+    assert found["E.i.5"]["paths"] == ["e/high/@value"]
+    assert found["C.3.3.3"]["paths"] == found["C.3.3.4"]["paths"] == ["n/given/text()"]
+    assert len(notes) == 1 and "E.i.4" in notes[0]

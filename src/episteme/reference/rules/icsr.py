@@ -15,11 +15,13 @@ whole document, and ``clause`` = the kind of check: ``parse``, ``structure``, ``
 
 from __future__ import annotations
 
+import calendar
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -39,7 +41,7 @@ _PRED_CODE = re.compile(r"\[code/@code='([^']*)'\]")
 _NUMBER = re.compile(r"[+-]?\d+(?:\.\d+)?")
 _INTEGER = re.compile(r"[+-]?\d+")
 _ALPHA = re.compile(r"[A-Za-z]+")
-_DATE = re.compile(r"(\d{4,14})(?:\.\d+)?(?:[+-]\d{2}(?:\d{2})?)?")
+_DATE = re.compile(r"(\d{4,14})(\.\d+)?(?:[+-]\d{2}(?:\d{2})?)?")
 _MEDDRA_CODE = re.compile(r"\d{8}")
 # The sheet says "N.N"; the ICH example instances send "15". Both are accepted.
 _MEDDRA_VERSION = re.compile(r"\d+(?:\.\d+)?")
@@ -79,6 +81,13 @@ def _parse_path(text: str, ns: str) -> _Path:
 
 
 @dataclass(frozen=True)
+class _Block:
+    steps: tuple[_Step, ...]
+    members: tuple[str, ...]  # elements inside one occurrence
+    outside: tuple[str, ...]  # elements of the block that sit elsewhere (G.k.1)
+
+
+@dataclass(frozen=True)
 class _Rules:
     ns: str
     root_tag: str
@@ -86,7 +95,7 @@ class _Rules:
     elements: Mapping[str, Mapping[str, Any]]
     paths: Mapping[str, tuple[_Path, ...]]
     shared: frozenset[tuple[str, str]]  # (scope, path) owned by more than one element
-    blocks: Mapping[str, tuple[tuple[_Step, ...], tuple[str, ...]]]
+    blocks: Mapping[str, _Block]
     codelists: Mapping[str, Mapping[str, Any]]
     by_oid: Mapping[str, str]
     rules: tuple[Mapping[str, Any], ...]
@@ -106,7 +115,9 @@ def _rules() -> _Rules:
         for p in paths[eid]:
             owners[(e["scope"], p.text)] = owners.get((e["scope"], p.text), 0) + 1
     blocks = {
-        name: (_parse_path(b["path"], ns).steps, tuple(b["members"]))
+        name: _Block(
+            _parse_path(b["path"], ns).steps, tuple(b["members"]), tuple(b.get("outside", ()))
+        )
         for name, b in data["blocks"].items()
     }
     meddra = frozenset(
@@ -185,11 +196,15 @@ class _Checker:
     def label(self, eid: str) -> str:
         return f"{eid} ({self.r.elements[eid]['name']})"
 
-    def hits(self, eid: str, start: ET.Element, scope_steps: int = 0) -> list[_Hit]:
+    def hits(self, eid: str, start: ET.Element, below: tuple[_Step, ...] = ()) -> list[_Hit]:
+        """Hits of ``eid`` under ``start``; with ``below`` (a block path), ``start`` is a
+        block occurrence and only the element's paths inside the block are used."""
         e = self.r.elements[eid]
         out = []
         for p in self.r.paths[eid]:
-            for node in _match(start, p.steps[scope_steps:], self.r.ns):
+            if p.steps[: len(below)] != below:
+                continue
+            for node in _match(start, p.steps[len(below) :], self.r.ns):
                 out.append(_Hit(node, p, (e["scope"], p.text) in self.r.shared))
         return out
 
@@ -218,29 +233,35 @@ class _Checker:
             if block in self.r.blocks:
                 self.mandatory_in_block(eid, block, node)
             elif not any(h.present for h in hits):
-                self.add(eid, "mandatory", f"missing mandatory element {self.label(eid)}")
+                self.add(eid, "mandatory", self.missing(eid, hits))
+
+    def missing(self, eid: str, hits: list[_Hit], where: str = "") -> str:
+        if hits:
+            return f"mandatory element {self.label(eid)}{where} has no value and no nullFlavor"
+        return f"missing mandatory element {self.label(eid)}{where}"
 
     def mandatory_in_block(self, eid: str, block: str, node: ET.Element) -> None:
-        steps, members = self.r.blocks[block]
-        depth = len(steps)
-        occurrences = [
-            occ
-            for occ in _match(node, steps, self.r.ns)
-            if any(h.present for m in members for h in self.hits(m, occ, depth))
-        ]
+        b = self.r.blocks[block]
+        occurrences = _match(node, b.steps, self.r.ns)  # one node per repeat
         if not occurrences:
-            self.add(
-                eid,
-                "mandatory",
-                f"missing mandatory element {self.label(eid)}: no {block} block",
-            )
-        for n, occ in enumerate(occurrences, start=1):
-            if not any(h.present for h in self.hits(eid, occ, depth)):
+            self.add(eid, "mandatory", self.missing(eid, [], f": no {block} block"))
+            return
+        if eid in b.outside:
+            # Not inside the repeat: it must occur at least once per occurrence.
+            hits = self.hits(eid, node)
+            count = sum(h.present for h in hits)
+            if count < len(occurrences):
                 self.add(
                     eid,
                     "mandatory",
-                    f"missing mandatory element {self.label(eid)} in {block} #{n}",
+                    f"mandatory element {self.label(eid)} occurs {count} times for"
+                    f" {len(occurrences)} {block} blocks",
                 )
+            return
+        for n, occ in enumerate(occurrences, start=1):
+            hits = self.hits(eid, occ, b.steps)
+            if not any(h.present for h in hits):
+                self.add(eid, "mandatory", self.missing(eid, hits, f" in {block} #{n}"))
 
     def element_values(self, eid: str, hits: list[_Hit], checked: set[int]) -> None:
         e = self.r.elements[eid]
@@ -311,7 +332,12 @@ class _Checker:
 
     def date(self, eid: str, e: Mapping[str, Any], v: str) -> None:
         m = _DATE.fullmatch(v)
-        if not m or len(m.group(1)) not in (4, 6, 8, 10, 12, 14):
+        if (
+            not m
+            or len(m.group(1)) not in (4, 6, 8, 10, 12, 14)
+            or (m.group(2) and len(m.group(1)) != 14)
+            or not _calendar_ok(m.group(1))
+        ):
             self.add(eid, "format", f"{self.label(eid)}: {v!r} is not an HL7 date/time")
             return
         digits = m.group(1)
@@ -346,6 +372,18 @@ class _Checker:
                     "conditional",
                     f"{self.label(eid)} is required when {other} = {rule['equals']}",
                 )
+        elif kind == "same_root":
+            eid, other = rule["element"], rule["other"]
+            if eid not in found or other not in found:
+                return
+            mine = {h.node.get("root") for h in found[eid]}
+            theirs = {h.node.get("root") for h in found[other]}
+            if mine and theirs and mine != theirs:
+                self.add(
+                    eid,
+                    "consistency",
+                    f"{self.label(eid)} root {sorted(mine)} differs from {other} {sorted(theirs)}",
+                )
         elif kind == "same_as":
             eid, other = rule["element"], rule["other"]
             if eid not in found or other not in found:
@@ -374,14 +412,12 @@ class _Checker:
             if a in found and b in found and self.values(found, a) and self.values(found, b):
                 self.add(a, "conditional", f"{self.label(a)} and {b} must not both be given")
         elif kind == "single_value":
-            seen = sorted(
-                {v for eid in rule["elements"] if eid in found for v in self.values(found, eid)}
-            )
-            if len(seen) > 1:
+            seen = {v for eid in rule["elements"] if eid in found for v in self.values(found, eid)}
+            if len({_number(v) for v in seen}) > 1:  # '15' and '15.0' are one version
                 self.add(
                     rule["elements"][0],
                     "consistency",
-                    f"{rule['text']} Found versions {seen}",
+                    f"{rule['text']} Found versions {sorted(seen)}",
                 )
         elif kind == "meddra":
             self.meddra(rule["code"], rule["version"], found)
@@ -416,6 +452,25 @@ class _Checker:
                 )
 
 
+def _number(v: str) -> Decimal | str:
+    try:
+        return Decimal(v).normalize()
+    except InvalidOperation:
+        return v
+
+
+def _calendar_ok(digits: str) -> bool:
+    """Month, day, hour, minute and second in range (as far as the digits go)."""
+    parts = [int(digits[:4])] + [int(digits[i : i + 2]) for i in range(4, len(digits), 2)]
+    limits = [(1, 12), (1, 31), (0, 23), (0, 59), (0, 59)]
+    for value, (low, high) in zip(parts[1:], limits, strict=False):
+        if not low <= value <= high:
+            return False
+    if len(parts) >= 3:
+        return parts[2] <= calendar.monthrange(parts[0], parts[1])[1]
+    return True
+
+
 def check_icsr(
     xml_bytes: bytes,
     *,
@@ -436,7 +491,8 @@ def check_icsr(
         root = SafeET.fromstring(xml_bytes, forbid_dtd=True)
     except DefusedXmlException as exc:
         return [Finding("ICSR", "parse", f"XML refused: {type(exc).__name__}: {exc}")]
-    except ET.ParseError as exc:
+    except (ET.ParseError, LookupError, ValueError) as exc:
+        # ValueError and LookupError: a bad or unknown encoding declaration.
         return [Finding("ICSR", "parse", f"XML is not well-formed: {exc}")]
     rules = _rules()
     if root.tag != rules.root_tag:

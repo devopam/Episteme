@@ -29,6 +29,7 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,7 @@ _SAME_AS = re.compile(rf"value (?:is|must be) the same as ({_ELEMENT_ID})", re.I
 _EXACTLY_ONCE = re.compile(r"set to '(\w+)' once, and only once", re.IGNORECASE)
 _NOT_BOTH = re.compile(r"either (\w+) or (\w+), but NOT both")
 _ONE_MEDDRA_VERSION = re.compile(r"Only 1 MedDRA version is allowed per ICSR", re.IGNORECASE)
+_NOTATION_ROOT = re.compile(r"notation would be:?\s*<id\b[^>]*\broot=", re.IGNORECASE)
 _NOT_FUTURE = re.compile(r"cannot refer to a future date", re.IGNORECASE)
 _INTEGER = re.compile(r"No fractions, decimals", re.IGNORECASE)
 _PRECISION = (
@@ -395,9 +397,10 @@ def _step(node: ET.Element) -> str:
     return name + "".join(preds)
 
 
-def _value_step(node: ET.Element, element: str) -> str | None:
+def _value_step(node: ET.Element, element: str, fmt: str | None = None) -> str | None:
     """Where the element's value sits: the attribute or the text that holds the
-    placeholder (the element id), else ``@value``, else the text."""
+    placeholder (the element id), else ``@value``, else the text. A boolean or a date
+    with no sample value (``nullFlavor`` only) still has its value in ``@value``."""
     attrs = {k: v for k, v in node.attrib.items() if not k.startswith("{")}
     for key, value in attrs.items():
         if value == element:
@@ -412,13 +415,18 @@ def _value_step(node: ET.Element, element: str) -> str | None:
         return "@value"
     if text:
         return "text()"
+    if fmt in ("BL", "DT"):
+        return "@value"
     return None
 
 
-def _harvest(instance: Path, wanted: set[str]) -> tuple[dict[str, dict], str, str]:
+def _harvest(
+    instance: Path, wanted: Mapping[str, str | None]
+) -> tuple[dict[str, dict], str, str, list[str]]:
     """Map each element id named in a comment to its paths and code system.
 
-    Returns ``(found, root_tag, message_tag)``; paths start below the root.
+    ``wanted`` maps element id -> data type. Returns ``(found, root_tag, message_tag,
+    notes)``; paths start below the root.
     """
     root = _parse_with_comments(instance)
     parent = {c: p for p in root.iter() for c in p}
@@ -436,18 +444,48 @@ def _harvest(instance: Path, wanted: set[str]) -> tuple[dict[str, dict], str, st
                         steps.append(_step(node))
                         node = parent.get(node)
                     steps.reverse()
-                    entry = found.setdefault(m.group(1), {"paths": [], "code_system": None})
-                    value = _value_step(target, m.group(1))
+                    entry = found.setdefault(
+                        m.group(1), {"paths": [], "counts": {}, "code_system": None}
+                    )
+                    value = _value_step(target, m.group(1), wanted[m.group(1)])
                     path = "/".join(steps + ([value] if value else []))
                     if path not in entry["paths"]:
                         entry["paths"].append(path)
+                    entry["counts"][path] = entry["counts"].get(path, 0) + 1
                     if entry["code_system"] is None:
                         entry["code_system"] = target.get("codeSystem")
             elif isinstance(child.tag, str):
                 previous = child
-    tops = [p["paths"][0].split("/", 1)[0] for p in found.values()]
-    message_tag = max(set(tops), key=tops.count) if tops else ""
-    return found, _local(root.tag), message_tag
+    tops = Counter(p["paths"][0].split("/", 1)[0] for p in found.values())
+    message_tag = min(tops, key=lambda t: (-tops[t], t)) if tops else ""
+    return found, _local(root.tag), message_tag, _drop_errata(found)
+
+
+def _share(entry: dict, path: str) -> float:
+    return entry["counts"][path] / sum(entry["counts"].values())
+
+
+def _drop_errata(found: dict[str, dict]) -> list[str]:
+    """Drop a path that one element shares with another when it is a minority path for
+    the first element (under half of its comments) and a larger share for the other.
+    This removes mislabelled comments in the reference instance (E.i.4 on a ``high``
+    element) and keeps nodes that two elements really share (given and middle name)."""
+    owners: dict[str, list[str]] = {}
+    for eid, entry in found.items():
+        for path in entry["paths"]:
+            owners.setdefault(path, []).append(eid)
+    notes = []
+    for path, eids in sorted(owners.items()):
+        for eid in sorted(eids):
+            mine = _share(found[eid], path)
+            others = [o for o in eids if o != eid and _share(found[o], path) > mine]
+            if mine < 0.5 and others and len(found[eid]["paths"]) > 1:
+                found[eid]["paths"].remove(path)
+                notes.append(
+                    f"{eid}: reference-instance path {path} is dropped; it is a minority path"
+                    f" for {eid} and belongs to {', '.join(sorted(others))}."
+                )
+    return notes
 
 
 def _split(path: str) -> list[str]:
@@ -479,6 +517,8 @@ def _common_prefix(paths: Iterable[str]) -> str:
 def _codelist_for(row: dict, located: dict | None, codelists: Mapping[str, dict]) -> str | None:
     by_oid = {cl["oid"]: cl_id for cl_id, cl in codelists.items()}
     if located is not None:
+        if not any(p.endswith("/@code") for p in located["paths"]):
+            return None  # e.g. a version in @codeSystemVersion is not a code
         return by_oid.get(located["code_system"] or "")
     candidates = [by_oid[o] for o in row["oids"] if o in by_oid]
     return candidates[0] if len(candidates) == 1 else None
@@ -505,13 +545,15 @@ def build_rules(
     *,
     source_sha256: Mapping[str, str],
     reference_instance: Path | None = None,
+    package_zip: Path | None = None,
 ) -> dict:
     """Convert the ICH business-rules sheet and code lists into the rule file at ``out``.
 
     ``source_sha256`` maps a source file name to its expected sha256 (from the download
     manifest). A file whose sha256 differs raises ``ValueError``. Every source file is
     recorded with its sha256. ``reference_instance`` gives the XML paths; without it,
-    ``xpath`` is ``None``.
+    ``xpath`` is ``None``. ``package_zip`` (the downloaded IG package) is recorded with
+    its sha256 when given.
     """
     rows, notes = _read_sheet(xlsx)
     codelists, cl_files, cl_notes = _read_codelists(codelist_dir)
@@ -535,10 +577,13 @@ def build_rules(
     located_all: dict[str, dict] = {}
     root_tag = message_tag = None
     if reference_instance is not None:
-        located_all, root_tag, message_tag = _harvest(
-            reference_instance, {r["element"] for r in rows}
+        located_all, root_tag, message_tag, errata = _harvest(
+            reference_instance, {r["element"]: r["format"] for r in rows}
         )
+        notes += errata
         sources.append(("Reference instance", reference_instance))
+    if package_zip is not None:
+        sources.insert(0, ("ICH E2B(R3) IG package", package_zip))
 
     source_docs = []
     for title, path in sources:
@@ -601,13 +646,13 @@ def build_rules(
         e["ambiguous_with"] = shared or None
 
     blocks = _blocks(elements)
-    rules, checked, rule_notes = _rules(rows, by_id)
+    rules, checked, rule_notes, manual_extra = _rules(rows, by_id)
     notes += rule_notes
     manual = [
         {"element": r["element"], "name": r["name"], "text": r["rule"]}
         for r in rows
         if r["conformance"] == "conditional" and r["element"] not in checked
-    ]
+    ] + manual_extra
     data = {
         "ig": "ICH E2B(R3)",
         "version": "IG package v1.11; core data elements and business rules v1.00;"
@@ -646,24 +691,55 @@ def _repeating(block: str) -> bool:
     return bool(re.search(r"\.(?:r|i|k)(?:\.|$)", block))
 
 
+# A block member counts as an outlier when at least this share of the block's members
+# sits on one deeper branch without it.
+OUTLIER_SHARE = 0.75
+
+
 def _blocks(elements: list[dict]) -> dict[str, dict]:
-    """One entry per repeating block that has a path: the common path of its members."""
+    """One entry per repeating block that has a path.
+
+    The block path is the common path prefix of the block's members. When one branch
+    below that prefix holds at least ``OUTLIER_SHARE`` of the members, the path goes down
+    that branch and the other members are listed under ``outside``. Example: G.k.1 sits in
+    the causality assessment, all other G.k members in the drug, so one G.k occurrence is
+    one drug and G.k.1 is outside.
+    """
     members: dict[str, list[dict]] = {}
     for e in elements:
         if e["block"] and _repeating(e["block"]) and e["xpath"]:
-            members.setdefault(e["block"], []).append(e)
+            members.setdefault(e["block"].strip(), []).append(e)
     out = {}
     for block, items in members.items():
+        inside = list(items)
+        prefix = _element_steps(_common_prefix(p for e in inside for p in e["xpath"]))
+        while True:
+            branches: dict[str, list[dict]] = {}
+            for e in inside:
+                steps = _element_steps(sorted(e["xpath"])[0])
+                key = steps[len(prefix)] if len(steps) > len(prefix) else ""
+                branches.setdefault(key, []).append(e)
+            step, group = min(branches.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            if not step or len(branches) == 1 or len(group) < OUTLIER_SHARE * len(items):
+                break
+            inside = group
+            prefix = _element_steps(_common_prefix(p for e in inside for p in e["xpath"]))
+        names = {e["element"] for e in inside}
         out[block] = {
-            "path": _common_prefix(p for e in items for p in e["xpath"]),
-            "members": [e["element"] for e in items],
+            "path": "/".join(prefix),
+            "members": [e["element"] for e in items if e["element"] in names],
+            "outside": [e["element"] for e in items if e["element"] not in names],
         }
     return out
 
 
-def _rules(rows: list[dict], by_id: Mapping[str, dict]) -> tuple[list[dict], set[str], list[str]]:
+def _rules(
+    rows: list[dict], by_id: Mapping[str, dict]
+) -> tuple[list[dict], set[str], list[str], list[dict]]:
     """Recognise business-rule sentences. Return rules, the conditional elements whose
-    condition is checked, and notes about rules that cannot be checked."""
+    condition is checked, notes about rules that cannot be checked, and extra manual
+    entries."""
+    manual_extra: list[dict] = []
     rules: list[dict] = []
     checked: set[str] = set()
     notes: list[str] = []
@@ -682,7 +758,25 @@ def _rules(rows: list[dict], by_id: Mapping[str, dict]) -> tuple[list[dict], set
             )
             checked.add(element)
         if m := _SAME_AS.search(text):
-            rules.append({"kind": "same_as", "element": element, "other": m.group(1), "text": text})
+            if _NOTATION_ROOT.search(text):
+                # "The value is the same as C.1.1. Therefore the notation would be <id ...
+                # root=...>": only the root OID is shared (controller ruling R13).
+                rules.append(
+                    {"kind": "same_root", "element": element, "other": m.group(1), "text": text}
+                )
+                manual_extra.append(
+                    {
+                        "element": element,
+                        "name": row["name"],
+                        "text": text,
+                        "note": f"Equality of the value with {m.group(1)} is not checked; only"
+                        " the root OID is (ruling R13). The ICH examples use different values.",
+                    }
+                )
+            else:
+                rules.append(
+                    {"kind": "same_as", "element": element, "other": m.group(1), "text": text}
+                )
         if m := _EXACTLY_ONCE.search(text):
             rules.append(
                 {"kind": "exactly_once", "element": element, "value": m.group(1), "text": text}
@@ -714,7 +808,7 @@ def _rules(rows: list[dict], by_id: Mapping[str, dict]) -> tuple[list[dict], set
             code = row["element"][:-1] + "b"
             if code in by_id:
                 rules.append({"kind": "meddra", "code": code, "version": row["element"]})
-    return rules, checked, notes
+    return rules, checked, notes, manual_extra
 
 
 def _by_name_in_block(rows: list[dict], block: str | None, short: str) -> str | None:
@@ -736,11 +830,22 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--raw", type=Path, required=True, help="the unpacked IG package directory")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--package-zip", type=Path, help="the downloaded IG package zip (optional)")
     args = ap.parse_args(argv)
     xlsx = _one(args.raw, XLSX_GLOB, "business-rules spreadsheet")
     codelist_dir = _one(args.raw, CODELIST_DIR_GLOB, "code list directory", directory=True)
     instance = _one(args.raw, REFERENCE_GLOB, "ICSR reference instance")
-    data = build_rules(xlsx, codelist_dir, args.out, source_sha256={}, reference_instance=instance)
+    inputs = [xlsx, instance, *sorted(p for p in codelist_dir.iterdir() if p.is_file())]
+    if args.package_zip is not None:
+        inputs.append(args.package_zip)
+    data = build_rules(
+        xlsx,
+        codelist_dir,
+        args.out,
+        source_sha256={p.name: sha256_file(p) for p in inputs},
+        reference_instance=instance,
+        package_zip=args.package_zip,
+    )
     print(
         f"{args.out}: {len(data['elements'])} elements, {len(data['rules'])} rules,"
         f" {len(data['manual'])} manual, {len(data['codelists'])} code lists"

@@ -101,11 +101,28 @@ def test_code_outside_codelist_is_reported():
     assert any("CL2" in f.message and "'7'" in f.message for f in findings)
 
 
-def test_message_header_must_match_case_identifier():
-    n2r1 = b'<id extension="JP-DSJP-DSJ-2009-98765-1" root="2.16.840.1.113883.3.989.2.1.3.1"/>'
-    n2r1 += b"\n    <!-- N.2.r.1"
-    xml = _replace(n2r1, n2r1.replace(b"JP-DSJP-DSJ-2009-98765-1", b"OTHER"))
-    assert ("N.2.r.1", "consistency") in _kinds(check_icsr(xml, today=TODAY))
+N2R1 = b'<id extension="JP-DSJP-DSJ-2009-98765-1" root="2.16.840.1.113883.3.989.2.1.3.1"/>'
+N2R1 += b"\n    <!-- N.2.r.1"
+
+
+def test_message_identifier_shares_only_the_root_with_the_case_identifier():
+    # Ruling R13: N.2.r.1 and C.1.1 share the root OID; their values may differ.
+    rules = load_rules("ich_e2b_r3").data
+    assert {"kind": "same_root", "element": "N.2.r.1", "other": "C.1.1"}.items() <= next(
+        r for r in rules["rules"] if r.get("element") == "N.2.r.1"
+    ).items()
+    assert "N.2.r.1" in {m["element"] for m in rules["manual"]}
+    other_value = _replace(N2R1, N2R1.replace(b"JP-DSJP-DSJ-2009-98765-1", b"OTHER"))
+    assert check_icsr(other_value, today=TODAY) == []
+    other_root = _replace(N2R1, N2R1.replace(b"2.1.3.1", b"2.1.3.99"))
+    assert ("N.2.r.1", "mandatory") in _kinds(check_icsr(other_root, today=TODAY))
+
+
+def test_message_creation_date_must_equal_case_creation_date():
+    xml = _replace(
+        b'<creationTime value="20120720100001+09"/>', b'<creationTime value="20120720100002+09"/>'
+    )
+    assert ("N.2.r.4", "consistency") in _kinds(check_icsr(xml, today=TODAY))
 
 
 def test_meddra_code_shape_only():
@@ -119,8 +136,16 @@ def test_meddra_code_shape_only():
     assert ("E.i.2.1a", "meddra") in _kinds(check_icsr(no_version, today=TODAY))
 
 
-def test_malformed_xml_returns_one_finding_not_an_exception():
-    findings = check_icsr(b"<MCCI_IN200100UV01><id></MCCI_IN200100UV01>")
+@pytest.mark.parametrize(
+    "xml",
+    [
+        b"<MCCI_IN200100UV01><id></MCCI_IN200100UV01>",
+        b'<?xml version="1.0" encoding="bogus"?><a/>',
+        b'<?xml version="1.0" encoding="utf-8"?><a>\xff\xfe</a>',
+    ],
+)
+def test_malformed_xml_returns_one_finding_not_an_exception(xml):
+    findings = check_icsr(xml)
     assert len(findings) == 1
     assert findings[0].clause == "parse"
 
@@ -152,6 +177,93 @@ def test_eu_region_without_eu_rules_reports_not_loaded():
         check_icsr(VALID, region="pmda")  # type: ignore[arg-type]
 
 
+TWO_DRUGS = (FIXTURES / "two_drugs.xml").read_bytes()
+
+
+def test_two_drug_icsr_passes():
+    assert check_icsr(TWO_DRUGS, today=TODAY) == []
+
+
+def test_mandatory_member_is_checked_per_drug():
+    name2 = b"<name>domeridone</name>"
+    assert TWO_DRUGS.count(name2) == 1
+    findings = check_icsr(TWO_DRUGS.replace(name2, b""), today=TODAY)
+    assert ("G.k.2.2", "mandatory") in _kinds(findings)
+    assert any("G.k.2.2" in f.message and "G.k #2" in f.message for f in findings)
+
+
+def test_drug_role_outside_the_drug_must_occur_per_drug():
+    role2 = b'<value xsi:type="CE" code="2" codeSystem="2.16.840.1.113883.3.989.2.1.1.13"/>'
+    assert TWO_DRUGS.count(role2) == 1
+    findings = check_icsr(TWO_DRUGS.replace(role2, b""), today=TODAY)
+    assert ("G.k.1", "mandatory") in _kinds(findings)
+
+
+def test_route_termid_version_is_not_a_route_code():
+    elements = {e["element"]: e for e in load_rules("ich_e2b_r3").data["elements"]}
+    assert elements["G.k.4.r.10.2a"]["codelist"] is None
+    assert elements["G.k.4.r.11.2a"]["codelist"] is None
+    assert elements["G.k.4.r.10.2b"]["codelist"] == "CL14"
+    assert b'codeSystemVersion="2.11"' in TWO_DRUGS
+    assert all(f.clause != "codelist" for f in check_icsr(TWO_DRUGS, today=TODAY))
+
+
+def test_meddra_versions_compare_as_numbers():
+    # valid_min sends 15.1 for the reaction; the indication sends 15.10: the same version.
+    assert b'codeSystemVersion="15.10"' in TWO_DRUGS
+    assert check_icsr(TWO_DRUGS, today=TODAY) == []
+    other = TWO_DRUGS.replace(b'codeSystemVersion="15.10"', b'codeSystemVersion="16.0"')
+    assert ("D.7.1.r.1a", "consistency") in _kinds(check_icsr(other, today=TODAY))
+
+
+SERIOUS_B = b'<code code="21" codeSystem="2.16.840.1.113883.3.989.2.1.1.19"/>\n'
+SERIOUS_B += b'                          <value xsi:type="BL" value="true"/>'
+
+
+def test_seriousness_criterion_false_is_reported():
+    xml = _replace(SERIOUS_B, SERIOUS_B.replace(b'value="true"', b'value="false"'))
+    assert ("E.i.3.2b", "value") in _kinds(check_icsr(xml, today=TODAY))
+
+
+def test_seriousness_criterion_without_value_is_reported():
+    xml = _replace(SERIOUS_B, SERIOUS_B.replace(b' value="true"', b""))
+    findings = check_icsr(xml, today=TODAY)
+    assert ("E.i.3.2b", "mandatory") in _kinds(findings)
+    assert any("no value" in f.message for f in findings)
+
+
+REACTION_TIME = b'<id root="154eb889-958b-45f2-a02f-42d4d6f4657f"/>'
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        b'<effectiveTime xsi:type="IVL_TS"><low value="20090101"/>'
+        b'<high value="%s"/></effectiveTime>',
+        b'<effectiveTime xsi:type="SXPR_TS"><comp xsi:type="IVL_TS"><low value="20090101"/>'
+        b'<high value="%s"/></comp></effectiveTime>',
+    ],
+    ids=["IVL_TS", "SXPR_TS"],
+)
+@pytest.mark.parametrize("date_value", [b"20991231", b"2009123"], ids=["future", "7-digit"])
+def test_reaction_end_date_is_checked(end, date_value):
+    reaction_code = b'<code code="29" codeSystem="2.16.840.1.113883.3.989.2.1.1.19"/>'
+    xml = _replace(reaction_code, reaction_code + end % date_value)
+    kinds = _kinds(check_icsr(xml, today=TODAY))
+    assert ("E.i.5", "date") in kinds or ("E.i.5", "format") in kinds
+
+
+@pytest.mark.parametrize("bad", [b"20091340", b"20090230", b"2009.5", b"20090622256000"])
+def test_impossible_date_is_a_format_finding(bad):
+    xml = _replace(b'<low value="20090622"/>', b'<low value="' + bad + b'"/>')
+    assert ("C.1.4", "format") in _kinds(check_icsr(xml, today=TODAY))
+
+
+def test_fraction_of_a_second_is_allowed():
+    xml = VALID.replace(b'value="20120720100001+09"', b'value="20120720100001.123+09"')
+    assert check_icsr(xml, today=TODAY) == []
+
+
 def _ig_package() -> Path:
     from episteme.config import ConfigError, get_settings
 
@@ -167,17 +279,18 @@ def _ig_package() -> Path:
     return package
 
 
-# ICH example 3 leaves out seriousness criteria that the ICH sheet marks Mandatory
-# (E.i.3.2a-f, "true" or nullFlavor NI): it sends only E.i.3.2a, and E.i.3.2c in reaction 3.
-# The check reports them; the expectation names them exactly, so any other mandatory or
-# code-list finding fails the test.
+# All findings on the ICH examples, per file (rule_id, clause) -> count.
+# Example 3 leaves out seriousness criteria that the ICH sheet marks Mandatory (E.i.3.2a-f,
+# "true" or nullFlavor NI): it sends only E.i.3.2a, and E.i.3.2c in reaction 3 (ruling R12).
+# Example 2-2 has no C.2.r.5 primary-source flag (ruling R14).
 EXPECTED_EXAMPLE_FINDINGS = {
+    "2-2_ExampleCase_newNum_F-up_v1_0.xml": {("C.2.r.5", "conditional"): 1},
     "3_ExampleCase_Clinical_trial_v1_0.xml": {
-        "E.i.3.2b": 3,
-        "E.i.3.2c": 2,
-        "E.i.3.2d": 3,
-        "E.i.3.2e": 3,
-        "E.i.3.2f": 3,
+        ("E.i.3.2b", "mandatory"): 3,
+        ("E.i.3.2c", "mandatory"): 2,
+        ("E.i.3.2d", "mandatory"): 3,
+        ("E.i.3.2e", "mandatory"): 3,
+        ("E.i.3.2f", "mandatory"): 3,
     },
 }
 
@@ -189,7 +302,6 @@ def test_ich_example_instances_pass():
     )
     assert len(examples) == 5, [p.name for p in examples]
     for path in examples:
-        findings = check_icsr(path.read_bytes())
-        assert [f for f in findings if f.clause in ("parse", "structure")] == [], path.name
-        counts = Counter(f.rule_id for f in findings if f.clause in ("mandatory", "codelist"))
+        findings = check_icsr(path.read_bytes(), today=TODAY)
+        counts = Counter((f.rule_id, f.clause) for f in findings)
         assert dict(counts) == EXPECTED_EXAMPLE_FINDINGS.get(path.name, {}), path.name
