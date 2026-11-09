@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SP2 literature-load wrapper: europepmc_preprint staging shards ->
 # episteme.articles + episteme.article_body. Thin shell over `python -m
-# episteme.data.load_articles --source europepmc_preprint`. run_pipeline.sh
+# episteme.data.load_articles --source europepmc_preprint`, then the retire step. run_pipeline.sh
 # forwards load_args (--force --reason R when --force was given, else nothing).
 #
 # NOTE ON LOCATION: see extract_europepmc_preprint.sh in this same directory —
@@ -23,4 +23,7 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
-exec "$PY" -m episteme.data.load_articles --source europepmc_preprint "$@"
+"$PY" -m episteme.data.load_articles --source europepmc_preprint "$@" || exit $?
+
+# Retire the rows of deleted parts, only after a load that exited 0.
+exec "$PY" -m episteme.data.europepmc.preprints.retire "$@"

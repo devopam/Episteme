@@ -1,53 +1,55 @@
 #!/usr/bin/env python3
-"""Extraction: europepmc_preprint — parse per-ID Europe PMC preprint full-text
-JATS (``PPR*.xml``) into the unified ``episteme.articles`` row schema (contract
-v1.4).
+"""Extraction: europepmc_preprint — EBI's bulk preprint files into the unified
+``episteme.articles`` row schema (contract v1.4), in bounded parts.
 
-EBI discontinued the bulk preprint feed (2026-09-08 spike); the downloader now
-REST-harvests one ``raw_dir/{PPRid}.xml`` per preprint (see
-``download_europepmc_preprints.py``). This extractor therefore discovers
-``PPR*.xml`` ONLY — no ``*.xml.gz`` range archives, no ``rglob``.
+Input: the files ``PPR<a>_PPR<b>.xml.gz`` that ``download_europepmc_preprints``
+stores under ``<raw>/europepmc/preprints_bulk/``. Each file holds one
+``<articles>`` root with many ``<article article-type="preprint">`` JATS records
+(about 10,000 in the first file).
 
-Unit of work: one ``PPR*.xml`` file = one preprint = one row.
+**Unit.** One bulk file is one unit. Its key is ``input_key(path, raw_dir)``
+without the ``.xml.gz`` suffix (for a file directly under ``raw_dir``:
+``PPR7001_PPR208218``). The unit has a success marker and parts
+``<key>__partNNNNN`` capped by the profile's ``part_rows`` / ``part_bytes``
+(``bucket_parts.write_parts``). The unit is read as a stream: ``iterparse`` hands
+over one record at a time and the record is cleared after it is parsed, so the
+memory use is one record, never the file.
 
-Spec §3.2 ``europepmc_preprint`` row:
-  * ``source = "europepmc_preprint"``.
-  * ``source_record_id = "PPR{n}"`` — the id, from the file-name stem (preprints
-    usually have no pmcid, so the stem is the stable key).
-  * JATS ``<body>`` -> ``body_text``; ``doi`` present, ``pmid`` usually absent.
-  * ``license`` per-preprint (CC-BY common) via
-    ``normalize_license(<raw licence from <permissions>/<license>>)`` then
-    ``subset = subset_from_license(code)`` (no ``default=`` override — matches
-    the pubmed / apollo extractors; a metadata-only preprint with no licence is
-    therefore ``subset="open_metadata"``, not ``"text_mining"``).
-  * ``container_id`` / ``book_meta`` = ``None``.
+**Resume.** The unit marker holds a fingerprint of the file (size and sha256). A
+unit whose marker ``inputs`` equal the fingerprint is skipped (unless
+``--force``); any other unit is written again from part 1 after its old parts
+are deleted. The names of parts that were loaded go to
+``retire_pending.d/<key>.json`` first; ``retire`` (run by ``load`` after a good
+load) deletes their rows.
 
-``extract_status`` (via ``finalize_row`` / ``decide_extract_status``):
-  * ``ok``    — full-text XML with a non-empty ``<body>``.
-  * ``empty`` — metadata-only XML (parsed, has an id, no body).
-  * unparseable file -> the parse raises, ``mark_failed`` records it, and the
-    file is counted ``failed`` (it emits NO row). A genuine 404 is never written
-    to ``raw_dir`` by the downloader, so ``PPR*.xml`` stubs are not expected.
+**Row.** ``source = "europepmc_preprint"``; ``source_record_id`` is the PPR id;
+``id`` is ``doi:<doi>`` when the record has a DOI, else
+``europepmc_preprint:<PPR id>`` (the form of the earlier per-id extractor, so a
+loaded row is replaced, not duplicated). ``license`` is
+``normalize_license(<first licence element: text and xlink:href>)`` and
+``subset = subset_from_license(license)``; CC BY-NC and CC BY-NC-ND are
+``text_mining``.
+
+**Skipped records** (counted in the unit marker and in the summary, never
+fatal): ``skipped_no_ppr_id`` (no ``article-id`` whose value is ``PPR<n>``),
+``skipped_no_text`` (neither body nor abstract text) and ``skipped_duplicate_id``
+(the id is already in this unit; the first record stays).
 
 Importable core: ``extract_europepmc_preprints(raw_dir, processed_dir, *,
-max_files=0, force=False, workers=1, verbose=False) -> {"inputs","ok","failed",
-"rows"}``. ``main()`` is the thin CLI wrapper; ``--report`` parses in memory
-(honouring ``--max-files``) and prints a field-shape table without writing any
-shard, marker, manifest or audit row.
+max_files=0, force=False, workers=1, verbose=False) -> dict``.
 
-Roadmap CLI (§4.7):
   python -m episteme.data.europepmc.preprints.extract_europepmc_preprints \\
-    --raw-dir ./01_raw/europepmc/preprints \\
-    --processed-dir ./02_processed \\
-    --max-files 20 --workers 4 [--force]
+    --raw-dir ./01_raw/europepmc/preprints_bulk --processed-dir ./02_processed
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import logging
+import re
 import sys
-import threading
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -60,8 +62,8 @@ _SRC = Path(__file__).resolve().parents[4]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import bucket_parts  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     SCHEMA_VERSION,
@@ -75,15 +77,16 @@ from episteme.data.checkpoint_markers import (  # noqa: E402
     is_success,
     mark_failed,
     mark_success,
+    success_marker_path,
     write_run_manifest,
 )
 from episteme.data.parallel import (  # noqa: E402
     default_workers,
     record_first_failure,
     run_per_file,
-    skip_files,
 )
-from episteme.data.staging_writer import write_rows  # noqa: E402
+from episteme.data.staging_writer import WRITE_BATCH_ROWS  # noqa: E402
+from episteme.ops.profile import get_profile  # noqa: E402
 from episteme.ops.retry import TransientUnitError, is_transient  # noqa: E402
 from episteme.ops.skip import add_skip_args, check_skip_args  # noqa: E402
 from episteme.ops.stop import stage_guard  # noqa: E402
@@ -91,10 +94,16 @@ from episteme.ops.stop import stage_guard  # noqa: E402
 _LOG = logging.getLogger(__name__)
 
 SOURCE = "europepmc_preprint"
+BULK_PATTERN = "PPR*_PPR*.xml.gz"
+BULK_NAME_RE = re.compile(r"^PPR\d+_PPR\d+\.xml\.gz$")
+_SUFFIX = ".xml.gz"
+_PPR_RE = re.compile(r"^PPR\d+$")
+_XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
+_BODY_MAX_CHARS = 500000
+_SKIP_KEYS = ("skipped_no_ppr_id", "skipped_no_text", "skipped_duplicate_id")
 
-# Guards the in-process (workers=1) path only. Across worker processes, the mirror
-# append lock in audit_trail and the DB advisory lock serialise audit writes.
-_AUDIT_LOCK = threading.Lock()
+# Batch size is module-level (read at call time) so tests can shrink it.
+_WRITE_BATCH_ROWS = WRITE_BATCH_ROWS
 
 
 def _local(tag: str) -> str:
@@ -114,13 +123,10 @@ def _itertext(el: ET.Element | None) -> str:
     return "".join(el.itertext()).strip()
 
 
-def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any]:
-    """One preprint ``<article>`` element -> a finalized ``episteme.articles`` row.
-
-    ``stem`` is the ``PPR{n}`` file-name stem — it is the ``source_record_id``
-    and (absent a DOI) the row ``id``.
-    """
-    pmid = pmcid = doi = title = abstract = body = journal = language = ""
+def parse_article(art: ET.Element, source_file: str) -> dict[str, Any] | str:
+    """One preprint ``<article>`` element -> a finalized row, or the name of the
+    skip reason (``"no_ppr_id"``, ``"no_text"``)."""
+    pmid = pmcid = doi = title = abstract = body = journal = language = ppr = ""
     year: int | None = None
     authors: list[str] = []
     license_raw = ""
@@ -134,7 +140,9 @@ def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any
         if t == "article-id":
             idt = (el.get("pub-id-type") or "").lower()
             val = (el.text or "").strip()
-            if idt in ("pmid", "pubmed"):
+            if _PPR_RE.match(val):
+                ppr = ppr or val
+            elif idt in ("pmid", "pubmed"):
                 pmid = val
             elif idt == "pmcid":
                 pmcid = val if val.upper().startswith("PMC") else f"PMC{val}"
@@ -145,7 +153,7 @@ def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any
         elif t == "abstract" and not abstract:
             abstract = _itertext(el)
         elif t == "body" and not body:
-            body = _itertext(el)[:500000]
+            body = _itertext(el)[:_BODY_MAX_CHARS]
         elif t == "journal-title" and not journal:
             journal = _itertext(el)
         elif t == "year" and year is None:
@@ -166,20 +174,29 @@ def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any
                 fore = _child_text(target, "given-names")
                 if last or fore:
                     authors.append(f"{fore} {last}".strip() if fore else last)
-        elif t in ("license", "license-p") and not license_raw:
-            license_raw = _itertext(el)[:500]
-            href = el.get("{http://www.w3.org/1999/xlink}href") or el.get("href")
-            if href and href not in license_raw:
+        elif t in ("license", "license-p"):
+            href = el.get(_XLINK_HREF) or el.get("href")
+            if not license_raw:
+                license_raw = _itertext(el)[:500]
+                if href and href not in license_raw:
+                    license_raw = f"{href} {license_raw}".strip()
+            elif href and "://" not in license_raw:
+                # The first element named no URL; a nested one may.
                 license_raw = f"{href} {license_raw}".strip()
+
+    if not ppr:
+        return "no_ppr_id"
+    if not body and not abstract:
+        return "no_text"
 
     lic, lic_url, lic_snip = normalize_license(license_raw or None)
     subset = subset_from_license(lic)
 
     row: dict[str, Any] = {
-        "id": f"doi:{doi}" if doi else f"europepmc_preprint:{stem}",
+        "id": f"doi:{doi}" if doi else f"{SOURCE}:{ppr}",
         "source": SOURCE,
         "source_file": source_file,
-        "source_record_id": stem,
+        "source_record_id": ppr,
         "pmid": pmid or None,
         "pmcid": pmcid or None,
         "doi": doi or None,
@@ -207,174 +224,170 @@ def parse_article(art: ET.Element, source_file: str, stem: str) -> dict[str, Any
     return finalize_row(row)
 
 
-def iter_articles(path: Path, *, source_file: str | None = None) -> Iterator[dict[str, Any]]:
-    """Yield one row per ``<article>`` in a per-ID preprint XML file.
+def iter_records(path: Path, skips: Counter[str] | None = None) -> Iterator[dict[str, Any]]:
+    """Yield one row per usable ``<article>`` of one bulk file, as a stream.
 
-    A preprint file is single-article JATS; if the root is not ``<article>`` and
-    carries no ``<article>`` descendant, the root itself is parsed (still yields
-    a — most likely metadata-only — row).
-
-    ``source_file`` defaults to ``path.name`` when omitted (existing positional
-    callers, e.g. the tests, keep working), but callers with a ``raw_dir`` in
-    scope must pass ``input_key(path, raw_dir)`` explicitly -- see
-    ``process_one`` and ``_run_report``. ``stem`` (``path.stem`` -- the bare
-    ``PPR{n}`` filename stem, never directory-qualified) is unaffected by this
-    and still drives ``source_record_id`` / the ``id`` fallback -- see
-    ``parse_article``.
-    """
-    source_file = source_file or path.name
-    stem = path.stem
-    root = ET.parse(path).getroot()
-    if _local(root.tag) == "article":
-        yield parse_article(root, source_file, stem)
-        return
-    found = False
-    for el in root.iter():
-        if _local(el.tag) == "article":
-            found = True
-            yield parse_article(el, source_file, stem)
-    if not found:
-        yield parse_article(root, source_file, stem)
+    Memory: ``iterparse`` builds one record at a time; the record and the root's
+    children are cleared after it is parsed. A record that is skipped is counted
+    in ``skips`` as ``skipped_<reason>``. A repeated id in the file is counted as
+    ``skipped_duplicate_id``."""
+    skips = skips if skips is not None else Counter()
+    seen: set[str] = set()
+    depth = 0
+    root = None
+    with gzip.open(path, "rb") as fh:
+        for event, el in ET.iterparse(fh, events=("start", "end")):
+            if event == "start":
+                if root is None:
+                    root = el
+                if _local(el.tag) == "article":
+                    depth += 1
+                continue
+            if _local(el.tag) != "article":
+                continue
+            depth -= 1
+            if depth > 0:  # an article inside an article: part of the outer record
+                continue
+            res = parse_article(el, Path(path).name)
+            el.clear()
+            if root is not None:
+                root.clear()
+            if isinstance(res, str):
+                skips[f"skipped_{res}"] += 1
+                continue
+            if res["id"] in seen:
+                skips["skipped_duplicate_id"] += 1
+                continue
+            seen.add(res["id"])
+            yield res
 
 
 def discover(raw_dir: Path) -> list[Path]:
-    """Per-ID preprint XML only — ``PPR*.xml`` (bulk range archives are gone).
+    """The bulk files ``PPR<a>_PPR<b>.xml.gz`` directly under ``raw_dir`` (a flat
+    glob, non-recursive: the downloader writes nowhere else), in order of the
+    first id."""
 
-    Deliberately stays a flat, non-recursive ``raw_dir.glob(...)`` -- NOT
-    ``checkpoint_markers.discover_input_files`` (which also ``rglob``s), same
-    judgment call as ``europepmc_manuscript`` (Task 13) for consistency between
-    the two EPMC modules. Verified directly against this module's own
-    downloader, not just this docstring: ``download_europepmc_preprints.py``'s
-    ``download_preprints()`` writes every fetched preprint with
-    ``(raw_dir / f"{ppr_id}.xml").write_bytes(body)`` -- a bare join of
-    ``raw_dir`` and the id, with no subdirectory component anywhere in the
-    write path. That is even stronger than ``europepmc_manuscript``'s evidence
-    (a shell ``http_fetch`` that happens to always write ``basename(url)``):
-    here it is structurally impossible for the acquisition side to ever place a
-    file anywhere but directly under ``raw_dir``, so widening discovery to
-    ``rglob`` would add scope with no corresponding real layout to justify it.
-    See ``process_one`` for the identity change that DOES apply regardless of
-    layout flatness (``input_key`` instead of ``path.name``, for
-    defense-in-depth consistency with the shared scheme).
-    """
-    return sorted(p for p in raw_dir.glob("PPR*.xml") if p.is_file())
+    def first_id(p: Path) -> int:
+        return int(p.name.split("_", 1)[0][3:])
+
+    return sorted(
+        (p for p in Path(raw_dir).glob(BULK_PATTERN) if p.is_file() and BULK_NAME_RE.match(p.name)),
+        key=first_id,
+    )
 
 
-def _best_effort_audit(basename: str, n_rows: int) -> None:
-    """One chained ``extract_commit`` audit row on a fresh connection, degrading
-    to the file-only mirror when no DB is reachable. Never raises."""
-    with _AUDIT_LOCK:
-        try:
-            from episteme.data.db.connection import connection as _pg_connection
-
-            with _pg_connection() as _conn:
-                _audit(
-                    "extract_commit",
-                    conn=_conn,
-                    object=f"{SOURCE} {basename}",
-                    rows_affected=n_rows,
-                    reason=None,
-                    run_id=get_settings().run_id,
-                )
-                _conn.commit()
-        except Exception:  # noqa: BLE001 - best-effort: DB unavailable or audit failed
-            try:
-                from episteme import audit_trail as _audit_trail
-
-                _audit_trail.mirror_only(
-                    "extract_commit",
-                    object=f"{SOURCE} {basename}",
-                    rows_affected=n_rows,
-                    note="db_unavailable_or_failed",
-                    run_id=get_settings().run_id,
-                )
-            except Exception:  # noqa: BLE001 - last-resort fallback must never escape
-                _LOG.warning(
-                    "audit mirror_only fallback also failed for %s", basename, exc_info=True
-                )
+def unit_key(path: Path, raw_dir: Path) -> str:
+    """The unit key: ``input_key`` without the ``.xml.gz`` suffix."""
+    k = input_key(path, raw_dir)
+    return k[: -len(_SUFFIX)] if k.endswith(_SUFFIX) else k
 
 
-def process_one(
+def part_name(key: str, n: int) -> str:
+    return f"{key}__part{n:05d}"
+
+
+def fingerprint(path: Path) -> list[str]:
+    """``["size:<bytes>", "sha256:<hex>"]`` of the file, read in 1 MiB blocks."""
+    h = hashlib.sha256()
+    size = 0
+    with Path(path).open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+            size += len(block)
+    return [f"size:{size}", f"sha256:{h.hexdigest()}"]
+
+
+def _part_caps() -> tuple[int, int]:
+    """``(part_rows, part_bytes)`` from the runtime profile (a test seam)."""
+    profile = get_profile()
+    return profile.part_rows, profile.part_bytes
+
+
+def process_unit(
     path: Path,
     *,
     raw_dir: Path,
     processed_dir: Path,
     force: bool,
 ) -> dict[str, Any]:
-    # input_key, not path.name: brings this identity computation in line with
-    # the shared scheme (checkpoint_markers.input_key) even though today's
-    # real, flat REST-harvest layout means the two are identical for every
-    # currently-reachable file (input_key's own docstring: "A file directly
-    # under raw_root yields its bare basename") -- see discover()'s docstring
-    # for why discovery scope itself stays flat/unchanged.
-    basename = input_key(path, raw_dir)
-    if not force and is_success(processed_dir, SOURCE, basename):
-        return {"source_file": basename, "skipped": True, "reason": "success_marker"}
-
+    """Extract one bulk file as bounded parts; skip it when its marker matches."""
+    key = unit_key(path, raw_dir)
     t0 = time.time()
-    status_counts: Counter[str] = Counter()
-    n_rows = 0
-
-    def _stream_rows():
-        # Count while streaming: the writer pulls one row at a time, so memory
-        # stays bounded by one write batch, not by the unit.
-        nonlocal n_rows
-        for row in iter_articles(path, source_file=basename):
-            status_counts[str(row.get("extract_status"))] += 1
-            n_rows += 1
-            yield row
-
+    progress: dict[str, Any] = {"part": None, "rows": 0}
     try:
-        gen = _stream_rows()
-        try:
-            write_info = write_rows(
-                gen,
-                processed_dir,
-                source=SOURCE,
-                source_file=basename,
-                prefer_parquet=True,
-            )
-        finally:
-            gen.close()
-        elapsed = round(time.time() - t0, 4)
-        stats = {
+        fp = fingerprint(path)
+        if not force:
+            done = bucket_parts.read_bucket_marker(processed_dir, SOURCE, key)
+            if done is not None and done["inputs"] == fp:
+                return {
+                    "source_file": key,
+                    "skipped": True,
+                    "reason": "success_marker",
+                    **{k: int(done.get(k) or 0) for k in _SKIP_KEYS},
+                }
+            if is_success(processed_dir, SOURCE, key):
+                _LOG.warning("%s: input or marker changed; writing the unit again", key)
+        # The unit marker goes first: a stop during the rewrite leaves no marker
+        # with an old parts_list.
+        success_marker_path(processed_dir, SOURCE, key).unlink(missing_ok=True)
+        bucket_parts.delete_all_parts(processed_dir, SOURCE, key)
+
+        cap_rows, cap_bytes = _part_caps()
+        skips: Counter[str] = Counter()
+        rows_src = ((row, []) for row in iter_records(path, skips))
+        n_parts, n_rows, status_counts = bucket_parts.write_parts(
+            rows_src,
+            processed_dir=processed_dir,
+            source=SOURCE,
+            part_name=lambda n: part_name(key, n),
+            cap_rows=cap_rows,
+            cap_bytes=cap_bytes,
+            batch_rows=_WRITE_BATCH_ROWS,
+            progress=progress,
+        )
+        stats: dict[str, Any] = {
             "n_rows": n_rows,
+            "parts": n_parts,
+            "parts_list": [part_name(key, i) for i in range(1, n_parts + 1)],
+            "inputs": fp,
+            **{k: int(skips.get(k, 0)) for k in _SKIP_KEYS},
+            "part_rows": cap_rows,
+            "part_bytes": cap_bytes,
             "extract_status_counts": dict(status_counts),
-            "elapsed_sec": elapsed,
-            "write": write_info,
+            "elapsed_sec": round(time.time() - t0, 4),
         }
-        mark_success(processed_dir, SOURCE, basename, stats=stats)
-        _best_effort_audit(basename, n_rows)
-        return {"source_file": basename, "skipped": False, "ok": True, **stats}
+        mark_success(processed_dir, SOURCE, key, stats=stats)
+        result = {k: v for k, v in stats.items() if k != "inputs"}
+        return {"source_file": key, "skipped": False, "ok": True, **result}
     except Exception as e:  # noqa: BLE001
         if is_transient(e):
-            raise TransientUnitError(basename, repr(e)) from None
+            raise TransientUnitError(key, repr(e)) from None
         cls = type(e).__name__
-        is_parse = "Parse" in cls or "XML" in cls or "SyntaxError" in cls
+        is_parse = "Parse" in cls or "XML" in cls or "SyntaxError" in cls or "BadGzip" in cls
         mark_failed(
             processed_dir,
             SOURCE,
-            basename,
-            error_class="parse_error" if is_parse else "unknown",
+            key,
+            error_class="parse_error" if is_parse else cls,
             message=str(e),
-            stats={"n_rows_partial": n_rows},
+            stats={"n_rows_partial": progress.get("rows", 0), "failed_part": progress.get("part")},
             exc=e,
         )
-        return {"source_file": basename, "skipped": False, "ok": False, "error": str(e)}
+        return {"source_file": key, "skipped": False, "ok": False, "error": str(e)}
 
 
 def _print_verbose(result: dict[str, Any]) -> None:
-    basename = result.get("source_file")
+    key = result.get("source_file")
     if result.get("skipped"):
-        print(f"skip {basename}", file=sys.stderr)
+        print(f"skip {key}", file=sys.stderr)
     elif result.get("ok"):
+        skipped = {k: result.get(k) for k in _SKIP_KEYS}
         print(
-            f"ok {basename} rows={result.get('n_rows')} "
-            f"status={result.get('extract_status_counts')}",
+            f"ok {key} parts={result.get('parts')} rows={result.get('n_rows')} {skipped}",
             file=sys.stderr,
         )
     else:
-        print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
+        print(f"FAIL {key}: {result.get('error')}", file=sys.stderr)
 
 
 def extract_europepmc_preprints(
@@ -388,25 +401,28 @@ def extract_europepmc_preprints(
     skip_units: list[str] | None = None,
     skip_reason: str | None = None,
 ) -> dict:
-    """Importable core: parse ``PPR*.xml`` under ``raw_dir`` into staging shards +
-    ops markers under ``processed_dir``.
+    """Importable core: extract the bulk files under ``raw_dir`` into staging
+    parts + ops markers under ``processed_dir``.
 
-    Returns ``{"inputs": n, "ok": n, "failed": n, "rows": n}``.
+    ``max_files`` limits the number of bulk files; ``skip_units`` take unit keys.
+    Returns ``{"inputs", "ok", "failed", "rows", "skipped_no_ppr_id",
+    "skipped_no_text", "skipped_duplicate_id"}``.
     """
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    files = discover(raw_dir)
-    files = skip_files(SOURCE, "extract", files, raw_dir, skip_units, skip_reason)
+    by_key = {unit_key(p, raw_dir): p for p in discover(raw_dir)}
+    keys = bucket_parts.select_buckets(SOURCE, list(by_key), skip_units, skip_reason)
     if max_files and max_files > 0:
-        files = files[:max_files]
+        keys = keys[:max_files]
+    files = [by_key[k] for k in keys]
 
     workers = max(1, int(workers))
     t0 = time.time()
 
     results = run_per_file(
-        process_one,
+        process_unit,
         files,
         workers=workers,
         on_result=_print_verbose if verbose else None,
@@ -419,7 +435,9 @@ def extract_europepmc_preprints(
     ok = sum(1 for r in results if r.get("ok"))
     failed = sum(1 for r in results if not r.get("ok") and not r.get("skipped"))
     rows = sum(int(r.get("n_rows") or 0) for r in results if r.get("ok"))
-    summary = {"inputs": len(files), "ok": ok, "failed": failed, "rows": rows}
+    summary: dict[str, Any] = {"inputs": len(files), "ok": ok, "failed": failed, "rows": rows}
+    for k in _SKIP_KEYS:
+        summary[k] = sum(int(r.get(k) or 0) for r in results)
 
     run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
     try:
@@ -451,6 +469,7 @@ def extract_europepmc_preprints(
 
 _SAMPLE_MAX = 4
 _SAMPLE_TRUNC = 60
+_REPORT_ROWS_PER_FILE = 1000
 
 
 def _stringify(value: object) -> str:
@@ -500,14 +519,21 @@ def _run_report(raw_dir: Path, max_files: int = 0) -> int:
     if max_files and max_files > 0:
         files = files[:max_files]
     if not files:
-        print(f"ERROR: no PPR*.xml under {raw_dir}", file=sys.stderr)
+        print(f"ERROR: no {BULK_PATTERN} under {raw_dir}", file=sys.stderr)
         return 1
     rows: list[dict[str, Any]] = []
     for fp in files:
+        gen = iter_records(fp)
         try:
-            rows.extend(iter_articles(fp, source_file=input_key(fp, raw_dir)))
+            for _ in range(_REPORT_ROWS_PER_FILE):
+                row = next(gen, None)
+                if row is None:
+                    break
+                rows.append(row)
         except Exception as e:  # noqa: BLE001 — report is best-effort per file
             print(f"  WARN: could not parse {fp.name}: {e}", file=sys.stderr)
+        finally:
+            gen.close()
     print(_render_field_shape(rows, len(files)), end="")
     return 0
 
@@ -516,19 +542,19 @@ def _main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
     p = argparse.ArgumentParser(
-        description="Europe PMC preprint per-ID JATS to episteme.articles staging shards",
+        description="Europe PMC preprint bulk JATS files to episteme.articles staging parts",
     )
     p.add_argument(
         "--raw-dir",
         type=Path,
-        default=settings.raw_root / "europepmc" / "preprints",
+        default=settings.raw_root / "europepmc" / "preprints_bulk",
     )
     p.add_argument("--processed-dir", type=Path, default=settings.processed_root)
     p.add_argument(
         "--max-files",
         type=int,
         default=settings.sample_limit,
-        help="0 = all discovered PPR*.xml (env: EPISTEME_SAMPLE_LIMIT)",
+        help="0 = all bulk files; N = the first N (env: EPISTEME_SAMPLE_LIMIT)",
     )
     p.add_argument(
         "--workers",
@@ -576,10 +602,15 @@ def _main(argv: list[str] | None = None) -> int:
 
     # inputs == 0 after --skip-unit dropped every file is a clean run (R8).
     if res["inputs"] == 0 and not args.skip_unit:
-        print(f"ERROR: no PPR*.xml under {raw_dir}", file=sys.stderr)
+        print(f"ERROR: no {BULK_PATTERN} under {raw_dir}", file=sys.stderr)
         return 1
 
-    print(f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']}")
+    print(
+        f"done inputs={res['inputs']} ok={res['ok']} failed={res['failed']} rows={res['rows']} "
+        f"skipped_no_ppr_id={res['skipped_no_ppr_id']} skipped_no_text={res['skipped_no_text']} "
+        f"skipped_duplicate_id={res['skipped_duplicate_id']}"
+    )
+    bucket_parts.write_failed_inputs(processed_dir, SOURCE, int(res["failed"]))
     return 1 if res["failed"] else 0
 
 

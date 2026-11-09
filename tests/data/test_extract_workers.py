@@ -35,12 +35,6 @@ CASES = [
     ),
     ("episteme.data.apollo.extract_apollo", "extract_apollo", SP2 / "apollo", "apollo"),
     (
-        "episteme.data.europepmc.preprints.extract_europepmc_preprints",
-        "extract_europepmc_preprints",
-        SP2 / "europepmc_preprint",
-        "europepmc_preprint",
-    ),
-    (
         "episteme.data.europepmc.manuscripts.extract_europepmc_manuscripts",
         "extract_europepmc_manuscripts",
         SP2 / "europepmc_manuscript",

@@ -34,7 +34,7 @@ Episteme uses a **bimodal** data strategy:
 | **PubMed** (baseline + daily updates) | Abstracts, MeSH, citation language | NLM redistribution terms; treat as `open_metadata` | NCBI FTP | **In progress** — extractor proven |
 | **PMC OA Commercial (`oa_comm`)** | Full text CC0 / CC BY / BY-SA / BY-ND | Commercial-friendly OA only | AWS Open Data `pmc-oa-opendata` | **Sample done**; full on SSD |
 | **PMC OA non-commercial / other** | Extra full text | NC or mixed — **exclude from commercial train** | Same bucket families | Track separately if research-only |
-| **Europe PMC preprints** | Full-text preprints | Per-article CC; filter NC | EBI FTP | **Done** (5 archives) |
+| **Europe PMC preprints** | Full-text preprints | Per-article CC; filter NC | EBI FTP (8 bulk files `PPR<a>_PPR<b>.xml.gz`, JATS; per-article licence, about 3% NC/ND) | **Done** (bulk files, read in bounded parts) |
 | **Europe PMC author manuscripts** | Accepted manuscripts | Text-mining / copyright notices | EPMC FTP | **Wired** (download, extract, load, graph) — see docs/12 |
 | **Europe PMC OA journals** | Overlap with PMC; EU-weighted | License-filter | EPMC / NCBI | Prefer NCBI `oa_comm` to avoid dup |
 | **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Wired** (download, serialize, load) — see docs/12; strong metadata/KG candidate |

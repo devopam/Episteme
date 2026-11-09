@@ -67,13 +67,13 @@ If a step fails: the dispatcher prints `stage failed: <name>` and `resume with: 
 
 On Windows, psycopg pool shutdown noise can appear on stderr from `run_pipeline.sh` (at the start, from the `run_start` audit, and at the end), `verify_audit_trail.sh` and `source_inventory.sh`. Both forms were observed: `hint: you can try to call 'close()' explicitly or to use the pool as context manager` and `couldn't stop thread 'pool-1-...'`. It is harmless when the exit code is 0. They can bury the result line, and a `tail` may show only noise, so grep for the line you want (`audit chain OK`) as in step 4. The exit status after `| grep` is grep's, not the verifier's; the proof is the `audit chain OK` line itself. The inventory table in step 5 lists every wired source, not only `openalex`; rows from earlier work (for example another source with data) are expected, and `n/a` on sources with no data is normal.
 
-**Alternative fast path: Europe PMC preprints.** This runs download, extract, load and graph for three preprints, but it depends on `ftp.ebi.ac.uk` being reachable from your machine (the id list `pprid.txt.gz`). The base URL is the key `EUROPEPMC_PREPRINT_BASE` in `scripts/data/_lib/sources.env`; override it in `.env` if you have a mirror.
+**Alternative fast path: Europe PMC preprints.** This runs download, extract, load and graph for three preprints, but it depends on `ftp.ebi.ac.uk` being reachable from your machine (the bulk files `PPR<a>_PPR<b>.xml.gz`, about 1.5 GB in total). The base URL is the key `EUROPEPMC_PREPRINT_BASE` in `scripts/data/_lib/sources.env`; override it in `.env` if you have a mirror.
 
 ```bash
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 1
 ```
 
-Expected: `stage: download` then `europepmc_preprint: ids=<N> fetched=3 skipped=0 errors=<E>`, `stage: extract` then `done inputs=3 ok=3 failed=0 rows=<n>`, `stage: load` then one `ok <shard> ... event=load_commit` line and `done shards=1 failed=0`, `stage: graph` then `done source_files=...`, and `pipeline done: europepmc_preprint all` with exit code 0. A per-preprint 404, 429 or 503 counts in `errors` and is not fatal. If the id list itself cannot be fetched, the downloader aborts with a raw Python traceback (a `ConnectionError` naming `pprid.txt.gz`), exit code 1, `stage failed: download` and `resume with: ...`; nothing was written to the database. Check with `curl -I` against the base URL plus `/pprid.txt.gz`, retry later, or use the `openalex` path above. The `--dry-run` preview is not a reachability check: with the upstream unreachable it prints a WARN, `would harvest 0 ids`, and exits 0. Treat `0` there as an error, not as nothing to do.
+Expected: `stage: download` then `europepmc_preprint: files=<N> fetched=1 skipped=0 errors=0` (the first bulk file, about 150 MB; `--max-files` caps the files fetched), `stage: extract` then `done inputs=1 ok=1 failed=0 rows=<n> skipped_no_ppr_id=<a> skipped_no_text=<b> skipped_duplicate_id=<c>` (about 10,000 records in the first file), `stage: load` then one `ok <shard> ... event=load_commit` line per part and `done shards=<parts> failed=0`, then the retire step (`europepmc_preprint: no deleted part pending; nothing retired` on a first run), `stage: graph` then `done source_files=...`, and `pipeline done: europepmc_preprint all` with exit code 0. If the download fails, check reachability with `curl -I` against the base URL (`EUROPEPMC_PREPRINT_BASE`), retry later, or use the `openalex` path above. The `--dry-run` preview lists the bulk files found in the folder listing; an unreachable base is an error.
 
 Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 130 or 143 a stage was stopped (Ctrl-C, SIGTERM, or the parent watchdog; section 4.7); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`): every non-zero stage code other than 130 and 143 becomes 1. On Windows, Python stages may also print pool shutdown noise on stderr (`couldn't stop thread 'pool-1-...'` or a `hint: you can try to call 'close()'...` line; observed with `run_pipeline.sh`, `verify_audit_trail.sh` and `source_inventory.sh`, see section 0.3); they were not seen to affect the exit code.
 
@@ -643,7 +643,7 @@ Then delete the lock file. Never delete the lock of a live job.
 | `pmc` (`download_pmc.py`) | before each submit batch of up to 2,000 articles |
 | `s5cmd` and `aws s3 sync` (S3 sources) | none |
 | `hf download` (Hugging Face sources) | none |
-| `europepmc_preprint` (the REST harvester) | none |
+| `europepmc_preprint` (the bulk file downloader) | none |
 
 For the downloads with no pause point, a waiting heavy job waits until the download ends. A pause point also needs a run id (`EPISTEME_RUN_ID`). Any download run outside `run_pipeline.sh` (a wrapper or the `pmc` downloader run directly) has no run id. It takes no download lock and never pauses.
 
@@ -1006,26 +1006,30 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh apollo graph
 
 #### Europe PMC preprints (`europepmc_preprint`)
 
-Per-preprint full-text XML, harvested one id at a time from the Europe PMC REST API using the id list `pprid.txt.gz` at `EUROPEPMC_PREPRINT_BASE`. The old bulk range archives were discontinued by the upstream (spike of 2026-09-08). Raw: `<raw>/europepmc/preprints/PPR*.xml` plus a `.harvest_state` resume list. Ids are taken newest first so a capped run returns usable preprints. This is the smallest full literature chain; section 0.3 keeps it as the alternative fast path (it needs `ftp.ebi.ac.uk`).
+EBI publishes the preprint full text as bulk files `PPR<a>_PPR<b>.xml.gz` at `EUROPEPMC_PREPRINT_BASE` (8 files of 148 to 269 MB on 2026-10-31; each holds one `<articles>` root of JATS `<article article-type="preprint">` records, about 10,000 in the first file). The folder also holds `pprid.txt.gz` and a privacy notice; the pipeline does not use them. Raw: `<raw>/europepmc/preprints_bulk/PPR<a>_PPR<b>.xml.gz`. The old per-id route (one `fullTextXML` request per preprint, `<raw>/europepmc/preprints/PPR*.xml`, `.harvest_state`) is removed; those files stay on disk but nothing reads them.
+
+**Download.** The downloader reads the folder listing and takes every name that matches `PPR<a>_PPR<b>.xml.gz` (no fixed list: a new range file is found by the pattern). A file that is already in the raw folder with the size the server states is skipped. Other files go to `<name>.part` and are renamed when complete; a stopped download resumes from the `.part` file. `--max-files N` caps the files fetched in one run, `--force` fetches again, `--dry-run` lists and writes nothing. The wrapper accepts `--max-files`, `--force`, `--raw-dir`, `--dry-run`.
+
+**Extract.** One bulk file is one unit (key `PPR<a>_PPR<b>`, from `input_key`). The extractor streams the file record by record (memory is one record) and writes bounded parts `PPR<a>_PPR<b>__partNNNNN`, capped by the runtime profile's `part_rows` and `part_bytes`, as `pmc` does. The unit marker holds a fingerprint (size and sha256): an unchanged file is skipped, a changed file is written again from part 1 and the rows of its deleted parts that were loaded are retired by the `retire` step that `load` runs after a good load. `--max-files N` takes the first N bulk files (a unit is about 10,000 records, so a sample run of one file is about 10,000 rows). The row `id` is `doi:<doi>` when the record has a DOI, else `europepmc_preprint:<PPR id>`; the loader replaces a row of the same `id` under another `source_file`, so the preprints loaded from the per-id files are replaced, not doubled. A record is skipped and counted (never fatal) when it has no `PPR<n>` article id (`skipped_no_ppr_id`), neither body nor abstract text (`skipped_no_text`), or an id that the same file already used (`skipped_duplicate_id`). Licence: from the first `<license>` element (its text and `xlink:href`); CC BY and CC BY-ND are `commercial`, CC BY-NC and CC BY-NC-ND are `text_mining`, no recognisable licence is `open_metadata`.
 
 ```bash
-# preview (fetches only the id list; prints "would harvest N ids"; writes nothing)
+# preview (lists the bulk files; writes nothing)
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download --dry-run
 
-# first time, bounded
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 3
+# first time, bounded (one bulk file)
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint all --max-files 1
 
 # stage by stage
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download --max-files 3
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint extract --max-files 3
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download --max-files 1
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint extract --max-files 1
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint load
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint graph
 
-# incremental: same download command; already-harvested ids are skipped
+# incremental: same download command; size-matched files are skipped
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_preprint download
 ```
 
-`--since` is accepted by this downloader but is a documented no-op (the id feed has no server-side filter). Per-id 404 (withdrawn, or no full text yet), 429 and 503 are counted in `errors=` and are not fatal; a 404 id is retried on the next run.
+A file that fails to download counts in `errors=` and the run goes on; the next run resumes it. A bulk file that cannot be parsed gets a failed marker and the extract stage exits 1.
 
 #### Europe PMC author manuscripts (`europepmc_manuscript`)
 
