@@ -260,7 +260,7 @@ def _schema():
 
 
 @pytest.fixture
-def db(_schema, pg_conn, monkeypatch):
+def db(_schema, pg_conn, clean_substance, monkeypatch):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     from episteme.config import get_settings
 

@@ -66,7 +66,7 @@ def _schema():
 
 
 @pytest.fixture
-def db(_schema, pg_conn, monkeypatch, tmp_path):
+def db(_schema, pg_conn, clean_substance, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "test")
     monkeypatch.setenv("EPISTEME_PROCESSED_ROOT", str(tmp_path / "processed"))
     from episteme.config import get_settings

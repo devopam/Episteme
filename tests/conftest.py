@@ -339,3 +339,33 @@ def pg_conn(monkeypatch):
     finally:
         conn.rollback()
         conn.close()
+
+
+def truncate_substance(conn) -> None:
+    """Empty ``episteme.substance`` and ``substance_xref`` and restart the key identity.
+
+    A pg fixture that inserts substance rows with explicit keys leaves them behind; a real
+    load into the same database then collides on key 1 (2026-11-05). Refuses to run on any
+    database but ``episteme_test``; does nothing when the tables do not exist."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database()")
+        name = cur.fetchone()[0]
+        if name != "episteme_test":
+            raise RuntimeError(f"refusing to truncate substance in database {name!r}")
+        cur.execute(
+            "SELECT to_regclass('episteme.substance') IS NOT NULL "
+            "AND to_regclass('episteme.substance_xref') IS NOT NULL"
+        )
+        if cur.fetchone()[0]:
+            cur.execute("TRUNCATE episteme.substance_xref, episteme.substance RESTART IDENTITY")
+    conn.commit()
+
+
+@pytest.fixture
+def clean_substance(pg_conn):
+    """Teardown that clears the substance rows a pg test inserted (runs before ``pg_conn``
+    closes). Request it from every pg fixture that inserts ``substance`` or
+    ``substance_xref`` rows."""
+    yield
+    pg_conn.rollback()
+    truncate_substance(pg_conn)
