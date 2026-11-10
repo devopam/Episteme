@@ -1089,7 +1089,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_id_mappings
 
 Integrity check (mandatory before load): the `head` above must show the header `PMID,PMCID,DOI` and real rows. A payload holding error text (an earlier audit found Oracle `ORA-`/`SP2-` error text saved as the file) is a corrupt source: delete it and re-download. The load is idempotent (`ON CONFLICT DO NOTHING`), so a rerun of an unchanged file inserts no new rows; `--force` is accepted and does nothing.
 
-**`europepmc_lite`**: `PMCLiteMetadata.tgz` (about 2 GB), weekly. It enriches existing `episteme.articles` rows (journal, year); it creates no rows, so load an article source first. Raw: `<raw>/europepmc/lite_metadata/`.
+**`europepmc_lite`**: `PMCLiteMetadata.tgz` (about 2 GB), weekly. It enriches existing `episteme.articles` rows (journal, year); it creates no rows, so load an article source first. Raw: `<raw>/europepmc/lite_metadata/`. The UPDATE rewrites a row only when journal, year or mesh would change, so a re-run writes no new row versions. `enrich` commits after each tar member (and after every `EPISTEME_LITE_COMMIT_BATCHES` batches inside a member) and writes a marker per finished member under `<processed>/_ops/europepmc_lite/load_success/`, named from the input key of the tgz and the member name. A re-run skips finished members. A new tgz (other size or mtime) is processed again. `--force` redoes all members. The output shows `rows_matched` (pmcids in the feed) and `rows_updated` (rows that changed) apart.
 
 ```bash
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh europepmc_lite download
@@ -1548,6 +1548,7 @@ All of them are read in `src/episteme/config.py` (the only module that reads the
 | `EPISTEME_EPAR_MAX_WITHDRAWN_SHARE` | Share of the known documents that the feed may drop |
 | `EPISTEME_EPAR_BUCKET_IDS` | Width of an EPAR bucket, in document ids (a change rebuilds every bucket) |
 | `EPISTEME_SAMPLE_MIN_SUBSTANCES` | Minimum rows in `episteme.substance` of the target database for a `--sample` load of `ema`, `openfda` or `openfda_faers` (default 1000); below it the run refuses (exit 2) and names `scripts/data/openfda/load_substance.sh` |
+| `EPISTEME_LITE_BATCH_SIZE`, `EPISTEME_LITE_COMMIT_BATCHES` | `europepmc_lite enrich`: rows per UPDATE batch (default 2000) and batches per commit inside a tar member (default 50) |
 | `EPISTEME_AACT_MAY_BE_EMPTY_TABLES` | Comma separated AACT tables that may be header-only in the export (default `search_results`); another header-only table fails the gate |
 | `EPISTEME_AACT_MAX_ORPHAN_SHARE` | Largest share of rows per AACT table whose `nct_id` is not in `studies` (default 0.05); a breach fails the load and the previous release keeps serving |
 | `EPISTEME_LOAD_BATCH_BYTES`, `EPISTEME_WRITE_BATCH_BYTES` | Byte caps of a load batch and of a staging write batch |

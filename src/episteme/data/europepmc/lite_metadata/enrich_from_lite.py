@@ -44,11 +44,17 @@ tree as it goes (memory stays flat regardless of file size), batching UPDATE
 parameters and flushing a single set-based ``UPDATE ... FROM (VALUES ...)``
 per batch (faster for large N than one ``UPDATE`` per row, and gives an exact
 ``cur.rowcount`` per batch, unlike ``executemany``'s driver-dependent rowcount
-semantics). Because records are only ever turned into batched UPDATE params
-(never stored in a dict), ``rows_matched`` and ``rows_updated`` collapse into
-the same number here -- an UPDATE is issued only for pmcids seen in the feed,
-so "matched" and "had an UPDATE issued for it" are the same population; see
-``enrich_from_lite``'s docstring.
+semantics). The UPDATE has a WHERE predicate, so a row is rewritten only when
+a column would change (no new tuple version for a no-op match).
+``rows_matched`` counts the pmcids seen in the feed; ``rows_updated`` is the
+sum of ``cur.rowcount`` (rows that changed).
+
+Restartability: with ``processed_root`` and ``raw_dir`` the pass commits per
+tar member (and every ``commit_batches`` batches inside a member) and writes a
+marker per finished member, keyed on ``input_key(tgz, raw_dir)`` plus the
+percent-encoded member name. A re-run skips finished members; ``force``
+redoes them. The UPDATE is idempotent, so a member that stopped half way is
+safe to redo.
 
 This module never reads ``os.environ`` -- ``enrich_from_lite`` takes a
 ``conn`` directly (the caller, e.g. ``main()``, owns DSN resolution via
@@ -58,20 +64,19 @@ This module never reads ``os.environ`` -- ``enrich_from_lite`` takes a
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tarfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 from defusedxml.ElementTree import iterparse as _safe_iterparse
 
+from episteme.data import checkpoint_markers
 from episteme.data.article_schema import cap_list_elements
-
-# Batch size for the set-based UPDATE ... FROM (VALUES ...) flush. Kept modest
-# (not tens of thousands) so a single UPDATE statement's parameter count and
-# VALUES-list size stay comfortably within psycopg/Postgres limits.
-BATCH_SIZE = 2000
 
 SOURCE = "europepmc_lite"
 
@@ -132,11 +137,11 @@ def _iter_records(fileobj: IO[bytes]):
         root.clear()
 
 
-def _iter_all_records(tgz_path: Path):
-    """Stream every ``<PMC_ARTICLE>`` record across every tar member of
-    ``tgz_path``, in streaming mode (``"r|gz"`` -- forward-only, no seeking:
-    the feed is 2.2GB compressed / tens of GB uncompressed, too large to load
-    or seek within)."""
+def _iter_members(tgz_path: Path):
+    """Yield ``(member name, records)`` for every XML tar member of ``tgz_path``, in
+    streaming mode (``"r|gz"`` -- forward-only, no seeking: the feed is 2.2GB compressed
+    / tens of GB uncompressed). The caller must use or drop ``records`` before it asks
+    for the next member; a member that is not iterated is skipped by the stream."""
     with tarfile.open(tgz_path, "r|gz") as tf:
         for member in tf:
             if not member.isfile() or not member.name.endswith(".xml"):
@@ -144,7 +149,14 @@ def _iter_all_records(tgz_path: Path):
             fileobj = tf.extractfile(member)
             if fileobj is None:
                 continue
-            yield from _iter_records(fileobj)
+            yield member.name, _iter_records(fileobj)
+
+
+def member_key(tgz_path: Path, raw_dir: Path, member: str) -> str:
+    """Marker name of one tar member: ``input_key`` of the tgz plus the percent-encoded
+    member name (``/`` becomes ``%2F`` and ``%`` becomes ``%25``, so two member names
+    never give the same key)."""
+    return f"{checkpoint_markers.input_key(tgz_path, raw_dir)}__member__{quote(member, safe='')}"
 
 
 _UPDATE_SQL = """
@@ -155,14 +167,16 @@ UPDATE episteme.articles AS a
        mesh    = CASE WHEN a.mesh IS NULL OR a.mesh = '{}' THEN v.mesh ELSE a.mesh END
   FROM (VALUES %s) AS v (pmcid, journal, year, mesh)
  WHERE a.pmcid = v.pmcid
+   AND ((a.journal IS NULL AND v.journal IS NOT NULL)
+        OR ((a.year IS NULL OR a.year = 0) AND v.year IS NOT NULL AND v.year <> 0)
+        OR ((a.mesh IS NULL OR a.mesh = '{}') AND v.mesh IS NOT NULL AND v.mesh <> '{}'))
 """
 
 
 def _flush(cur, batch: list[dict[str, Any]]) -> int:
     """Issue one set-based UPDATE for ``batch`` (a list of {pmcid, journal,
     year, mesh} dicts) and return the number of ``episteme.articles`` rows it
-    matched (== updated-or-no-op'd, since ``coalesce``/the mesh ``CASE`` may
-    leave a row's values unchanged if it already had them).
+    changed (the WHERE predicate leaves a row alone when nothing would change).
 
     Known edge case, accepted rather than engineered around: if the SAME
     pmcid appears twice within one batch (e.g. a correction/duplicate record
@@ -182,52 +196,97 @@ def _flush(cur, batch: list[dict[str, Any]]) -> int:
     return cur.rowcount
 
 
-def enrich_from_lite(tgz_path: Path, conn, *, force: bool = False) -> dict[str, Any]:
+def _fingerprint(tgz_path: Path) -> dict[str, int]:
+    st = tgz_path.stat()
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def _member_done(marker: Path, fp: dict[str, int]) -> bool:
+    """A marker counts only for the same file (size and mtime): a new weekly file with
+    the same name is processed again."""
+    if not marker.is_file():
+        return False
+    try:
+        return json.loads(marker.read_text(encoding="utf-8")).get("stats", {}).get("file") == fp
+    except (OSError, ValueError):
+        return False
+
+
+def enrich_from_lite(
+    tgz_path: Path,
+    conn,
+    *,
+    force: bool = False,
+    processed_root: Path | None = None,
+    raw_dir: Path | None = None,
+    batch_size: int | None = None,
+    commit_batches: int | None = None,
+) -> dict[str, Any]:
     """Enrich ``episteme.articles`` from one ``PMCLiteMetadata.tgz`` file.
 
-    Runs in the caller's transaction (does not commit).
+    Without ``processed_root`` the pass runs in the caller's transaction (no commit, no
+    marker). With ``processed_root`` (and ``raw_dir``, default the tgz folder) it commits
+    after every ``commit_batches`` batches and at the end of each tar member, and writes a
+    marker per finished member; finished members are skipped unless ``force``.
+    ``batch_size`` and ``commit_batches`` default to the Settings values.
 
-    Returns:
-        {"records_read": int, "rows_matched": int, "rows_updated": int}
-
-    ``rows_matched`` and ``rows_updated`` are the same number here: an UPDATE
-    is issued only for pmcids actually seen in the feed (a pmcid with no
-    matching lite-metadata record gets no UPDATE at all -- not even a 0-row
-    no-op one), so "matched" (found in the feed) and "had an UPDATE issued for
-    it, whether or not it changed anything" are identical populations. Kept as
-    two dict keys per the brief's contract, in case a future caller wants to
-    distinguish "found" from "actually changed" (this module doesn't, per
-    coalesce()/CASE semantics -- a match that already had journal/year/mesh
-    set still counts as matched+updated even though the row's values didn't
-    change).
-
-    ``force`` is accepted for CLI-flag symmetry with the other SP2 enrichment
-    passes (Task 11's ``load_id_mappings``) but is a no-op: there is no
-    checkpoint/marker system for this one-shot UPDATE pass, and
-    ``coalesce(journal, ...)``/the mesh ``CASE`` only ever fill NULL/empty
-    columns, so a re-run of an unchanged file is naturally idempotent (same
-    reasoning as Task 11).
+    Returns ``{"records_read", "rows_matched", "rows_updated", "members_done",
+    "members_skipped"}``. ``rows_matched`` counts the pmcids seen in the feed in the
+    members read; ``rows_updated`` is the number of rows that changed (the WHERE
+    predicate of ``_UPDATE_SQL`` skips a row that would not change).
     """
+    from episteme.config import get_settings
+
     tgz_path = Path(tgz_path)
-    _ = force  # no-op: coalesce()-based UPDATE is already idempotent (see docstring)
+    settings = get_settings()
+    batch_size = batch_size or settings.lite_batch_size
+    commit_batches = commit_batches or settings.lite_commit_batches
+    raw_dir = Path(raw_dir) if raw_dir is not None else tgz_path.parent
+    fp = _fingerprint(tgz_path) if processed_root is not None else {}
 
-    records_read = 0
-    rows_matched = 0
-    batch: list[dict[str, Any]] = []
-
+    records_read = rows_matched = rows_updated = done = skipped = 0
     with conn.cursor() as cur:
-        for rec in _iter_all_records(tgz_path):
-            records_read += 1
-            batch.append(rec)
-            if len(batch) >= BATCH_SIZE:
-                rows_matched += _flush(cur, batch)
-                batch = []
-        rows_matched += _flush(cur, batch)
-
+        for name, records in _iter_members(tgz_path):
+            marker = None
+            if processed_root is not None:
+                marker = checkpoint_markers.load_success_marker_path(
+                    Path(processed_root), SOURCE, member_key(tgz_path, raw_dir, name)
+                )
+                if not force and _member_done(marker, fp):
+                    skipped += 1
+                    continue
+            batch: list[dict[str, Any]] = []
+            batches = member_read = 0
+            for rec in records:
+                member_read += 1
+                batch.append(rec)
+                if len(batch) >= batch_size:
+                    rows_updated += _flush(cur, batch)
+                    batch = []
+                    batches += 1
+                    if processed_root is not None and batches % commit_batches == 0:
+                        conn.commit()
+            rows_updated += _flush(cur, batch)
+            records_read += member_read
+            rows_matched += member_read
+            if marker is not None:
+                conn.commit()
+                checkpoint_markers.write_marker(
+                    marker,
+                    {
+                        "source": SOURCE,
+                        "member": name,
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "stats": {"file": fp, "records": member_read},
+                    },
+                )
+            done += 1
     return {
         "records_read": records_read,
         "rows_matched": rows_matched,
-        "rows_updated": rows_matched,
+        "rows_updated": rows_updated,
+        "members_done": done,
+        "members_skipped": skipped,
     }
 
 
@@ -252,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--force",
         action="store_true",
-        help="accepted for CLI symmetry; no-op (coalesce()-based UPDATE is already idempotent)",
+        help="redo tar members that already have a finished marker",
     )
     p.add_argument(
         "--reason",
@@ -282,12 +341,19 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"source={SOURCE} tgz_path={tgz_path}")
     with connection() as conn:
-        result = enrich_from_lite(tgz_path, conn, force=args.force)
+        result = enrich_from_lite(
+            tgz_path,
+            conn,
+            force=args.force,
+            processed_root=settings.processed_root,
+            raw_dir=args.raw_dir,
+        )
         conn.commit()
 
     print(
         f"done records_read={result['records_read']} rows_matched={result['rows_matched']} "
-        f"rows_updated={result['rows_updated']}"
+        f"rows_updated={result['rows_updated']} members_done={result['members_done']} "
+        f"members_skipped={result['members_skipped']}"
     )
     return 0
 

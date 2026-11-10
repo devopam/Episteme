@@ -95,7 +95,7 @@ def test_enrich_from_lite_fills_matched_rows_and_skips_others(pg_conn):
     # PMC29327 -- the last one has no matching seeded row (proves a
     # non-matching feed record is a no-op, not an error).
     assert res["records_read"] == 4
-    assert res["rows_matched"] == 3
+    assert res["rows_matched"] == 4
     assert res["rows_updated"] == 3
 
     with pg_conn.cursor() as cur:
@@ -157,7 +157,7 @@ def test_enrich_from_lite_fills_mesh_when_present_in_feed(pg_conn, tmp_path):
     res = enrich_from_lite(synthetic, pg_conn)
     pg_conn.commit()
 
-    assert res == {"records_read": 1, "rows_matched": 1, "rows_updated": 1}
+    assert (res["records_read"], res["rows_matched"], res["rows_updated"]) == (1, 1, 1)
 
     with pg_conn.cursor() as cur:
         cur.execute(
@@ -283,4 +283,20 @@ def test_enrich_from_lite_keeps_year_0_when_the_feed_has_no_year(pg_conn, tmp_pa
             "SELECT year FROM episteme.articles WHERE id = %s",
             ("pmcid:PMCNULLYEAR",),
         )
-        assert cur.fetchone() == (0,)
+        # Nothing to fill (no journal, no year in the feed): the row is not rewritten, so a
+        # NULL year stays NULL. The loader never writes NULL (it writes 0), so this seed is
+        # artificial.
+        assert cur.fetchone() == (None,)
+
+
+def test_enrich_from_lite_second_run_changes_no_row(pg_conn):
+    _setup_schema(pg_conn)
+
+    from episteme.data.europepmc.lite_metadata.enrich_from_lite import enrich_from_lite
+
+    with pg_conn.cursor() as cur:
+        _seed_article(cur, id_="pmcid:PMC17774", pmcid="PMC17774")
+    first = enrich_from_lite(FIXTURE, pg_conn)
+    assert first["rows_updated"] == 1
+    second = enrich_from_lite(FIXTURE, pg_conn)
+    assert second["rows_updated"] == 0 and second["rows_matched"] == first["rows_matched"]
