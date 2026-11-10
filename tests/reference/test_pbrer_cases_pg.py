@@ -49,7 +49,9 @@ def test_build_cases_skips_ambiguous_substances(ref_db):
     assert cases[1].start == date(2023, 2, 28)
     assert cases[2].substance_key == 1  # salt plus its moiety: one family
     assert first.reviewed_by_owner is False
-    assert "2" in first.expected_gaps or first.expected_facts is not None
+    # Seeded: one fda_drugsfda record for metformin; every other dataset is not loaded.
+    assert any("NDA020357" in f for f in first.expected_facts["2"]), first.expected_facts
+    assert "Coverage gap: ema_medicines" in first.expected_gaps["2"], first.expected_gaps
 
 
 def test_build_cases_honours_limit(ref_db):

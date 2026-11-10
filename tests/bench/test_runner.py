@@ -106,17 +106,31 @@ def test_skeleton_draft_scores_zero_invented_values():
     assert s["sections_ok"] is True
 
 
-def test_findings_split_by_rule_not_message(monkeypatch):
+def test_findings_split_by_gate_parts(monkeypatch):
     from episteme.bench import runner
     from episteme.reference.rules import Finding
 
-    monkeypatch.setattr(
-        runner, "section_findings", lambda d: [Finding("x", "c", f"mentions {MAH_MARKER}")]
-    )
-    monkeypatch.setattr(runner, "marker_findings", lambda d: [])
-    s = score(_case(), _draft(), [])
+    seen = {}
+
+    def parts(draft, *, region="ich"):
+        seen["region"] = region
+        return [Finding("x", "c", f"mentions {MAH_MARKER}")], []
+
+    monkeypatch.setattr(runner, "gate_parts", parts)
+    s = score(_case(), _draft(), [], region="eu")
+    assert seen["region"] == "eu"
     assert s["sections_ok"] is False
     assert s["mah_markers_ok"] is True
+
+
+def test_gate_parts_concatenate_to_gate():
+    from episteme.harness.pbrer import gate, gate_parts
+
+    d = _draft()
+    d.pop(next(iter(d)))
+    sec, mah = gate_parts(d)
+    assert sec
+    assert gate(d) == [*sec, *mah]
 
 
 def test_cli_prints_summary_and_sets_logging(tmp_path, capsys):

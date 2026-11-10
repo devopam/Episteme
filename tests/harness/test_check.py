@@ -134,8 +134,6 @@ def test_max_candidates_is_a_parameter():
 
 
 def test_check_answer_accepts_release_ids_and_known_values():
-    from datetime import date as _d
-
     from episteme.harness.check import check_answer as ca
     from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
@@ -144,4 +142,3 @@ def test_check_answer_accepts_release_ids_and_known_values():
     assert ca("release 2026-11-02", [r]) == []
     assert ca("from 2023-03-15", [r]) == ["2023-03-15"]
     assert ca("from 2023-03-15", [r], known=["2023-03-15"]) == []
-    assert _d

@@ -13,13 +13,13 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal
 
 from episteme.bench.pbrer_cases import PbrerCase, load_case
 from episteme.harness.check import check_answer
 from episteme.harness.loop import make_call_tool
-from episteme.harness.pbrer import assemble_facts, skeleton
+from episteme.harness.pbrer import assemble_facts, gate_parts, skeleton
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
-from episteme.reference.rules import Finding, check_mah_markers, check_sections, load_rules
 
 log = logging.getLogger(__name__)
 
@@ -33,34 +33,31 @@ def _share(expected: dict[str, list[str]], text: str) -> float:
     return sum(1 for x in items if x in text) / len(items)
 
 
-def section_findings(draft: dict[str, str]) -> list[Finding]:
-    """Section completeness and order, as in ``episteme.harness.pbrer.gate``."""
-    return check_sections(load_rules("ich_e2c_r2"), list(draft), region="ich")
-
-
-def marker_findings(draft: dict[str, str]) -> list[Finding]:
-    """MAH-marker checks, as in ``episteme.harness.pbrer.gate``."""
-    return check_mah_markers(load_rules("ich_e2c_r2"), draft, strict=True)
-
-
-def score(case: PbrerCase, draft: dict[str, str], results: list[LookupResult]) -> dict:
+def score(
+    case: PbrerCase,
+    draft: dict[str, str],
+    results: list[LookupResult],
+    *,
+    region: Literal["ich", "eu"] = "ich",
+) -> dict:
     """Score one draft.
 
     ``sections_ok``: no section finding (missing, duplicate, order).
     ``mah_markers_ok``: no MAH-marker finding. The two lists are the two parts of
-    ``gate``, kept apart by the rule that makes them, not by message text.
+    ``gate``, kept apart by ``gate_parts``.
     ``invented_values``: count of values from ``check_answer`` over the whole draft text.
     The case's own interval dates and substance name count as stated values.
     ``facts_found`` / ``gaps_reported``: share of expected lines present in the draft
     (1.0 when none are expected)."""
     text = "\n".join(draft.values())
+    sections, markers = gate_parts(draft, region=region)
     known = [case.start.isoformat(), case.end.isoformat(), case.substance_name]
     return {
         "facts_found": _share(case.expected_facts, text),
         "gaps_reported": _share(case.expected_gaps, text),
         "invented_values": len(check_answer(text, results, known=known)),
-        "mah_markers_ok": not marker_findings(draft),
-        "sections_ok": not section_findings(draft),
+        "mah_markers_ok": not markers,
+        "sections_ok": not sections,
     }
 
 

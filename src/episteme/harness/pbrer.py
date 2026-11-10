@@ -169,11 +169,20 @@ def unfilled_sections(draft: dict[str, str]) -> list[str]:
     return [h for h, b in draft.items() if (b or "").startswith(SKELETON_PLACEHOLDER)]
 
 
-def gate(draft: dict[str, str], *, region: Literal["ich", "eu"] = "ich") -> list[Finding]:
-    """Rule-store checks: section completeness and order, and the MAH markers (a
-    mah_data section holds the marker alone, because v1 supplies no company data)."""
+def gate_parts(
+    draft: dict[str, str], *, region: Literal["ich", "eu"] = "ich"
+) -> tuple[list[Finding], list[Finding]]:
+    """The two parts of ``gate``: section findings (completeness, order) and MAH-marker
+    findings (a mah_data section holds the marker alone, because v1 supplies no company
+    data)."""
     rules = load_rules("ich_e2c_r2")
-    return [
-        *check_sections(rules, list(draft), region=region),
-        *check_mah_markers(rules, draft, strict=True),
-    ]
+    return (
+        check_sections(rules, list(draft), region=region),
+        check_mah_markers(rules, draft, strict=True),
+    )
+
+
+def gate(draft: dict[str, str], *, region: Literal["ich", "eu"] = "ich") -> list[Finding]:
+    """Rule-store checks: ``gate_parts`` joined, section findings first."""
+    sections, markers = gate_parts(draft, region=region)
+    return [*sections, *markers]
