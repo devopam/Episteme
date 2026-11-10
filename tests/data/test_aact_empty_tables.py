@@ -153,7 +153,12 @@ def test_gate_fails_when_two_tables_are_empty_upstream():
     assert any("max_upstream_empty_tables" in f for f in fails)
 
 
-def test_the_allowlist_is_a_setting_with_search_results_as_default():
+def test_the_allowlist_is_a_setting_with_search_results_as_default(monkeypatch):
     from episteme.config import get_settings
 
-    assert get_settings().aact_may_be_empty_tables == ("search_results",)
+    monkeypatch.delenv("EPISTEME_AACT_MAY_BE_EMPTY_TABLES", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().aact_may_be_empty_tables == ("search_results",)
+    finally:
+        get_settings.cache_clear()
