@@ -111,7 +111,11 @@ def _rollback(conn: psycopg.Connection) -> None:
     """End the failed transaction of a non-autocommit ``conn``; otherwise every later
     statement fails with InFailedSqlTransaction."""
     if not getattr(conn, "autocommit", True):
-        conn.rollback()
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            # A dead connection cannot roll back; keep the original error, not this one.
+            log.warning("rollback failed after a tool error", exc_info=True)
 
 
 def make_call_tool(

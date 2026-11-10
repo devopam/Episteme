@@ -244,3 +244,17 @@ def test_run_default_max_tool_calls_from_settings(monkeypatch):
         caller="c",
     )
     assert executed == ["trials"]
+
+
+def test_rollback_failure_on_dead_connection_does_not_raise():
+    import psycopg
+
+    from episteme.harness import loop
+
+    class DeadConn:
+        autocommit = False
+
+        def rollback(self):
+            raise psycopg.OperationalError("connection is closed")
+
+    loop._rollback(DeadConn())  # logs and returns; the caller re-raises its own error
