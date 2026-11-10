@@ -193,13 +193,15 @@ DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
 # programme-design.md). A policy, not a tunable: no environment key.
 CORPUS_EXCLUDED_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
 # Licence class (subset) of each lookup source whose facts may ground a Stage B tool
-# example, keyed by ``Provenance.source``. ``commercial`` = "use freely"; ``pending`` = an
-# open owner question (FAERS: rights to the MedDRA reaction terms). A source not listed is
-# refused. TODO: keep in step with docs/02-data-sources.md sections 2.2.1 and 2.7; there
+# or rule-check example, keyed by ``Provenance.source``. ``commercial`` = "use freely";
+# ``pending`` = an open owner question (FAERS: rights to the MedDRA reaction terms;
+# DailyMed and EPAR: whether their looked-up facts may appear in examples). A source not
+# listed is refused. TODO: keep in step with docs/02-data-sources.md sections 2.2.1 and 2.7; there
 # is no licence registry for lookup sources in code yet.
 LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
     "substance": "commercial",
-    "dailymed": "commercial",
+    "dailymed": "pending",
+    "ema_epar": "pending",
     "aact": "commercial",
     "fda_drugsfda": "commercial",
     "fda_enforcement": "commercial",

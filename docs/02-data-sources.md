@@ -220,7 +220,7 @@ Rules from a document may enter the rule store only when its class is "use freel
 |------|--------------------|--------------------------------|-------|
 | ICH E2C(R2) PBRER | `database.ich.org/sites/default/files/E2C_R2_Guideline.pdf` (legal notice, front page) | May be used, reproduced, adapted, modified, translated or distributed under a public license; credit ICH; label changes; no sponsor impression | Use freely, with attribution (confirmed by the owner 2026-11-09) |
 | ICH E2B(R3) IG v5.03 (Step 4, 18 July 2025) | `database.ich.org`, ICH E2B(R3) IG PDF (legal notice, page 3) | Same ICH notice. Third-party content inside the IG (for example ISO, MedDRA, UCUM, EDQM) is excluded | Use freely, with attribution (IG text only; confirmed by the owner 2026-11-09) |
-| ICH E2B(R3) XML schema and message files | ICH E2B page: the fetch tool returned no content on 2026-11-09 | Not verified. FDA lists a schema set, but no terms were read | Use with caution: not verified |
+| ICH E2B(R3) XML schema and message files | ICH E2B page: the fetch tool returned no content on 2026-11-09 | ICH material; the owner states ICH is licence-free (2026-11-09) | Use freely, with attribution (owner: ICH licence-free, 2026-11-09) |
 | ICH E6(R3) GCP (Step 4, 16 June 2026) | `database.ich.org`, E6(R3) final consolidated PDF (legal notice, front matter) | Same ICH notice; the ICH logo is excluded | Use freely, with attribution (confirmed by the owner 2026-11-09) |
 | ICH E3 clinical study reports (1995) | `database.ich.org/sites/default/files/E3_Guideline.pdf` | The PDF carries no legal notice. The ICH copyright page returned no content | Use freely, with attribution (changed 2026-11-10 from "use with caution: no notice found"; the owner statement of 2026-11-09 covers all ICH guidelines) |
 | FDA regional E2B(R3) IG (final, Aug 2024, docket FDA-2016-D-1280) | FDA guidance page; `fda.gov/about-fda/about-website/website-policies` | The guidance page states no terms of its own. The class rests on FDA's website policy: web content is public domain unless noted. ICH text inside keeps the ICH notice | Use freely (FDA text; class rests on FDA's website policy); third-party text excluded |
@@ -229,12 +229,13 @@ Rules from a document may enter the rule store only when its class is "use freel
 
 #### 2.7.2 Lookup sources in Stage B examples
 
-A Stage B `tool_draft` example is built on lookup results, not on corpus rows. Its licence comes from the data: every source named in the provenance of its tool results (alternatives included) must have class `commercial` in the config constant `LOOKUP_SOURCE_SUBSETS` (`src/episteme/config.py`). The corpus exclusion (`corpus_excluded_sources`) does not apply here: it governs raw text in the corpus. A source with class `pending` gives the reject reason `licence_pending`. A source that is not in the table, or has another class, gives the reject reason `licence`. Keep this table and the constant in step: there is no licence registry for lookup sources in code yet.
+A Stage B `tool_draft` or `rule_check` example is built on lookup results, not on corpus rows. Its licence comes from the data: every source named in the provenance of its tool results (alternatives included) must have class `commercial` in the config constant `LOOKUP_SOURCE_SUBSETS` (`src/episteme/config.py`). The corpus exclusion (`corpus_excluded_sources`) does not apply here: it governs raw text in the corpus. A source with class `pending` gives the reject reason `licence_pending`. A source that is not in the table, or has another class, gives the reject reason `licence`. A row whose tool results hold no claim gives `licence`: no source can be verified. Keep this table and the constant in step: there is no licence registry for lookup sources in code yet.
 
-| `Provenance.source` | Class in `LOOKUP_SOURCE_SUBSETS` | Effect on a `tool_draft` example |
+| `Provenance.source` | Class in `LOOKUP_SOURCE_SUBSETS` | Effect on a `tool_draft` or `rule_check` example |
 |---|---|---|
 | `substance` | `commercial` | Allowed |
-| `dailymed` | `commercial` | Allowed in code. **Open (owner):** whether DailyMed facts may appear in tool examples (DailyMed text stays out of the corpus) |
+| `dailymed` | `pending` | Held (`licence_pending`). **Open (owner):** whether DailyMed facts may appear in tool examples (DailyMed text stays out of the corpus) |
+| `ema_epar` | `pending` | Held (`licence_pending`). No lookup emits it yet. **Open (owner):** whether EPAR facts may appear in tool examples |
 | `aact` | `commercial` | Allowed |
 | `fda_drugsfda` | `commercial` | Allowed |
 | `fda_enforcement` | `commercial` | Allowed |
@@ -247,9 +248,7 @@ A Stage B `tool_draft` example is built on lookup results, not on corpus rows. I
 | `pubmed` | `open_metadata` | Refused (`licence`). **Open (owner):** whether PubMed literature facts (citations from `literature`) may appear in tool examples |
 | `openfda_faers` | `pending` | Held (`licence_pending`). **Open (owner):** rights to the MedDRA reaction terms in FAERS facts (section 2.2.1) |
 
-`ema_epar` is not a lookup source. **Open (owner):** whether EPAR facts may appear in tool examples, if a lookup over EPAR text is added.
-
-**`pbrer_skeleton` label.** A `rule_check` example checks a PBRER draft against the rule store. Its input row carries `source = pbrer_skeleton` and `subset = commercial`; the batch refuses a `rule_check` row with any other label. The label is safe only for a skeleton with no lookup facts in it, or with facts from `commercial` sources only. `skeleton()` copies claim lines into section bodies (for example FAERS counts and literature citations). The batch checks only the label of a `rule_check` row, not the sources inside the document. Until it does, build `rule_check` rows from skeletons whose facts are all from `commercial` sources (drift log, 2026-11-10).
+**`pbrer_skeleton` label.** A `rule_check` example checks a PBRER draft against the rule store. Its input row carries `source = pbrer_skeleton` and `subset = commercial`; the batch refuses a `rule_check` row with any other label. `skeleton()` copies claim lines into section bodies (for example FAERS counts and literature citations), so the row also carries the `tool_results` its skeleton was built from. The batch checks every claim source of those results by the table above, as for a `tool_draft`. A `rule_check` row with no tool results is refused (`licence`).
 
 ### 2.8 Model inputs
 

@@ -190,6 +190,17 @@ def _need(row: dict, *keys: str) -> None:
         raise InputError(f"row {row.get('id')!r} lacks {missing}")
 
 
+def _check_lookup_results(row: dict, results: list) -> None:
+    for r in results:
+        try:
+            LookupResult.from_json(r)
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise FormatError(
+                f"row {row.get('id')!r}: a tool result is not a lookup result"
+                f" ({type(exc).__name__})"
+            ) from None
+
+
 def check_input(kind: str, row: dict) -> None:
     """Raise ``InputError`` when ``row`` lacks what ``kind`` needs, and ``FormatError``
     when a tool result is not a well-formed lookup result (claims and provenance). Every
@@ -204,14 +215,7 @@ def check_input(kind: str, row: dict) -> None:
             raise InputError(f"row {row.get('id')!r}: tool_results is not a list of objects")
         if len(row.get("tool_calls") or ()) != len(results):
             raise InputError(f"row {row.get('id')!r}: tool_calls and tool_results differ")
-        for r in results:
-            try:
-                LookupResult.from_json(r)
-            except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                raise FormatError(
-                    f"row {row.get('id')!r}: a tool result is not a lookup result"
-                    f" ({type(exc).__name__})"
-                ) from None
+        _check_lookup_results(row, results)
         region = row.get("pbrer_region")
         if region is not None and region not in ("ich", "eu"):
             raise InputError(f"row {row.get('id')!r}: pbrer_region {region!r}")
@@ -221,6 +225,12 @@ def check_input(kind: str, row: dict) -> None:
         _need(row, "document")
         if not isinstance(row["document"], dict):
             raise InputError(f"row {row.get('id')!r}: document is not an object")
+        # The tool results the skeleton was built from; missing ones fail the licence check.
+        results = row.get("tool_results")
+        if results is not None:
+            if not isinstance(results, list):
+                raise FormatError(f"row {row.get('id')!r}: tool_results is not a list")
+            _check_lookup_results(row, results)
     elif kind == "abstain":
         _need(row, "text", "reason")
         if row["reason"] not in ABSTAIN_REASONS:

@@ -11,9 +11,12 @@ Training data rule (spec section 9.2), decided per row before any request:
   examples on lookup results. A ``pending`` source (``openfda_faers``) gives the reason
   ``licence_pending``.
 - ``rule_check``: the document is a skeleton draft; the row says
-  ``source = 'pbrer_skeleton'`` and ``subset = 'commercial'``.
+  ``source = 'pbrer_skeleton'`` and ``subset = 'commercial'``, and carries the tool
+  results the skeleton was built from. Their claim sources pass the same check as a
+  ``tool_draft``.
 
-A row with no claim in its tool results has nothing to verify and is refused.
+A ``tool_draft`` or ``rule_check`` row with no claim in its tool results has nothing to
+verify and is refused.
 
 Ledger and restart: ``requests.jsonl`` is append-only. Right after each answered request
 (before any check) a ``paid`` line with the row id and its tokens is written and forced
@@ -100,26 +103,32 @@ def lookup_sources(row: dict) -> list[str]:
     return sorted(found, key=str)
 
 
+def _lookup_reason(row: dict, lookup_subsets: dict[str, str]) -> tuple[str, str] | None:
+    """The licence of lookup facts: every claim source of the row's tool results must be
+    ``commercial``; a ``pending`` source holds the row."""
+    sources = lookup_sources(row)
+    if not sources:
+        return "licence", "the tool results hold no claim, so no source to verify"
+    bad = [s for s in sources if lookup_subsets.get(s) not in ("commercial", "pending")]
+    if bad:
+        return "licence", f"lookup sources not commercial: {bad}"
+    pending = [s for s in sources if lookup_subsets.get(s) == "pending"]
+    if pending:
+        return "licence_pending", f"lookup sources pending an owner decision: {pending}"
+    return None
+
+
 def licence_reason(
     kind: str, row: dict, excluded: tuple[str, ...], lookup_subsets: dict[str, str]
 ) -> tuple[str, str] | None:
     """``(reason, detail)`` when the row may not reach the teacher, else None."""
     if kind == "tool_draft":
-        sources = lookup_sources(row)
-        if not sources:
-            return "licence", "the tool results hold no claim, so no source to verify"
-        bad = [s for s in sources if lookup_subsets.get(s) not in ("commercial", "pending")]
-        if bad:
-            return "licence", f"lookup sources not commercial: {bad}"
-        pending = [s for s in sources if lookup_subsets.get(s) == "pending"]
-        if pending:
-            return "licence_pending", f"lookup sources pending an owner decision: {pending}"
-        return None
+        return _lookup_reason(row, lookup_subsets)
     source, subset = row.get("source"), row.get("subset")
     if kind == "rule_check":
         if source != RULE_CHECK_SOURCE or subset != "commercial":
             return "licence", f"rule_check rows need source {RULE_CHECK_SOURCE!r}, commercial"
-        return None
+        return _lookup_reason(row, lookup_subsets)
     if subset != "commercial":
         return "licence", f"subset {subset!r}"
     if not isinstance(source, str) or not source.strip():
@@ -133,7 +142,7 @@ def _source_row(kind: str, row: dict) -> dict:
     ident = {k: row.get(k) for k in ("id", "source", "subset", "content_hash")}
     if "_lineage" in row:
         ident["_lineage"] = row["_lineage"]
-    if kind == "tool_draft":
+    if kind in ("tool_draft", "rule_check"):
         ident["lookup_sources"] = lookup_sources(row)
     return ident
 

@@ -250,23 +250,26 @@ def test_tool_draft_licence_comes_from_claim_provenance(fakes, tmp_path):
         ]
     )
     rows = [
-        # dailymed is excluded from the corpus text but its looked-up facts are commercial.
-        _tool_row(1, _result("dailymed"), source="dailymed", subset="commercial"),
+        # The row label is ignored: the claims decide (fda_enforcement is commercial).
+        _tool_row(1, _result("fda_enforcement"), source="dailymed", subset="commercial"),
         _tool_row(2, _result("openfda_faers")),
         _tool_row(3, _result("pubmed")),
         _tool_row(4, _result("no_such_source")),
         _tool_row(5, _result("fda_enforcement"), _result("openfda_faers")),
+        # DailyMed and EPAR facts wait for the owner (ruling R19).
+        _tool_row(6, _result("dailymed")),
+        _tool_row(7, _result("ema_epar")),
     ]
     out = generate_batch(
-        _teacher(session), rows, "tool_draft", 5, tmp_path, excluded=("dailymed", "ema_epar")
+        _teacher(session), rows, "tool_draft", 7, tmp_path, excluded=("dailymed", "ema_epar")
     )
     assert out["kept"] == 1
-    assert out["rejected"]["licence_pending"] == 2
+    assert out["rejected"]["licence_pending"] == 4
     assert out["rejected"]["licence"] == 2
     assert len(session.posts) == 1
     row = _jsonl(tmp_path / "examples.jsonl")[0]
     assert row["source_row"]["id"] == "T1"
-    assert row["source_row"]["lookup_sources"] == ["dailymed"]
+    assert row["source_row"]["lookup_sources"] == ["fda_enforcement"]
     assert row["tools_sha256"] == TOOLS_SHA256
     assert "tools" not in row
     assert row["messages"][1]["tool_calls"][0]["function"]["name"] == "safety_actions"
@@ -307,14 +310,56 @@ def test_rule_check_rows_use_the_skeleton_label(fakes, tmp_path):
     session = fakes.FakeSession(
         [fakes.chat_reply(json.dumps({"findings": expected}), {"total_tokens": 1})]
     )
+    label = {"source": "pbrer_skeleton", "subset": "commercial", "document": doc}
+
+    def results(*sources):
+        return [_result(src).to_json() for src in sources]
+
     rows = [
-        {"id": "R1", "source": "pmc", "subset": "commercial", "document": doc},
-        {"id": "R2", "source": "pbrer_skeleton", "subset": "commercial", "document": doc},
+        {
+            "id": "R1",
+            "source": "pmc",
+            "subset": "commercial",
+            "document": doc,
+            "tool_results": results("fda_enforcement"),
+        },
+        {"id": "R2", **label, "tool_results": results("fda_enforcement", "ema_psusa")},
+        # No tool results: the skeleton's sources cannot be verified.
+        {"id": "R3", **label},
+        {"id": "R4", **label, "tool_results": []},
+        {"id": "R5", **label, "tool_results": results("fda_enforcement", "pubmed")},
+        {"id": "R6", **label, "tool_results": results("openfda_faers")},
+        {"id": "R7", **label, "tool_results": results("dailymed")},
     ]
-    out = generate_batch(_teacher(session), rows, "rule_check", 2, tmp_path, excluded=())
+    out = generate_batch(_teacher(session), rows, "rule_check", 7, tmp_path, excluded=())
     assert out["kept"] == 1
-    assert out["rejected"]["licence"] == 1
-    assert _jsonl(tmp_path / "examples.jsonl")[0]["source_row"]["id"] == "R2"
+    assert out["rejected"]["licence"] == 4
+    assert out["rejected"]["licence_pending"] == 2
+    assert len(session.posts) == 1
+    kept = _jsonl(tmp_path / "examples.jsonl")[0]["source_row"]
+    assert kept["id"] == "R2"
+    assert kept["lookup_sources"] == ["ema_psusa", "fda_enforcement"]
+
+
+def test_rule_check_malformed_tool_results_are_format(fakes, tmp_path):
+    row = {
+        "id": "R1",
+        "source": "pbrer_skeleton",
+        "subset": "commercial",
+        "document": _skeleton(),
+        "tool_results": [{"claims": ["x"]}],
+    }
+    session = fakes.FakeSession([])
+    out = generate_batch(_teacher(session), [row], "rule_check", 1, tmp_path, excluded=())
+    assert out["rejected"]["format"] == 1
+    assert session.posts == []
+
+
+def test_dailymed_and_epar_lookup_facts_are_pending():
+    from episteme.config import LOOKUP_SOURCE_SUBSETS
+
+    assert LOOKUP_SOURCE_SUBSETS["dailymed"] == "pending"
+    assert LOOKUP_SOURCE_SUBSETS["ema_epar"] == "pending"
 
 
 def test_abstain_batch(fakes, tmp_path):
