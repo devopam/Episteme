@@ -137,6 +137,7 @@ for pkg in "${packages[@]}"; do
         continue
     fi
 
+    rm -f "$out.verified"
     if ! mv -f "$part" "$out"; then
         log WARN "cdisc_ct: $pkg could not move $part into place"
         rm -f "$part"

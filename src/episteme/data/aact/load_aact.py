@@ -51,7 +51,9 @@ recorded with the release.
    compare ``left(col, 500)`` to use it (``WHERE left(name, 500) = left(%s, 500)``). Then
    ``ANALYZE``.
 3. **Row checks.** ``studies`` must be in the zip; its rows must equal its distinct
-   ``nct_id``; a table with zero rows fails (except ``MAY_BE_EMPTY_TABLES``); in each other
+   ``nct_id``; a table with zero rows fails unless its zip member is header-only and the table is in
+   ``Settings.aact_may_be_empty_tables`` (default ``search_results``; listed as
+   ``upstream_empty_tables``); in each other
    table with ``nct_id``, the share of rows whose ``nct_id`` is NULL or not in ``studies``
    must be at most ``EPISTEME_AACT_MAX_ORPHAN_SHARE``.
 4. **Names.** The distinct names of ``interventions.name`` and
@@ -123,7 +125,7 @@ from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.aact import dictionary as dct
-from episteme.data.checkpoint_markers import input_key
+from episteme.data.checkpoint_markers import in_skipped_dir, input_key
 from episteme.data.regulatory.load_reg import (
     database_name,
     db_marker_name,
@@ -150,9 +152,9 @@ INTERVENTION_SUBSTANCE = "intervention_substance"
 # dictionary table missing from the zip fails the load before a table loads, so the gate's
 # tables_with_rows floor (the dictionary's 52 tables less these three: 49) holds.
 KNOWN_ABSENT_TABLES: tuple[str, ...] = ("mesh_headings", "mesh_terms", "study_searches")
-# Tables the file may ship with a header and no rows. The real file of the 2026-11-05 sample
-# run has `search_results.txt` as the header line only (62 bytes). Any other empty table fails.
-MAY_BE_EMPTY_TABLES: tuple[str, ...] = ("search_results",)
+# A table whose zip member holds the header line only is empty upstream, not a failed load.
+# The 2026-11-03 file has `search_results.txt` as the header line only (62 bytes). The row
+# check fails a table only when its member has data rows and the loaded table has none.
 # A change of the reading or typing rules changes the fingerprint, so a finished release is
 # not taken as current after such a change.
 LOADER_VERSION = 1
@@ -267,7 +269,7 @@ def release_zips(raw_dir: Path) -> list[Path]:
         return []
     out: list[tuple[str, Path]] = []
     for p in base.rglob("*.zip"):
-        if not p.is_file() or not is_release_name(p.name):
+        if not p.is_file() or in_skipped_dir(p, base) or not is_release_name(p.name):
             continue
         try:
             out.append((release_id_from_zip(p), p))
@@ -803,9 +805,43 @@ def _build_indexes(conn: psycopg.Connection, schema: str, tables: Sequence[str])
     return built
 
 
-def empty_tables(state: dict[str, dict]) -> list[str]:
-    """The tables with zero rows that the file may not ship empty (``MAY_BE_EMPTY_TABLES``)."""
-    return sorted(t for t, s in state.items() if not s["rows"] and t not in MAY_BE_EMPTY_TABLES)
+def member_has_data_rows(zip_path: Path, member: str) -> bool:
+    """Whether ``member`` has at least one record after the header line."""
+    rows = _iter_rows(zip_path, member)
+    next(rows, None)
+    return any(row for _line, row in rows)
+
+
+def upstream_empty_tables(zip_path: Path, state: dict[str, dict]) -> list[str]:
+    """The tables with zero loaded rows whose zip member has no data row (header only):
+    empty upstream. A state without a member name is never counted as upstream-empty."""
+    out: list[str] = []
+    for table, s in state.items():
+        member = (s.get("stats") or {}).get("member")
+        if not s["rows"] and member and not member_has_data_rows(zip_path, member):
+            out.append(table)
+    return sorted(out)
+
+
+def empty_tables(state: dict[str, dict], upstream_empty: Sequence[str] = ()) -> list[str]:
+    """The tables with zero rows that the file ships with data rows. A table in
+    ``upstream_empty`` (header-only member) is not a failure."""
+    return sorted(t for t, s in state.items() if not s["rows"] and t not in upstream_empty)
+
+
+def check_empty(
+    state: dict[str, dict], upstream_empty: Sequence[str], allowed: Sequence[str]
+) -> None:
+    """``_Invalid`` when ``studies`` has no rows (an empty release is never loaded, whatever
+    the zip holds), or when a table has no loaded row and is not an allowed upstream-empty
+    table: only a header-only member of a table in ``allowed``
+    (``Settings.aact_may_be_empty_tables``) may load with no row."""
+    if STUDIES in state and not state[STUDIES]["rows"]:
+        raise _Invalid("studies has no rows: the release is refused")
+    tolerated = [t for t in upstream_empty if t in allowed]
+    empty = empty_tables(state, tolerated)
+    if empty:
+        raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
 
 
 def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> dict:
@@ -814,9 +850,8 @@ def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> 
     ``missing_nct_id`` lists the tables with no ``nct_id`` column (no orphan count)."""
     if STUDIES not in state:
         raise _Invalid("the zip has no studies table")
-    empty = empty_tables(state)
-    if empty:
-        raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
+    upstream_empty = upstream_empty_tables(ctx.zip_path, state)
+    check_empty(state, upstream_empty, get_settings().aact_may_be_empty_tables)
     cols = _columns(conn, ctx.schema)
     studies = _t(ctx.schema, STUDIES)
     counts: dict[str, tuple[int, int]] = {}
@@ -846,6 +881,7 @@ def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> 
         )
     return {
         "studies": rows,
+        "upstream_empty_tables": upstream_empty,
         "orphans": {t: o for t, (_n, o) in counts.items()},
         "orphan_shares": {t: (o / n if n else 0.0) for t, (n, o) in counts.items()},
         "missing_nct_id": sorted(
@@ -1207,6 +1243,8 @@ def load_release(
             "dictionary": {k: v for k, v in result["dictionary"].items() if k != "columns"},
             "tables": {t: s["rows"] for t, s in state.items()},
             "orphans": result["orphans"],
+            # The tables whose zip member is header-only: empty upstream, not a failed load.
+            "upstream_empty_tables": result["upstream_empty_tables"],
             # The tables with no nct_id column (search_terms): no orphan count, and the
             # gate counts them as checked.
             "missing_nct_id": result["missing_nct_id"],

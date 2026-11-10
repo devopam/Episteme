@@ -58,7 +58,7 @@ while IFS= read -r rel || [ -n "$rel" ]; do
     url="$BOOKSHELF_BASE/$rel"
     relpath="packages/$rel"
     # force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$relpath"; fi
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$relpath" "$dest/$relpath.verified"; fi
     if size_match_skip "$dest/$relpath" "$url"; then
         log INFO "skip (size-matched): $relpath"
     else

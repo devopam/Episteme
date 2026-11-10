@@ -207,11 +207,11 @@ def test_missing_dictionary_tables_are_reported_and_only_the_known_three_are_all
 
 
 def test_the_packaged_dictionary_minus_the_known_three_is_the_tables_floor():
-    """The gate floor of ``tables_with_rows`` is the dictionary tables less the three that
-    the zip leaves out: absent tables never enter the load state."""
+    """The gate floor of ``tables_with_rows_or_upstream_empty`` is the dictionary tables
+    less the three that the zip leaves out: absent tables never enter the load state."""
     from episteme.ops import gate
 
-    floor = gate.load_rules("aact")["load"]["min_counts"]["tables_with_rows"]
+    floor = gate.load_rules("aact")["load"]["min_counts"]["tables_with_rows_or_upstream_empty"]
     assert floor == len(dct.read_dictionary()) - len(la.KNOWN_ABSENT_TABLES) == 49
 
 

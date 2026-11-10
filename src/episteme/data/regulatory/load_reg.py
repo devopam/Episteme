@@ -53,7 +53,7 @@ from psycopg.types.json import Jsonb
 from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
-from episteme.data.checkpoint_markers import input_key
+from episteme.data.checkpoint_markers import in_skipped_dir, input_key
 from episteme.data.regulatory.feeds import Feed, source_feeds
 from episteme.data.regulatory.normalize import (
     fits_index,
@@ -551,7 +551,7 @@ def feed_files(source: str, feed: Feed, raw_dir: Path) -> list[Path]:
     base = raw_dir / "drug" / tag
     if not base.is_dir():
         return []
-    return sorted(p for p in base.rglob("*.zip") if p.is_file())
+    return sorted(p for p in base.rglob("*.zip") if p.is_file() and not in_skipped_dir(p, base))
 
 
 def marker_name_for(feed: Feed, release_id: str, raw_dir: Path) -> str:

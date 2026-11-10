@@ -207,10 +207,11 @@ def _aact_measures(**over):
         "failed_inputs": 0,
         "peak_rss_mb": 900.0,
         "empty_tables": 0,
+        "upstream_empty_table_count": 1,
         "orphan_share_pct_max": 0.2,
         "studies_equal_distinct_nct_id": True,
         "xref_coverage_pct": {"aact_intervention": 50.0},
-        "counts": {"tables_with_rows": 49, "studies": 609_804},
+        "counts": {"tables_with_rows_or_upstream_empty": 49, "studies": 609_804},
     }
     base.update(over)
     return base
@@ -224,7 +225,7 @@ def test_aact_rules_need_tables_rows_and_orphans_under_limit():
         "max_empty_tables" in f for f in gate.evaluate(_aact_measures(empty_tables=1), rules)
     )
     # Too few tables, and no study.
-    for key in ("tables_with_rows", "studies"):
+    for key in ("tables_with_rows_or_upstream_empty", "studies"):
         counts = {**_aact_measures()["counts"], key: 0}
         fails = gate.evaluate(_aact_measures(counts=counts), rules)
         assert any("min_counts" in f and key in f for f in fails), key
@@ -415,7 +416,7 @@ def test_measure_aact_reads_the_release_summary_and_the_live_studies(pg_conn, mo
             pg_conn, raw_dir=Path("."), run_id=run_id, record={"rc": 0, "peak_rss_mb": 5.0}
         )
         assert m["studies_equal_distinct_nct_id"] is True
-        assert m["counts"] == {"tables_with_rows": 3, "studies": 2}
+        assert m["counts"] == {"tables_with_rows_or_upstream_empty": 3, "studies": 2}
         assert m["orphan_share_pct_max"] == pytest.approx(0.2)
         assert m["rows"] >= 2
         # Another run id has no summary: the measures are missing.

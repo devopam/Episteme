@@ -145,6 +145,18 @@ def write_run_manifest(
     return write_marker(path, payload)
 
 
+def in_skipped_dir(path: Path, root: Path) -> bool:
+    """True when ``path`` sits under a directory of ``root`` whose name starts with ``.``
+    (tool state) or ``_`` (ops and quarantine folders such as ``_bad_<date>/``, where the
+    download scripts move damaged files). Those hold no source data: discovery skips them.
+    The file name itself is not tested."""
+    try:
+        parts = Path(path).relative_to(root).parts[:-1]
+    except ValueError:
+        return False
+    return any(part.startswith((".", "_")) for part in parts)
+
+
 def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:
     """Legacy: dedups by BASENAME — two files sharing a name in different
     directories collapse to one. New code uses discover_input_files + input_key."""
@@ -156,7 +168,7 @@ def list_input_files(raw_glob_root: Path, patterns: list[str]) -> list[Path]:
     seen: set[str] = set()
     out: list[Path] = []
     for f in sorted(set(files), key=lambda p: str(p)):
-        if not f.is_file():
+        if not f.is_file() or in_skipped_dir(f, raw_glob_root):
             continue
         key = f.name
         if key in seen:
@@ -185,7 +197,9 @@ def discover_input_files(raw_root: Path, patterns: list[str]) -> list[Path]:
     Files under a hidden directory of ``raw_root`` (a path part starting with ``.``)
     are skipped: they are tool state, not source data -- e.g. the
     ``.cache/huggingface/`` folder that ``hf download --local-dir`` keeps, whose
-    ``trees/<sha>.json`` would otherwise be read as an apollo or guidelines file."""
+    ``trees/<sha>.json`` would otherwise be read as an apollo or guidelines file.
+    Files under a directory whose name starts with ``_`` are skipped too: those are
+    quarantine and ops folders (``_bad_<date>/`` holds damaged downloads)."""
     root = Path(raw_root)
     seen: set[Path] = set()
     out: list[Path] = []
@@ -193,7 +207,7 @@ def discover_input_files(raw_root: Path, patterns: list[str]) -> list[Path]:
         for f in [*root.glob(pat), *root.rglob(pat)]:
             if not f.is_file():
                 continue
-            if any(part.startswith(".") for part in f.relative_to(root).parts[:-1]):
+            if in_skipped_dir(f, root):
                 continue
             rp = f.resolve()
             if rp in seen:

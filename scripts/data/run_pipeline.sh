@@ -987,7 +987,7 @@ else
         serialize) run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
-                run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh"
+                run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh" "${load_args[@]}"
             else
                 die "$SOURCE enrich is not wired" 3
             fi

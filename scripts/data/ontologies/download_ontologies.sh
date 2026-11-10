@@ -49,7 +49,7 @@ for it in "${items[@]}"; do
     IFS='|' read -r sub fname url <<< "$it"
     rel="$sub/$fname"
     # W-4: force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$rel"; fi
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$rel" "$dest/$rel.verified"; fi
     if size_match_skip "$dest/$rel" "$url"; then
         log INFO "skip (size-matched): $rel"
     else
