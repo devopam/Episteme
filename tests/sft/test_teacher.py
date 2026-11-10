@@ -153,3 +153,9 @@ def test_teacher_timeout_setting(monkeypatch):
         assert s.teacher_max_tokens == 512
     finally:
         cfg.get_settings.cache_clear()
+
+
+def test_no_network_guard_fires_for_a_real_session():
+    t = Teacher("https://teacher.invalid/v1", KEY, "teach-1", 1000)
+    with pytest.raises(AssertionError, match="network access in a test"):
+        t.complete(_msgs(8), max_tokens=4)

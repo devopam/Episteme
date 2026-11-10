@@ -107,3 +107,20 @@ def test_duplicate_rows_are_dropped(tmp_path):
     counts = build_slice(root, out, 100_000, weights={}, excluded=(), seed=1)
     assert counts["rows_kept"] == 3
     assert counts["rows_dropped_duplicate"] == 3
+
+
+def test_slice_rows_carry_subset_and_source(tmp_path):
+    root, out = tmp_path / "c", tmp_path / "o"
+    d = root / "pretrain" / "source=pmc" / "year=2024"
+    d.mkdir(parents=True)
+    # A shard without a source column: the source comes from the path.
+    pq.write_table(
+        pa.table({"text": ["a b c", "d e f"], "id": ["x1", "x2"], "content_hash": ["1", "2"]}),
+        d / "part-000.parquet",
+    )
+    _shard(root, "pmcx", _rows("q", 2))
+    build_slice(root, out, 10_000, weights={}, excluded=(), seed=1)
+    rows = _read(out)
+    assert {r["subset"] for r in rows} == {"commercial"}
+    by_id = {r["id"]: r["source"] for r in rows}
+    assert by_id == {"x1": "pmc", "x2": "pmc", "q0": "pmcx", "q1": "pmcx"}

@@ -18,7 +18,7 @@ from typing import Literal
 from episteme.bench.pbrer_cases import PbrerCase, load_case
 from episteme.harness.check import check_answer
 from episteme.harness.loop import make_call_tool
-from episteme.harness.pbrer import assemble_facts, gate_parts, skeleton
+from episteme.harness.pbrer import assemble_facts, gate_parts, section_headings, skeleton
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
 log = logging.getLogger(__name__)
@@ -46,12 +46,14 @@ def score(
     ``mah_markers_ok``: no MAH-marker finding. The two lists are the two parts of
     ``gate``, kept apart by ``gate_parts``.
     ``invented_values``: count of values from ``check_answer`` over the whole draft text.
-    The case's own interval dates and substance name count as stated values.
+    The case's own interval dates, substance name and the section headings of ``region``
+    count as stated values, so a cross-reference such as "section 16" is not invented.
     ``facts_found`` / ``gaps_reported``: share of expected lines present in the draft
     (1.0 when none are expected)."""
     text = "\n".join(draft.values())
     sections, markers = gate_parts(draft, region=region)
     known = [case.start.isoformat(), case.end.isoformat(), case.substance_name]
+    known += section_headings(region)
     return {
         "facts_found": _share(case.expected_facts, text),
         "gaps_reported": _share(case.expected_gaps, text),

@@ -55,6 +55,15 @@ def test_score_counts_invented_values():
     assert s["invented_values"] == 2
 
 
+def test_score_section_cross_references_are_not_invented():
+    d = _draft()
+    first = next(h for h in d if d[h] == "text")
+    d[first] = "approved 2001-02-03; see section 16 and section 18.2"
+    assert score(_case(), d, [_result("approved 2001-02-03")])["invented_values"] == 0
+    d[first] = "approved 2001-02-03; see section 99"
+    assert score(_case(), d, [_result("approved 2001-02-03")])["invented_values"] == 1
+
+
 def test_score_flags_missing_section_and_marker():
     d = _draft()
     d.pop(next(iter(d)))

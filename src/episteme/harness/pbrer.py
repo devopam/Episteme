@@ -19,6 +19,7 @@ from episteme.reference.rules import (
     Finding,
     check_mah_markers,
     check_sections,
+    headings,
     load_rules,
 )
 
@@ -161,6 +162,12 @@ def skeleton(facts: PbrerFacts, *, region: Literal["ich", "eu"] = "ich") -> dict
         else _body(s.id, s.mah_data, facts.sections.get(s.id))
         for s in rules.sections_for(region)
     }
+
+
+def section_headings(region: Literal["ich", "eu"] = "ich") -> list[str]:
+    """The E2C(R2) section headings of ``region`` in rule order (they carry the section
+    numbers a draft may cite)."""
+    return headings(load_rules("ich_e2c_r2"), region)
 
 
 def unfilled_sections(draft: dict[str, str]) -> list[str]:

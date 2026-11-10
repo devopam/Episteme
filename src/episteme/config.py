@@ -192,6 +192,26 @@ DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
 # programme-design.md). A policy, not a tunable: no environment key.
 CORPUS_EXCLUDED_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
+# Licence class (subset) of each lookup source whose facts may ground a Stage B tool
+# example, keyed by ``Provenance.source``. ``commercial`` = "use freely"; ``pending`` = an
+# open owner question (FAERS: rights to the MedDRA reaction terms). A source not listed is
+# refused. TODO: keep in step with docs/02-data-sources.md sections 2.2.1 and 2.7; there
+# is no licence registry for lookup sources in code yet.
+LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
+    "substance": "commercial",
+    "dailymed": "commercial",
+    "aact": "commercial",
+    "fda_drugsfda": "commercial",
+    "fda_enforcement": "commercial",
+    "ema_medicines": "commercial",
+    "ema_article57": "commercial",
+    "ema_outside_eu": "commercial",
+    "ema_referrals": "commercial",
+    "ema_dhpc": "commercial",
+    "ema_psusa": "commercial",
+    "pubmed": "open_metadata",
+    "openfda_faers": "pending",
+}
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 

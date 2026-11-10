@@ -60,8 +60,13 @@ def test_citation_in_passage_passes_after_whitespace_normalisation():
 
 
 def test_curly_quotes_are_spans_too():
-    ex = _qa("It says “412 patients received\n the drug”.")
+    ex = _qa("It says “412 patients received\n the drug” [PMC123].")
     assert check_citation_quotes_passage(ex) == []
+
+
+def test_answer_must_cite_its_passage_ref():
+    assert check_citation_quotes_passage(_qa('"412 patients received the drug".'))
+    assert check_citation_quotes_passage(_qa('"412 patients received the drug" [PMC9].'))
 
 
 def test_citation_not_in_passage_is_rejected():
@@ -99,6 +104,15 @@ def test_exact_values_scan_pbrer_bodies_not_headings():
     heading = next(iter(draft))
     draft[heading] = draft[heading] + "\n9999 reports"
     assert check_exact_values(_draft_example(json.dumps(draft), pbrer_region="ich")) == ["9999"]
+
+
+def test_pbrer_section_cross_references_are_known_values():
+    draft = _pbrer_draft()
+    heading = next(iter(draft))
+    draft[heading] = draft[heading] + "\nSee section 16 and section 18.2."
+    assert check_exact_values(_draft_example(json.dumps(draft), pbrer_region="ich")) == []
+    draft[heading] = draft[heading] + "\nSee section 99."
+    assert check_exact_values(_draft_example(json.dumps(draft), pbrer_region="ich")) == ["99"]
 
 
 # --- structure --------------------------------------------------------------
@@ -154,6 +168,6 @@ def test_format_requires_fields_and_known_tools():
 
 
 def test_run_checks_reports_first_failing_reason():
-    assert run_checks(_qa('"412 patients received the drug"')) == []
+    assert run_checks(_qa('"412 patients received the drug" [PMC123]')) == []
     reasons = [r for r, _ in run_checks(_qa('"999 patients" were treated'))]
     assert reasons[0] == "citation"

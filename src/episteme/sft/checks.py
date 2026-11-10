@@ -13,7 +13,7 @@ from collections import Counter
 
 from episteme.harness.check import check_answer
 from episteme.harness.loop import TOOLS
-from episteme.harness.pbrer import gate
+from episteme.harness.pbrer import gate, section_headings
 from episteme.reference.claims import LookupResult
 from episteme.reference.rules import Finding
 from episteme.sft.examples import (
@@ -104,9 +104,10 @@ def check_format(example: Example) -> list[str]:
 
 
 def check_citation_quotes_passage(example: Example) -> list[str]:
-    """A grounded answer quotes the passage: every quoted span (straight or curly double
-    quotes) is a substring of the passage after whitespace normalisation. An answer with
-    no quoted span fails. Other kinds have no passage and pass."""
+    """A grounded answer quotes and cites the passage: every quoted span (straight or curly
+    double quotes) is a substring of the passage after whitespace normalisation, and the
+    answer cites ``[passage_ref]``. An answer with no quoted span fails. Other kinds have
+    no passage and pass."""
     if not isinstance(example, GroundedQA):
         return []
     spans = [
@@ -116,14 +117,18 @@ def check_citation_quotes_passage(example: Example) -> list[str]:
     if not any(spans):
         return ["answer has no quoted span"]
     passage = _ws(example.passage)
-    return [f"quote not in passage: {s!r}" for s in spans if not s or s not in passage]
+    problems = [f"quote not in passage: {s!r}" for s in spans if not s or s not in passage]
+    if f"[{example.passage_ref}]" not in example.answer:
+        problems.append(f"answer does not cite [{example.passage_ref}]")
+    return problems
 
 
 def check_exact_values(example: Example) -> list[str]:
     """Dates, ids and counts in the answer that the grounding does not state
     (``episteme.harness.check.check_answer``). A grounded answer checks against its passage
     and reference; a tool answer against its tool results, its task and its call
-    arguments. A PBRER draft is checked on its bodies, not its headings."""
+    arguments. A PBRER draft is checked on its bodies, not its headings; the section
+    headings of its region count as stated, so "section 16" is not an invented value."""
     if isinstance(example, GroundedQA):
         return check_answer(example.answer, [], known=(example.passage, example.passage_ref))
     if isinstance(example, ToolDraft):
@@ -135,6 +140,8 @@ def check_exact_values(example: Example) -> list[str]:
         known = [example.task] + [
             json.dumps(c.get("arguments") or {}) for c in example.tool_calls if isinstance(c, dict)
         ]
+        if example.pbrer_region in ("ich", "eu"):
+            known += section_headings(example.pbrer_region)
         return check_answer(text, list(example.tool_results), known=known)
     return []
 

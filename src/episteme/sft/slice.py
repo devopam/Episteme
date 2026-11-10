@@ -6,6 +6,8 @@ GPU host. Sampling is deterministic for a given seed and input.
 
 Materialised shards hold commercial rows only and have no ``subset`` column.
 If a shard does carry a ``subset`` column, every row must say ``commercial``.
+Every output row carries ``subset = 'commercial'`` and its ``source`` (from the shard
+path when the shard has no ``source`` column), so Stage B can verify both.
 """
 
 from __future__ import annotations
@@ -164,6 +166,10 @@ def build_slice(
                 dupes += 1
                 continue
             seen.add(key)
+            # Stage B verifies these two fields: only commercial rows reach this point,
+            # and a shard without a source column takes it from its path.
+            row["source"] = row.get("source") or src
+            row["subset"] = "commercial"
             for c, v in row.items():
                 buf.setdefault(c, []).append(v)
             rows_kept += 1
