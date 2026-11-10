@@ -1602,7 +1602,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ich download --force 
 - **Chunks for EMA.** Run `ema_guidance download --budget-s 540` (under 10 minutes) until the manifest holds all 55 paths. The list is `src/episteme/data/reference_docs/ema_documents.txt` (paths only; the host is `EMA_BASE` in `sources.env`).
 - **Plans.** `ich` reads the ICH node API for each page in `EPISTEME_REFERENCE_DOCS_ICH_PAGES` (default: the E2B(R3) package page, `efficacy-guidelines`, `quality-guidelines`). Video files are not fetched. `meddra_ptc` reads the English guidance list and takes the Points to Consider item only (Word, PDF and spreadsheet files, and the best-practices document). `--dry-run` for these two still calls the API. The ICH plan waits `EPISTEME_REFERENCE_DOCS_API_PAUSE_S` (default 1) between API calls. A file link is kept only when its host is the host of `ICH_API_BASE` or `ICH_FILES_BASE` (`ich`) or of `MEDDRA_API_BASE` (`meddra_ptc`); other hosts are logged and dropped. No source fetches a path under `/search`. Two files with one name in one folder get a short hash of the url in the name.
 - **User-Agent.** A fixed project string (`EPISTEME_REFERENCE_DOCS_USER_AGENT`). It holds no e-mail address.
-- **Licence.** ICH and MedDRA Points to Consider documents carry the ICH public-licence notice: use with ICH credit, mark every change, do not imply ICH endorsement (docs/02 s2.7.1; a conditional project ruling). EMA: reuse with credit. MedDRA terminology is licensed and out of scope. Each manifest line carries the licence text.
+- **Licence.** ICH and MedDRA Points to Consider documents carry the ICH public-licence notice: use with ICH credit, mark every change, do not imply ICH endorsement (docs/02 s2.7.1; confirmed by the owner 2026-11-09). EMA: reuse with credit. MedDRA terminology is licensed and out of scope. Each manifest line carries the licence text.
 - **Exit codes.** 0 done; 3 stopped, run again; 1 done but some files failed (HTTP error, short read or refused zip); 2 bad arguments.
 
 ## 6. Materialize, ingest and field-shape checks
@@ -1635,6 +1635,72 @@ PYTHONIOENCODING=utf-8 bash scripts/data/pubmed/extract_pubmed.sh --report --max
 ```
 
 Run it after each new download or parser change as the smoke check.
+
+### 6.4 SFT data and training handoff
+
+This section builds the training data on the laptop and hands it to a rented GPU host. Training itself is out of the repo's scope this round. Design: `13-graphrag-design.md` section 9. Licence rules: `02-data-sources.md` sections 2.7 and 2.7.2. In v1, `build_slice` and `generate_batch` have no command line: call them from Python, as shown. Use one new output folder per round, outside `<corpus>/`.
+
+**1. Materialize the corpus.** Section 6.1. The shards land under `<corpus>/pretrain/source=<source>/year=<year>/`.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh corpus materialize
+```
+
+**2. Build the Stage A slice.** `build_slice` reads the shards as streams. It refuses the shards of `corpus_excluded_sources` and every row whose `subset` is not `commercial`. `EPISTEME_SFT_MIX_WEIGHTS` sets the mix (`source=weight,...`; empty means proportional to the tokens of each source). Tokens are whitespace tokens.
+
+```python
+from pathlib import Path
+from episteme.config import get_settings
+from episteme.sft.slice import build_slice
+
+s = get_settings()
+out = Path("<round folder>")
+build_slice(s.corpus_root, out, target_tokens=50_000_000, weights=s.sft_mix_weights,
+            excluded=s.corpus_excluded_sources, seed=1)
+```
+
+Output: `<round folder>/stage_a/part-*.parquet` and `<round folder>/stage_a/manifest.json` (kind `slice`, with each input shard, its row and token counts, and a `config_hash`).
+
+**3. Generate the Stage B batches.** Run `generate_batch` once per kind (`grounded_qa`, `tool_draft`, `rule_check`, `abstain`), each into its own folder. Set these keys in `.env` first (names only here): `EPISTEME_TEACHER_API_KEY`, `EPISTEME_TEACHER_MODEL`, `EPISTEME_TEACHER_BUDGET_TOKENS`, `EPISTEME_TEACHER_MAX_TOKENS`, `EPISTEME_TEACHER_REQUEST_TIMEOUT_S`. The endpoint is `TEACHER_BASE_URL` in `sources.env`. Start with a small budget.
+
+```python
+from episteme.sft.batch import generate_batch
+from episteme.sft.teacher import Teacher
+
+teacher = Teacher.from_settings(get_settings())
+generate_batch(teacher, rows, "grounded_qa", 200, out / "stage_b" / "grounded_qa")
+```
+
+- **Input rows.** Every row needs an `id`. `grounded_qa`: `text`, `source`, `subset` (rows of the Stage A parts fit). `abstain`: also `reason` (`MAH data required` or `unverified`). `tool_draft`: `task`, `tool_calls` and `tool_results` (lookup results from the harness). `rule_check`: `document` (a PBRER draft, heading to body) with `source = pbrer_skeleton` and `subset = commercial`. No code builds `tool_draft` or `rule_check` rows yet. Build `rule_check` rows only from skeletons whose facts all come from `commercial` sources (`02-data-sources.md` section 2.7.2).
+- **Licence gate.** A row that fails the licence rule is counted as `licence` or `licence_pending` and is never sent to the teacher.
+- **Output.** `examples.jsonl` (kept examples, each with its source row, teacher and tool-schema hash), `requests.jsonl` (append-only ledger of paid requests) and `manifest.json` (kind `batch`: kept and rejected counts per reason, `budget_used`, `stopped`).
+- **Stop and resume.** `stopped` is empty when `n` examples are kept, `exhausted` when the rows run out, `budget` at the token cap, `error` when an error ends the run. Run the same call again to resume: kept and paid rows are skipped, and the tokens in the ledger count against the budget. The files are never truncated. An earlier manifest is kept as `manifest.run-<k>.json`.
+
+**4. Copy to the GPU host.** Copy these and nothing else:
+
+- `<round folder>/stage_a/` (the parts and the slice manifest);
+- `<round folder>/stage_b/<kind>/examples.jsonl` and `manifest.json` for each kind.
+
+Keep `requests.jsonl` on the laptop as the audit record. Never copy `.env` or any key.
+
+**5. Train (on the GPU host, out of repo scope).** Train in rounds: a small checked set, a round, a measurement, then the next batch. Write a manifest of kind `round` for each round (`episteme.sft.manifest.write_manifest`): the inputs with their manifests, the base model, the settings and the budget used. Keep a held-out split of the Stage B examples for evaluation.
+
+**6. Export the GGUF.** Merge the adapter into the base model. Quantise to `Q4_K_M` and `Q5_K_M`. Write a model card with these fields (spec section 9.5):
+
+- the base model and its licence;
+- the training slice and the licence classes of its sources;
+- the teacher (provider and model);
+- the evaluation scores.
+
+**7. Evaluate on the laptop.** Serve the GGUF with the llama.cpp server (OpenAI-compatible API, tool calls on). Set `EPISTEME_HARNESS_BASE_URL` to its `/v1` address; the harness loop (`episteme.harness.loop.run`) posts there. Then run the benchmark runner on the reviewed cases:
+
+```bash
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.bench.runner --cases benchmarks/pbrer --out <scores folder>
+```
+
+- The runner reads the database read-only. It runs only cases with `reviewed_by_owner: true`; the others are counted as `skipped_unreviewed`.
+- **Limit in v1.** The command line scores the deterministic skeleton, which is the baseline. A producer that drafts with the GGUF is not on the command line yet; code can pass one to `episteme.bench.runner.main(produce=...)`. Scoring the GGUF from the command line is deferred (drift log, 2026-11-10).
+- No case files exist yet. The cases are built with `episteme.bench.pbrer_cases.build_cases` after the full loads, and the owner reviews each one.
 
 ---
 
@@ -1690,3 +1756,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v1 | 2026-08-31 | Initial runbook from the acquisition phase and sample audit |
 | v2 | 2026-09-21 | SP5 rewrite: single operator runbook. Covers every wired source through `run_pipeline.sh`, the DB-mode guard, migrations 0002/0003 by hand, `episteme_test` targeting, `openalex` bounded fetch, `cdisc_bc`, verification. Dated status board replaced by `docs/12-source-inventory.md`; per-source facts checked against the wrappers |
 | v3 | 2026-11-09 | Section 5.17: reference documents (`ich`, `meddra_ptc`, `ema_guidance`), download-only |
+| v4 | 2026-11-10 | Section 6.4: SFT data and training handoff (Stage A slice, Stage B batches, copy to the GPU host, GGUF export, benchmark runner); ICH licence confirmed by the owner in section 5.17 |
