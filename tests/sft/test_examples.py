@@ -205,6 +205,8 @@ def test_batch_manifest_records_teacher_and_rejections(fakes, tmp_path):
         _passage(2, subset="noncommercial"),
         _passage(3, source="dailymed"),
         _passage(4, subset=None),
+        _passage(10, source=None),
+        {k: v for k, v in _passage(11).items() if k != "source"},
         _passage(5),
         _passage(6),
         _passage(7),
@@ -214,10 +216,10 @@ def test_batch_manifest_records_teacher_and_rejections(fakes, tmp_path):
     out = generate_batch(
         _teacher(session), passages, "grounded_qa", 2, tmp_path, excluded=("dailymed",)
     )
-    # Three refused rows cost no request; the run stops at the second kept example.
+    # Five refused rows cost no request; the run stops at the second kept example.
     assert len(session.posts) == 4
     assert out["kept"] == 2
-    assert out["rejected"]["licence"] == 3
+    assert out["rejected"]["licence"] == 5
     assert out["rejected"]["citation"] == 1
     assert out["rejected"]["exact_values"] == 1
     assert out["stopped"] is None
@@ -227,7 +229,7 @@ def test_batch_manifest_records_teacher_and_rejections(fakes, tmp_path):
     assert doc["teacher"] == "teach-1"
     assert doc["budget_used"] == 50
     assert doc["counts"]["kept"] == 2
-    assert doc["counts"]["rejected_licence"] == 3
+    assert doc["counts"]["rejected_licence"] == 5
     assert doc["counts"]["rejected_citation"] == 1
     assert doc["counts"]["rejected_exact_values"] == 1
     assert doc["counts"]["rejected_format"] == 0
@@ -236,6 +238,7 @@ def test_batch_manifest_records_teacher_and_rejections(fakes, tmp_path):
     assert doc["stopped"] is None
     outcomes = {i["id"]: i["outcome"] for i in doc["inputs"]}
     assert outcomes["PMC1"] == "kept" and outcomes["PMC2"] == "licence"
+    assert outcomes["PMC10"] == outcomes["PMC11"] == "licence"
     assert "PMC8" not in outcomes
     rows = _jsonl(tmp_path / "examples.jsonl")
     assert [r["source_row"]["id"] for r in rows] == ["PMC1", "PMC7"]
@@ -317,3 +320,18 @@ def test_input_missing_fields_is_rejected_without_a_request(fakes, tmp_path):
 def test_unknown_kind_is_refused(fakes, tmp_path):
     with pytest.raises(ValueError):
         generate_batch(_teacher(fakes.FakeSession([])), [], "essay", 1, tmp_path, excluded=())
+
+
+def test_max_tokens_defaults_to_the_setting(fakes, tmp_path, monkeypatch):
+    from episteme import config as cfg
+
+    cfg.get_settings.cache_clear()
+    monkeypatch.setenv("EPISTEME_TEACHER_MAX_TOKENS", "77")
+    try:
+        session = fakes.FakeSession([fakes.chat_reply(_qa_json(), {"total_tokens": 1})])
+        generate_batch(_teacher(session), [_passage(1)], "grounded_qa", 1, tmp_path, excluded=())
+        assert session.posts[0]["json"]["max_tokens"] == 77
+        doc = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+        assert doc["config"]["max_tokens"] == 77
+    finally:
+        cfg.get_settings.cache_clear()

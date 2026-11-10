@@ -19,7 +19,6 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from episteme.config import DEFAULT_TEACHER_MAX_TOKENS
 from episteme.harness.loop import TOOLS
 from episteme.reference.claims import LookupResult
 from episteme.reference.rules import MAH_MARKER, Finding
@@ -315,7 +314,13 @@ def parse_example(kind: str, row: dict, raw: str) -> Example:
 
 
 def _licence_ok(row: dict, excluded: tuple[str, ...]) -> bool:
-    return row.get("subset") == "commercial" and row.get("source") not in excluded
+    source = row.get("source")
+    return (
+        row.get("subset") == "commercial"
+        and isinstance(source, str)
+        and bool(source.strip())
+        and source not in excluded
+    )
 
 
 def _source_row(row: dict) -> dict:
@@ -333,7 +338,7 @@ def generate_batch(
     out_dir: Path,
     *,
     excluded: tuple[str, ...] | None = None,
-    max_tokens: int = DEFAULT_TEACHER_MAX_TOKENS,
+    max_tokens: int | None = None,
 ) -> dict:
     """Generate up to ``n`` checked examples of ``kind`` from ``passages``.
 
@@ -341,15 +346,21 @@ def generate_batch(
     teacher) and ``out_dir/manifest.json`` (kind ``batch``). Stops when ``n`` examples are
     kept (``stopped`` None), when the rows run out (``exhausted``) or at the budget cap
     (``budget``); the examples kept so far stay written. ``excluded`` defaults to
-    ``Settings.corpus_excluded_sources``. HTTP and teacher errors propagate."""
+    ``Settings.corpus_excluded_sources`` and ``max_tokens`` to ``Settings.teacher_max_tokens``.
+    A row without a ``source`` or with a ``subset`` other than ``commercial`` is refused
+    (reason ``licence``). HTTP and teacher errors propagate."""
     from episteme.sft.checks import run_checks
 
     if kind not in KINDS:
         raise ValueError(f"unknown kind {kind!r}; expected one of {KINDS}")
-    if excluded is None:
+    if excluded is None or max_tokens is None:
         from episteme.config import get_settings
 
-        excluded = get_settings().corpus_excluded_sources
+        settings = get_settings()
+        if excluded is None:
+            excluded = settings.corpus_excluded_sources
+        if max_tokens is None:
+            max_tokens = settings.teacher_max_tokens
     excluded = tuple(excluded)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
