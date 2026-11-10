@@ -1655,7 +1655,7 @@ from episteme.sft.slice import build_slice
 
 s = get_settings()
 out = Path("<round folder>")
-build_slice(s.corpus_root, out, target_tokens=50_000_000, weights=s.sft_mix_weights,
+build_slice(s.corpus_root, out, target_tokens=<target tokens>, weights=s.sft_mix_weights,
             excluded=s.corpus_excluded_sources, seed=1)
 ```
 
