@@ -195,4 +195,6 @@ record_key = []
 substance_fields = ["generic_name"]
 product_fields = ["package_ndc"]
 date_field = "update_date"
+# openFDA shortages write slash dates as MM/DD/YYYY (09/20/2023).
+date_order = "mdy"
 cadence = "monthly"

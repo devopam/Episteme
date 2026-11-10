@@ -497,6 +497,91 @@ def _load(conn, tmp_path, members=None, name=ZIP_NAME, **kw):
     return la.load_release(conn, z, raw_dir=raw, run_id="t", **kw)
 
 
+class _RecCursor:
+    """Records each statement; answers the few reads that ``_resolve_interventions`` makes."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, params=None):
+        self._last = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        self.log.append(self._last)
+
+    def fetchall(self):
+        return [("aspirin",)]
+
+    def fetchone(self):
+        return (7, 3) if "FILTER" in self._last else (3,)
+
+    def copy(self, query):
+        self.log.append("COPY")
+        return _RecCopy()
+
+
+class _RecCopy:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write_row(self, row):
+        pass
+
+
+class _RecConn:
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+
+    def cursor(self):
+        return _RecCursor(self.log)
+
+
+def test_coverage_count_runs_after_the_index_and_analyze(monkeypatch):
+    """A new table has no statistics: the index and ANALYZE come before the coverage SELECT
+    (without them the count ran as a nested loop for hours)."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    log: list[str] = []
+    monkeypatch.setattr(
+        la,
+        "_columns",
+        lambda conn, schema: {
+            "interventions": ["id", "nct_id", "name"],
+        },
+    )
+    monkeypatch.setattr(la, "resolve_names", lambda conn, names, source: {"matched": 1})
+    monkeypatch.setattr(la.audit_trail, "deferred_mirror", lambda conn: nullcontext())
+    monkeypatch.setattr(la.audit_trail, "record", lambda *a, **k: None)
+    monkeypatch.setattr(la.audit_trail, "commit", lambda conn: None)
+    monkeypatch.setattr(la.audit_trail, "rollback", lambda conn: None)
+    ctx = SimpleNamespace(schema="aact_20261103", release_id="20261103", run_id="r")
+    out = la._resolve_interventions(_RecConn(log), ctx)
+
+    def first(needle: str) -> int:
+        return next(i for i, q in enumerate(log) if needle in q)
+
+    insert, index, analyze, coverage = (
+        first("INSERT INTO"),
+        first("CREATE INDEX"),
+        first('ANALYZE "aact_20261103"'),
+        first("FILTER"),
+    )
+    assert insert < index < analyze < coverage
+    assert "(nct_id, intervention_id)" in log[index]
+    assert 'ON "aact_20261103"."intervention_substance"' in log[index]
+    assert log[analyze].strip().endswith('"aact_20261103"."intervention_substance"')
+    assert out["interventions"] == 7 and out["interventions_matched"] == 3
+
+
 @pytest.mark.pg
 def test_release_loads_and_views_switch(db, tmp_path):
     out = _load(db, tmp_path)
