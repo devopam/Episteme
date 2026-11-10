@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 
 from episteme import audit_trail
 from episteme.config import get_settings
+from episteme.data.checkpoint_markers import in_skipped_dir
 
 _LOG = logging.getLogger(__name__)
 
@@ -139,7 +140,9 @@ def decide_generation(
 def faers_zips(raw_dir: Path) -> list[Path]:
     """The zips under ``<raw>/drug/event/``, in path order. Nothing else is read."""
     base = Path(raw_dir) / "drug" / "event"
-    return sorted(p for p in base.rglob("*.zip") if p.is_file()) if base.is_dir() else []
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.rglob("*.zip") if p.is_file() and not in_skipped_dir(p, base))
 
 
 def _shown(parts: Iterable[int]) -> str:

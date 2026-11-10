@@ -192,6 +192,7 @@ from episteme.data.article_schema import (  # noqa: E402
     utc_now_iso,
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
+    in_skipped_dir,
     input_key,
     is_success,
     mark_failed,
@@ -248,7 +249,7 @@ def discover_ontology_files(raw_dir: Path) -> list[Path]:
     by_dir: dict[Path, list[Path]] = {}
     for ext in (_OBO_EXT, _OWL_EXT):
         for p in raw_dir.rglob(f"*{ext}"):
-            if p.is_file():
+            if p.is_file() and not in_skipped_dir(p, raw_dir):
                 by_dir.setdefault(p.parent, []).append(p)
 
     files: list[Path] = []

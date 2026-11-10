@@ -52,6 +52,7 @@ import psycopg
 from episteme import audit_trail
 from episteme.config import get_settings
 from episteme.data import checkpoint_markers
+from episteme.data.checkpoint_markers import in_skipped_dir
 from episteme.data.regulatory.load_reg import database_name, db_marker_name, input_keys
 from episteme.data.regulatory.normalize import MAX_INDEX_TEXT_BYTES, norm_name
 from episteme.ops.failure import record_failure
@@ -320,7 +321,9 @@ def resolve_names(conn: psycopg.Connection, names: Iterable[str], source: str) -
 def substance_files(raw_dir: Path) -> list[Path]:
     """The substance zips under ``<raw>/other/substance/``, in path order."""
     base = raw_dir / "other" / "substance"
-    return sorted(p for p in base.rglob("*.zip") if p.is_file()) if base.is_dir() else []
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.rglob("*.zip") if p.is_file() and not in_skipped_dir(p, base))
 
 
 def marker_name_for(path: Path, raw_dir: Path) -> str:

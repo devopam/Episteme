@@ -518,6 +518,8 @@ def aact_summary_measures(summary: dict | None) -> dict:
     out: dict[str, Any] = {
         "tables_with_rows": None,
         "empty_tables": None,
+        "upstream_empty_tables": None,
+        "tables_with_upstream_data": None,
         "orphan_share_pct": None,
         "orphan_share_pct_max": None,
         "xref_coverage_pct": {"aact_intervention": None},
@@ -525,8 +527,13 @@ def aact_summary_measures(summary: dict | None) -> dict:
     if not summary:
         return out
     tables = summary.get("tables") or {}
+    # A table whose zip member is header-only (empty upstream) is not a failed load: it is
+    # listed apart and does not count as empty.
+    upstream_empty = sorted(set(summary.get("upstream_empty_tables") or []) & set(tables))
     out["tables_with_rows"] = sum(1 for n in tables.values() if n)
-    out["empty_tables"] = sum(1 for n in tables.values() if not n)
+    out["upstream_empty_tables"] = upstream_empty
+    out["empty_tables"] = sum(1 for t, n in tables.items() if not n and t not in upstream_empty)
+    out["tables_with_upstream_data"] = len(tables) - len(upstream_empty)
     orphans = summary.get("orphans") or {}
     shares = {t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0 for t, o in orphans.items()}
     out["orphan_share_pct"] = shares
@@ -585,7 +592,12 @@ def measure_aact(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) 
     out["release_id"] = release
     out.update(aact_summary_measures(summary))
     out["studies_equal_distinct_nct_id"] = None if studies is None else studies == distinct
-    out["counts"] = {"tables_with_rows": out["tables_with_rows"], "studies": studies}
+    # The rule floor (49) is the dictionary tables less the three the zip leaves out. A table
+    # that is empty upstream meets it as a table with all its upstream rows; one that lost
+    # its data rows is in ``empty_tables`` and fails ``max_empty_tables``.
+    with_rows = out["tables_with_rows"]
+    satisfied = None if with_rows is None else with_rows + len(out["upstream_empty_tables"])
+    out["counts"] = {"tables_with_rows": satisfied, "studies": studies}
     out.update(record_measures(record))
     return out
 

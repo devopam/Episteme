@@ -261,7 +261,9 @@ def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
     assert (out / "b.txt").read_text() == "data\n"
 
 
-def _skip_script_env(tmp_path: Path, name: str, content: bytes, dry_run: bool = False):
+def _skip_script_env(
+    tmp_path: Path, name: str, content: bytes, dry_run: bool = False, marker: str | None = None
+):
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
@@ -274,6 +276,11 @@ def _skip_script_env(tmp_path: Path, name: str, content: bytes, dry_run: bool = 
     data = tmp_path / "d" / name
     data.parent.mkdir()
     data.write_bytes(content)
+    if marker is not None:
+        st = data.stat()
+        mtime = int(st.st_mtime) + (0 if marker == "match" else 100)
+        size = st.st_size
+        Path(str(data) + ".verified").write_bytes(f"{size} {mtime} full\n".encode())
     script = (
         'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
         'export PATH="$fb:$PATH"; . "$LIB/common.sh"; '
@@ -353,9 +360,40 @@ def _zero_middle_zip(tmp_path: Path) -> bytes:
     return bytes(raw)
 
 
-def test_size_skip_reads_only_the_directory_so_a_zero_filled_middle_passes_it(tmp_path):
-    out, data = _skip_script_env(tmp_path, "x.zip", _zero_middle_zip(tmp_path))
+def test_size_skip_runs_the_full_test_so_a_zero_filled_middle_is_quarantined(tmp_path):
+    # 2026-11-10: six DailyMed zips with an intact tail and an unfetched middle passed the
+    # directory-only check. No marker means the full CRC test runs.
+    damaged = _zero_middle_zip(tmp_path)
+    out, data = _skip_script_env(tmp_path, "x.zip", damaged)
+    assert out == "FETCH" and not data.exists()
+    bad = list(data.parent.glob("_bad_*/x.zip.bad"))
+    assert len(bad) == 1 and bad[0].read_bytes() == damaged
+    assert not Path(str(data) + ".verified").exists()
+
+
+def test_size_skip_writes_a_marker_after_the_full_test_passes(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path))
+    marker = Path(str(data) + ".verified")
+    st = data.stat()
+    assert out == "SKIP" and marker.is_file()
+    assert marker.read_text().split() == [str(st.st_size), str(int(st.st_mtime)), "full"]
+
+
+def test_size_skip_trusts_a_matching_marker_without_the_full_test(tmp_path):
+    # the content would fail the full test; only the marker lets it through
+    out, data = _skip_script_env(tmp_path, "x.zip", _zero_middle_zip(tmp_path), marker="match")
     assert out == "SKIP" and data.is_file()
+
+
+def test_size_skip_ignores_a_stale_marker(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _zero_middle_zip(tmp_path), marker="stale")
+    assert out == "FETCH" and not data.exists()
+    assert not Path(str(data) + ".verified").exists()
+
+
+def test_dry_run_writes_no_marker(tmp_path):
+    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path), dry_run=True)
+    assert out == "SKIP" and not Path(str(data) + ".verified").exists()
 
 
 def test_a_fresh_download_with_a_zero_filled_middle_fails_the_full_crc_test(tmp_path):
@@ -384,6 +422,7 @@ def test_an_intact_fresh_zip_is_kept(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert (tmp_path / "out" / "x.zip").is_file()
+    assert (tmp_path / "out" / "x.zip.verified").is_file()
 
 
 def test_a_python_that_does_not_run_never_quarantines_a_zip(tmp_path):
