@@ -118,6 +118,34 @@ DEFAULT_EMA_READ_TIMEOUT_SECONDS = 60.0
 # Seconds the reg_record loader waits for the lock of its partition DDL (a reader that
 # holds a long transaction on reg_record blocks it); then the feed fails.
 DEFAULT_REG_LOCK_TIMEOUT_S = 300
+# Reference documents (ICH, MedDRA PtC, EMA guidance; episteme.data.reference_docs). EMA
+# answers a client that is not a browser with HTTP 429 at low rates, so the pause between two
+# document requests is long (EPISTEME_EMA_DOC_MIN_INTERVAL_S). ICH and MedDRA files are static
+# and take a short pause (EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S). The ICH pages listed here
+# (EPISTEME_REFERENCE_DOCS_ICH_PAGES, comma separated) are read through the ICH node API.
+DEFAULT_EMA_DOC_MIN_INTERVAL_S = 60
+DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S = 2.0
+# Seconds between two node API calls of the ICH plan (EPISTEME_REFERENCE_DOCS_API_PAUSE_S).
+DEFAULT_REFERENCE_DOCS_API_PAUSE_S = 1.0
+DEFAULT_REFERENCE_DOCS_ICH_PAGES = (
+    "e2br3-individual-case-safety-report-icsr-specification-and-related-files",
+    "efficacy-guidelines",
+    "quality-guidelines",
+)
+# A fixed project string, with no e-mail address (EPISTEME_REFERENCE_DOCS_USER_AGENT).
+DEFAULT_REFERENCE_DOCS_USER_AGENT = "Episteme-reference-docs/1.0 (open biomedical data pipeline)"
+DEFAULT_TEACHER_MODEL = "deepseek-chat"
+DEFAULT_TEACHER_BUDGET_TOKENS = 2_000_000
+# Seconds one teacher request may take (EPISTEME_TEACHER_REQUEST_TIMEOUT_S); no retry in v1.
+DEFAULT_TEACHER_REQUEST_TIMEOUT_S = 120
+# Completion tokens asked of the teacher per example (EPISTEME_TEACHER_MAX_TOKENS).
+DEFAULT_TEACHER_MAX_TOKENS = 2048
+DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
+DEFAULT_HARNESS_MAX_TOOL_CALLS = 24
+DEFAULT_HARNESS_MAX_CANDIDATES = 8
+DEFAULT_HARNESS_REQUEST_TIMEOUT_S = 300
+DEFAULT_BENCH_TENANT = "bench"
+DEFAULT_BENCH_CALLER = "bench-runner"
 # Seconds the FAERS loader waits for the lock of its generation swap, and of the drops
 # after it. New readers queue behind the waiting lock, so the wait is short; a failed run
 # keeps the built generation, and a re-run goes straight to the swap.
@@ -164,6 +192,28 @@ DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
 # programme-design.md). A policy, not a tunable: no environment key.
 CORPUS_EXCLUDED_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
+# Licence class (subset) of each lookup source whose facts may ground a Stage B tool
+# or rule-check example, keyed by ``Provenance.source``. ``commercial`` = "use freely";
+# ``pending`` = an open owner question (FAERS: rights to the MedDRA reaction terms;
+# DailyMed and EPAR: whether their looked-up facts may appear in examples). A source not
+# listed is refused. TODO: keep in step with docs/02-data-sources.md sections 2.2.1 and 2.7; there
+# is no licence registry for lookup sources in code yet.
+LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
+    "substance": "commercial",
+    "dailymed": "pending",
+    "ema_epar": "pending",
+    "aact": "commercial",
+    "fda_drugsfda": "commercial",
+    "fda_enforcement": "commercial",
+    "ema_medicines": "commercial",
+    "ema_article57": "commercial",
+    "ema_outside_eu": "commercial",
+    "ema_referrals": "commercial",
+    "ema_dhpc": "commercial",
+    "ema_psusa": "commercial",
+    "pubmed": "open_metadata",
+    "openfda_faers": "pending",
+}
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
 
 
@@ -195,6 +245,16 @@ def _slice_max_bytes() -> dict[str, int]:
         if source and value:
             out[source] = value
     return out
+
+
+def _reference_docs_ich_pages() -> tuple[str, ...]:
+    """``EPISTEME_REFERENCE_DOCS_ICH_PAGES``: comma separated ICH page slugs. Unset or empty:
+    the default pages."""
+    raw = _get("EPISTEME_REFERENCE_DOCS_ICH_PAGES")
+    if not raw:
+        return DEFAULT_REFERENCE_DOCS_ICH_PAGES
+    pages = tuple(dict.fromkeys(p.strip().strip("/") for p in raw.split(",") if p.strip()))
+    return pages or DEFAULT_REFERENCE_DOCS_ICH_PAGES
 
 
 def _get_non_negative_float_or_default(name: str, default: float) -> float:
@@ -256,6 +316,27 @@ def _get_pid_or_none(name: str) -> int | None:
 
 def _get_size_or_none(name: str) -> str | None:
     return (_get(name) or "").strip() or None
+
+
+def _parse_mix_weights(raw: str | None) -> dict[str, float]:
+    """Parse ``source=weight,...``. A malformed or negative weight raises ``ConfigError``."""
+    weights: dict[str, float] = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, text = item.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ConfigError(f"EPISTEME_SFT_MIX_WEIGHTS entry {item!r} must be source=weight")
+        try:
+            weight = float(text)
+        except ValueError as exc:
+            raise ConfigError(f"EPISTEME_SFT_MIX_WEIGHTS weight {text!r} is not a number") from exc
+        if not math.isfinite(weight) or weight < 0:
+            raise ConfigError(f"EPISTEME_SFT_MIX_WEIGHTS weight for {name!r} must be >= 0")
+        weights[name] = weight
+    return weights
 
 
 def _find_project_dotenv() -> str | None:
@@ -382,6 +463,14 @@ class Settings:
     epar_max_bytes: int = DEFAULT_EPAR_MAX_BYTES
     epar_max_withdrawn_share: float = DEFAULT_EPAR_MAX_WITHDRAWN_SHARE
     epar_bucket_ids: int = DEFAULT_EPAR_BUCKET_IDS
+    # Reference document downloads (EPISTEME_EMA_DOC_MIN_INTERVAL_S,
+    # EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S, EPISTEME_REFERENCE_DOCS_ICH_PAGES,
+    # EPISTEME_REFERENCE_DOCS_USER_AGENT).
+    ema_doc_min_interval_s: int = DEFAULT_EMA_DOC_MIN_INTERVAL_S
+    reference_docs_min_interval_s: float = DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
+    reference_docs_ich_pages: tuple[str, ...] = DEFAULT_REFERENCE_DOCS_ICH_PAGES
+    reference_docs_api_pause_s: float = DEFAULT_REFERENCE_DOCS_API_PAUSE_S
+    reference_docs_user_agent: str = DEFAULT_REFERENCE_DOCS_USER_AGENT
     # Largest share of orphan rows (nct_id not in studies) per AACT table
     # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
     aact_max_orphan_share: float = DEFAULT_AACT_MAX_ORPHAN_SHARE
@@ -390,6 +479,22 @@ class Settings:
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
     # Per-source sample slice caps, lower-case source name -> bytes.
     slice_max_bytes: dict[str, int] = field(default_factory=dict)
+    # SFT teacher and tool harness (spec sections 9.3 and 10). The API key is a secret:
+    # it stays out of repr and logs.
+    teacher_base_url: str | None = None
+    teacher_api_key: str | None = field(default=None, repr=False)
+    teacher_model: str = DEFAULT_TEACHER_MODEL
+    teacher_budget_tokens: int = DEFAULT_TEACHER_BUDGET_TOKENS
+    teacher_request_timeout_s: int = DEFAULT_TEACHER_REQUEST_TIMEOUT_S
+    teacher_max_tokens: int = DEFAULT_TEACHER_MAX_TOKENS
+    # Source name -> mix weight (EPISTEME_SFT_MIX_WEIGHTS=source=weight,...); empty = proportional.
+    sft_mix_weights: dict[str, float] = field(default_factory=dict)
+    harness_base_url: str = DEFAULT_HARNESS_BASE_URL
+    harness_max_tool_calls: int = DEFAULT_HARNESS_MAX_TOOL_CALLS
+    harness_max_candidates: int = DEFAULT_HARNESS_MAX_CANDIDATES
+    harness_request_timeout_s: int = DEFAULT_HARNESS_REQUEST_TIMEOUT_S
+    bench_tenant: str = DEFAULT_BENCH_TENANT
+    bench_caller: str = DEFAULT_BENCH_CALLER
 
     def pg_dsn(self) -> str:
         return (
@@ -564,7 +669,44 @@ def get_settings() -> Settings:
         aact_max_orphan_share=_get_non_negative_float_or_default(
             "EPISTEME_AACT_MAX_ORPHAN_SHARE", DEFAULT_AACT_MAX_ORPHAN_SHARE
         ),
+        ema_doc_min_interval_s=_get_positive_int_or_default(
+            "EPISTEME_EMA_DOC_MIN_INTERVAL_S", DEFAULT_EMA_DOC_MIN_INTERVAL_S
+        ),
+        reference_docs_min_interval_s=_get_non_negative_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_MIN_INTERVAL_S", DEFAULT_REFERENCE_DOCS_MIN_INTERVAL_S
+        ),
+        reference_docs_ich_pages=_reference_docs_ich_pages(),
+        reference_docs_api_pause_s=_get_non_negative_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_API_PAUSE_S", DEFAULT_REFERENCE_DOCS_API_PAUSE_S
+        ),
+        reference_docs_user_agent=_get("EPISTEME_REFERENCE_DOCS_USER_AGENT")
+        or DEFAULT_REFERENCE_DOCS_USER_AGENT,
         slice_max_bytes=_slice_max_bytes(),
+        teacher_base_url=_get("TEACHER_BASE_URL"),
+        teacher_api_key=_get("EPISTEME_TEACHER_API_KEY"),
+        teacher_model=_get("EPISTEME_TEACHER_MODEL") or DEFAULT_TEACHER_MODEL,
+        teacher_budget_tokens=_get_positive_int_or_default(
+            "EPISTEME_TEACHER_BUDGET_TOKENS", DEFAULT_TEACHER_BUDGET_TOKENS
+        ),
+        teacher_request_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_TEACHER_REQUEST_TIMEOUT_S", DEFAULT_TEACHER_REQUEST_TIMEOUT_S
+        ),
+        teacher_max_tokens=_get_positive_int_or_default(
+            "EPISTEME_TEACHER_MAX_TOKENS", DEFAULT_TEACHER_MAX_TOKENS
+        ),
+        sft_mix_weights=_parse_mix_weights(_get("EPISTEME_SFT_MIX_WEIGHTS")),
+        harness_base_url=_get("EPISTEME_HARNESS_BASE_URL") or DEFAULT_HARNESS_BASE_URL,
+        harness_max_tool_calls=_get_positive_int_or_default(
+            "EPISTEME_HARNESS_MAX_TOOL_CALLS", DEFAULT_HARNESS_MAX_TOOL_CALLS
+        ),
+        harness_max_candidates=_get_positive_int_or_default(
+            "EPISTEME_HARNESS_MAX_CANDIDATES", DEFAULT_HARNESS_MAX_CANDIDATES
+        ),
+        harness_request_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_HARNESS_REQUEST_TIMEOUT_S", DEFAULT_HARNESS_REQUEST_TIMEOUT_S
+        ),
+        bench_tenant=_get("EPISTEME_BENCH_TENANT") or DEFAULT_BENCH_TENANT,
+        bench_caller=_get("EPISTEME_BENCH_CALLER") or DEFAULT_BENCH_CALLER,
     )
 
 

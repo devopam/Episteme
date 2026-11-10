@@ -190,7 +190,13 @@ declare -A WRAPPER=(
     [cdisc_bc]="cdisc_bc/download_cdisc_bc.sh"
     [cdisc_ct]="cdisc_ct/download_cdisc_ct.sh"
     [cdisc_usdm]="cdisc_usdm/download_cdisc_usdm.sh"
+    [ich]="reference_docs/download_reference_docs.sh"
+    [meddra_ptc]="reference_docs/download_reference_docs.sh"
+    [ema_guidance]="reference_docs/download_reference_docs.sh"
 )
+
+# ich, meddra_ptc and ema_guidance (reference documents) are download-only: they sit in
+# WRAPPER and in no stage list, so extract, load and the rest are refused for them.
 
 # SP2 literature sources: the six that get the full extract -> load -> graph
 # chain (dispatch to $HERE/<source>/<stage>_<source>.sh). Every other source is
@@ -717,6 +723,7 @@ run_stage() {
             3)
                 case "$SOURCE:$name" in
                     ema:download|ema_epar:download) exit 3 ;;
+                    ich:download|meddra_ptc:download|ema_guidance:download) exit 3 ;;
                 esac
                 exit 1 ;;
             *) exit 1 ;;
@@ -792,6 +799,10 @@ struct_serialize_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"$
 # (pmc's download_pmc.py takes --limit N), the SP3 wrappers take --max-files N
 # and --force --reason R. --dry-run is NOT here — it rides EPISTEME_DRY_RUN.
 wrapper_args=()
+# The reference document sources share one wrapper: it takes the source as its first argument.
+case "$SOURCE" in
+    ich|meddra_ptc|ema_guidance) wrapper_args+=("$SOURCE") ;;
+esac
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")
 # I1: forward the collected MODE positionals last (guard the expansion for set -u).

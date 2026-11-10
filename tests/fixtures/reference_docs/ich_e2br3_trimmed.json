@@ -1,0 +1,25 @@
+{
+ "items": [
+  {
+   "bundleInfo": {
+    "alias": "/page/e2br3-individual-case-safety-report-icsr-specification-and-related-files"
+   },
+   "mainWidgets": {
+    "items": [
+     {
+      "widgets": {
+       "items": [
+        {
+         "text": "<div><a class=\"file file--mime-application-zip file--package-x-generic\" href=\"https://admin.ich.org/sites/default/files/inline-files/IG_Complete_Package_v1_11_1.zip\" data-entity-uuid=\"9db8e394-e130-4238-ad92-9534ac6523c9\" data-entity-type=\"file\">To download the package click here</a></div><div><a class=\"file file--mime-application-zip file--package-x-generic\" href=\"https://admin.ich.org/sites/default/files/inline-files/QA-v2_5.zip\" target=\"_blank\" data-entity-uuid=\"f7683ea8-cd1f-4569-b0c7-0a877003095e\" data-entity-type=\"file\">To download the Q&amp;As click here&nbsp;</a></div><div><a href=\"https://admin.ich.org/sites/default/files/inline-files/OID_Information_Paper%20%281%29_0.pdf\" data-entity-uuid=\"a1643323-08eb-4327-9698-79705ffebcd2\" data-entity-type=\"file\">Link to the M2 information paper for OIDs and UUIDs.&nbsp;</a></div>"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "_meta": {
+  "maxCount": 1
+ }
+}

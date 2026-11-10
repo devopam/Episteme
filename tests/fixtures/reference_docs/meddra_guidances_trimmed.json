@@ -1,0 +1,135 @@
+[
+ {
+  "language": "English",
+  "items": [
+   {
+    "id": "2b6d72a3-d8aa-4690-bdd9-77ecacf06795",
+    "title": "Points to Consider Documents and MedDRA Best Practices Document",
+    "published": true,
+    "alias": "/general-documentation-0",
+    "created": "05/09/2013 - 04:29",
+    "bundle": "guidance",
+    "actions": {},
+    "body": {
+     "text": "",
+     "summary": ""
+    },
+    "autolinkedDocuments": [],
+    "bottomHeadline": null,
+    "documentCollection": [
+     {
+      "id": "09d41eb4-8fc4-490f-9e65-8929564a991f",
+      "guidanceFileDoc": {
+       "url": "https://admin.meddra.org/sites/default/files/guidance/file/001329_termselptc_r4_26_mar2026.docx",
+       "description": "",
+       "size": "805677"
+      },
+      "documentTitle": "MedDRA Term Selection: Points to Consider Release 4.26",
+      "htmlDocument": {
+       "url": "https://files.meddra.org/www/Website%20Files/PtCs/001329_termselptc_r4_26_mar2026%20(1).html",
+       "title": "",
+       "node": null
+      },
+      "guidanceFilePdf": {
+       "url": "https://admin.meddra.org/sites/default/files/guidance/file/001329_termselptc_r4_26_mar2026.pdf",
+       "description": "",
+       "size": "694262"
+      },
+      "guidanceFileSpreadsheet": []
+     },
+     {
+      "id": "27342284-70ef-4220-8bf6-7be78d9f1f15",
+      "guidanceFileDoc": {
+       "url": "https://admin.meddra.org/sites/default/files/guidance/file/001329_termselptc_r4_26_mar2026_redline.docx",
+       "description": "",
+       "size": "823388"
+      },
+      "documentTitle": "MedDRA Term Selection: Points to Consider Release 4.26 Redline",
+      "htmlDocument": [],
+      "guidanceFilePdf": [],
+      "guidanceFileSpreadsheet": []
+     },
+     {
+      "id": "600358f8-1bd0-4f4b-8f62-8acb88d4a6df",
+      "guidanceFileDoc": {
+       "url": "https://admin.meddra.org/sites/default/files/guidance/file/001331_companionptc_r4_0_Sep_2026_red-line.docx",
+       "description": "",
+       "size": "842630"
+      },
+      "documentTitle": "MedDRA\u00ae Points to Consider Companion Document Release 4.0 Redline",
+      "htmlDocument": [],
+      "guidanceFilePdf": [],
+      "guidanceFileSpreadsheet": []
+     }
+    ],
+    "headline": null,
+    "highlighted": true,
+    "redHighlighted": false,
+    "language": "211090a2-fbb3-4567-ae18-e85b2df91adf",
+    "otherDocuments": [
+     {
+      "url": "https://admin.meddra.org/sites/default/files/guidance/file/000026_MedDRA%20Best%20Practices%20_%202018.pdf",
+      "description": "MedDRA Best Practices",
+      "size": "642702"
+     }
+    ],
+    "date": "2026-03-01"
+   },
+   {
+    "id": "bf920f29-b39e-46a9-bd51-1bbfb15c012b",
+    "title": "MedDRA Version 29.1 September 2026",
+    "published": true,
+    "alias": "/node/3480",
+    "created": "08/25/2026 - 21:08",
+    "bundle": "guidance",
+    "actions": {},
+    "body": {
+     "text": ""
+    },
+    "autolinkedDocuments": [],
+    "bottomHeadline": "Additional MedDRA Guides",
+    "documentCollection": [
+     {
+      "id": "14400c1f-1fd1-4add-9fb5-07b435f54493",
+      "guidanceFileDoc": [],
+      "documentTitle": null,
+      "htmlDocument": [],
+      "guidanceFilePdf": [],
+      "guidanceFileSpreadsheet": []
+     }
+    ],
+    "headline": null,
+    "highlighted": false,
+    "redHighlighted": false,
+    "language": "211090a2-fbb3-4567-ae18-e85b2df91adf",
+    "otherDocuments": [
+     {
+      "url": "https://admin.meddra.org/sites/default/files/guidance/file/whatsnew_29_1_English.pdf",
+      "description": "What\u2019s New MedDRA Version 29.1",
+      "size": "387635"
+     },
+     {
+      "url": "https://admin.meddra.org/sites/default/files/guidance/file/intguide_29_1_English.pdf",
+      "description": "Introductory Guide MedDRA Version 29.1",
+      "size": "701919"
+     },
+     {
+      "url": "https://admin.meddra.org/sites/default/files/guidance/file/SMQ_intguide_29_1_English.pdf",
+      "description": "Introductory Guide for Standardised MedDRA Queries (SMQs) Version 29.1",
+      "size": "2166781"
+     },
+     {
+      "url": "https://admin.meddra.org/sites/default/files/guidance/file/dist_file_format_29_1_English.pdf",
+      "description": "Distribution File Format Version 29.1",
+      "size": "532896"
+     }
+    ],
+    "date": "2026-08-31"
+   }
+  ]
+ },
+ {
+  "language": "Japanese",
+  "items": []
+ }
+]

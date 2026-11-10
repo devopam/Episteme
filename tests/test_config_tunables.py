@@ -120,3 +120,43 @@ def test_slice_cap_follows_the_setting(clean_settings):
     cfg.get_settings.cache_clear()
     assert gate_slice.max_bytes_of("pmc") == 999
     assert gate_slice.max_bytes_of("apollo") == gate_slice.SLICES["apollo"].max_bytes
+
+
+def test_teacher_settings_defaults_and_api_key_not_in_repr(clean_settings):
+    for key in (
+        "EPISTEME_TEACHER_API_KEY",
+        "EPISTEME_TEACHER_MODEL",
+        "EPISTEME_TEACHER_BUDGET_TOKENS",
+        "EPISTEME_HARNESS_BASE_URL",
+        "EPISTEME_HARNESS_MAX_TOOL_CALLS",
+        "TEACHER_BASE_URL",
+    ):
+        clean_settings.delenv(key, raising=False)
+    s = cfg.get_settings()
+    assert s.teacher_api_key is None
+    assert s.teacher_base_url == "https://api.deepseek.com/v1"
+    assert s.teacher_model == "deepseek-chat"
+    assert s.teacher_budget_tokens == 2000000
+    assert s.harness_base_url == "http://127.0.0.1:8080/v1"
+    assert s.harness_max_tool_calls == 24
+    cfg.get_settings.cache_clear()
+    clean_settings.setenv("EPISTEME_TEACHER_API_KEY", "secret-x")
+    s = cfg.get_settings()
+    assert s.teacher_api_key == "secret-x"
+    assert "secret-x" not in repr(s)
+
+
+def test_sft_mix_weights_parse(clean_settings):
+    clean_settings.delenv("EPISTEME_SFT_MIX_WEIGHTS", raising=False)
+    assert cfg.get_settings().sft_mix_weights == {}
+    cfg.get_settings.cache_clear()
+    clean_settings.setenv("EPISTEME_SFT_MIX_WEIGHTS", "pmc=0.7,guidelines=0.3")
+    assert cfg.get_settings().sft_mix_weights == {"pmc": 0.7, "guidelines": 0.3}
+    cfg.get_settings.cache_clear()
+    clean_settings.setenv("EPISTEME_SFT_MIX_WEIGHTS", "pmc=-0.1")
+    with pytest.raises(cfg.ConfigError):
+        cfg.get_settings()
+    cfg.get_settings.cache_clear()
+    clean_settings.setenv("EPISTEME_SFT_MIX_WEIGHTS", "pmc")
+    with pytest.raises(cfg.ConfigError):
+        cfg.get_settings()

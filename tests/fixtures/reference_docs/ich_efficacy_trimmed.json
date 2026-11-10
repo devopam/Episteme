@@ -1,0 +1,173 @@
+{
+ "items": [
+  {
+   "bundleInfo": {
+    "alias": "/page/efficacy-guidelines"
+   },
+   "mainWidgets": {
+    "items": [
+     {
+      "widgets": {
+       "items": [
+        {
+         "accordions": {
+          "items": [
+           {
+            "items": [
+             {
+              "code": "E2A",
+              "title": "Clinical Safety Data Management: Definitions and Standards for Expedited Reporting",
+              "status": "Step 5",
+              "details": {
+               "stepDate": "27 October 1994"
+              },
+              "fileGroups": [
+               {
+                "title": "Guideline",
+                "weight": 0,
+                "files": [
+                 {
+                  "title": "ICH E2A Guideline",
+                  "uri": "https://database.ich.org/sites/default/files/E2A_Guideline.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               }
+              ]
+             },
+             {
+              "code": "E2C(R2)",
+              "title": "Periodic Benefit-Risk Evaluation Report",
+              "status": "Step 5",
+              "details": {
+               "stepDate": "17 December 2012"
+              },
+              "fileGroups": [
+               {
+                "title": "Guideline",
+                "weight": 0,
+                "files": [
+                 {
+                  "title": "E2C(R2) Guideline",
+                  "uri": "https://database.ich.org/sites/default/files/E2C_R2_Guideline.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               },
+               {
+                "title": "Endorsed Documents",
+                "weight": 1,
+                "files": [
+                 {
+                  "title": "E2C(R2) Concept Paper",
+                  "uri": "https://database.ich.org/sites/default/files/E2C_R2_Concept_Paper.pdf",
+                  "mimetype": "application/pdf"
+                 },
+                 {
+                  "title": "E2C(R2) Business Plan",
+                  "uri": "https://database.ich.org/sites/default/files/E2C_R2_Business_Plan_0.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               },
+               {
+                "title": "WG Presentations / Trainings",
+                "weight": 2,
+                "files": [
+                 {
+                  "title": "E2C(R2) Training Material",
+                  "uri": "https://database.ich.org/sites/default/files/E2C_R2_Training_Material.mp4",
+                  "mimetype": "video/mp4"
+                 }
+                ],
+                "links": []
+               }
+              ]
+             },
+             {
+              "code": "E2F",
+              "title": "Development Safety Update Report",
+              "status": "Step 5",
+              "details": {
+               "stepDate": "17 August 2010"
+              },
+              "fileGroups": [
+               {
+                "title": "Guideline",
+                "weight": 0,
+                "files": [
+                 {
+                  "title": "E2F Guideline",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Guideline.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               },
+               {
+                "title": "Endorsed Documents",
+                "weight": 1,
+                "files": [
+                 {
+                  "title": "E2F Concept Paper",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Concept_Paper.pdf",
+                  "mimetype": "application/pdf"
+                 },
+                 {
+                  "title": "E2F Business Plan",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Business_Plan_0.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               },
+               {
+                "title": "WG Presentations / Trainings",
+                "weight": 2,
+                "files": [
+                 {
+                  "title": "E2F Presentation DSUR",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Presentation_DSUR.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               },
+               {
+                "title": "Deliverables",
+                "weight": 3,
+                "files": [
+                 {
+                  "title": "E2F DSUR Examples Non-Commercial Sponsors",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Example_Non_Commercial_DSUR.pdf",
+                  "mimetype": "application/pdf"
+                 },
+                 {
+                  "title": "E2F DSUR Examples Commercial Sponsors",
+                  "uri": "https://database.ich.org/sites/default/files/E2F_Example_Commercial_DSUR.pdf",
+                  "mimetype": "application/pdf"
+                 }
+                ],
+                "links": []
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "_meta": {
+  "maxCount": 1
+ }
+}

@@ -65,9 +65,9 @@ Episteme uses a **bimodal** data strategy:
 
 | Source | What it contributes | Rights posture | Access | Induction status |
 |--------|---------------------|----------------|--------|------------------|
-| **MedMCQA** | Exam-style MCQ + rationales | Dataset license (check HF) | HF | **Not started** |
+| **MedMCQA** | Exam-style MCQ + rationales | **Use with caution** (2026-11-09): MIT repo, but the exam questions have rights holders who granted nothing. Not in SFT data | HF | **Not started** |
 | **PubMedQA** | Yes/no/maybe + context | Open research norms / license on release | HF / official | **Not started** |
-| **MedQA / USMLE-style open sets** | Clinical exam reasoning | Per release | HF | Candidate |
+| **MedQA / USMLE-style open sets** | Clinical exam reasoning | **Use with caution** (2026-11-09): MIT repo, but the exam questions have rights holders who granted nothing. Not in SFT data | HF | Candidate |
 | **mmlu / medical subsets / MedGENIE-style** | Broad + medical QA | Per release | HF | Candidate |
 | **Medprompt-style CoT/ToT collections** | Explicit reasoning chains | Depends on underlying items | Constructed | Build only from Stream-1-clean sources |
 | **BioASQ** (where redistributable) | Biomedical QA | Task licenses | BioASQ | Candidate |
@@ -113,6 +113,8 @@ Episteme uses a **bimodal** data strategy:
 | **Drugs@FDA / Orange Book** | Approval & exclusivity | Periodic | FDA | Structured RAG |
 | **EMA open data** (selected) | EU assessment / shortages where open | Varies | EMA | Jurisdiction-specific |
 | **FAERS** (public) | Adverse event reports | Quarterly / openFDA | FDA | RAG analytics |
+| **FDA Purple Book** | Licensed biological products, biosimilar and interchangeable status, exclusivity | Monthly CSV and XLSX files, each with the changes and a full snapshot | `purplebooksearch.fda.gov/downloads` | Candidate. **Use freely:** FDA's own download; FDA states its web content is public domain unless noted (read 2026-11-09). The downloads page itself states no terms |
+| **FDA AdComm transcripts** | Advisory committee meeting transcripts | Per meeting | FDA | Candidate. **Use with caution:** contract court reporters wrote the text; rights not confirmed. RAG with citation only |
 
 #### 2.2.1 Regulatory sources wired for the first cut (2026-11)
 
@@ -127,6 +129,9 @@ Design: `superpowers/specs/2026-11-02-regulatory-sources-design.md`. Stages and 
 | **FAERS** (`openfda_faers`): `drug/event` zips (about 12,000 reports each) | Adverse event reports from 2004: reports, suspect and concomitant drugs with batch numbers, reaction terms; signal tables by quarter | `episteme.faers_*` (typed tables, by generation) | Quarterly in the zips; a refresh is a full reissue, done by hand (runbook section 5.12) | US government data. Reaction terms are MedDRA preferred terms published in FDA's public data. **Open (owner):** operator rights to expose the terms to subscribing tenants, before serving |
 | **FDA substance data** (`other/substance` of openFDA, loaded by `load_substance`) | UNII, every synonym, RxCUI and ATC codes, active-moiety links: the anchor of the US/EU bridge | `episteme.substance`, `substance_xref` | When FDA republishes (one file per run) | US government data (FDA substance registration); treated as public domain |
 | **AACT** (`aact`): the ClinicalTrials.gov snapshot, one pipe-delimited file per table in one zip | Studies, conditions, interventions, design, eligibility, outcomes, results, reported adverse events and references (609,804 studies in the 2026-11-03 release); `intervention_substance` ties each intervention to a substance (`substance_key`) and its active moiety (`moiety_key`) by exact normalised name | One schema per release, `aact_r<YYYYMMDD>`, with views in schema `aact` over the latest release; a row in `episteme.reg_release` (`dataset = 'aact'`). No `episteme.articles` rows | One full snapshot per release; the loader takes the newest zip. The monthly and daily dumps of CTTI are the source of the zips | ClinicalTrials.gov records are public US government data. The project treats them as public domain. Sponsor-supplied documents are not loaded. Lookup data: AACT writes no `articles` row, so it cannot reach the training corpus |
+| **ICH guideline files** (`ich`): E2 guidelines, the E2B(R3) package page, and the efficacy and quality guideline pages | The official ICH texts, Q&As, implementation guide packages and information papers: E2 safety reporting (E2A to E2F, E2B(R3)) plus the efficacy and quality guidelines (E and Q series) | Files under `<raw>/ich/` with `_manifest.jsonl`; no database row | On demand (`run_pipeline.sh ich download`); with `--force`, a changed file is kept as a new dated copy | ICH public-licence notice: use, reproduce and adapt with ICH credit, mark every change, do not imply ICH endorsement. Class "use freely, with attribution" (confirmed by the owner 2026-11-09, section 2.7.1). The ICH logo and third-party content are excluded |
+| **MedDRA Points to Consider** (`meddra_ptc`): the English term-selection and data-retrieval documents, the companion document and the best-practices document | The official coding and retrieval guidance for safety rules | Files under `<raw>/meddra_ptc/` with `_manifest.jsonl`; no database row | On demand; the documents follow the March and September MedDRA releases | The documents carry the ICH public-licence notice: use freely with attribution. **MedDRA terminology is licensed and out of scope** (section 2.4); the release notes and guides of each MedDRA version are not fetched |
+| **EMA guidance documents** (`ema_guidance`): a fixed list of 55 documents under `/en/documents/` (GVP modules, PSUR and signal lists, EU ICSR implementation guide, RMP and QRD templates) | The EU text that rules for pharmacovigilance are built from | Files under `<raw>/ema_guidance/` with `_manifest.jsonl`; no database row | On demand, in chunks. EMA answers non-browser clients with HTTP 429, so the stage waits `EPISTEME_EMA_DOC_MIN_INTERVAL_S` (default 60) between requests and stops with exit 3 to resume | EMA legal notice: reuse allowed, commercial and non-commercial, with EMA credited in each copy; third-party content excluded. The SPOR API is out of scope (owner decision 2026-11-09); the owner exports SPOR lists from the web portal later |
 
 Notes:
 
@@ -166,6 +171,8 @@ Notes:
 
 **DME / IME:** Treat as **Stream 2, license-bound** (usually MedDRA-linked), not Stream 1 tokens.
 
+**Rule (2026-11-09).** MedDRA, WHODrug and SNOMED CT are paid subscriptions without sublicensing. They go to Stream 2 only, and only under a deployer's own licence. Episteme holds none of these licences. No training data, rule store or example set may contain their content. Checks may test the shape of a code and its version field only.
+
 ### 2.5 Knowledge-graph & graph-adjacent open sets
 
 | Source | Role | Notes |
@@ -186,6 +193,71 @@ Notes:
 | **CDISC Biomedical Concepts** (COSMoS `export/`, incl. SDTM dataset specializations) | Granular clinical-observation concepts and their SDTM mappings | COSMoS README: code MIT, "documentation and minutes" CC-BY-4.0; **no licence stated for `export/` data** | **Wired as `cdisc_bc`, download-only**; no serializer and no corpus inclusion until CDISC confirms (see `12-source-inventory.md`) |
 | **USDM** (Unified Study Definitions Model, `cdisc-org/DDF-RA`) | Study-definition model, API spec, implementation guide | Same README pattern as COSMoS: code and scripts MIT, "content files like documentation and minutes" CC-BY-4.0; **model files not explicitly covered** | **Wired as `cdisc_usdm`, download-only** (latest release's `Deliverables/`); no serializer and no corpus inclusion until CDISC confirms (see `12-source-inventory.md`) |
 | **SDTM** model and Implementation Guide | Tabulation model and implementation rules | CDISC standard licence: use **within your organization only**, **no derivative works**, no copying/distribution; machine-readable metadata via CDISC Library (membership) | **Stream 2 only**, deployer-licensed, like MedDRA/WHODrug; never in the open training corpus |
+
+### 2.7 Licence classes of sources added 2026-11-09
+
+Every source, every teacher output and the base model carry one class. Design: `superpowers/specs/2026-11-09-sft-and-reference-lookup-design.md` section 8.
+
+| Class | Meaning |
+|-------|---------|
+| Use freely | Commercial training and RAG allowed, with attribution |
+| Use with caution | RAG with citation; out of SFT until the open point is closed |
+| Download-only | No corpus and no training |
+
+The source table below is carried from the spec and was not re-read in this task. Only the items in 2.7.1 and 2.8 were verified on official pages. It is a project ruling, not a legal determination. Confirm each source again before first use.
+
+| Class | Sources |
+|-------|---------|
+| Use freely | FDA Purple Book (US government work; FDA's own download); PDB/RCSB (CC0); Reactome (CC0, except the Functional Interaction network files, which carry KEGG data); Open Targets Platform (CC0; upstream terms per source); SureChEMBL (CC BY 4.0); Gene Ontology (CC BY 4.0); PubMedQA (MIT; contexts under PubMed posture); BioASQ (CC BY 2.5 plus NLM terms; registration by the owner); PARHAF (CC BY; embargoed part excluded); 21 CFR |
+| Use with caution | MedMCQA and MedQA (MIT repos; exam questions whose rights holders granted nothing); FDA AdComm transcripts (written by contract court reporters); IUPHAR/GtoPdb (ODbL plus CC BY-SA); BindingDB (conflicting statements); UCUM (custom licence; fine as a lookup); Semantic Scholar (datasets ODC-BY, API non-commercial, abstracts belong to publishers); CDC (third-party content excluded); FDA Recognized Consensus Standards (list only; standard texts are copyrighted); LibreTexts (per page; only CC BY pages) |
+| Download-only or out | MMedC (CC BY-NC-SA 4.0); WHO publications (CC BY-NC-SA 3.0 IGO; ICD/ICF CC BY-ND); PARCOMED (research-only); MedDRA, WHODrug, SNOMED CT (paid subscription, no sublicensing; Stream 2 only under a deployer's licence); ISO and other standard texts |
+
+#### 2.7.1 Guideline and ICSR standard packages (read 2026-11-09)
+
+Rules from a document may enter the rule store only when its class is "use freely". Keep the ICH credit, mark every adaptation, and do not imply ICH endorsement. The ICH notice excludes third-party content and the ICH logo. **The ICH class is confirmed by the owner (2026-11-09: "ICH is license free as such").** The notice grants use, reproduction, adaptation and modification with credit and has no non-commercial term; it says "under a public license" and names no licence. The owner statement covers the ICH guidelines; the attribution conditions of the notice still apply. The E2C(R2) rule file holds the ICH section titles and clause numbers. The E2B(R3) rule file is generated from the ICH business-rules sheet and carries its data element names and rule wording as published. The `source_docs` of each rule file give the ICH credit.
+
+| Item | Official page read | Key licence words (paraphrase) | Class |
+|------|--------------------|--------------------------------|-------|
+| ICH E2C(R2) PBRER | `database.ich.org/sites/default/files/E2C_R2_Guideline.pdf` (legal notice, front page) | May be used, reproduced, adapted, modified, translated or distributed under a public license; credit ICH; label changes; no sponsor impression | Use freely, with attribution (confirmed by the owner 2026-11-09) |
+| ICH E2B(R3) IG v5.03 (Step 4, 18 July 2025) | `database.ich.org`, ICH E2B(R3) IG PDF (legal notice, page 3) | Same ICH notice. Third-party content inside the IG (for example ISO, MedDRA, UCUM, EDQM) is excluded | Use freely, with attribution (IG text only; confirmed by the owner 2026-11-09) |
+| ICH E2B(R3) XML schema and message files | ICH E2B page: the fetch tool returned no content on 2026-11-09 | ICH material; the owner states ICH is licence-free (2026-11-09) | Use freely, with attribution (owner: ICH licence-free, 2026-11-09) |
+| ICH E6(R3) GCP (Step 4, 16 June 2026) | `database.ich.org`, E6(R3) final consolidated PDF (legal notice, front matter) | Same ICH notice; the ICH logo is excluded | Use freely, with attribution (confirmed by the owner 2026-11-09) |
+| ICH E3 clinical study reports (1995) | `database.ich.org/sites/default/files/E3_Guideline.pdf` | The PDF carries no legal notice. The ICH copyright page returned no content | Use freely, with attribution (changed 2026-11-10 from "use with caution: no notice found"; the owner statement of 2026-11-09 covers all ICH guidelines) |
+| FDA regional E2B(R3) IG (final, Aug 2024, docket FDA-2016-D-1280) | FDA guidance page; `fda.gov/about-fda/about-website/website-policies` | The guidance page states no terms of its own. The class rests on FDA's website policy: web content is public domain unless noted. ICH text inside keeps the ICH notice | Use freely (FDA text; class rests on FDA's website policy); third-party text excluded |
+| EU ICSR IG (EMA/51938/2013, Rev 2) | `ema.europa.eu/en/about-us/legal-notice` | EMA legal notice: reuse in whole or in part, commercial and non-commercial, with EMA credit in each copy; third-party content excluded. The guide itself was not read (HTTP 429) | Use with caution: guide not read |
+| HL7 v3 ICSR artefacts (ISO/HL7 27953) | ISO and HL7 catalogue entries (search result only) | An ISO/HL7 standard; the catalogue says reuse needs a fee or licence. HL7's own terms were not read | Download-only (ISO standard text) |
+
+#### 2.7.2 Lookup sources in Stage B examples
+
+A Stage B `tool_draft` or `rule_check` example is built on lookup results, not on corpus rows. Its licence comes from the data: every source named in the provenance of its tool results (alternatives included) must have class `commercial` in the config constant `LOOKUP_SOURCE_SUBSETS` (`src/episteme/config.py`). The corpus exclusion (`corpus_excluded_sources`) does not apply here: it governs raw text in the corpus. A source with class `pending` gives the reject reason `licence_pending`. A source that is not in the table, or has another class, gives the reject reason `licence`. A row whose tool results hold no claim gives `licence`: no source can be verified. Keep this table and the constant in step: there is no licence registry for lookup sources in code yet.
+
+| `Provenance.source` | Class in `LOOKUP_SOURCE_SUBSETS` | Effect on a `tool_draft` or `rule_check` example |
+|---|---|---|
+| `substance` | `commercial` | Allowed |
+| `dailymed` | `pending` | Held (`licence_pending`). **Open (owner):** whether DailyMed facts may appear in tool examples (DailyMed text stays out of the corpus) |
+| `ema_epar` | `pending` | Held (`licence_pending`). No lookup emits it yet. **Open (owner):** whether EPAR facts may appear in tool examples |
+| `aact` | `commercial` | Allowed |
+| `fda_drugsfda` | `commercial` | Allowed |
+| `fda_enforcement` | `commercial` | Allowed |
+| `ema_medicines` | `commercial` | Allowed |
+| `ema_article57` | `commercial` | Allowed |
+| `ema_outside_eu` | `commercial` | Allowed |
+| `ema_referrals` | `commercial` | Allowed |
+| `ema_dhpc` | `commercial` | Allowed |
+| `ema_psusa` | `commercial` | Allowed |
+| `pubmed` | `open_metadata` | Refused (`licence`). **Open (owner):** whether PubMed literature facts (citations from `literature`) may appear in tool examples |
+| `openfda_faers` | `pending` | Held (`licence_pending`). **Open (owner):** rights to the MedDRA reaction terms in FAERS facts (section 2.2.1) |
+
+**`pbrer_skeleton` label.** A `rule_check` example checks a PBRER draft against the rule store. Its input row carries `source = pbrer_skeleton` and `subset = commercial`; the batch refuses a `rule_check` row with any other label. `skeleton()` copies claim lines into section bodies (for example FAERS counts and literature citations), so the row also carries the `tool_results` its skeleton was built from. The batch checks every claim source of those results by the table above, as for a `tool_draft`. A `rule_check` row with no tool results is refused (`licence`).
+
+### 2.8 Model inputs
+
+| Input | Role | Licence evidence (read 2026-11-09) | Class |
+|-------|------|------------------------------------|-------|
+| **Qwen3 (1.7B)** | Base model for the SFT model | Hugging Face model card `huggingface.co/Qwen/Qwen3-1.7B` states `apache-2.0` | Use freely: Apache 2.0. Keep the licence and notices with the weights |
+| **DeepSeek Open Platform API** | Teacher that writes Stage B examples (public data only) | Terms of service section 4.2 (`cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html`): Inputs and Outputs may be used for "training other models (such as model distillation)", subject to law and the Terms | Use freely for outputs under these terms. Each example keeps its teacher name. Open-weight DeepSeek-R1 is not used as teacher |
+
+Only the 1.7B card was read. The 0.6B and 4B cards must be verified before use. Qwen3.5 and the other candidate base models are not verified here. Verify the model card before any of them is used.
 
 ---
 
@@ -259,6 +331,7 @@ Work that **does not need the full 8 TB** — build scripts + **small subset** e
 | `10-data-sources-runbook.md` | How we download/operate sources already implemented |
 | `09-extraction-contract.md` | Schema/ops for literature-like extracts |
 | `12-source-inventory.md` | Live per-source inventory: which sources are wired, at which stages |
+| `13-graphrag-design.md` | SFT model and deterministic reference lookup as built: routing by claim type, lookups, rule store, harness, PBRER v1 |
 | `superpowers/specs/2026-09-02-phase0-data-roadmap.md` | Suggested sequencing; **subordinate** to this catalog |
 
 When a new source is added, update **this file first**, then runbook + extractor.
@@ -275,3 +348,6 @@ When a new source is added, update **this file first**, then runbook + extractor
 | 2026-09-29 | SP7 | CDISC Controlled Terminology wired as `cdisc_ct` (download, serialize, load, per-package retire); §2.6 and backlog rows updated to done |
 | 2026-09-29 | SP8 | USDM wired as `cdisc_usdm` (download-only, latest release's `Deliverables/`); §2.6 and backlog rows updated |
 | 2026-11-03 | Regulatory sources | Added §2.2.1: DailyMed, the EMA feeds and EPARs, openFDA `drug/*`, FAERS and the FDA substance data, with the licence posture and the EMA credit |
+| 2026-11-09 | SFT and reference lookup | Added 2.7 (licence classes of new sources; guideline and ICSR packages with page and date read), 2.8 (model inputs), Purple Book and AdComm rows in 2.2, the licensed-vocabulary rule in 2.4; MedMCQA and MedQA marked use with caution |
+| 2026-11-09 | Reference documents | Three rows in 2.2.1: `ich`, `meddra_ptc`, `ema_guidance` (download-only; files and a manifest, no database row); scope of the MedDRA documents (Points to Consider only) |
+| 2026-11-10 | SFT and reference lookup, as built | ICH class confirmed by the owner (2026-11-09) in 2.2.1 and 2.7.1; ICH E3 moved from use with caution to use freely, with attribution; new 2.7.2 (`LOOKUP_SOURCE_SUBSETS`, the `pbrer_skeleton` label, open owner questions on lookup facts in tool examples); cross-reference to `13-graphrag-design.md` |

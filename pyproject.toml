@@ -66,6 +66,8 @@ where = ["src"]
 "episteme.ops.gate_rules" = ["*.json"]
 "episteme.data.regulatory" = ["*.toml"]
 "episteme.data.aact" = ["*.csv"]
+"episteme.data.reference_docs" = ["*.txt"]
+"episteme.reference.rules" = ["data/*.json"]
 
 [tool.ruff]
 line-length = 100
