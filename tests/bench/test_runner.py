@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pytest
+
 from episteme.bench.pbrer_cases import PbrerCase, write_case
 from episteme.bench.runner import main, score
 from episteme.harness.pbrer import GAP_PREFIX
@@ -172,3 +174,112 @@ def test_skeleton_producer_missing_key_is_resolution_gap():
 
     draft, results = skeleton_producer(Conn(), tenant="t", caller="c")(_case())
     assert any("Coverage gap: substance" in b for b in draft.values())
+
+
+# --- final review I1: the skeleton baseline with real coverage notes ---------------
+
+
+def _realistic_lookup(name, kwargs):
+    from episteme.reference.lookups import FAERS_QUARTER_RULE, LABEL_HISTORY_GAP
+
+    def claim(text, value, source, key):
+        prov = Provenance(source, None, None, key, None)
+        return Claim(text, value, "fetched", prov, 1.0, "b")
+
+    if name == "approval_status":
+        return LookupResult(
+            (claim("approved 2001-02-03", "approved", "fda_drugsfda", "NDA020357"),),
+            Coverage(1, notes=("substance 1 has no name to match",)),
+        )
+    if name == "safety_actions":
+        return LookupResult(
+            (),
+            Coverage(
+                0,
+                missing=("ema_psusa",),
+                notes=(
+                    "fda_enforcement: 37 records with no date not checked",
+                    "ema_dhpc: status field not found",
+                ),
+            ),
+        )
+    if name == "current_label":
+        return LookupResult((), Coverage(0, missing=("dailymed",), notes=(LABEL_HISTORY_GAP,)))
+    if name == "trials":
+        return LookupResult((), Coverage(0, missing=("aact",)))
+    if name == "faers_counts":
+        notes = (FAERS_QUARTER_RULE, "no FAERS data for quarters: 2023Q1, 2023Q2")
+        return LookupResult((), Coverage(0, missing=("faers",), notes=notes))
+    if name == "literature":
+        claims = tuple(
+            claim(
+                f"PMID {30000000 + i} (2021): MeSH Metformin",
+                str(30000000 + i),
+                "pubmed",
+                f"pmid:{30000000 + i}",
+            )
+            for i in range(20)
+        )
+        return LookupResult(claims, Coverage(20, notes=("limited to the 20 newest records",)))
+    raise AssertionError(name)
+
+
+def test_skeleton_with_real_coverage_notes_scores_zero_invented_values():
+    from episteme.harness.pbrer import assemble_facts, skeleton
+
+    case = _case(start=date(2023, 3, 15), end=date(2024, 3, 14))
+    sub = _result("Metformin", "1")
+    facts = assemble_facts(_realistic_lookup, sub, case.start, case.end, tenant="t", caller="c")
+    draft = skeleton(facts)
+    text = "\n".join(draft.values())
+    assert "37 records with no date" in text and "limited to the 20 newest" in text
+    s = score(case, draft, [sub, *facts.sections.values()])
+    assert s["invented_values"] == 0
+
+
+# --- final review I4: the runner connects through the project helpers ---------------
+
+
+def test_runner_connection_is_guarded_autocommit_and_read_only(monkeypatch):
+    from episteme.bench import runner
+
+    seen = {}
+
+    def fake_connect(dsn, **kw):
+        seen.update(dsn=dsn, **kw)
+        return "CONN"
+
+    monkeypatch.setattr(runner, "dsn_from_settings", lambda: "GUARDED-DSN")
+    monkeypatch.setattr(runner.psycopg, "connect", fake_connect)
+
+    class S:
+        db_mode = "restricted"
+        run_id = None
+
+    assert runner.connect(S()) == "CONN"
+    assert seen["dsn"] == "GUARDED-DSN"
+    assert seen["autocommit"] is True
+    assert "default_transaction_read_only=on" in seen["options"]
+    assert seen["application_name"].startswith("episteme:")
+
+
+def test_runner_connection_refused_by_db_mode_guard(monkeypatch, tmp_path):
+    from episteme import config
+    from episteme.bench import runner
+    from episteme.data.db.guard import ProductionDatabaseGuardError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EPISTEME_DB_MODE", "restricted")
+    monkeypatch.setenv("EPISTEME_PRODUCTION_DATABASE", "episteme")
+    monkeypatch.setenv("EPISTEME_DB_TARGET", "primary")
+    monkeypatch.setenv("PGDATABASE", "episteme")
+    monkeypatch.delenv("PGDATABASE_SECONDARY", raising=False)
+    called = []
+    monkeypatch.setattr(runner.psycopg, "connect", lambda *a, **k: called.append(a))
+    config.get_settings.cache_clear()
+    try:
+        with pytest.raises(ProductionDatabaseGuardError):
+            runner.connect(config.get_settings())
+    finally:
+        config.get_settings.cache_clear()
+    assert called == []

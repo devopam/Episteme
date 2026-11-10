@@ -129,7 +129,8 @@ def _claim_line(c: Claim) -> str:
     return f"{c.text} [{', '.join(bits)}]"
 
 
-def _gap_lines(r: LookupResult) -> list[str]:
+def gap_lines(r: LookupResult) -> list[str]:
+    """The coverage gaps and notes of ``r`` as the skeleton writes them."""
     return [GAP_PREFIX + g for g in r.coverage.missing] + [
         NOTE_PREFIX + n for n in r.coverage.notes
     ]
@@ -147,7 +148,7 @@ def _body(section_id: str, mah_data: bool, result: LookupResult | None) -> str:
         return MAH_MARKER
     if result is None:
         return PROSE_BODY if section_id in PROSE_SECTIONS else NO_SOURCE_BODY
-    lines = [_claim_line(c) for c in result.claims] + _gap_lines(result)
+    lines = [_claim_line(c) for c in result.claims] + gap_lines(result)
     if "faers_counts" in SECTION_SOURCES.get(section_id, ()):
         lines.insert(0, FAERS_LABEL)
     return "\n".join(lines) if lines else GAP_PREFIX + "no matching records"

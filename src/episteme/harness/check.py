@@ -7,16 +7,20 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import date
 from typing import Literal
 
-from episteme.config import DEFAULT_HARNESS_MAX_CANDIDATES
+from episteme.config import get_settings
 from episteme.reference.claims import Claim, LookupResult
 
 MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
 _MONTH_NO = {m: i for i, m in enumerate(MONTHS.split("|"), 1)}
 # Order matters: an identifier match hides its digits from the later patterns.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("id", re.compile(r"EMEA/H/C/PSUSA/\d+/\d+")),
+    # The EMEA/H/C/ prefix is optional: EMA writes it only for centrally authorised products.
+    ("psusa", re.compile(r"(?:\bEMEA/H/C/)?\bPSUSA/(\d+)/(\d+)\b")),
     ("id", re.compile(r"\bNCT\d{8}\b")),
     ("iso", re.compile(r"\b\d{4}-\d{2}-\d{2}\b")),
+    ("ymd", re.compile(r"(?<![\w/])(\d{4})/(\d{1,2})/(\d{1,2})(?![\w/])")),
+    # DD/MM/YYYY or MM/DD/YYYY: the order is not known, so both readings count.
+    ("dmy", re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{4})(?![\w/])")),
     ("long", re.compile(rf"\b(\d{{1,2}}) ({MONTHS}) (\d{{4}})\b")),
     ("ndc", re.compile(r"\b\d{4,5}-\d{3,4}(?:-\d{1,2})?\b")),
     ("pmid", re.compile(r"\bPMID:?\s*(\d+)\b", re.IGNORECASE)),
@@ -45,7 +49,12 @@ def _claims(results: list[LookupResult]) -> Iterator[Claim]:
 
 
 def _haystack(results: list[LookupResult]) -> str:
+    """Claim values, texts, record keys and release ids, and the coverage notes and
+    missing datasets of every result (the skeleton copies them into the draft)."""
     parts: list[str] = []
+    for r in results:
+        parts.extend(r.coverage.notes)
+        parts.extend(r.coverage.missing)
     for c in _claims(results):
         parts.extend(
             (c.value or "", c.text, c.provenance.record_key or "", c.provenance.release or "")
@@ -59,8 +68,31 @@ def _is_year_range(text: str) -> bool:
     return len(left) == len(right) == 4 and left[:2] in ("19", "20") and right[:2] in ("19", "20")
 
 
+def _date_or_none(y: int, m: int, d: int) -> date | None:
+    try:
+        return date(y, m, d)
+    except ValueError:
+        return None
+
+
 def _key(kind: str, m: re.Match[str]) -> _Key:
-    """Canonical form: dates compare by value, every other token as written."""
+    """Canonical form: dates compare by value, a PSUSA number by its two parts, every
+    other token as written. A slash date with day and month in unknown order gives
+    ``("dates", readings)``: it is stated when one of its readings is stated."""
+    if kind == "psusa":
+        return ("psusa", (m.group(1), m.group(2)))
+    if kind == "ymd":
+        y, mo, d = (int(g) for g in m.groups())
+        found = _date_or_none(y, mo, d)
+        return ("date", found) if found else ("raw", m.group(0))
+    if kind == "dmy":
+        a, b, y = (int(g) for g in m.groups())
+        readings = frozenset(x for x in (_date_or_none(y, a, b), _date_or_none(y, b, a)) if x)
+        if not readings:
+            return ("raw", m.group(0))
+        if len(readings) == 1:
+            return ("date", next(iter(readings)))
+        return ("dates", readings)
     if kind == "iso":
         try:
             return ("date", date.fromisoformat(m.group(0)))
@@ -100,7 +132,10 @@ def _stated(hay: str) -> set[_Key]:
     masked = list(hay)
     for kind, key, _, start, end in _scan(hay):
         if kind != "int":
-            keys.add(key)
+            if key[0] == "dates":
+                keys.update(("date", d) for d in key[1])
+            else:
+                keys.add(key)
             masked[start:end] = " " * (end - start)
     keys.update(("pmid", d) for d in re.findall(r"(?<!\d)\d+(?!\d)", hay))
     for m in _LOOSE_INT.finditer("".join(masked)):
@@ -113,14 +148,20 @@ def _stated(hay: str) -> set[_Key]:
 def check_answer(answer: str, results: list[LookupResult], known: Iterable[str] = ()) -> list[str]:
     """Return the dates, ids and counts in ``answer`` that no claim states.
 
-    Dates compare by value, so ``25 January 2020`` matches ``2020-01-25``. Every other
-    token must match a whole token of a claim value, text, provenance record key or
-    provenance release id. ``known`` lists extra stated values (for example the dates
-    the caller asked for); they count as stated."""
+    Dates compare by value, so ``25 January 2020`` matches ``2020-01-25``. A slash date
+    with day and month in unknown order (``03/04/2020``) matches either reading. A PSUSA
+    number matches with or without its ``EMEA/H/C/`` prefix. Every other token must match
+    a whole token of a claim value, text, provenance record key, provenance release id,
+    or a coverage note or missing dataset of a result. ``known`` lists extra stated
+    values (for example the dates the caller asked for); they count as stated."""
     stated = _stated(_haystack(results) + "\n" + "\n".join(known))
     offending: list[str] = []
     for _, key, written, _, _ in sorted(_scan(answer), key=lambda t: t[3]):
-        if key not in stated and written not in offending:
+        if key[0] == "dates":
+            ok = any(("date", d) in stated for d in key[1])
+        else:
+            ok = key in stated
+        if not ok and written not in offending:
             offending.append(written)
     return offending
 
@@ -144,9 +185,13 @@ def _terms_in(claim: str, terms: tuple[str, ...]) -> bool:
 def route_claim(
     claim: str,
     resolve: Callable[[str], LookupResult],
-    max_candidates: int = DEFAULT_HARNESS_MAX_CANDIDATES,
+    max_candidates: int | None = None,
 ) -> tuple[Literal["lookup", "model"], str | None]:
-    """Send a claim to a lookup when it names a resolvable entity and a trigger term."""
+    """Send a claim to a lookup when it names a resolvable entity and a trigger term.
+
+    ``max_candidates`` defaults to ``Settings.harness_max_candidates``."""
+    if max_candidates is None:
+        max_candidates = get_settings().harness_max_candidates
     function = next((f for f, terms in FIELD_TERMS.items() if _terms_in(claim, terms)), None)
     if function is None:
         return ("model", None)

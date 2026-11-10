@@ -177,3 +177,33 @@ def test_build_messages_sends_pbrer_headings_and_skeleton():
         build_messages("tool_draft", _passage(2, task="t", tool_results=[]))[1]["content"]
     )
     assert "headings" not in plain
+
+
+# --- final review I2: duplicate JSON keys are a format error -------------------------
+
+
+def _pbrer_row() -> dict:
+    return _passage(
+        9,
+        task="Draft the PBRER.",
+        tool_calls=[],
+        tool_results=[],
+        pbrer_region="ich",
+    )
+
+
+def test_duplicate_heading_in_object_answer_is_rejected():
+    from episteme.sft.examples import FormatError
+
+    raw = '{"answer": {"1. Introduction": "a", "1. Introduction": "b"}}'
+    with pytest.raises(FormatError, match="duplicate"):
+        parse_example("tool_draft", _pbrer_row(), raw)
+
+
+def test_duplicate_top_level_key_is_rejected():
+    from episteme.sft.examples import FormatError
+
+    with pytest.raises(FormatError, match="duplicate"):
+        parse_example(
+            "abstain", _passage(3, reason="unverified"), '{"question": "a", "question": "b"}'
+        )

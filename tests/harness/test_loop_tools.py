@@ -192,3 +192,55 @@ def test_tool_schemas_match_real_signatures():
         assert [p.name for p in sig] == list(schema["properties"]), name
         required = {p.name for p in sig if p.default is inspect.Parameter.empty}
         assert required == set(schema["required"]), name
+
+
+# --- final review I4: a database error on a transaction connection rolls back -------
+
+
+class _Conn:
+    def __init__(self, autocommit):
+        self.autocommit = autocommit
+        self.rollbacks = 0
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def _failing(*a, **k):
+    raise psycopg.errors.QueryCanceled("x")
+
+
+@pytest.mark.parametrize(("autocommit", "rollbacks"), [(False, 1), (True, 0)])
+def test_make_call_tool_rolls_back_after_database_error(monkeypatch, autocommit, rollbacks):
+    monkeypatch.setattr(lookups, "trials", _failing)
+    conn = _Conn(autocommit)
+    call = loop.make_call_tool(conn, tenant="t", caller="c")
+    with pytest.raises(psycopg.Error):
+        call("trials", {"substance_key": 1})
+    assert conn.rollbacks == rollbacks
+
+
+def test_make_call_tool_docstring_states_autocommit():
+    assert "autocommit" in (loop.make_call_tool.__doc__ or "")
+
+
+# --- final review M2: max_tool_calls default from settings ---------------------------
+
+
+def test_run_default_max_tool_calls_from_settings(monkeypatch):
+    import dataclasses
+
+    from episteme import config
+
+    s = dataclasses.replace(config.get_settings(), harness_max_tool_calls=1)
+    monkeypatch.setattr(loop, "get_settings", lambda: s)
+    replies = iter([_tool_msg([("trials", {"substance_key": 1})] * 3), _final("ok")])
+    executed = []
+    loop.run(
+        [{"role": "user", "content": "q"}],
+        call_tool=lambda n, a: executed.append(n) or _result(),
+        post=lambda p: next(replies),
+        tenant="t",
+        caller="c",
+    )
+    assert executed == ["trials"]

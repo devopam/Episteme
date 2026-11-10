@@ -15,7 +15,7 @@ from episteme.harness.check import check_answer
 from episteme.harness.loop import TOOLS
 from episteme.harness.pbrer import gate, section_headings
 from episteme.reference.claims import LookupResult
-from episteme.reference.rules import Finding
+from episteme.reference.rules import REGIONS, Finding
 from episteme.sft.examples import (
     ABSTAIN_REASONS,
     Abstain,
@@ -23,10 +23,10 @@ from episteme.sft.examples import (
     GroundedQA,
     RuleCheck,
     ToolDraft,
+    loads_strict,
 )
 
 _TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOLS)
-_REGIONS = ("ich", "eu")
 _QUOTED = re.compile(r'"([^"]*)"|“([^”]*)”')
 
 
@@ -39,9 +39,10 @@ def _nonempty(value: object) -> bool:
 
 
 def _pbrer_draft(answer: str) -> dict[str, str] | None:
-    """The draft in a PBRER answer, or None when it is not a JSON object of strings."""
+    """The draft in a PBRER answer, or None when it is not a JSON object of strings or
+    holds a heading twice."""
     try:
-        draft = json.loads(answer)
+        draft = loads_strict(answer)
     except ValueError:
         return None
     if not isinstance(draft, dict) or not draft:
@@ -76,7 +77,7 @@ def check_format(example: Example) -> list[str]:
         if not all(isinstance(r, LookupResult) for r in example.tool_results):
             problems.append("a tool result is not a lookup result")
         if example.pbrer_region is not None:
-            if example.pbrer_region not in _REGIONS:
+            if example.pbrer_region not in REGIONS:
                 problems.append(f"unknown region {example.pbrer_region!r}")
             if _nonempty(example.answer) and _pbrer_draft(example.answer) is None:
                 problems.append("PBRER answer is not a JSON object of heading to body")
@@ -86,7 +87,7 @@ def check_format(example: Example) -> list[str]:
             problems.append("document is empty")
         elif not all(isinstance(k, str) and isinstance(v, str) for k, v in doc.items()):
             problems.append("document is not heading to body text")
-        if example.region not in _REGIONS:
+        if example.region not in REGIONS:
             problems.append(f"unknown region {example.region!r}")
         for f in example.findings:
             if not isinstance(f, Finding) or not all(

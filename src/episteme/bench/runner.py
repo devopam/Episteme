@@ -15,7 +15,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal
 
+import psycopg
+
 from episteme.bench.pbrer_cases import PbrerCase, load_case
+from episteme.data.db.connection import connect_kwargs, dsn_from_settings
 from episteme.harness.check import check_answer
 from episteme.harness.loop import make_call_tool
 from episteme.harness.pbrer import assemble_facts, gate_parts, section_headings, skeleton
@@ -98,6 +101,19 @@ def skeleton_producer(conn, *, tenant: str, caller: str) -> Produce:
     return produce
 
 
+def connect(settings) -> psycopg.Connection:
+    """A read-only autocommit connection through the project helpers.
+
+    ``dsn_from_settings`` runs the DB-mode guard before any connection attempt, and
+    ``connect_kwargs`` adds the ``application_name`` tag the orphan sweep reads.
+    Autocommit keeps each lookup in its own short statement, so the run holds no
+    transaction that blocks loader partition DDL. ``default_transaction_read_only`` makes
+    every statement read-only, whatever the DB mode."""
+    kwargs = connect_kwargs(settings)
+    kwargs["options"] = "-c default_transaction_read_only=on"
+    return psycopg.connect(dsn_from_settings(), autocommit=True, **kwargs)
+
+
 def main(argv: Sequence[str] | None = None, *, produce: Produce | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cases", type=Path, required=True)
@@ -114,13 +130,10 @@ def main(argv: Sequence[str] | None = None, *, produce: Produce | None = None) -
         if produce is not None:
             scores = {c.case_id: score(c, *produce(c)) for c in reviewed}
         else:
-            import psycopg
-
             from episteme.config import get_settings
 
             settings = get_settings()
-            with psycopg.connect(settings.pg_dsn()) as conn:
-                conn.read_only = True
+            with connect(settings) as conn:
                 run = skeleton_producer(
                     conn,
                     tenant=args.tenant or settings.bench_tenant,

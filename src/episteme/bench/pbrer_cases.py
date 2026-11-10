@@ -18,7 +18,7 @@ from pathlib import Path
 import psycopg
 
 from episteme.harness.loop import make_call_tool
-from episteme.harness.pbrer import GAP_PREFIX, NOTE_PREFIX, assemble_facts
+from episteme.harness.pbrer import assemble_facts, gap_lines
 from episteme.reference._scope import latest_release, relation_exists, substance_scope
 from episteme.reference.claims import LookupResult
 from episteme.reference.resolve import resolve_entity
@@ -127,10 +127,7 @@ def _single_substance(
 
 def _lines(r: LookupResult) -> tuple[list[str], list[str]]:
     facts = [c.text for c in r.claims]
-    gaps = [GAP_PREFIX + g for g in r.coverage.missing] + [
-        NOTE_PREFIX + n for n in r.coverage.notes
-    ]
-    return facts, gaps
+    return facts, gap_lines(r)
 
 
 def build_cases(

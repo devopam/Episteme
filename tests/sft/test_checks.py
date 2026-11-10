@@ -171,3 +171,18 @@ def test_run_checks_reports_first_failing_reason():
     assert run_checks(_qa('"412 patients received the drug" [PMC123]')) == []
     reasons = [r for r, _ in run_checks(_qa('"999 patients" were treated'))]
     assert reasons[0] == "citation"
+
+
+# --- final review I2: a duplicated heading in a string answer is rejected ------------
+
+
+def test_duplicate_heading_in_string_answer_is_rejected():
+    draft = _pbrer_draft()
+    first = next(iter(draft))
+    body = json.dumps(draft, ensure_ascii=False)
+    dup = body[:-1] + ", " + json.dumps(first) + ": " + json.dumps(draft[first]) + "}"
+    ex = _draft_example(dup, pbrer_region="ich")
+    assert ex.answer.count(json.dumps(first)) == 2
+    problems = check_format(ex)
+    assert problems and "not a JSON object" in problems[0]
+    assert run_checks(ex)

@@ -12,13 +12,13 @@ import json
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
+from episteme.harness.loop import RESERVED_ARGS
 from episteme.harness.pbrer import section_headings
 from episteme.reference.claims import LookupResult
 from episteme.reference.rules import MAH_MARKER, Finding
 
 ABSTAIN_REASONS: tuple[str, ...] = (MAH_MARKER, "unverified")
 KINDS: tuple[str, ...] = ("grounded_qa", "tool_draft", "rule_check", "abstain")
-_RESERVED_ARGS = ("tenant", "caller")
 
 _JSON_ONLY = "Reply with one JSON object and nothing else: no prose, no code fence, no comment."
 PROMPTS: dict[str, str] = {
@@ -62,6 +62,23 @@ PROMPTS: dict[str, str] = {
 
 class FormatError(ValueError):
     """The teacher reply is not the JSON object its kind needs."""
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise FormatError(f"duplicate key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def loads_strict(text: str) -> Any:
+    """``json.loads`` that raises ``FormatError`` on a duplicate key in any object.
+
+    Plain ``json.loads`` keeps the last value, so a PBRER draft could hold one heading
+    twice and lose a body without notice."""
+    return json.loads(text, object_pairs_hook=_no_duplicate_keys)
 
 
 class InputError(ValueError):
@@ -110,7 +127,7 @@ class ToolDraft:
                         {
                             k: v
                             for k, v in (c.get("arguments") or {}).items()
-                            if k not in _RESERVED_ARGS
+                            if k not in RESERVED_ARGS
                         }
                     ),
                 },
@@ -275,7 +292,9 @@ def parse_example(kind: str, row: dict, raw: str) -> Example:
     """Build the example from the teacher reply ``raw`` (strict JSON) and the input row.
     Raises ``FormatError`` when the reply is not the JSON object the kind needs."""
     try:
-        obj = json.loads(raw)
+        obj = loads_strict(raw)
+    except FormatError:
+        raise
     except ValueError as exc:
         raise FormatError(f"reply is not JSON: {exc}") from None
     if not isinstance(obj, dict):

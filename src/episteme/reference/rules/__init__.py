@@ -27,6 +27,8 @@ _REGIONS: dict[str, frozenset[str]] = {
     "ich": frozenset({"ich"}),
     "eu": frozenset({"ich", "eu"}),
 }
+# The PBRER regions, in the order of ``_REGIONS``; other modules import this name.
+REGIONS: tuple[str, ...] = tuple(_REGIONS)
 _DOC_BY_REGION = {"ich": "ICH E2C(R2)", "eu": "EU GVP"}
 # A leading "Appendix 2", "5.1", "5.1." or "Section 5.1" before the title.
 _NUMBER = re.compile(

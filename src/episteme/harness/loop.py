@@ -15,6 +15,7 @@ from typing import Any
 
 import psycopg
 
+from episteme.config import get_settings
 from episteme.harness.pbrer import SECTION_SOURCES
 from episteme.reference import literature as _literature
 from episteme.reference import lookups as _lookups
@@ -78,13 +79,14 @@ TOOLS: list[dict] = [
     for n in _NAMES
 ]
 _TOOL_NAMES = frozenset(_NAMES)
-_RESERVED = ("tenant", "caller")
+# The loop sets these on every tool call; a value the model sends is dropped.
+RESERVED_ARGS: tuple[str, ...] = ("tenant", "caller")
 
 
 def _convert(name: str, args: dict) -> list[Any]:
     """Check ``args`` against the schema of ``name``; return values in call order."""
     spec = _PARAMS[name]
-    args = {k: v for k, v in args.items() if k not in _RESERVED}
+    args = {k: v for k, v in args.items() if k not in RESERVED_ARGS}
     if extra := set(args) - set(spec):
         raise TypeError(f"unexpected arguments: {sorted(extra)}")
     values: list[Any] = []
@@ -105,12 +107,25 @@ def _convert(name: str, args: dict) -> list[Any]:
     return values
 
 
+def _rollback(conn: psycopg.Connection) -> None:
+    """End the failed transaction of a non-autocommit ``conn``; otherwise every later
+    statement fails with InFailedSqlTransaction."""
+    if not getattr(conn, "autocommit", True):
+        conn.rollback()
+
+
 def make_call_tool(
     conn: psycopg.Connection, *, tenant: str, caller: str
 ) -> Callable[[str, dict], LookupResult]:
     """Build the ``call_tool`` for ``run``: check and convert the arguments, add the
-    audit identity and call the real function. Bad arguments raise KeyError (missing),
-    TypeError (unknown) or ValueError (bad value)."""
+    audit identity and call the real function. Bad arguments raise ToolArgumentError
+    (from KeyError, TypeError or ValueError).
+
+    ``conn`` must be an autocommit connection (read-only by preference). Each lookup then
+    runs in its own short statement, so a long harness or bench run holds no transaction
+    that blocks loader partition DDL. On a connection that is not autocommit, a
+    ``psycopg.Error`` from a lookup rolls the transaction back before it propagates, so
+    ``run`` can send the error to the model and the next tool call still works."""
 
     def call(name: str, args: dict) -> LookupResult:
         try:
@@ -119,11 +134,19 @@ def make_call_tool(
             raise ToolArgumentError(type(exc).__name__) from exc
         # Outside the try: an error in the lookup itself is a bug and must propagate.
         if name == "resolve_entity":
-            return _resolve.resolve_entity(
-                conn, values[0], id_type=values[1], tenant=tenant, caller=caller
-            )
+            try:
+                return _resolve.resolve_entity(
+                    conn, values[0], id_type=values[1], tenant=tenant, caller=caller
+                )
+            except psycopg.Error:
+                _rollback(conn)
+                raise
         module = _literature if name == "literature" else _lookups
-        return getattr(module, name)(conn, *values, tenant=tenant, caller=caller)
+        try:
+            return getattr(module, name)(conn, *values, tenant=tenant, caller=caller)
+        except psycopg.Error:
+            _rollback(conn)
+            raise
 
     return call
 
@@ -149,7 +172,7 @@ def run(
     *,
     call_tool: Callable[[str, dict], LookupResult],
     post: Callable[[dict], dict] = _default_post,
-    max_tool_calls: int,
+    max_tool_calls: int | None = None,
     tenant: str,
     caller: str,
 ) -> tuple[str, list[LookupResult]]:
@@ -158,7 +181,10 @@ def run(
     Each tool call counts toward ``max_tool_calls``, an unknown tool included. When the
     budget is spent the loop asks once more with no tools and returns that answer.
     Only ToolArgumentError and psycopg.Error go back to the model, as a fixed text that
-    names the tool; any other exception propagates."""
+    names the tool; any other exception propagates. ``max_tool_calls`` defaults to
+    ``Settings.harness_max_tool_calls``."""
+    if max_tool_calls is None:
+        max_tool_calls = get_settings().harness_max_tool_calls
     msgs = list(messages)
     results: list[LookupResult] = []
     used = 0
@@ -191,7 +217,7 @@ def run(
                     _tool_message(call["id"], f"error: arguments of {name} are not valid JSON")
                 )
                 continue
-            args = {k: v for k, v in args.items() if k not in _RESERVED}
+            args = {k: v for k, v in args.items() if k not in RESERVED_ARGS}
             args.update(tenant=tenant, caller=caller)
             try:
                 result = call_tool(name, args)
