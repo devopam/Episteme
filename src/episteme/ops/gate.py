@@ -147,6 +147,7 @@ _KNOWN_KEYS = {
     "min_xref_coverage_pct",
     "min_counts",
     "max_empty_tables",
+    "max_upstream_empty_tables",
     "studies_equal_distinct_nct_id",
     "max_orphan_share_pct",
 }
@@ -259,6 +260,7 @@ _SIMPLE = {
     "max_orphan_bodies": (_max_rule, "orphan_bodies"),
     "max_peak_rss_mb": (_max_rule, "peak_rss_mb"),
     "max_empty_tables": (_max_rule, "empty_tables"),
+    "max_upstream_empty_tables": (_max_rule, "upstream_empty_table_count"),
     "max_orphan_share_pct": (_max_rule, "orphan_share_pct_max"),
 }
 _PER_KEY = {

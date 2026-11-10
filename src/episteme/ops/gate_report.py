@@ -17,7 +17,7 @@ must reach. A measure that cannot be computed is None (or absent): its rule then
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -507,7 +507,7 @@ def section_measures(with_sections: int | None, without_sections: int | None) ->
     }
 
 
-def aact_summary_measures(summary: dict | None) -> dict:
+def aact_summary_measures(summary: dict | None, allowed: Sequence[str] | None = None) -> dict:
     """Measures from the summary that ``load_aact`` writes with its ``load_commit`` audit row:
     the tables with rows and without, the orphan ``nct_id`` share (percent) per table and its
     largest value (a measure only when every table but ``studies`` is in ``orphans`` or in
@@ -519,6 +519,8 @@ def aact_summary_measures(summary: dict | None) -> dict:
         "tables_with_rows": None,
         "empty_tables": None,
         "upstream_empty_tables": None,
+        "upstream_empty_unlisted": None,
+        "upstream_empty_table_count": None,
         "tables_with_upstream_data": None,
         "orphan_share_pct": None,
         "orphan_share_pct_max": None,
@@ -532,7 +534,17 @@ def aact_summary_measures(summary: dict | None) -> dict:
     upstream_empty = sorted(set(summary.get("upstream_empty_tables") or []) & set(tables))
     out["tables_with_rows"] = sum(1 for n in tables.values() if n)
     out["upstream_empty_tables"] = upstream_empty
-    out["empty_tables"] = sum(1 for t, n in tables.items() if not n and t not in upstream_empty)
+    if allowed is None:
+        from episteme.config import get_settings
+
+        allowed = get_settings().aact_may_be_empty_tables
+    # An upstream-empty table outside the allowlist counts as empty: the gate fails it.
+    unlisted = [t for t in upstream_empty if t not in allowed]
+    out["upstream_empty_unlisted"] = unlisted
+    out["upstream_empty_table_count"] = len(upstream_empty)
+    out["empty_tables"] = sum(
+        1 for t, n in tables.items() if not n and (t not in upstream_empty or t in unlisted)
+    )
     out["tables_with_upstream_data"] = len(tables) - len(upstream_empty)
     orphans = summary.get("orphans") or {}
     shares = {t: _pct(int(o), int(tables[t])) if tables.get(t) else 0.0 for t, o in orphans.items()}
@@ -592,12 +604,15 @@ def measure_aact(conn: Any, *, raw_dir: Path, run_id: str | None, record: dict) 
     out["release_id"] = release
     out.update(aact_summary_measures(summary))
     out["studies_equal_distinct_nct_id"] = None if studies is None else studies == distinct
-    # The rule floor (49) is the dictionary tables less the three the zip leaves out. A table
-    # that is empty upstream meets it as a table with all its upstream rows; one that lost
-    # its data rows is in ``empty_tables`` and fails ``max_empty_tables``.
+    # The rule floor (49) is the dictionary tables less the three the zip leaves out. An
+    # allowlisted table that is empty upstream meets it; one that lost its data rows, or is
+    # empty upstream and not allowlisted, is in ``empty_tables`` and fails ``max_empty_tables``.
     with_rows = out["tables_with_rows"]
-    satisfied = None if with_rows is None else with_rows + len(out["upstream_empty_tables"])
-    out["counts"] = {"tables_with_rows": satisfied, "studies": studies}
+    listed = [
+        t for t in out["upstream_empty_tables"] or [] if t not in out["upstream_empty_unlisted"]
+    ]
+    satisfied = None if with_rows is None else with_rows + len(listed)
+    out["counts"] = {"tables_with_rows_or_upstream_empty": satisfied, "studies": studies}
     out.update(record_measures(record))
     return out
 

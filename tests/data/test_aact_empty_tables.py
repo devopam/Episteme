@@ -74,6 +74,7 @@ def test_gate_measures_report_upstream_empty_apart_and_floor_holds():
     assert m["empty_tables"] == 0
     assert m["tables_with_rows"] == 49
     assert m["tables_with_upstream_data"] == 49
+    assert m["upstream_empty_table_count"] == 1
 
 
 def test_gate_still_counts_a_table_that_lost_its_rows():
@@ -82,3 +83,66 @@ def test_gate_still_counts_a_table_that_lost_its_rows():
     assert m["empty_tables"] == 1 and m["upstream_empty_tables"] == []
     rules = gate.load_rules("aact")["load"]
     assert rules["max_empty_tables"] == 0
+
+
+def test_a_release_with_no_studies_rows_is_refused():
+    import pytest
+
+    state = _state(studies=0, search_results=0)
+    with pytest.raises(load_aact._Invalid, match="studies has no rows"):
+        load_aact.check_empty(state, ["studies", "search_results"])
+
+
+def test_header_only_search_results_is_accepted_by_the_loader():
+    state = _state(studies=3, search_results=0)
+    load_aact.check_empty(state, ["search_results"])
+
+
+def _summary(upstream_empty: list[str]) -> dict:
+    tables = {f"t{i}": 10 for i in range(47)} | {"studies": 5}
+    tables |= {t: 0 for t in upstream_empty}
+    return {
+        "rows": 5,
+        "tables": tables,
+        "upstream_empty_tables": upstream_empty,
+        "orphans": {},
+        "missing_nct_id": [],
+    }
+
+
+def test_gate_passes_with_only_the_allowlisted_table_empty_upstream():
+    m = gate_report.aact_summary_measures(_summary(["search_results"]))
+    assert m["empty_tables"] == 0 and m["upstream_empty_table_count"] == 1
+    assert m["upstream_empty_unlisted"] == []
+    rules = gate.load_rules("aact")["load"]
+    assert rules["max_upstream_empty_tables"] == 1
+    fails = gate.evaluate(
+        {**m, "counts": {"tables_with_rows_or_upstream_empty": 49, "studies": 5}}, rules
+    )
+    assert not any("empty" in f for f in fails)
+
+
+def test_gate_fails_for_a_header_only_table_that_is_not_allowlisted():
+    m = gate_report.aact_summary_measures(_summary(["outcomes"]))
+    assert m["upstream_empty_unlisted"] == ["outcomes"]
+    assert m["empty_tables"] == 1
+    rules = gate.load_rules("aact")["load"]
+    fails = gate.evaluate(
+        {**m, "counts": {"tables_with_rows_or_upstream_empty": 49, "studies": 5}}, rules
+    )
+    assert any("max_empty_tables" in f for f in fails)
+
+
+def test_gate_fails_when_two_tables_are_empty_upstream():
+    m = gate_report.aact_summary_measures(_summary(["search_results", "outcomes"]))
+    rules = gate.load_rules("aact")["load"]
+    fails = gate.evaluate(
+        {**m, "counts": {"tables_with_rows_or_upstream_empty": 49, "studies": 5}}, rules
+    )
+    assert any("max_upstream_empty_tables" in f for f in fails)
+
+
+def test_the_allowlist_is_a_setting_with_search_results_as_default():
+    from episteme.config import get_settings
+
+    assert get_settings().aact_may_be_empty_tables == ("search_results",)

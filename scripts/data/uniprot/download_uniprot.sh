@@ -61,7 +61,7 @@ urls=()
 for f in "${files[@]}"; do
     u="$BASE/$f"
     # W-4: force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$f"; fi
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$f" "$dest/$f.verified"; fi
     if size_match_skip "$dest/$f" "$u"; then
         log INFO "skip (size-matched): $f"
     else

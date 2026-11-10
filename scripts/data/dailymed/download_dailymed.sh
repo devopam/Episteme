@@ -85,7 +85,7 @@ lines=()
 for h in "${planned[@]}"; do
     base="${h##*/}"
     # W-4: force a re-fetch — but never delete real files during a --dry-run preview
-    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$base"; fi
+    if [ "$FORCE" = "1" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then rm -f "$dest/$base" "$dest/$base.verified"; fi
     if size_match_skip "$dest/$base" "$h"; then
         log INFO "skip (size-matched): $base"
     else

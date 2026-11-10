@@ -96,7 +96,9 @@ def test_runbook_has_an_aact_section_with_the_operator_steps():
         assert phrase in sec, phrase
     # The dispatcher carries --zip, so the gate pass applies: no direct wrapper call.
     assert "load_aact.sh --zip" not in sec
-    rationale = doc(RUNBOOK).split("`tables_with_rows` at least 49")[1][:600]
+    rationale = doc(RUNBOOK).split("`counts.tables_with_rows_or_upstream_empty` at least 49")[1][
+        :600
+    ]
     assert "mesh_headings" in rationale and "never enters the load state" in rationale
     # The steps: a load, the release switch, dropping an old schema, the EPAR counts.
     for title in (

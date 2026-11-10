@@ -187,6 +187,10 @@ DEFAULT_SAMPLE_MIN_SUBSTANCES = 1000
 # The AACT loader refuses a release in which more than this share of a table's rows have an
 # nct_id that is not in studies (AACT has known orphans). Provisional: the first sample sets it.
 DEFAULT_AACT_MAX_ORPHAN_SHARE = 0.05
+# AACT tables that may be header-only in the export (the 2026-11-03 file ships
+# `search_results.txt` so). Any other header-only table counts against the AACT gate
+# (EPISTEME_AACT_MAY_BE_EMPTY_TABLES, comma separated; unset or empty: this default).
+DEFAULT_AACT_MAY_BE_EMPTY_TABLES: tuple[str, ...] = ("search_results",)
 # Sources that never enter the training corpus, whatever their licence subset. The owner's
 # design splits the data: publications train the model; regulatory reference data (labels,
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
@@ -215,6 +219,15 @@ LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
     "openfda_faers": "pending",
 }
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+
+
+def _aact_may_be_empty_tables() -> tuple[str, ...]:
+    """``EPISTEME_AACT_MAY_BE_EMPTY_TABLES``: comma separated table names, lower case,
+    without repeats. Unset or empty: ``DEFAULT_AACT_MAY_BE_EMPTY_TABLES``."""
+    raw = _get("EPISTEME_AACT_MAY_BE_EMPTY_TABLES")
+    if raw is None or not raw.strip():
+        return DEFAULT_AACT_MAY_BE_EMPTY_TABLES
+    return tuple(dict.fromkeys(n.strip().lower() for n in raw.split(",") if n.strip()))
 
 
 def _dailymed_kinds() -> tuple[str, ...]:
@@ -474,6 +487,8 @@ class Settings:
     # Largest share of orphan rows (nct_id not in studies) per AACT table
     # (EPISTEME_AACT_MAX_ORPHAN_SHARE).
     aact_max_orphan_share: float = DEFAULT_AACT_MAX_ORPHAN_SHARE
+    # AACT tables that may be empty upstream (EPISTEME_AACT_MAY_BE_EMPTY_TABLES).
+    aact_may_be_empty_tables: tuple[str, ...] = DEFAULT_AACT_MAY_BE_EMPTY_TABLES
     sample_min_substances: int = DEFAULT_SAMPLE_MIN_SUBSTANCES
     # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
@@ -669,6 +684,7 @@ def get_settings() -> Settings:
         aact_max_orphan_share=_get_non_negative_float_or_default(
             "EPISTEME_AACT_MAX_ORPHAN_SHARE", DEFAULT_AACT_MAX_ORPHAN_SHARE
         ),
+        aact_may_be_empty_tables=_aact_may_be_empty_tables(),
         ema_doc_min_interval_s=_get_positive_int_or_default(
             "EPISTEME_EMA_DOC_MIN_INTERVAL_S", DEFAULT_EMA_DOC_MIN_INTERVAL_S
         ),

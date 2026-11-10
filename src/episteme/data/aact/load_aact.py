@@ -828,6 +828,16 @@ def empty_tables(state: dict[str, dict], upstream_empty: Sequence[str] = ()) -> 
     return sorted(t for t, s in state.items() if not s["rows"] and t not in upstream_empty)
 
 
+def check_empty(state: dict[str, dict], upstream_empty: Sequence[str]) -> None:
+    """``_Invalid`` when ``studies`` has no rows (an empty release is never loaded, whatever
+    the zip holds), or when a table has no loaded row although its member has data rows."""
+    if STUDIES in state and not state[STUDIES]["rows"]:
+        raise _Invalid("studies has no rows: the release is refused")
+    empty = empty_tables(state, upstream_empty)
+    if empty:
+        raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
+
+
 def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> dict:
     """The row checks of spec 4.4; ``_Invalid`` on a breach. Returns ``{"studies": n,
     "orphans": {table: n}, "orphan_shares": {table: share}, "missing_nct_id": [tables]}``;
@@ -835,9 +845,7 @@ def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> 
     if STUDIES not in state:
         raise _Invalid("the zip has no studies table")
     upstream_empty = upstream_empty_tables(ctx.zip_path, state)
-    empty = empty_tables(state, upstream_empty)
-    if empty:
-        raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
+    check_empty(state, upstream_empty)
     cols = _columns(conn, ctx.schema)
     studies = _t(ctx.schema, STUDIES)
     counts: dict[str, tuple[int, int]] = {}

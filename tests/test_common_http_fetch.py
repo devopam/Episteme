@@ -262,7 +262,12 @@ def test_aria2c_session_limits_curl_to_unfinished_files(tmp_path):
 
 
 def _skip_script_env(
-    tmp_path: Path, name: str, content: bytes, dry_run: bool = False, marker: str | None = None
+    tmp_path: Path,
+    name: str,
+    content: bytes,
+    dry_run: bool = False,
+    marker: str | None = None,
+    python: str | None = None,
 ):
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
@@ -292,7 +297,7 @@ def _skip_script_env(
             "LIB": lib.as_posix(),
             "FAKEBIN": fake.as_posix(),
             "F": data.as_posix(),
-            "PYTHON": Path(sys.executable).as_posix(),
+            "PYTHON": python or Path(sys.executable).as_posix(),
         }
     )
     if dry_run:
@@ -331,9 +336,13 @@ def test_size_match_skip_moves_a_damaged_full_size_zip_aside(tmp_path):
     assert len(bad) == 1 and bad[0].read_bytes() == damaged
 
 
-def test_dry_run_does_not_move_a_damaged_zip(tmp_path):
-    out, data = _skip_script_env(tmp_path, "x.zip", _damaged(tmp_path), dry_run=True)
-    assert out == "FETCH" and data.is_file()
+def test_dry_run_never_tests_moves_or_marks_a_zip(tmp_path):
+    # a dry run does not read the file: it reports "would verify" and leaves everything alone
+    damaged = _damaged(tmp_path)
+    out, data = _skip_script_env(tmp_path, "x.zip", damaged, dry_run=True)
+    assert out == "SKIP" and data.read_bytes() == damaged
+    assert not Path(str(data) + ".verified").exists()
+    assert not list(data.parent.glob("_bad_*"))
 
 
 def test_a_non_zip_file_is_not_tested(tmp_path):
@@ -457,3 +466,53 @@ def test_a_zip_that_curl_did_not_finish_is_recorded_once_and_not_quarantined(tmp
     assert not list(dest.glob("_bad_*"))
     failed = (dest / ".failed_files.txt").read_text(encoding="utf-8").splitlines()
     assert len(failed) == 1
+
+
+def _stub(tmp_path: Path, body: str) -> str:
+    stub = tmp_path / "stub_python"
+    stub.write_bytes(("#!/usr/bin/env bash\n" + body + "\n").encode())
+    stub.chmod(0o755)
+    return stub.as_posix()
+
+
+def _has_unzip() -> bool:
+    proc = subprocess.run([_bash(), "-c", "command -v unzip"], capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+def test_without_python_a_damaged_zip_is_quarantined_by_the_unzip_exit_code(tmp_path):
+    # unzip -t exits 2 (CRC error) or 9 (bad zip), not 1: any non-zero exit means damaged
+    if not _has_unzip():
+        pytest.skip("no unzip")
+    damaged = _zero_middle_zip(tmp_path)
+    out, data = _skip_script_env(tmp_path, "x.zip", damaged, python=_stub(tmp_path, "exit 9"))
+    assert out == "FETCH" and not data.exists()
+    assert len(list(data.parent.glob("_bad_*/x.zip.bad"))) == 1
+
+
+def test_without_python_an_intact_zip_is_kept_and_marked(tmp_path):
+    if not _has_unzip():
+        pytest.skip("no unzip")
+    out, data = _skip_script_env(
+        tmp_path, "x.zip", _good_zip(tmp_path), python=_stub(tmp_path, "exit 9")
+    )
+    assert out == "SKIP" and Path(str(data) + ".verified").is_file()
+
+
+def test_a_file_that_changes_during_the_full_test_gets_no_marker(tmp_path):
+    # the stub passes the probe, then changes the mtime of the zip as the "test" runs
+    stub = _stub(tmp_path, 'if [ "$1" = "-c" ]; then exit 0; fi; touch -d 2001-01-01 "$4"; exit 0')
+    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path), python=stub)
+    assert out == "SKIP" and data.is_file()
+    assert not Path(str(data) + ".verified").exists()
+
+
+def test_a_restart_of_an_unfinished_download_removes_the_old_marker(tmp_path):
+    proc, _ = _run(
+        tmp_path,
+        "0",
+        urls=("https://example.invalid/d/f.bin",),
+        precreate={"f.bin": b"old", "f.bin.aria2": b"x", "f.bin.verified": b"3 1 full\n"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not (tmp_path / "out" / "f.bin.verified").exists()

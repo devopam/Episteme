@@ -203,8 +203,13 @@ except Exception:
         case "$rc" in 0) return 0 ;; 3) return 1 ;; esac
     fi
     if command -v unzip >/dev/null 2>&1; then
+        # Any non-zero exit of unzip is "damaged" (1). unzip exit 1 means "warnings only"; it is
+        # treated as damaged on purpose (conservative: the file is fetched again). Exit codes
+        # 2, 9 and others (CRC error, bad zip) are damage. The answer 2 is only for "no tool".
         if [ "$mode" = "full" ]; then unzip -tq "$f" >/dev/null 2>&1; else unzip -l "$f" >/dev/null 2>&1; fi
-        return
+        rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        return 1
     fi
     log WARN "zip_intact: no working python or unzip -- cannot test $f"
     return 2
@@ -214,14 +219,26 @@ _zip_stamp() { # _zip_stamp FILE -> "<bytes> <mtime epoch>" (GNU stat, then BSD 
     stat -c '%s %Y' "$1" 2>/dev/null || stat -f '%z %m' "$1" 2>/dev/null
 }
 
-zip_mark_verified() { # zip_mark_verified FILE — call ONLY after FILE passed `zip_intact FILE full`
+zip_mark_verified() { # zip_mark_verified FILE STAMP — call ONLY after FILE passed `zip_intact FILE full`
+    # STAMP is `_zip_stamp FILE` read BEFORE the test. The marker is written only when the
+    # stamp is still the same after the test: a file that changed during the test is not marked.
     # 2026-11-10: six DailyMed zips were full size with an intact central directory but an
     # unfetched middle (aria2c killed before the .aria2 file was written). The marker records
     # that the full CRC test passed for this exact size and mtime; size_match_skip needs it.
-    local f="$1" stamp
-    stamp="$(_zip_stamp "$f")" || return 1
+    local f="$1" before="$2" now
+    [ -n "$before" ] || return 1
+    now="$(_zip_stamp "$f")" || return 1
+    [ "$now" = "$before" ] || return 1
     printf '%s full
-' "$stamp" > "$f.verified"
+' "$before" > "$f.verified"
+}
+
+zip_verify_full() { # zip_verify_full FILE — full CRC test; marker on a pass. Returns the zip_intact code.
+    local f="$1" before zrc
+    before="$(_zip_stamp "$f")" || before=""
+    zip_intact "$f" full; zrc=$?
+    if [ "$zrc" -eq 0 ]; then zip_mark_verified "$f" "$before" || true; fi
+    return "$zrc"
 }
 
 zip_is_verified() { # zip_is_verified FILE — 0 only if the marker matches the current size and mtime
@@ -259,17 +276,19 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
             # the central directory alone is not proof: only a file with a matching
             # `.verified` marker skips the full CRC test
             zip_is_verified "$local_path" && return 0
+            # a dry run never reads the file (a full CRC test of a large tree takes hours),
+            # moves nothing and writes nothing: it only says what a real run would do
+            if [ "${EPISTEME_DRY_RUN:-0}" = "1" ]; then
+                log INFO "size_match_skip: would verify $local_path (no .verified marker)"
+                return 0
+            fi
             local zrc
-            zip_intact "$local_path" full; zrc=$?
+            zip_verify_full "$local_path"; zrc=$?
             if [ "$zrc" -eq 1 ]; then
-                # a dry run moves nothing: it only says that the file would be fetched
-                [ "${EPISTEME_DRY_RUN:-0}" = "1" ] || quarantine_bad "$local_path"
+                quarantine_bad "$local_path"
                 return 1
             fi
-            # a dry run writes nothing; exit 2 (no tool) accepts the file without a marker
-            if [ "$zrc" -eq 0 ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
-                zip_mark_verified "$local_path" || true
-            fi
+            # exit 2 (no tool) accepts the file without a marker
             ;;
     esac
     return 0
@@ -399,13 +418,10 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         if [ -f "$failed_file" ] && tail -n +"$((failed_before + 1))" "$failed_file" | cut -f1 | grep -qxF "$zurl"; then
             continue
         fi
-        zip_intact "$dest_dir/$zrel" full
-        zrc=$?
+        zip_verify_full "$dest_dir/$zrel"; zrc=$?
         if [ "$zrc" -eq 1 ]; then
             quarantine_bad "$dest_dir/$zrel"
             _hf_record_failed "$dest_dir" "$zurl" "$zrel" "damaged zip"
-        elif [ "$zrc" -eq 0 ]; then
-            zip_mark_verified "$dest_dir/$zrel" || true
         fi
     done
     local failed_now=0
@@ -502,7 +518,7 @@ _curl_fetch_all() { # _curl_fetch_all DEST_DIR LINE... — sequential resumable 
         if [ -e "$out.aria2" ]; then
             # an unfinished aria2c file: its segments can leave holes, so `-C -`
             # (which appends at the file size) would corrupt it — start over
-            rm -f "$out" "$out.aria2"
+            rm -f "$out" "$out.aria2" "$out.verified"
         elif [ -s "$out" ] && size_match_skip "$out" "$url"; then
             continue  # already complete (aria2c removes the control file when done)
         fi

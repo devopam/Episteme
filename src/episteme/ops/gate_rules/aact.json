@@ -3,6 +3,7 @@
     "max_failed_inputs": 0,
     "min_rows": 1,
     "max_empty_tables": 0,
+    "max_upstream_empty_tables": 1,
     "studies_equal_distinct_nct_id": true,
     "max_orphan_share_pct": 5.0,
     "min_xref_coverage_pct": {
@@ -10,7 +11,7 @@
     },
     "max_peak_rss_mb": 2048,
     "min_counts": {
-      "tables_with_rows": 49,
+      "tables_with_rows_or_upstream_empty": 49,
       "studies": 1
     }
   }
