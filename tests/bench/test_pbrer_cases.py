@@ -47,3 +47,19 @@ def test_unreviewed_by_default():
 )
 def test_interval_is_twelve_months_before_event(event, start, end):
     assert interval_for(event) == (start, end)
+
+
+def test_case_id_is_hash_of_record_key():
+    import hashlib
+
+    from episteme.bench.pbrer_cases import case_id_for
+
+    key = "https://example.invalid/a/very/long/psusa"
+    assert case_id_for(key) == "psusa-" + hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def test_write_case_refuses_different_overwrite(tmp_path):
+    write_case(_case(), tmp_path)
+    write_case(_case(), tmp_path)  # same content: no-op
+    with pytest.raises(FileExistsError):
+        write_case(_case(substance_name="Other"), tmp_path)

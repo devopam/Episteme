@@ -140,6 +140,8 @@ DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
 DEFAULT_HARNESS_MAX_TOOL_CALLS = 24
 DEFAULT_HARNESS_MAX_CANDIDATES = 8
 DEFAULT_HARNESS_REQUEST_TIMEOUT_S = 300
+DEFAULT_BENCH_TENANT = "bench"
+DEFAULT_BENCH_CALLER = "bench-runner"
 # Seconds the FAERS loader waits for the lock of its generation swap, and of the drops
 # after it. New readers queue behind the waiting lock, so the wait is short; a failed run
 # keeps the built generation, and a re-run goes straight to the swap.
@@ -463,6 +465,8 @@ class Settings:
     harness_max_tool_calls: int = DEFAULT_HARNESS_MAX_TOOL_CALLS
     harness_max_candidates: int = DEFAULT_HARNESS_MAX_CANDIDATES
     harness_request_timeout_s: int = DEFAULT_HARNESS_REQUEST_TIMEOUT_S
+    bench_tenant: str = DEFAULT_BENCH_TENANT
+    bench_caller: str = DEFAULT_BENCH_CALLER
 
     def pg_dsn(self) -> str:
         return (
@@ -667,6 +671,8 @@ def get_settings() -> Settings:
         harness_request_timeout_s=_get_positive_int_or_default(
             "EPISTEME_HARNESS_REQUEST_TIMEOUT_S", DEFAULT_HARNESS_REQUEST_TIMEOUT_S
         ),
+        bench_tenant=_get("EPISTEME_BENCH_TENANT") or DEFAULT_BENCH_TENANT,
+        bench_caller=_get("EPISTEME_BENCH_CALLER") or DEFAULT_BENCH_CALLER,
     )
 
 

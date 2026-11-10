@@ -7,9 +7,10 @@ gaps the Task 4 lookups return for its substance in the 12 months before the rec
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,8 +29,8 @@ DATASET = "ema_psusa"
 _RECORDS_SQL = """
 SELECT record_key, substance_names, event_date
 FROM episteme.reg_record
-WHERE dataset = %(ds)s AND release_id = %(rel)s AND event_date IS NOT NULL
-ORDER BY event_date DESC, record_key
+WHERE dataset = %(ds)s AND release_id = %(rel)s
+ORDER BY event_date DESC NULLS LAST, record_key
 """
 
 
@@ -66,13 +67,16 @@ class PbrerCase:
 
 
 def write_case(case: PbrerCase, directory: Path) -> Path:
-    """Write ``<case_id>.json`` with sorted keys and return its path."""
+    """Write ``<case_id>.json`` with sorted keys and return its path. An existing file
+    with the same content is left as it is; one with different content raises."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{case.case_id}.json"
-    path.write_text(
-        json.dumps(case.to_json(), indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(case.to_json(), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    if path.exists():
+        if path.read_bytes() == text.encode("utf-8"):
+            return path
+        raise FileExistsError(f"{path} exists with different content; not overwritten")
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
@@ -92,25 +96,33 @@ def interval_for(event_date: date) -> tuple[date, date]:
     return start, event_date - timedelta(days=1)
 
 
-def _slug(record_key: str) -> str:
-    return "psusa-" + re.sub(r"[^A-Za-z0-9]+", "-", record_key).strip("-")
+def case_id_for(record_key: str) -> str:
+    """``psusa-`` plus the first 12 hex digits of the SHA-256 of the record key."""
+    return "psusa-" + hashlib.sha256(record_key.encode("utf-8")).hexdigest()[:12]
 
 
-def _single_substance(conn, names, *, tenant: str, caller: str) -> LookupResult | None:
-    """The ``resolve_entity`` result when every name resolves and all names lead to one
-    moiety family; otherwise ``None`` (none, ambiguous or several substances)."""
+def _single_substance(
+    conn, names, *, tenant: str, caller: str
+) -> tuple[LookupResult | None, str | None]:
+    """``(result, None)`` when every name resolves and all names lead to one moiety
+    family; otherwise ``(None, reason)`` with reason ``no_names``, ``unresolved`` or
+    ``several_moieties``."""
     first: LookupResult | None = None
     moieties: set[int] = set()
-    for name in names or ():
+    if not names:
+        return None, "no_names"
+    for name in names:
         res = resolve_entity(conn, name, tenant=tenant, caller=caller)
         if not res.claims:
-            return None
+            return None, "unresolved"
         head = res.claims[0]
         for c in (head, *head.alternatives):
             scope = substance_scope(conn, int(c.value))
             moieties.add(scope.moiety_key if scope else int(c.value))
         first = first or res
-    return first if first is not None and len(moieties) == 1 else None
+    if len(moieties) != 1:
+        return None, "several_moieties"
+    return first, None
 
 
 def _lines(r: LookupResult) -> tuple[list[str], list[str]]:
@@ -139,13 +151,16 @@ def build_cases(
         records = cur.fetchall()
     call = make_call_tool(conn, tenant=tenant, caller=caller)
     cases: list[PbrerCase] = []
-    skipped = 0
+    skipped: Counter[str] = Counter()
     for record_key, names, event_date in records:
         if len(cases) >= limit:
             break
-        substance = _single_substance(conn, names, tenant=tenant, caller=caller)
+        if event_date is None:
+            skipped["no_event_date"] += 1
+            continue
+        substance, reason = _single_substance(conn, names, tenant=tenant, caller=caller)
         if substance is None:
-            skipped += 1
+            skipped[reason or "unresolved"] += 1
             continue
         start, end = interval_for(event_date)
         facts = assemble_facts(call, substance, start, end, tenant=tenant, caller=caller)
@@ -160,7 +175,7 @@ def build_cases(
         head = substance.claims[0]
         cases.append(
             PbrerCase(
-                case_id=_slug(record_key),
+                case_id=case_id_for(record_key),
                 substance_key=int(head.value),
                 substance_name=head.text,
                 start=start,
@@ -170,5 +185,11 @@ def build_cases(
                 expected_gaps=expected_gaps,
             )
         )
-    log.info("built %d cases from %s %s; skipped %d", len(cases), DATASET, release, skipped)
+    log.info(
+        "built %d cases from %s %s; skipped: %s",
+        len(cases),
+        DATASET,
+        release,
+        ", ".join(f"{k}={skipped[k]}" for k in sorted(skipped)) or "none",
+    )
     return cases

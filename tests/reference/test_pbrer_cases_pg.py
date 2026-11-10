@@ -37,15 +37,17 @@ def test_build_cases_skips_ambiguous_substances(ref_db):
             _psusa("P/3", ["metformin", "aspirin"], date(2024, 3, 13)),
             _psusa("P/4", ["aspirin"], date(2024, 2, 29)),
             _psusa("P/5", ["aspirin"], None),
+            _psusa("P/6", ["metformin", "metformin hydrochloride"], date(2024, 1, 5)),
         ],
         latest=True,
     )
     cases = build_cases(ref_db, 10, **KW)
-    assert [c.psusa_record_key for c in cases] == ["P/1", "P/4"]
+    assert [c.psusa_record_key for c in cases] == ["P/1", "P/4", "P/6"]
     first = cases[0]
     assert first.substance_key == 1
     assert (first.start, first.end) == (date(2023, 3, 15), date(2024, 3, 14))
     assert cases[1].start == date(2023, 2, 28)
+    assert cases[2].substance_key == 1  # salt plus its moiety: one family
     assert first.reviewed_by_owner is False
     assert "2" in first.expected_gaps or first.expected_facts is not None
 

@@ -16,9 +16,10 @@ from pathlib import Path
 
 from episteme.bench.pbrer_cases import PbrerCase, load_case
 from episteme.harness.check import check_answer
-from episteme.harness.pbrer import gate
-from episteme.reference.claims import LookupResult
-from episteme.reference.rules import MAH_MARKER
+from episteme.harness.loop import make_call_tool
+from episteme.harness.pbrer import assemble_facts, skeleton
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+from episteme.reference.rules import Finding, check_mah_markers, check_sections, load_rules
 
 log = logging.getLogger(__name__)
 
@@ -32,38 +33,68 @@ def _share(expected: dict[str, list[str]], text: str) -> float:
     return sum(1 for x in items if x in text) / len(items)
 
 
+def section_findings(draft: dict[str, str]) -> list[Finding]:
+    """Section completeness and order, as in ``episteme.harness.pbrer.gate``."""
+    return check_sections(load_rules("ich_e2c_r2"), list(draft), region="ich")
+
+
+def marker_findings(draft: dict[str, str]) -> list[Finding]:
+    """MAH-marker checks, as in ``episteme.harness.pbrer.gate``."""
+    return check_mah_markers(load_rules("ich_e2c_r2"), draft, strict=True)
+
+
 def score(case: PbrerCase, draft: dict[str, str], results: list[LookupResult]) -> dict:
     """Score one draft.
 
-    ``sections_ok``: the gate has no section finding (missing, duplicate, order).
-    ``mah_markers_ok``: the gate has no MAH-marker finding.
+    ``sections_ok``: no section finding (missing, duplicate, order).
+    ``mah_markers_ok``: no MAH-marker finding. The two lists are the two parts of
+    ``gate``, kept apart by the rule that makes them, not by message text.
     ``invented_values``: count of values from ``check_answer`` over the whole draft text.
+    The case's own interval dates and substance name count as stated values.
     ``facts_found`` / ``gaps_reported``: share of expected lines present in the draft
     (1.0 when none are expected)."""
-    findings = gate(draft)
-    marker = [f for f in findings if MAH_MARKER in f.message]
     text = "\n".join(draft.values())
+    known = [case.start.isoformat(), case.end.isoformat(), case.substance_name]
     return {
         "facts_found": _share(case.expected_facts, text),
         "gaps_reported": _share(case.expected_gaps, text),
-        "invented_values": len(check_answer(text, results)),
-        "mah_markers_ok": not marker,
-        "sections_ok": len(findings) == len(marker),
+        "invented_values": len(check_answer(text, results, known=known)),
+        "mah_markers_ok": not marker_findings(draft),
+        "sections_ok": not section_findings(draft),
     }
 
 
 def skeleton_producer(conn, *, tenant: str, caller: str) -> Produce:
-    from episteme.harness.loop import make_call_tool
-    from episteme.harness.pbrer import assemble_facts, skeleton
-    from episteme.reference.resolve import resolve_entity
-
+    """Deterministic baseline. The substance comes from ``case.substance_key``, not from
+    a new name lookup. A key that no longer exists gives a resolution gap."""
     call = make_call_tool(conn, tenant=tenant, caller=caller)
 
+    def substance_for(case: PbrerCase) -> LookupResult:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT unii, preferred_name FROM episteme.substance WHERE substance_key = %s",
+                (case.substance_key,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return LookupResult(
+                (), Coverage(0, missing=("substance",), notes=("substance not resolved",))
+            )
+        unii, name = row
+        claim = Claim(
+            text=name or case.substance_name,
+            value=str(case.substance_key),
+            method="fetched",
+            provenance=Provenance("substance", None, None, f"unii:{unii}" if unii else None, None),
+            confidence=1.0,
+            confidence_basis="substance_key of the benchmark case",
+        )
+        return LookupResult((claim,), Coverage(1))
+
     def produce(case: PbrerCase):
-        substance = resolve_entity(conn, case.substance_name, tenant=tenant, caller=caller)
+        substance = substance_for(case)
         facts = assemble_facts(call, substance, case.start, case.end, tenant=tenant, caller=caller)
-        results = [substance, *facts.sections.values()]
-        return skeleton(facts), results
+        return skeleton(facts), [substance, *facts.sections.values()]
 
     return produce
 
@@ -72,7 +103,10 @@ def main(argv: Sequence[str] | None = None, *, produce: Produce | None = None) -
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cases", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--tenant", default=None, help="audit tenant (default: config)")
+    ap.add_argument("--caller", default=None, help="audit caller (default: config)")
     args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     cases = [load_case(p) for p in sorted(args.cases.glob("*.json"))]
     reviewed = [c for c in cases if c.reviewed_by_owner]
     skipped = len(cases) - len(reviewed)
@@ -85,15 +119,21 @@ def main(argv: Sequence[str] | None = None, *, produce: Produce | None = None) -
 
             from episteme.config import get_settings
 
-            with psycopg.connect(get_settings().pg_dsn()) as conn:
-                run = skeleton_producer(conn, tenant="bench", caller="bench-runner")
+            settings = get_settings()
+            with psycopg.connect(settings.pg_dsn()) as conn:
+                conn.read_only = True
+                run = skeleton_producer(
+                    conn,
+                    tenant=args.tenant or settings.bench_tenant,
+                    caller=args.caller or settings.bench_caller,
+                )
                 scores = {c.case_id: score(c, *run(c)) for c in reviewed}
     args.out.mkdir(parents=True, exist_ok=True)
     payload = {"cases": scores, "skipped_unreviewed": skipped}
     (args.out / "scores.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    log.info("scored %d cases; skipped %d unreviewed", len(scores), skipped)
+    print(f"{len(scores)} run, {skipped} skipped (unreviewed); wrote {args.out / 'scores.json'}")
     return 0
 
 

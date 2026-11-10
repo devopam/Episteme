@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import date
 from typing import Literal
 
@@ -47,7 +47,9 @@ def _claims(results: list[LookupResult]) -> Iterator[Claim]:
 def _haystack(results: list[LookupResult]) -> str:
     parts: list[str] = []
     for c in _claims(results):
-        parts.extend((c.value or "", c.text, c.provenance.record_key or ""))
+        parts.extend(
+            (c.value or "", c.text, c.provenance.record_key or "", c.provenance.release or "")
+        )
     return "\n".join(parts)
 
 
@@ -108,12 +110,14 @@ def _stated(hay: str) -> set[_Key]:
     return keys
 
 
-def check_answer(answer: str, results: list[LookupResult]) -> list[str]:
+def check_answer(answer: str, results: list[LookupResult], known: Iterable[str] = ()) -> list[str]:
     """Return the dates, ids and counts in ``answer`` that no claim states.
 
     Dates compare by value, so ``25 January 2020`` matches ``2020-01-25``. Every other
-    token must match a whole token of a claim value, text or provenance key."""
-    stated = _stated(_haystack(results))
+    token must match a whole token of a claim value, text, provenance record key or
+    provenance release id. ``known`` lists extra stated values (for example the dates
+    the caller asked for); they count as stated."""
+    stated = _stated(_haystack(results) + "\n" + "\n".join(known))
     offending: list[str] = []
     for _, key, written, _, _ in sorted(_scan(answer), key=lambda t: t[3]):
         if key not in stated and written not in offending:

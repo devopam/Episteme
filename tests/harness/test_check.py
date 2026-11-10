@@ -131,3 +131,17 @@ def test_max_candidates_is_a_parameter():
 
     route_claim("Is aspirin ibuprofen naproxen approved?", resolve, max_candidates=2)
     assert len(seen) == 2
+
+
+def test_check_answer_accepts_release_ids_and_known_values():
+    from datetime import date as _d
+
+    from episteme.harness.check import check_answer as ca
+    from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+
+    c = Claim("x", None, "fetched", Provenance("s", "2026-11-02", None, "k", None), 1.0, "b")
+    r = LookupResult((c,), Coverage(1))
+    assert ca("release 2026-11-02", [r]) == []
+    assert ca("from 2023-03-15", [r]) == ["2023-03-15"]
+    assert ca("from 2023-03-15", [r], known=["2023-03-15"]) == []
+    assert _d
