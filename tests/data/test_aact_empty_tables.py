@@ -162,3 +162,49 @@ def test_the_allowlist_is_a_setting_with_search_results_as_default(monkeypatch):
         assert get_settings().aact_may_be_empty_tables == ("search_results",)
     finally:
         get_settings.cache_clear()
+
+
+class _ScriptedCursor:
+    """Answers the queries of ``measure_aact`` in order: rows of run, release, summary, studies."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchone(self):
+        return self.answers.pop(0)
+
+
+class _ScriptedConn:
+    def __init__(self, summary):
+        self.cur = _ScriptedCursor([(10,), ("20261103",), (summary,), (5, 5)])
+
+    def cursor(self):
+        return self.cur
+
+
+def test_measure_aact_counts_the_allowlisted_upstream_empty_table_as_met():
+    m = gate_report.measure_aact(
+        _ScriptedConn(_summary(["search_results"])), raw_dir=Path("."), run_id="r", record={}
+    )
+    # 47 tables + studies have rows (48); the allowlisted empty table makes 49
+    assert m["tables_with_rows"] == 48
+    assert m["counts"]["tables_with_rows_or_upstream_empty"] == 49
+    rules = gate.load_rules("aact")["load"]
+    assert not any("min_counts" in f for f in gate.evaluate({**m, "peak_rss_mb": 1.0}, rules))
+
+
+def test_measure_aact_does_not_count_an_unlisted_upstream_empty_table():
+    m = gate_report.measure_aact(
+        _ScriptedConn(_summary(["outcomes"])), raw_dir=Path("."), run_id="r", record={}
+    )
+    assert m["counts"]["tables_with_rows_or_upstream_empty"] == 48
+    assert m["empty_tables"] == 1

@@ -43,6 +43,12 @@ def test_a_tree_without_a_works_dir_keeps_the_old_behaviour(tmp_path):
     assert sorted(so.discover_openalex_files(tmp_path)) == sorted([a, b])
 
 
+def test_a_works_dir_inside_a_skipped_subtree_does_not_hide_fixture_shards(tmp_path):
+    a = _touch(tmp_path / "updated_date=2026-06-25" / "part_0000.gz")
+    _touch(tmp_path / "_bad_20261110" / "works" / "part_0000.gz")
+    assert so.discover_openalex_files(tmp_path) == [a]
+
+
 def test_progress_line_is_printed_every_n_files_without_verbose(capsys):
     show = so._progress_printer(total=5, every=2)
     for i in range(5):

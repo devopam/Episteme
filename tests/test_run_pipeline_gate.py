@@ -767,3 +767,14 @@ def test_sample_load_of_another_source_does_not_check_substance(tree):
         tree, "bookshelf", "load", "--sample", CHECK_load="no pass", FEW_SUBSTANCES="1"
     )
     assert not any(c.startswith("subcheck") for c in calls)
+
+
+def test_europepmc_lite_enrich_forwards_force_and_reason():
+    # PR 108: `enrich --force --reason R` must reach the wrapper (the loader's redo switch)
+    text = (Path(__file__).resolve().parents[1] / "scripts/data/run_pipeline.sh").read_text(
+        encoding="utf-8"
+    )
+    line = next(
+        ln for ln in text.splitlines() if "enrich_europepmc_lite.sh" in ln and "run_stage" in ln
+    )
+    assert '"${load_args[@]}"' in line

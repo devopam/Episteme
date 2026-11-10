@@ -51,10 +51,12 @@ sum of ``cur.rowcount`` (rows that changed).
 
 Restartability: with ``processed_root`` and ``raw_dir`` the pass commits per
 tar member (and every ``commit_batches`` batches inside a member) and writes a
-marker per finished member, keyed on ``input_key(tgz, raw_dir)`` plus the
-percent-encoded member name. A re-run skips finished members; ``force``
-redoes them. The UPDATE is idempotent, so a member that stopped half way is
-safe to redo.
+marker per finished member, keyed on ``input_key(tgz, raw_dir)``, the member's
+position in the archive and the percent-encoded member name. The marker also holds
+the target database (name, server address, port) and the run time: a marker made
+against another database does not count. A re-run skips finished members, so after
+new articles were loaded, ``force`` is needed to enrich them from a finished member.
+The UPDATE is idempotent, so a member that stopped half way is safe to redo.
 
 This module never reads ``os.environ`` -- ``enrich_from_lite`` takes a
 ``conn`` directly (the caller, e.g. ``main()``, owns DSN resolution via
@@ -138,10 +140,11 @@ def _iter_records(fileobj: IO[bytes]):
 
 
 def _iter_members(tgz_path: Path):
-    """Yield ``(member name, records)`` for every XML tar member of ``tgz_path``, in
+    """Yield ``(ordinal, member name, records)`` for every XML tar member of ``tgz_path``, in
     streaming mode (``"r|gz"`` -- forward-only, no seeking: the feed is 2.2GB compressed
     / tens of GB uncompressed). The caller must use or drop ``records`` before it asks
     for the next member; a member that is not iterated is skipped by the stream."""
+    ordinal = 0
     with tarfile.open(tgz_path, "r|gz") as tf:
         for member in tf:
             if not member.isfile() or not member.name.endswith(".xml"):
@@ -149,14 +152,16 @@ def _iter_members(tgz_path: Path):
             fileobj = tf.extractfile(member)
             if fileobj is None:
                 continue
-            yield member.name, _iter_records(fileobj)
+            ordinal += 1
+            yield ordinal, member.name, _iter_records(fileobj)
 
 
-def member_key(tgz_path: Path, raw_dir: Path, member: str) -> str:
-    """Marker name of one tar member: ``input_key`` of the tgz plus the percent-encoded
-    member name (``/`` becomes ``%2F`` and ``%`` becomes ``%25``, so two member names
-    never give the same key)."""
-    return f"{checkpoint_markers.input_key(tgz_path, raw_dir)}__member__{quote(member, safe='')}"
+def member_key(tgz_path: Path, raw_dir: Path, member: str, ordinal: int = 0) -> str:
+    """Marker name of one tar member: ``input_key`` of the tgz, the member's position in the
+    archive (two members can share a name) and the percent-encoded member name (``/`` becomes
+    ``%2F`` and ``%`` becomes ``%25``, so two member names never give the same key)."""
+    base = checkpoint_markers.input_key(tgz_path, raw_dir)
+    return f"{base}__member{ordinal}__{quote(member, safe='')}"
 
 
 _UPDATE_SQL = """
@@ -201,15 +206,25 @@ def _fingerprint(tgz_path: Path) -> dict[str, int]:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
-def _member_done(marker: Path, fp: dict[str, int]) -> bool:
-    """A marker counts only for the same file (size and mtime): a new weekly file with
-    the same name is processed again."""
+def _db_identity(conn) -> str:
+    """Name, server address and port of the connected database (no credentials). A
+    marker made against another database must not count."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database(), inet_server_addr()::text, inet_server_port()")
+        row = cur.fetchone()
+    return "|".join(str(v) for v in row) if row else "unknown"
+
+
+def _member_done(marker: Path, fp: dict[str, int], database: str) -> bool:
+    """A marker counts only for the same file (size and mtime) and the same target
+    database: a new weekly file with the same name, or another database, is processed."""
     if not marker.is_file():
         return False
     try:
-        return json.loads(marker.read_text(encoding="utf-8")).get("stats", {}).get("file") == fp
+        stats = json.loads(marker.read_text(encoding="utf-8")).get("stats", {})
     except (OSError, ValueError):
         return False
+    return stats.get("file") == fp and stats.get("database") == database
 
 
 def enrich_from_lite(
@@ -243,16 +258,17 @@ def enrich_from_lite(
     commit_batches = commit_batches or settings.lite_commit_batches
     raw_dir = Path(raw_dir) if raw_dir is not None else tgz_path.parent
     fp = _fingerprint(tgz_path) if processed_root is not None else {}
+    database = _db_identity(conn) if processed_root is not None else ""
 
     records_read = rows_matched = rows_updated = done = skipped = 0
     with conn.cursor() as cur:
-        for name, records in _iter_members(tgz_path):
+        for ordinal, name, records in _iter_members(tgz_path):
             marker = None
             if processed_root is not None:
                 marker = checkpoint_markers.load_success_marker_path(
-                    Path(processed_root), SOURCE, member_key(tgz_path, raw_dir, name)
+                    Path(processed_root), SOURCE, member_key(tgz_path, raw_dir, name, ordinal)
                 )
-                if not force and _member_done(marker, fp):
+                if not force and _member_done(marker, fp, database):
                     skipped += 1
                     continue
             batch: list[dict[str, Any]] = []
@@ -277,7 +293,12 @@ def enrich_from_lite(
                         "source": SOURCE,
                         "member": name,
                         "completed_at": datetime.now(timezone.utc).isoformat(),
-                        "stats": {"file": fp, "records": member_read},
+                        "stats": {
+                            "file": fp,
+                            "database": database,
+                            "run_at": datetime.now(timezone.utc).isoformat(),
+                            "records": member_read,
+                        },
                     },
                 )
             done += 1

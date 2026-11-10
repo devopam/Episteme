@@ -268,6 +268,7 @@ def _skip_script_env(
     dry_run: bool = False,
     marker: str | None = None,
     python: str | None = None,
+    pre: str = "",
 ):
     lib = tmp_path / "scripts" / "data" / "_lib"
     shutil.copytree(LIB, lib)
@@ -283,12 +284,12 @@ def _skip_script_env(
     data.write_bytes(content)
     if marker is not None:
         st = data.stat()
-        mtime = int(st.st_mtime) + (0 if marker == "match" else 100)
+        mtime = st.st_mtime_ns + (0 if marker == "match" else 1)
         size = st.st_size
         Path(str(data) + ".verified").write_bytes(f"{size} {mtime} full\n".encode())
     script = (
         'fb=$(cygpath -u "$FAKEBIN" 2>/dev/null || echo "$FAKEBIN"); '
-        'export PATH="$fb:$PATH"; . "$LIB/common.sh"; '
+        'export PATH="$fb:$PATH"; . "$LIB/common.sh"; ' + pre + " "
         'size_match_skip "$F" https://example.invalid/f && echo SKIP || echo FETCH'
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
@@ -385,7 +386,7 @@ def test_size_skip_writes_a_marker_after_the_full_test_passes(tmp_path):
     marker = Path(str(data) + ".verified")
     st = data.stat()
     assert out == "SKIP" and marker.is_file()
-    assert marker.read_text().split() == [str(st.st_size), str(int(st.st_mtime)), "full"]
+    assert marker.read_text().split() == [str(st.st_size), str(st.st_mtime_ns), "full"]
 
 
 def test_size_skip_trusts_a_matching_marker_without_the_full_test(tmp_path):
@@ -499,12 +500,49 @@ def test_without_python_an_intact_zip_is_kept_and_marked(tmp_path):
     assert out == "SKIP" and Path(str(data) + ".verified").is_file()
 
 
-def test_a_file_that_changes_during_the_full_test_gets_no_marker(tmp_path):
-    # the stub passes the probe, then changes the mtime of the zip as the "test" runs
-    stub = _stub(tmp_path, 'if [ "$1" = "-c" ]; then exit 0; fi; touch -d 2001-01-01 "$4"; exit 0')
-    out, data = _skip_script_env(tmp_path, "x.zip", _good_zip(tmp_path), python=stub)
-    assert out == "SKIP" and data.is_file()
+def test_a_file_that_changes_during_the_full_test_is_not_skipped_or_marked(tmp_path):
+    # the stub passes the probe, answers the stamp call with the real python, and changes
+    # the mtime of the zip while the "full test" runs
+    real = Path(sys.executable).as_posix()
+    body = (
+        'if [ "$1" = "-c" ]; then exit 0; fi; '
+        f'if [ "$5" != "full" ]; then exec "{real}" "$@"; fi; '
+        'touch -d 2001-01-01 "$4"; exit 0'
+    )
+    out, data = _skip_script_env(
+        tmp_path, "x.zip", _good_zip(tmp_path), python=_stub(tmp_path, body)
+    )
+    assert out == "FETCH" and data.is_file()
     assert not Path(str(data) + ".verified").exists()
+
+
+def test_a_zip_that_cannot_be_tested_at_all_is_fetched_not_skipped(tmp_path):
+    # no python and no unzip: zip_intact answers 2 -- the zip is not accepted unverified
+    out, data = _skip_script_env(
+        tmp_path, "x.zip", _good_zip(tmp_path), pre="zip_intact() { return 2; };"
+    )
+    assert out == "FETCH" and data.is_file()
+    assert not Path(str(data) + ".verified").exists()
+
+
+def test_the_stamp_has_nanosecond_mtime(tmp_path):
+    lib = tmp_path / "scripts" / "data" / "_lib"
+    shutil.copytree(LIB, lib)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    f = tmp_path / "f.zip"
+    f.write_bytes(b"abc")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EPISTEME_")}
+    env.update(
+        {"LIB": lib.as_posix(), "F": f.as_posix(), "PYTHON": Path(sys.executable).as_posix()}
+    )
+    proc = subprocess.run(
+        [_bash(), "-c", '. "$LIB/common.sh"; _zip_stamp "$F"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.stdout.split() == ["3", str(f.stat().st_mtime_ns)]
 
 
 def test_a_restart_of_an_unfinished_download_removes_the_old_marker(tmp_path):

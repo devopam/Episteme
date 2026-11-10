@@ -21,8 +21,14 @@ class FakeCursor:
     def __exit__(self, *exc):
         return False
 
+    def fetchone(self):
+        return self.conn.identity
+
     def execute(self, sql, params=None):
+        if "current_database" in sql:
+            return
         self.conn.statements.append((sql, params))
+        self.conn.events.append("update")
         n = (len(params) // 4) if params else 0
         self.rowcount = n if self.conn.update_all else 0
 
@@ -30,6 +36,8 @@ class FakeCursor:
 class FakeConn:
     def __init__(self, update_all=False):
         self.statements: list = []
+        self.events: list[str] = []
+        self.identity = ("episteme", "127.0.0.1", 5432)
         self.commits = 0
         self.update_all = update_all
 
@@ -38,6 +46,7 @@ class FakeConn:
 
     def commit(self):
         self.commits += 1
+        self.events.append("commit")
 
 
 def _rec(pmcid: str, journal="J", year="2020") -> str:
@@ -117,7 +126,16 @@ def test_commit_every_n_batches_inside_a_member(tmp_path, monkeypatch):
         commit_batches=2,
     )
     # 5 batches: commits after batches 2 and 4, then one at the member end
-    assert len(conn.statements) == 5 and conn.commits == 3
+    assert conn.events == [
+        "update",
+        "update",
+        "commit",
+        "update",
+        "update",
+        "commit",
+        "update",
+        "commit",
+    ]
 
 
 def test_marker_keys_do_not_collide(tmp_path):
@@ -128,5 +146,46 @@ def test_marker_keys_do_not_collide(tmp_path):
         mod.member_key(a, raw, "a__b.xml"),
         mod.member_key(a, raw, "a%2Fb.xml"),
         mod.member_key(b, raw, "a/b.xml"),
+        mod.member_key(a, raw, "a/b.xml", 1),
+        mod.member_key(a, raw, "a/b.xml", 2),
     }
-    assert len(keys) == 4
+    assert len(keys) == 6
+
+
+def test_a_marker_for_another_database_does_not_count(tmp_path):
+    tgz = _tgz(tmp_path, {"out/PMC.1.xml": ["PMC1"]})
+    kw = {"processed_root": tmp_path / "proc", "raw_dir": tmp_path / "raw"}
+    mod.enrich_from_lite(tgz, FakeConn(), **kw)
+    other = FakeConn()
+    other.identity = ("episteme_test", "127.0.0.1", 5432)
+    res = mod.enrich_from_lite(tgz, other, **kw)
+    assert res["members_done"] == 1 and len(other.statements) == 1
+    same = FakeConn()
+    same.identity = ("episteme_test", "127.0.0.1", 5432)
+    assert mod.enrich_from_lite(tgz, same, **kw)["members_skipped"] == 1
+
+
+def test_two_tar_members_with_one_name_are_both_processed(tmp_path):
+    path = tmp_path / "raw" / "dup.tgz"
+    path.parent.mkdir(parents=True)
+    with tarfile.open(path, "w:gz") as tf:
+        for pmcid in ("PMC1", "PMC2"):
+            xml = f"<PMCSet>{_rec(pmcid)}</PMCSet>".encode()
+            info = tarfile.TarInfo(name="out/PMC.1.xml")
+            info.size = len(xml)
+            tf.addfile(info, io.BytesIO(xml))
+    kw = {"processed_root": tmp_path / "proc", "raw_dir": tmp_path / "raw"}
+    conn = FakeConn()
+    res = mod.enrich_from_lite(path, conn, **kw)
+    assert res["members_done"] == 2 and len(conn.statements) == 2
+
+
+def test_the_marker_records_the_database_and_the_run_time(tmp_path):
+    import json
+
+    tgz = _tgz(tmp_path, {"out/PMC.1.xml": ["PMC1"]})
+    proc = tmp_path / "proc"
+    mod.enrich_from_lite(tgz, FakeConn(), processed_root=proc, raw_dir=tmp_path / "raw")
+    marker = next(proc.rglob("*.ok"))
+    stats = json.loads(marker.read_text(encoding="utf-8"))["stats"]
+    assert stats["database"] == "episteme|127.0.0.1|5432" and stats["run_at"]

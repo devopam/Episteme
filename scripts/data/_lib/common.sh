@@ -215,8 +215,26 @@ except Exception:
     return 2
 }
 
-_zip_stamp() { # _zip_stamp FILE -> "<bytes> <mtime epoch>" (GNU stat, then BSD stat)
-    stat -c '%s %Y' "$1" 2>/dev/null || stat -f '%z %m' "$1" 2>/dev/null
+_zip_stamp() { # _zip_stamp FILE -> "<bytes> <mtime in ns>" (python os.stat, then GNU stat, then BSD stat)
+    # Nanosecond mtime: a replaced file of the same size and the same whole second must not
+    # match an old marker. Python is used first (no dependence on the stat flavour or on
+    # `stat` being on PATH); GNU `stat -c '%.9Y'` and BSD `stat -f '%z %m'` (seconds only) follow.
+    local py
+    py="$(_zip_python)"
+    if [ -n "$py" ]; then
+        "$py" -I -c '
+import os, sys
+st = os.stat(sys.argv[1])
+print(st.st_size, st.st_mtime_ns)
+' "$1" 2>/dev/null && return 0
+    fi
+    local out
+    out="$(stat -c '%s %.9Y' "$1" 2>/dev/null)" && { printf '%s\n' "${out//./}"; return 0; }
+    stat -f '%z %m' "$1" 2>/dev/null
+}
+
+_file_size() { # _file_size FILE -> byte size without reading the file (stat, then wc -c)
+    stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || wc -c < "$1" | tr -d '[:space:]'
 }
 
 zip_mark_verified() { # zip_mark_verified FILE STAMP — call ONLY after FILE passed `zip_intact FILE full`
@@ -229,15 +247,23 @@ zip_mark_verified() { # zip_mark_verified FILE STAMP — call ONLY after FILE pa
     [ -n "$before" ] || return 1
     now="$(_zip_stamp "$f")" || return 1
     [ "$now" = "$before" ] || return 1
-    printf '%s full
-' "$before" > "$f.verified"
+    printf '%s full\n' "$before" > "$f.verified"
 }
 
-zip_verify_full() { # zip_verify_full FILE — full CRC test; marker on a pass. Returns the zip_intact code.
-    local f="$1" before zrc
+zip_verify_full() { # zip_verify_full FILE — full CRC test; marker on a pass.
+    # Returns the zip_intact code (0 intact, 1 damaged, 2 no tool), or 3 when the file changed
+    # (size or mtime) while the test ran: the result is not valid for the file as it is now.
+    local f="$1" before after zrc
     before="$(_zip_stamp "$f")" || before=""
     zip_intact "$f" full; zrc=$?
-    if [ "$zrc" -eq 0 ]; then zip_mark_verified "$f" "$before" || true; fi
+    if [ "$zrc" -eq 0 ] && [ -n "$before" ]; then
+        after="$(_zip_stamp "$f")" || after=""
+        if [ "$after" != "$before" ]; then
+            log WARN "zip_verify_full: $f changed during the CRC test"
+            return 3
+        fi
+        zip_mark_verified "$f" "$before" || true
+    fi
     return "$zrc"
 }
 
@@ -246,6 +272,7 @@ zip_is_verified() { # zip_is_verified FILE — 0 only if the marker matches the 
     [ -s "$f.verified" ] || return 1
     stamp="$(_zip_stamp "$f")" || return 1
     read -r kind < "$f.verified" || true
+    kind="${kind%$'\r'}"
     [ "$kind" = "$stamp full" ]
 }
 
@@ -268,7 +295,7 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
     local remote_len local_len
     remote_len="$(curl -sSIL --connect-timeout 20 --max-time 90 "$url" 2>/dev/null \
         | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' | tail -n1)"
-    local_len="$(wc -c < "$local_path" | tr -d '[:space:]')"
+    local_len="$(_file_size "$local_path")"
     [ -n "$remote_len" ] && [ "$remote_len" = "$local_len" ] || return 1
     # a size match is not enough for a zip: a damaged file can have the full size
     case "$local_path" in
@@ -288,7 +315,13 @@ size_match_skip() { # size_match_skip LOCAL_PATH URL — exit 0 => caller SKIPS 
                 quarantine_bad "$local_path"
                 return 1
             fi
-            # exit 2 (no tool) accepts the file without a marker
+            # 3: the file changed during the test -- do not skip it, fetch it again
+            [ "$zrc" -eq 3 ] && return 1
+            # 2: no test tool -- an untested zip is not skipped; it is fetched (not fatal)
+            if [ "$zrc" -eq 2 ]; then
+                log WARN "size_match_skip: cannot test $local_path (no python, no unzip) -- fetching it again"
+                return 1
+            fi
             ;;
     esac
     return 0
@@ -422,6 +455,8 @@ http_fetch() { # http_fetch DEST_DIR [URL...]  (URLs also on stdin; line may be 
         if [ "$zrc" -eq 1 ]; then
             quarantine_bad "$dest_dir/$zrel"
             _hf_record_failed "$dest_dir" "$zurl" "$zrel" "damaged zip"
+        elif [ "$zrc" -eq 3 ]; then
+            _hf_record_failed "$dest_dir" "$zurl" "$zrel" "zip changed during the CRC test"
         fi
     done
     local failed_now=0

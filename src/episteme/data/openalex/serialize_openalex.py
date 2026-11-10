@@ -181,6 +181,7 @@ from episteme.data.article_schema import (  # noqa: E402
 )
 from episteme.data.checkpoint_markers import (  # noqa: E402
     discover_input_files,
+    in_skipped_dir,
     input_key,
     is_success,
     mark_failed,
@@ -456,7 +457,7 @@ def discover_openalex_files(raw_dir: Path) -> list[Path]:
     The keys stay relative to ``raw_dir``, so earlier markers remain valid."""
     raw_dir = Path(raw_dir)
     files = discover_input_files(raw_dir, ["part_*.gz", "*.jsonl", "*.jsonl.gz"])
-    if any(d.is_dir() for d in raw_dir.rglob("works")):
+    if any(d.is_dir() and not in_skipped_dir(d / "x", raw_dir) for d in raw_dir.rglob("works")):
         files = [f for f in files if "works" in f.relative_to(raw_dir).parts[:-1]]
     files.sort(key=lambda p: input_key(p, raw_dir))
     return files
