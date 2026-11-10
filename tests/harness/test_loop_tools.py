@@ -84,7 +84,7 @@ def test_psycopg_error_text_does_not_reach_the_model():
 
 def test_argument_error_gets_generic_message_without_exception_text():
     def boom(name, args):
-        raise ValueError("secret detail")
+        raise loop.ToolArgumentError("secret detail")
 
     _, msgs = _run_two_steps(_tool_msg([("trials", {"substance_key": 1})]), boom)
     assert "secret detail" not in msgs[0] and "trials" in msgs[0]
@@ -131,12 +131,36 @@ def test_make_call_tool_converts_dates_and_injects(monkeypatch):
 
 def test_make_call_tool_rejects_bad_arguments():
     call = loop.make_call_tool(None, tenant="t", caller="c")
-    with pytest.raises(KeyError):
+    with pytest.raises(loop.ToolArgumentError):
         call("faers_counts", {"substance_key": 1})
-    with pytest.raises(ValueError):
+    with pytest.raises(loop.ToolArgumentError):
         call("faers_counts", {"substance_key": 1, "start": "bad", "end": "2020-01-01"})
-    with pytest.raises(TypeError):
+    with pytest.raises(loop.ToolArgumentError):
         call("trials", {"substance_key": 1, "extra": 1})
+    with pytest.raises(loop.ToolArgumentError):
+        call("literature", {"substance_key": 1, "topic": 5})
+
+
+def test_lookup_body_errors_propagate_out_of_run(monkeypatch):
+    def broken(conn, key, *, tenant, caller):
+        raise TypeError("bug in the lookup")
+
+    monkeypatch.setattr(lookups, "trials", broken)
+    call = loop.make_call_tool(None, tenant="t", caller="c")
+    with pytest.raises(TypeError):
+        _run_two_steps(_tool_msg([("trials", {"substance_key": 1})]), call)
+
+
+def test_psycopg_error_logs_class_at_warning_and_traceback_at_debug(caplog):
+    def boom(name, args):
+        raise psycopg.OperationalError("host=db.internal")
+
+    with caplog.at_level("DEBUG", logger="episteme.harness.loop"):
+        _run_two_steps(_tool_msg([("trials", {"substance_key": 1})]), boom)
+    warn = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warn and "OperationalError" in warn[0].getMessage()
+    assert "db.internal" not in warn[0].getMessage()
+    assert any(r.levelname == "DEBUG" and r.exc_info for r in caplog.records)
 
 
 def test_literature_topic_is_required_and_nullable(monkeypatch):

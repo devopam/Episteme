@@ -23,6 +23,11 @@ from episteme.reference.claims import LookupResult
 
 log = logging.getLogger(__name__)
 
+
+class ToolArgumentError(Exception):
+    """The model sent arguments that do not fit the tool schema."""
+
+
 _INT = {"type": "integer", "description": "substance_key from resolve_entity"}
 _DATE = {"type": "string", "description": "ISO date YYYY-MM-DD"}
 # Parameter order equals the positional order of the real function, after ``conn``.
@@ -76,6 +81,30 @@ _TOOL_NAMES = frozenset(_NAMES)
 _RESERVED = ("tenant", "caller")
 
 
+def _convert(name: str, args: dict) -> list[Any]:
+    """Check ``args`` against the schema of ``name``; return values in call order."""
+    spec = _PARAMS[name]
+    args = {k: v for k, v in args.items() if k not in _RESERVED}
+    if extra := set(args) - set(spec):
+        raise TypeError(f"unexpected arguments: {sorted(extra)}")
+    values: list[Any] = []
+    for pname, schema in spec.items():
+        if pname not in args:
+            if pname in _OPTIONAL:
+                values.append(None)
+                continue
+            raise KeyError(pname)
+        v = args[pname]
+        if schema is _INT:
+            v = int(v)
+        elif schema is _DATE:
+            v = date.fromisoformat(v)
+        elif pname == "topic" and v is not None and not isinstance(v, str):
+            raise TypeError("topic must be a string or null")
+        values.append(v)
+    return values
+
+
 def make_call_tool(
     conn: psycopg.Connection, *, tenant: str, caller: str
 ) -> Callable[[str, dict], LookupResult]:
@@ -84,23 +113,11 @@ def make_call_tool(
     TypeError (unknown) or ValueError (bad value)."""
 
     def call(name: str, args: dict) -> LookupResult:
-        spec = _PARAMS[name]
-        args = {k: v for k, v in args.items() if k not in _RESERVED}
-        if extra := set(args) - set(spec):
-            raise TypeError(f"unexpected arguments: {sorted(extra)}")
-        values: list[Any] = []
-        for pname, schema in spec.items():
-            if pname not in args:
-                if pname in _OPTIONAL:
-                    values.append(None)
-                    continue
-                raise KeyError(pname)
-            v = args[pname]
-            if schema is _INT:
-                v = int(v)
-            elif schema is _DATE:
-                v = date.fromisoformat(v)
-            values.append(v)
+        try:
+            values = _convert(name, args)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ToolArgumentError(type(exc).__name__) from exc
+        # Outside the try: an error in the lookup itself is a bug and must propagate.
         if name == "resolve_entity":
             return _resolve.resolve_entity(
                 conn, values[0], id_type=values[1], tenant=tenant, caller=caller
@@ -140,7 +157,7 @@ def run(
 
     Each tool call counts toward ``max_tool_calls``, an unknown tool included. When the
     budget is spent the loop asks once more with no tools and returns that answer.
-    Only argument errors and database errors go back to the model, as a fixed text that
+    Only ToolArgumentError and psycopg.Error go back to the model, as a fixed text that
     names the tool; any other exception propagates."""
     msgs = list(messages)
     results: list[LookupResult] = []
@@ -178,12 +195,13 @@ def run(
             args.update(tenant=tenant, caller=caller)
             try:
                 result = call_tool(name, args)
-            except (ValueError, TypeError, KeyError) as exc:
-                log.warning("tool %s: argument error %s", name, type(exc).__name__)
+            except ToolArgumentError as exc:
+                log.warning("tool %s: argument error %s", name, exc)
                 msgs.append(_tool_message(call["id"], f"error: arguments of {name} are invalid"))
                 continue
             except psycopg.Error as exc:
                 log.warning("tool %s: database error %s", name, type(exc).__name__)
+                log.debug("tool %s: database error detail", name, exc_info=True)
                 msgs.append(_tool_message(call["id"], f"error: {name} failed (database error)"))
                 continue
             results.append(result)
