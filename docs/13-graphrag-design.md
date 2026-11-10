@@ -13,7 +13,7 @@ Episteme builds two parts:
 
 **The route follows the type of claim.** A claim goes to the lookup when it names an entity that resolves (substance, product, trial or another keyed record) and asks for a field that the reference store holds (approval status, label section, safety action, trial status, FAERS count). All other claims stay with the model: mechanisms, clinical reasoning, terminology, structure and style. The model never overrides a lookup value. A claim that neither side can settle is returned as `unverified`. No confidence threshold for this class exists yet; it is set later from benchmark measurement.
 
-Exact values (dates, codes, counts, identifiers, citations) come from the lookup, never from the model's weights. DailyMed labels, EPAR text and AACT stay out of the training corpus (`corpus_excluded_sources`); for versioned facts the lookup is the only authority.
+Exact values (dates, codes, counts, identifiers, citations) come from the lookup, never from the model's weights. DailyMed labels and EPAR text stay out of the training corpus (`corpus_excluded_sources`). AACT stays out because it writes no `articles` rows (docs/02 section 2.2.1). For versioned facts the lookup is the only authority.
 
 ## 2. Claim records
 
@@ -86,9 +86,9 @@ The full agent harness is programme project 6. PBRER v1 needs a minimal one (`sr
 
 - **Model server.** Any server with an OpenAI-compatible chat API and tool calls, for example the llama.cpp server with the GGUF. The URL is `EPISTEME_HARNESS_BASE_URL`.
 - **Tool schema.** `TOOLS` in `harness/loop.py`: OpenAI-style function schemas for `resolve_entity` and the six lookups. `tenant` and `caller` are not in the schema: the loop adds them to each call and drops any value the model sends for them. Stage B tool examples use this same schema; their batch manifest records its hash (`TOOLS_SHA256`).
-- **Loop.** `run(messages, call_tool=..., post=..., max_tool_calls=..., tenant=..., caller=...)` chats until the model answers. Each tool call counts toward `max_tool_calls` (`EPISTEME_HARNESS_MAX_TOOL_CALLS`). When the budget is spent, the loop asks once more with no tools. An argument error (`ToolArgumentError`) or a database error goes back to the model as a fixed text that names the tool; any other error stops the run.
-- **Post-answer check.** `check_answer(answer, results)` in `harness/check.py` returns every date (`YYYY-MM-DD`, `DD Month YYYY`), NDC, UNII, NCT id, PMID, EMA PSUSA procedure number and integer count above 9 in the answer that no claim value, claim text, record key or release id states.
-- **Router.** `route_claim(claim, resolve)` returns `("lookup", <function>)` when the claim names an entity that `resolve` matches and holds a trigger term of `FIELD_TERMS`; else `("model", None)`. It makes no model call.
+- **Loop.** `run(messages, call_tool=..., post=..., max_tool_calls=..., tenant=..., caller=...)` chats until the model answers. Each tool call counts toward `max_tool_calls`. When the caller does not give it, `run` reads `EPISTEME_HARNESS_MAX_TOOL_CALLS`. When the budget is spent, the loop asks once more with no tools. An argument error (`ToolArgumentError`) or a database error goes back to the model as a fixed text that names the tool; any other error stops the run. `make_call_tool(conn, ...)` needs an autocommit connection. On a connection that is not autocommit, a database error rolls the transaction back before it goes to the model.
+- **Post-answer check.** `check_answer(answer, results)` in `harness/check.py` returns every date (`YYYY-MM-DD`, `DD Month YYYY`, `YYYY/MM/DD`, `DD/MM/YYYY` or `MM/DD/YYYY`), NDC, UNII, NCT id, PMID, EMA PSUSA procedure number (with or without `EMEA/H/C/`) and integer count above 9 in the answer that no claim value, claim text, record key, release id, coverage note or missing dataset states. A slash date with the day and month in unknown order passes when one of its two readings is stated.
+- **Router.** `route_claim(claim, resolve)` returns `("lookup", <function>)` when the claim names an entity that `resolve` matches and holds a trigger term of `FIELD_TERMS`; else `("model", None)`. It makes no model call. It tries at most `max_candidates` candidate names; when the caller does not give it, it reads `EPISTEME_HARNESS_MAX_CANDIDATES`.
 
 ## 6. Literature retrieval without vectors
 
@@ -140,8 +140,9 @@ Section 6.4 of `10-data-sources-runbook.md` has the operator steps. In short:
 
 ## 10. Evaluation
 
-- **Cases.** `build_cases` in `src/episteme/bench/pbrer_cases.py` builds one case per newest `ema_psusa` record whose substance resolves to exactly one substance. Interval: the 12 months before `event_date`. Expected facts and gaps come from the lookups at build time. Case id: `psusa-` plus the first 12 hex digits of the SHA-256 of the record key. A case counts only after the owner sets `reviewed_by_owner: true`.
+- **Cases.** `build_cases` in `src/episteme/bench/pbrer_cases.py` builds one case per newest `ema_psusa` record whose substance names all resolve and all lead to one moiety family. Several substances of one family (for example a salt and its base) give one case. Interval: the 12 months before `event_date`. Expected facts and gaps come from the lookups at build time. Case id: `psusa-` plus the first 12 hex digits of the SHA-256 of the record key. A case counts only after the owner sets `reviewed_by_owner: true`.
 - **Runner.** `python -m episteme.bench.runner --cases benchmarks/pbrer --out <dir>` scores the reviewed cases and writes `scores.json`: `sections_ok`, `mah_markers_ok`, `invented_values`, `facts_found`, `gaps_reported`.
+- **Connection.** The runner connects through `dsn_from_settings` (the DB-mode guard) and `connect_kwargs` (the `application_name` tag), with autocommit and `default_transaction_read_only=on`.
 - **As built.** The runner's command line scores the deterministic skeleton (no model call). This is the baseline that a model draft has to beat. A producer that drafts with the GGUF through the harness loop is not on the command line yet; code can pass one to `runner.main(produce=...)`.
 - **Release gate (spec section 10).** A model ships only if it beats the base model with the same tools on these measures and has zero invented exact values.
 
