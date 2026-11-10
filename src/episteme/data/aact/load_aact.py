@@ -51,8 +51,9 @@ recorded with the release.
    compare ``left(col, 500)`` to use it (``WHERE left(name, 500) = left(%s, 500)``). Then
    ``ANALYZE``.
 3. **Row checks.** ``studies`` must be in the zip; its rows must equal its distinct
-   ``nct_id``; a table with zero rows fails unless its zip member is header-only (empty upstream,
-   listed as ``upstream_empty_tables``); in each other
+   ``nct_id``; a table with zero rows fails unless its zip member is header-only and the table is in
+   ``Settings.aact_may_be_empty_tables`` (default ``search_results``; listed as
+   ``upstream_empty_tables``); in each other
    table with ``nct_id``, the share of rows whose ``nct_id`` is NULL or not in ``studies``
    must be at most ``EPISTEME_AACT_MAX_ORPHAN_SHARE``.
 4. **Names.** The distinct names of ``interventions.name`` and
@@ -828,12 +829,17 @@ def empty_tables(state: dict[str, dict], upstream_empty: Sequence[str] = ()) -> 
     return sorted(t for t, s in state.items() if not s["rows"] and t not in upstream_empty)
 
 
-def check_empty(state: dict[str, dict], upstream_empty: Sequence[str]) -> None:
+def check_empty(
+    state: dict[str, dict], upstream_empty: Sequence[str], allowed: Sequence[str]
+) -> None:
     """``_Invalid`` when ``studies`` has no rows (an empty release is never loaded, whatever
-    the zip holds), or when a table has no loaded row although its member has data rows."""
+    the zip holds), or when a table has no loaded row and is not an allowed upstream-empty
+    table: only a header-only member of a table in ``allowed``
+    (``Settings.aact_may_be_empty_tables``) may load with no row."""
     if STUDIES in state and not state[STUDIES]["rows"]:
         raise _Invalid("studies has no rows: the release is refused")
-    empty = empty_tables(state, upstream_empty)
+    tolerated = [t for t in upstream_empty if t in allowed]
+    empty = empty_tables(state, tolerated)
     if empty:
         raise _Invalid(f"tables with zero rows: {', '.join(empty)}")
 
@@ -845,7 +851,7 @@ def _check_rows(conn: psycopg.Connection, ctx: _Ctx, state: dict[str, dict]) -> 
     if STUDIES not in state:
         raise _Invalid("the zip has no studies table")
     upstream_empty = upstream_empty_tables(ctx.zip_path, state)
-    check_empty(state, upstream_empty)
+    check_empty(state, upstream_empty, get_settings().aact_may_be_empty_tables)
     cols = _columns(conn, ctx.schema)
     studies = _t(ctx.schema, STUDIES)
     counts: dict[str, tuple[int, int]] = {}

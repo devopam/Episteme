@@ -90,12 +90,23 @@ def test_a_release_with_no_studies_rows_is_refused():
 
     state = _state(studies=0, search_results=0)
     with pytest.raises(load_aact._Invalid, match="studies has no rows"):
-        load_aact.check_empty(state, ["studies", "search_results"])
+        load_aact.check_empty(state, ["studies", "search_results"], ["search_results"])
 
 
 def test_header_only_search_results_is_accepted_by_the_loader():
     state = _state(studies=3, search_results=0)
-    load_aact.check_empty(state, ["search_results"])
+    load_aact.check_empty(state, ["search_results"], ["search_results"])
+
+
+def test_a_header_only_table_outside_the_allowlist_fails_the_load():
+    import pytest
+
+    state = _state(studies=3, conditions=0)
+    with pytest.raises(load_aact._Invalid, match="conditions"):
+        load_aact.check_empty(state, ["conditions"], ["search_results"])
+    # allowed only when the member is really header-only
+    with pytest.raises(load_aact._Invalid, match="search_results"):
+        load_aact.check_empty(_state(studies=3, search_results=0), [], ["search_results"])
 
 
 def _summary(upstream_empty: list[str]) -> dict:
