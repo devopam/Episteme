@@ -446,9 +446,18 @@ def discover_openalex_files(raw_dir: Path) -> list[Path]:
     resolved FULL path, never basename) and sorts by
     :func:`checkpoint_markers.input_key`, the raw-dir-relative identity that
     also keys the ops markers, staging shards, audit rows and each row's
-    ``source_file``."""
+    ``source_file``.
+
+    2026-11-10: ``<raw>/openalex/data/jsonl/`` holds every OpenAlex entity (authors,
+    institutions, sources, ... next to works), all with ``part_NNNN.gz`` files. When a
+    directory named ``works`` exists under ``raw_dir``, only the files under a ``works``
+    path component are returned (``works/deleted_ids.csv.gz`` does not match the
+    patterns). Without a ``works`` directory (fixture trees) every match is returned.
+    The keys stay relative to ``raw_dir``, so earlier markers remain valid."""
     raw_dir = Path(raw_dir)
     files = discover_input_files(raw_dir, ["part_*.gz", "*.jsonl", "*.jsonl.gz"])
+    if any(d.is_dir() for d in raw_dir.rglob("works")):
+        files = [f for f in files if "works" in f.relative_to(raw_dir).parts[:-1]]
     files.sort(key=lambda p: input_key(p, raw_dir))
     return files
 
@@ -579,6 +588,27 @@ def _print_verbose(result: dict[str, Any]) -> None:
         print(f"FAIL {basename}: {result.get('error')}", file=sys.stderr)
 
 
+def _progress_printer(total: int, every: int):
+    """An ``on_result`` callback that prints ``progress <done>/<total>`` to stdout (flushed,
+    so a redirected log shows it) every ``every`` files and at the last file, and every
+    failure at once. Runs in the parent process only."""
+    done = 0
+
+    def show(result: dict[str, Any]) -> None:
+        nonlocal done
+        done += 1
+        if not result.get("ok") and not result.get("skipped"):
+            print(f"FAIL {result.get('source_file')}: {result.get('error')}", flush=True)
+        if done % max(1, every) == 0 or done == total:
+            print(
+                f"progress {done}/{total} last={result.get('source_file')} "
+                f"rows={result.get('n_rows')}",
+                flush=True,
+            )
+
+    return show
+
+
 def serialize_openalex(
     raw_dir: Path,
     processed_dir: Path,
@@ -614,11 +644,21 @@ def serialize_openalex(
     workers = max(1, int(workers))
     t0 = time.time()
 
+    from episteme.config import get_settings
+
+    progress = _progress_printer(len(files), get_settings().openalex_progress_every)
+
+    def on_result(result: dict[str, Any]) -> None:
+        progress(result)
+        if verbose:
+            _print_verbose(result)
+
+    print(f"files={len(files)} workers={workers}", flush=True)
     results = run_per_file(
         process_one,
         files,
         workers=workers,
-        on_result=_print_verbose if verbose else None,
+        on_result=on_result,
         raw_dir=raw_dir,
         processed_dir=processed_dir,
         force=force,
@@ -790,8 +830,8 @@ def _main(argv: list[str] | None = None) -> int:
     if args.report:
         return _run_report(raw_dir, args.max_files)
 
-    print(f"schema={SCHEMA_VERSION} source={SOURCE}")
-    print(f"raw_dir={raw_dir.resolve()} workers={workers}")
+    print(f"schema={SCHEMA_VERSION} source={SOURCE}", flush=True)
+    print(f"raw_dir={raw_dir.resolve()} workers={workers}", flush=True)
 
     res = serialize_openalex(
         raw_dir,

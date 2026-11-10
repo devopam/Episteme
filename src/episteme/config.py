@@ -195,6 +195,8 @@ DEFAULT_AACT_MAY_BE_EMPTY_TABLES: tuple[str, ...] = ("search_results",)
 # per commit inside a tar member (EPISTEME_LITE_COMMIT_BATCHES).
 DEFAULT_LITE_BATCH_SIZE = 2000
 DEFAULT_LITE_COMMIT_BATCHES = 50
+# OpenAlex serialize: a progress line every N files (EPISTEME_OPENALEX_PROGRESS_EVERY).
+DEFAULT_OPENALEX_PROGRESS_EVERY = 25
 # Sources that never enter the training corpus, whatever their licence subset. The owner's
 # design splits the data: publications train the model; regulatory reference data (labels,
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
@@ -495,6 +497,7 @@ class Settings:
     aact_may_be_empty_tables: tuple[str, ...] = DEFAULT_AACT_MAY_BE_EMPTY_TABLES
     lite_batch_size: int = DEFAULT_LITE_BATCH_SIZE
     lite_commit_batches: int = DEFAULT_LITE_COMMIT_BATCHES
+    openalex_progress_every: int = DEFAULT_OPENALEX_PROGRESS_EVERY
     sample_min_substances: int = DEFAULT_SAMPLE_MIN_SUBSTANCES
     # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
@@ -693,6 +696,9 @@ def get_settings() -> Settings:
         aact_may_be_empty_tables=_aact_may_be_empty_tables(),
         lite_batch_size=_get_positive_int_or_default(
             "EPISTEME_LITE_BATCH_SIZE", DEFAULT_LITE_BATCH_SIZE
+        ),
+        openalex_progress_every=_get_positive_int_or_default(
+            "EPISTEME_OPENALEX_PROGRESS_EVERY", DEFAULT_OPENALEX_PROGRESS_EVERY
         ),
         lite_commit_batches=_get_positive_int_or_default(
             "EPISTEME_LITE_COMMIT_BATCHES", DEFAULT_LITE_COMMIT_BATCHES

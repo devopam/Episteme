@@ -60,6 +60,7 @@ Run steps 3b to 5 only if the previous step exited 0; `audit chain OK` does not 
 
 - Every `run_pipeline.sh` run records `run_start` (no output) and prints a prerequisites table (`aria2c`, `aws`, `curl`, `hf`, ... `MISSING` rows are informational; a missing `aws` is not informational for this path).
 - Step 3a: `stage: download`, then the `aws` progress line and a `download: s3://... to ...` line for the oldest `updated_date=` shard (a `.gz` of a few MB; it lands under `<raw>/openalex/data/jsonl/works/`; there is no separate listing line, and the step took about a minute), `write_sync_stamp`, then `pipeline done: openalex download`.
+- OpenAlex entities: `<raw>/openalex/data/jsonl/` can hold every entity (authors, institutions, sources, concepts, funders and works). The serializer reads only the files under the `works` folder (`works/updated_date=*/part_*.gz`). If no `works` folder exists under the raw dir, it reads every matching file (fixture trees). The markers and keys do not change. The serializer prints `files=<N> workers=<W>` before it works and `progress <done>/<total>` every `EPISTEME_OPENALEX_PROGRESS_EVERY` files; with more than one worker it uses worker processes.
 - Step 3b: the serializer prints `schema=... source=openalex`, `raw_dir=<path> workers=1`, then `done inputs=1 ok=1 failed=0 rows=<n> records_seen=<m> accepted=<n> rejected_non_biomedical=<k>`. `rows` is only the works tagged Medicine or Biology, so it is smaller than `records_seen`; the count depends on the shard, so do not compare it to a fixed number. Exit 1 with `ERROR: no openalex works_jsonl files under <dir>` means step 3a fetched nothing.
 - Step 3c: one `ok <shard> rows=... event=load_commit` line and `done shards=1 failed=0`, then `pipeline done: openalex load`.
 
@@ -1549,6 +1550,7 @@ All of them are read in `src/episteme/config.py` (the only module that reads the
 | `EPISTEME_EPAR_BUCKET_IDS` | Width of an EPAR bucket, in document ids (a change rebuilds every bucket) |
 | `EPISTEME_SAMPLE_MIN_SUBSTANCES` | Minimum rows in `episteme.substance` of the target database for a `--sample` load of `ema`, `openfda` or `openfda_faers` (default 1000); below it the run refuses (exit 2) and names `scripts/data/openfda/load_substance.sh` |
 | `EPISTEME_LITE_BATCH_SIZE`, `EPISTEME_LITE_COMMIT_BATCHES` | `europepmc_lite enrich`: rows per UPDATE batch (default 2000) and batches per commit inside a tar member (default 50) |
+| `EPISTEME_OPENALEX_PROGRESS_EVERY` | `openalex serialize` prints `progress <done>/<total>` to stdout every N files (default 25) |
 | `EPISTEME_AACT_MAY_BE_EMPTY_TABLES` | Comma separated AACT tables that may be header-only in the export (default `search_results`); another header-only table fails the gate |
 | `EPISTEME_AACT_MAX_ORPHAN_SHARE` | Largest share of rows per AACT table whose `nct_id` is not in `studies` (default 0.05); a breach fails the load and the previous release keeps serving |
 | `EPISTEME_LOAD_BATCH_BYTES`, `EPISTEME_WRITE_BATCH_BYTES` | Byte caps of a load batch and of a staging write batch |
