@@ -136,6 +136,10 @@ DEFAULT_REFERENCE_DOCS_ICH_PAGES = (
 DEFAULT_REFERENCE_DOCS_USER_AGENT = "Episteme-reference-docs/1.0 (open biomedical data pipeline)"
 DEFAULT_TEACHER_MODEL = "deepseek-chat"
 DEFAULT_TEACHER_BUDGET_TOKENS = 2_000_000
+# Seconds one teacher request may take (EPISTEME_TEACHER_REQUEST_TIMEOUT_S); no retry in v1.
+DEFAULT_TEACHER_REQUEST_TIMEOUT_S = 120
+# Completion tokens asked of the teacher per example (EPISTEME_TEACHER_MAX_TOKENS).
+DEFAULT_TEACHER_MAX_TOKENS = 2048
 DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
 DEFAULT_HARNESS_MAX_TOOL_CALLS = 24
 DEFAULT_HARNESS_MAX_CANDIDATES = 8
@@ -459,6 +463,8 @@ class Settings:
     teacher_api_key: str | None = field(default=None, repr=False)
     teacher_model: str = DEFAULT_TEACHER_MODEL
     teacher_budget_tokens: int = DEFAULT_TEACHER_BUDGET_TOKENS
+    teacher_request_timeout_s: int = DEFAULT_TEACHER_REQUEST_TIMEOUT_S
+    teacher_max_tokens: int = DEFAULT_TEACHER_MAX_TOKENS
     # Source name -> mix weight (EPISTEME_SFT_MIX_WEIGHTS=source=weight,...); empty = proportional.
     sft_mix_weights: dict[str, float] = field(default_factory=dict)
     harness_base_url: str = DEFAULT_HARNESS_BASE_URL
@@ -659,6 +665,12 @@ def get_settings() -> Settings:
         teacher_model=_get("EPISTEME_TEACHER_MODEL") or DEFAULT_TEACHER_MODEL,
         teacher_budget_tokens=_get_positive_int_or_default(
             "EPISTEME_TEACHER_BUDGET_TOKENS", DEFAULT_TEACHER_BUDGET_TOKENS
+        ),
+        teacher_request_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_TEACHER_REQUEST_TIMEOUT_S", DEFAULT_TEACHER_REQUEST_TIMEOUT_S
+        ),
+        teacher_max_tokens=_get_positive_int_or_default(
+            "EPISTEME_TEACHER_MAX_TOKENS", DEFAULT_TEACHER_MAX_TOKENS
         ),
         sft_mix_weights=_parse_mix_weights(_get("EPISTEME_SFT_MIX_WEIGHTS")),
         harness_base_url=_get("EPISTEME_HARNESS_BASE_URL") or DEFAULT_HARNESS_BASE_URL,

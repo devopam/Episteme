@@ -28,3 +28,24 @@ def test_manifest_records_teacher_and_budget(tmp_path):
     doc = json.loads((tmp_path / "m.json").read_text(encoding="utf-8"))
     assert doc["teacher"] == "t"
     assert doc["budget_used"] == 7
+
+
+def test_manifest_extra_fields_do_not_change_the_hash(tmp_path):
+    h1 = write_manifest(tmp_path / "a.json", "batch", inputs=[], counts={}, config={"k": 1})
+    h2 = write_manifest(
+        tmp_path / "b.json",
+        "batch",
+        inputs=[],
+        counts={},
+        config={"k": 1},
+        extra={"stopped": "budget"},
+    )
+    assert h1 == h2
+    doc = json.loads((tmp_path / "b.json").read_text(encoding="utf-8"))
+    assert doc["stopped"] == "budget"
+    import pytest
+
+    with pytest.raises(ValueError):
+        write_manifest(
+            tmp_path / "c.json", "batch", inputs=[], counts={}, config={}, extra={"kind": 1}
+        )
