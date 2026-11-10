@@ -100,7 +100,8 @@ def _convert(name: str, args: dict) -> list[Any]:
         if schema is _INT:
             v = int(v)
         elif schema is _DATE:
-            v = date.fromisoformat(v)
+            # The model sends ISO strings; in-process callers (bench.build_cases) pass dates.
+            v = v if isinstance(v, date) else date.fromisoformat(v)
         elif pname == "topic" and v is not None and not isinstance(v, str):
             raise TypeError("topic must be a string or null")
         values.append(v)

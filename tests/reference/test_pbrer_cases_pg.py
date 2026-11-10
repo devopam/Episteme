@@ -41,6 +41,19 @@ def test_build_cases_skips_ambiguous_substances(ref_db):
         ],
         latest=True,
     )
+    add_release(
+        ref_db,
+        "fda_drugsfda",
+        "2026-10",
+        [
+            {
+                "record_key": "NDA020357",
+                "substance_names": ["metformin hydrochloride"],
+                "payload": {"products": [{"marketing_status": "Prescription"}]},
+            }
+        ],
+        latest=True,
+    )
     cases = build_cases(ref_db, 10, **KW)
     assert [c.psusa_record_key for c in cases] == ["P/1", "P/4", "P/6"]
     first = cases[0]

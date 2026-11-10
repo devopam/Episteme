@@ -68,15 +68,20 @@ FAERS_QUARTER_RULE = "quarters that overlap the interval are counted whole"
 
 # Payload fields shown in a claim, read with .get(): a missing key is skipped. The first
 # field of each "status" tuple is the claim value. Article 57 names are checked in
-# parsers.ARTICLE57_COLUMNS; the others are NOT checked against a downloaded file.
+# parsers.ARTICLE57_COLUMNS. The EMA keys were checked against the loaded 2026-11
+# releases (2026-11-10); the FDA keys are not checked against a downloaded file.
 _STATUS_FIELDS: dict[str, tuple[str, ...]] = {
     "fda_drugsfda": ("products.marketing_status",),
     "ema_medicines": ("medicine_status",),
-    "ema_outside_eu": ("opinion_status", "medicine_status"),
+    "ema_outside_eu": ("ema_opinion_status",),
     "fda_enforcement": ("classification", "status"),
-    "ema_referrals": ("current_status", "status"),
-    "ema_psusa": ("regulatory_outcome", "outcome"),
+    "ema_referrals": ("current_status",),
+    "ema_psusa": ("regulatory_outcome",),
+    "ema_dhpc": ("dhpc_type", "regulatory_outcome"),
 }
+# Datasets with no status field: a record is itself the fact (an Article 57 entry is an
+# authorised product). Their claims have no value and raise no "status field not found".
+_NO_STATUS_FIELD = frozenset({"ema_article57"})
 _DETAIL_FIELDS: dict[str, tuple[str, ...]] = {
     "fda_drugsfda": ("sponsor_name", "products.brand_name"),
     "ema_medicines": ("name_of_medicine", "marketing_authorisation_developer_applicant_holder"),
@@ -196,7 +201,7 @@ def _reg_lookup(
                     notes.append(f"{ds}: {undated} records with no date not checked")
             cur.execute(query, params)
             found = [_reg_claim(ds, release, r) for r in cur.fetchall()]
-        if any(c.value is None for c in found):
+        if ds not in _NO_STATUS_FIELD and any(c.value is None for c in found):
             notes.append(f"{ds}: status field not found")
         claims.extend(found)
     if not scope.names:
