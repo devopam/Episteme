@@ -36,9 +36,39 @@ def test_check_flags_other_identifiers_and_counts():
         " 25 January 2020, 1,234 reports, 57 cases"
     )
     bad = check_answer(ans, _res())
-    wanted = ("NCT99999999", "123456", "1A2B3C4D5E", "12345-678-90", "25 January 2020")
-    for v in (*wanted, "1,234", "57"):
-        assert any(v in b for b in bad), v
+    wanted = ["NCT99999999", "123456", "1A2B3C4D5E", "12345-678-90", "25 January 2020"]
+    assert bad == [*wanted, "1,234", "57"]
+
+
+def test_long_form_date_matches_iso_date_in_results():
+    assert check_answer("Start was 25 January 2020.", _res(text="date: 2020-01-25")) == []
+    other = check_answer("Start was 26 January 2020.", _res(text="date: 2020-01-25"))
+    assert other == ["26 January 2020"]
+
+
+def test_count_is_not_matched_inside_a_date():
+    res = _res(text="date: 2021-03-15", key="faers:7:2020-01-01")
+    assert check_answer("There were 15 reports.", res) == ["15"]
+    assert check_answer("There were 12 reports.", res) == ["12"]
+
+
+def test_list_commas_do_not_join_numbers():
+    res = _res(text="counts: 5,12")
+    assert check_answer("There were 512 reports.", res) == ["512"]
+    assert check_answer("There were 12 reports.", res) == []
+
+
+def test_truncated_identifiers_are_flagged():
+    res = _res(text="NDC 12345-678-90 and NCT01234567")
+    assert check_answer("NDC 12345-678-9", res) == ["12345-678-9"]
+    psusa = "EMEA/H/C/PSUSA/00001/2020"
+    assert check_answer(psusa, res) == [psusa]
+
+
+def test_two_segment_ndc_is_checked():
+    assert check_answer("NDC 0002-1433.", _res(text="NDC 0002-1433")) == []
+    assert check_answer("NDC 0002-1434.", _res(text="NDC 0002-1433")) == ["0002-1434"]
+    assert check_answer("From 2015-2020.", _res()) == []
 
 
 def test_check_count_present_in_results():
@@ -73,3 +103,31 @@ def test_mechanism_claim_stays_with_model():
 
 def test_field_without_resolvable_entity_stays_with_model():
     assert route_claim("Is zzzzdrug approved?", _resolve_for("metformin")) == ("model", None)
+
+
+def test_trigger_terms_need_word_boundaries():
+    resolve = _resolve_for("metformin")
+    assert route_claim("Metformin and caesarean sectional delivery", resolve) == ("model", None)
+    assert route_claim("Metformin case reportsx suggest benefit", resolve) == ("model", None)
+
+
+def test_plural_trigger_words_are_not_candidates():
+    seen = []
+
+    def resolve(text):
+        seen.append(text.lower())
+        return LookupResult((), Coverage(0))
+
+    route_claim("Were there recalls and trials and referrals for aspirin?", resolve)
+    assert seen == ["aspirin"]
+
+
+def test_max_candidates_is_a_parameter():
+    seen = []
+
+    def resolve(text):
+        seen.append(text)
+        return LookupResult((), Coverage(0))
+
+    route_claim("Is aspirin ibuprofen naproxen approved?", resolve, max_candidates=2)
+    assert len(seen) == 2

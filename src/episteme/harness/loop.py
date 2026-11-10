@@ -1,20 +1,31 @@
 """Minimal tool loop over an OpenAI-compatible chat endpoint.
 
 ``post`` and ``call_tool`` are injected. The loop adds ``tenant`` and ``caller`` to every
-tool call and drops any value the model sends for them.
+tool call and drops any value the model sends for them. ``make_call_tool`` owns the
+conversion that the tool schemas need (ISO date strings to ``date``).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
+from datetime import date
 from typing import Any
 
+import psycopg
+
 from episteme.harness.pbrer import SECTION_SOURCES
+from episteme.reference import literature as _literature
+from episteme.reference import lookups as _lookups
+from episteme.reference import resolve as _resolve
 from episteme.reference.claims import LookupResult
+
+log = logging.getLogger(__name__)
 
 _INT = {"type": "integer", "description": "substance_key from resolve_entity"}
 _DATE = {"type": "string", "description": "ISO date YYYY-MM-DD"}
+# Parameter order equals the positional order of the real function, after ``conn``.
 _PARAMS: dict[str, dict[str, Any]] = {
     "resolve_entity": {
         "text": {"type": "string", "description": "drug name or UNII"},
@@ -27,10 +38,10 @@ _PARAMS: dict[str, dict[str, Any]] = {
     "faers_counts": {"substance_key": _INT, "start": _DATE, "end": _DATE},
     "literature": {
         "substance_key": _INT,
-        "topic": {"type": "string", "description": "optional topic"},
+        "topic": {"type": ["string", "null"], "description": "topic, or null for none"},
     },
 }
-_OPTIONAL = {"id_type", "topic"}
+_OPTIONAL = {"id_type"}
 _DOC = {
     "resolve_entity": "Resolve a drug name or UNII to a substance.",
     "approval_status": "Marketing authorisation status from FDA and EMA records.",
@@ -43,7 +54,8 @@ _DOC = {
 
 # The tool set must match the lookups the PBRER section map uses.
 _NAMES = ["resolve_entity", *sorted({n for v in SECTION_SOURCES.values() for n in v})]
-assert set(_NAMES) == set(_PARAMS), "TOOLS and SECTION_SOURCES have drifted"
+if set(_NAMES) != set(_PARAMS):
+    raise RuntimeError("TOOLS and SECTION_SOURCES have drifted")
 
 TOOLS: list[dict] = [
     {
@@ -64,13 +76,49 @@ _TOOL_NAMES = frozenset(_NAMES)
 _RESERVED = ("tenant", "caller")
 
 
+def make_call_tool(
+    conn: psycopg.Connection, *, tenant: str, caller: str
+) -> Callable[[str, dict], LookupResult]:
+    """Build the ``call_tool`` for ``run``: check and convert the arguments, add the
+    audit identity and call the real function. Bad arguments raise KeyError (missing),
+    TypeError (unknown) or ValueError (bad value)."""
+
+    def call(name: str, args: dict) -> LookupResult:
+        spec = _PARAMS[name]
+        args = {k: v for k, v in args.items() if k not in _RESERVED}
+        if extra := set(args) - set(spec):
+            raise TypeError(f"unexpected arguments: {sorted(extra)}")
+        values: list[Any] = []
+        for pname, schema in spec.items():
+            if pname not in args:
+                if pname in _OPTIONAL:
+                    values.append(None)
+                    continue
+                raise KeyError(pname)
+            v = args[pname]
+            if schema is _INT:
+                v = int(v)
+            elif schema is _DATE:
+                v = date.fromisoformat(v)
+            values.append(v)
+        if name == "resolve_entity":
+            return _resolve.resolve_entity(
+                conn, values[0], id_type=values[1], tenant=tenant, caller=caller
+            )
+        module = _literature if name == "literature" else _lookups
+        return getattr(module, name)(conn, *values, tenant=tenant, caller=caller)
+
+    return call
+
+
 def _default_post(payload: dict) -> dict:
     import requests
 
     from episteme.config import get_settings
 
-    url = get_settings().harness_base_url.rstrip("/") + "/chat/completions"
-    resp = requests.post(url, json=payload, timeout=300)
+    settings = get_settings()
+    url = settings.harness_base_url.rstrip("/") + "/chat/completions"
+    resp = requests.post(url, json=payload, timeout=settings.harness_request_timeout_s)
     resp.raise_for_status()
     return resp.json()
 
@@ -85,13 +133,15 @@ def run(
     call_tool: Callable[[str, dict], LookupResult],
     post: Callable[[dict], dict] = _default_post,
     max_tool_calls: int,
-    tenant: str = "harness",
-    caller: str = "harness-loop",
+    tenant: str,
+    caller: str,
 ) -> tuple[str, list[LookupResult]]:
     """Chat until the model answers. Returns the answer and every lookup result.
 
     Each tool call counts toward ``max_tool_calls``, an unknown tool included. When the
-    budget is spent the loop asks once more with no tools and returns that answer."""
+    budget is spent the loop asks once more with no tools and returns that answer.
+    Only argument errors and database errors go back to the model, as a fixed text that
+    names the tool; any other exception propagates."""
     msgs = list(messages)
     results: list[LookupResult] = []
     used = 0
@@ -117,17 +167,24 @@ def run(
                 continue
             try:
                 args = json.loads(fn.get("arguments") or "{}")
-                if not isinstance(args, dict):
-                    raise ValueError("arguments must be an object")
-            except ValueError as exc:
-                msgs.append(_tool_message(call["id"], f"error: bad arguments: {exc}"))
+            except ValueError:
+                args = None
+            if not isinstance(args, dict):
+                msgs.append(
+                    _tool_message(call["id"], f"error: arguments of {name} are not valid JSON")
+                )
                 continue
             args = {k: v for k, v in args.items() if k not in _RESERVED}
             args.update(tenant=tenant, caller=caller)
             try:
                 result = call_tool(name, args)
-            except Exception as exc:  # tool failure goes back to the model
-                msgs.append(_tool_message(call["id"], f"error: {type(exc).__name__}: {exc}"))
+            except (ValueError, TypeError, KeyError) as exc:
+                log.warning("tool %s: argument error %s", name, type(exc).__name__)
+                msgs.append(_tool_message(call["id"], f"error: arguments of {name} are invalid"))
+                continue
+            except psycopg.Error as exc:
+                log.warning("tool %s: database error %s", name, type(exc).__name__)
+                msgs.append(_tool_message(call["id"], f"error: {name} failed (database error)"))
                 continue
             results.append(result)
             msgs.append(_tool_message(call["id"], json.dumps(result.to_json())))

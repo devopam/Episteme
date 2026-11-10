@@ -58,6 +58,8 @@ def test_loop_runs_tool_calls_and_returns_answer():
         call_tool=call_tool,
         post=lambda payload: next(replies),
         max_tool_calls=5,
+        tenant="t",
+        caller="c",
     )
     assert answer == "done"
     assert len(results) == 1 and seen[0][0] == "trials"
@@ -80,6 +82,8 @@ def test_loop_stops_at_max_tool_calls():
         call_tool=lambda n_, a: executed.append(n_) or _result(),
         post=post,
         max_tool_calls=3,
+        tenant="t",
+        caller="c",
     )
     assert len(executed) == 3
     assert answer == "budget answer"
@@ -119,6 +123,8 @@ def test_unknown_tool_returns_error_and_counts():
         call_tool=lambda n, a: called.append(n) or _result(),
         post=post,
         max_tool_calls=1,
+        tenant="t",
+        caller="c",
     )
     assert answer == "ok" and results == [] and called == []
     assert "tools" not in payloads[1]  # the unknown call used the whole budget
