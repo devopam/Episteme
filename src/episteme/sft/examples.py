@@ -191,8 +191,9 @@ def _need(row: dict, *keys: str) -> None:
 
 
 def check_input(kind: str, row: dict) -> None:
-    """Raise ``InputError`` when ``row`` lacks what ``kind`` needs. Every kind needs an
-    ``id``, so each example records the row it came from."""
+    """Raise ``InputError`` when ``row`` lacks what ``kind`` needs, and ``FormatError``
+    when a tool result is not a well-formed lookup result (claims and provenance). Every
+    kind needs an ``id``, so each example records the row it came from."""
     _need(row, "id")
     if kind == "grounded_qa":
         _need(row, "text")
@@ -203,6 +204,14 @@ def check_input(kind: str, row: dict) -> None:
             raise InputError(f"row {row.get('id')!r}: tool_results is not a list of objects")
         if len(row.get("tool_calls") or ()) != len(results):
             raise InputError(f"row {row.get('id')!r}: tool_calls and tool_results differ")
+        for r in results:
+            try:
+                LookupResult.from_json(r)
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                raise FormatError(
+                    f"row {row.get('id')!r}: a tool result is not a lookup result"
+                    f" ({type(exc).__name__})"
+                ) from None
         region = row.get("pbrer_region")
         if region is not None and region not in ("ich", "eu"):
             raise InputError(f"row {row.get('id')!r}: pbrer_region {region!r}")

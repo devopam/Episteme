@@ -13,10 +13,20 @@ Training data rule (spec section 9.2), decided per row before any request:
 - ``rule_check``: the document is a skeleton draft; the row says
   ``source = 'pbrer_skeleton'`` and ``subset = 'commercial'``.
 
-Restart: ``examples.jsonl`` is never truncated. A re-run reads the ids already in it,
-skips those rows (no request) and appends; ``n`` is the target count of the whole file.
-The manifest is written on every exit, also on an error (``stopped = 'error'``); the
-manifest of an earlier run is kept as ``manifest.run-<k>.json``.
+A row with no claim in its tool results has nothing to verify and is refused.
+
+Ledger and restart: ``requests.jsonl`` is append-only. Right after each answered request
+(before any check) a ``paid`` line with the row id and its tokens is written and forced
+to disk; the outcome (``kept`` or ``rejected`` with its reason) follows as an ``outcome``
+line. A request that raises gets an ``error`` line with its estimated tokens. A hard kill
+loses at most the request in flight.
+
+``examples.jsonl`` and the ledger are never truncated. A re-run skips every row that was
+kept or paid for (no new request), retries rows whose request failed, and appends; ``n``
+is the target count of the whole file. The tokens in the ledger count against the budget
+of the re-run. An out_dir that holds another kind is refused. The manifest is written on
+every exit, also on an error (``stopped = 'error'``); the manifest of an earlier run is
+kept as ``manifest.run-<k>.json``.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -57,25 +68,35 @@ REJECT_REASONS: tuple[str, ...] = (
     "structure",
 )
 RULE_CHECK_SOURCE = "pbrer_skeleton"
+LEDGER_NAME = "requests.jsonl"
 # Hash of the harness tool schema the tool-call examples are written in.
 TOOLS_SHA256 = hashlib.sha256(
     json.dumps(TOOLS, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
 
 
-def _claim_sources(claim: dict) -> set[str]:
-    found = {(claim.get("provenance") or {}).get("source")}
-    for alt in claim.get("alternatives") or ():
+def _items(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _claim_sources(claim: object) -> set:
+    if not isinstance(claim, dict):
+        return set()
+    prov = claim.get("provenance")
+    found = {prov.get("source")} if isinstance(prov, dict) else set()
+    for alt in _items(claim.get("alternatives")):
         found |= _claim_sources(alt)
     return found
 
 
 def lookup_sources(row: dict) -> list[str]:
-    """Sources named in the provenance of every claim of the row's tool results."""
+    """Sources named in the provenance of every claim of the row's tool results.
+    Malformed parts give no source (``check_input`` rejects such rows)."""
     found: set = set()
-    for result in row.get("tool_results") or ():
-        for claim in result.get("claims") or ():
-            found |= _claim_sources(claim)
+    for result in _items(row.get("tool_results")):
+        if isinstance(result, dict):
+            for claim in _items(result.get("claims")):
+                found |= _claim_sources(claim)
     return sorted(found, key=str)
 
 
@@ -85,6 +106,8 @@ def licence_reason(
     """``(reason, detail)`` when the row may not reach the teacher, else None."""
     if kind == "tool_draft":
         sources = lookup_sources(row)
+        if not sources:
+            return "licence", "the tool results hold no claim, so no source to verify"
         bad = [s for s in sources if lookup_subsets.get(s) not in ("commercial", "pending")]
         if bad:
             return "licence", f"lookup sources not commercial: {bad}"
@@ -115,23 +138,57 @@ def _source_row(kind: str, row: dict) -> dict:
     return ident
 
 
-def _done_ids(path: Path) -> set[str]:
-    """Ids of the rows already in ``examples.jsonl``. A line that is not a whole record
+def _jsonl_records(path: Path) -> list[dict]:
+    """The records of an append-only JSONL file. A line that is not a whole JSON object
     stops the run: the file is never truncated or rewritten here."""
-    done: set[str] = set()
     if not path.exists():
-        return done
+        return []
+    records: list[dict] = []
     for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         try:
-            done.add(str(json.loads(line)["source_row"]["id"]))
-        except (ValueError, KeyError, TypeError):
+            rec = json.loads(line)
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict):
             raise ValueError(
                 f"{path}: line {i} is not a complete record; move or repair the file"
                 " before a re-run"
-            ) from None
-    return done
+            )
+        records.append(rec)
+    return records
+
+
+def _check_kind(path: Path, records: list[dict], kind: str) -> None:
+    other = sorted({str(r.get("kind")) for r in records if r.get("kind") != kind})
+    if other:
+        raise ValueError(
+            f"{path} holds {', '.join(other)} records, not {kind!r}; use another out_dir"
+        )
+
+
+def _prior_state(examples_path: Path, ledger_path: Path, kind: str) -> tuple[set, set, int]:
+    """Kept ids, paid ids (a request answered; kept, rejected or cut off before its
+    outcome) and the tokens of all earlier requests, failed ones included."""
+    examples = _jsonl_records(examples_path)
+    ledger = _jsonl_records(ledger_path)
+    _check_kind(examples_path, examples, kind)
+    _check_kind(ledger_path, ledger, kind)
+    try:
+        kept = {str(r["source_row"]["id"]) for r in examples}
+    except (KeyError, TypeError):
+        raise ValueError(f"{examples_path}: a record has no source_row id") from None
+    paid = {str(r.get("id")) for r in ledger if r.get("event") == "paid"}
+    tokens = sum(int(r.get("tokens") or 0) for r in ledger if r.get("event") in ("paid", "error"))
+    return kept, paid, tokens
+
+
+def _append(f, record: dict) -> None:
+    """Append one line and force it to disk before going on."""
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    f.flush()
+    os.fsync(f.fileno())
 
 
 def _keep_old_manifest(path: Path) -> None:
@@ -157,10 +214,12 @@ def generate_batch(
     """Generate checked examples of ``kind`` until ``out_dir/examples.jsonl`` holds ``n``.
 
     Appends kept examples (with their source row, teacher and tool-schema hash) to
-    ``out_dir/examples.jsonl`` and writes ``out_dir/manifest.json`` (kind ``batch``).
-    ``stopped`` is None when ``n`` is reached, ``exhausted`` when the rows run out,
-    ``budget`` at the budget cap, ``error`` when an exception ends the run (the manifest
-    is written, then the exception propagates). ``excluded`` defaults to
+    ``out_dir/examples.jsonl``, every paid request to ``out_dir/requests.jsonl`` and
+    writes ``out_dir/manifest.json`` (kind ``batch``). ``stopped`` is None when ``n`` is
+    reached, ``exhausted`` when the rows run out, ``budget`` at the budget cap, ``error``
+    when an exception ends the run (the manifest is written if it can be, then the
+    original exception propagates). The tokens of earlier runs in ``out_dir`` count
+    against the teacher's budget. ``excluded`` defaults to
     ``Settings.corpus_excluded_sources``, ``max_tokens`` to ``Settings.teacher_max_tokens``,
     ``lookup_subsets`` to ``config.LOOKUP_SOURCE_SUBSETS``."""
     if kind not in KINDS:
@@ -178,26 +237,41 @@ def generate_batch(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     examples_path = out_dir / "examples.jsonl"
+    ledger_path = out_dir / LEDGER_NAME
     manifest_path = out_dir / "manifest.json"
 
-    done = _done_ids(examples_path)
-    kept_before = len(done)
+    kept_ids, paid_ids, tokens_before = _prior_state(examples_path, ledger_path, kind)
+    skip = kept_ids | paid_ids
+    kept_before = len(kept_ids)
+    # Earlier runs in this out_dir spent these tokens: they count against the budget.
+    teacher.used_tokens += tokens_before
+    used_at_start = teacher.used_tokens
     rejected = dict.fromkeys(REJECT_REASONS, 0)
     inputs: list[dict] = []
     state: dict = {"kept": 0, "skipped_done": 0, "stopped": "exhausted", "error": None}
-    used_at_start = teacher.used_tokens
 
-    def reject(row: dict, reason: str, detail: str) -> None:
+    def reject(row: dict, reason: str, detail: str, ledger=None) -> None:
         rejected[reason] += 1
         inputs.append({**_source_row(kind, row), "outcome": reason})
+        if ledger is not None:
+            _append(
+                ledger,
+                {
+                    "event": "outcome",
+                    "id": str(row["id"]),
+                    "kind": kind,
+                    "outcome": "rejected",
+                    "reason": reason,
+                },
+            )
         log.info("batch %s: row %r rejected (%s): %s", kind, row.get("id"), reason, detail)
 
-    def run(out) -> None:
+    def run(out, ledger) -> None:
         if kept_before >= n:
             state["stopped"] = None
             return
         for row in passages:
-            if row.get("id") is not None and str(row["id"]) in done:
+            if row.get("id") is not None and str(row["id"]) in skip:
                 state["skipped_done"] += 1
                 continue
             try:
@@ -205,23 +279,53 @@ def generate_batch(
             except InputError as exc:
                 reject(row, "input", str(exc))
                 continue
+            except FormatError as exc:
+                reject(row, "format", str(exc))
+                continue
             if refusal := licence_reason(kind, row, excluded, lookup_subsets):
                 reject(row, *refusal)
                 continue
+            row_id = str(row["id"])
+            before = teacher.used_tokens
             try:
                 raw = teacher.complete(build_messages(kind, row), max_tokens=max_tokens)
             except BudgetExceeded as exc:
                 log.info("batch %s: %s; stopping", kind, exc)
                 state["stopped"] = "budget"
                 return
+            except BaseException as exc:
+                try:
+                    _append(
+                        ledger,
+                        {
+                            "event": "error",
+                            "id": row_id,
+                            "kind": kind,
+                            "tokens": teacher.used_tokens - before,
+                            "error": type(exc).__name__,
+                        },
+                    )
+                except Exception:
+                    log.exception("batch %s: ledger line for row %r not written", kind, row_id)
+                raise
+            # Paid: on disk before any check runs.
+            _append(
+                ledger,
+                {
+                    "event": "paid",
+                    "id": row_id,
+                    "kind": kind,
+                    "tokens": teacher.used_tokens - before,
+                },
+            )
             try:
                 ex = parse_example(kind, row, raw)
             except FormatError as exc:
-                reject(row, "format", str(exc))
+                reject(row, "format", str(exc), ledger)
                 continue
             problems = run_checks(ex)
             if problems:
-                reject(row, *problems[0])
+                reject(row, *problems[0], ledger)
                 continue
             record = {
                 "kind": kind,
@@ -231,29 +335,24 @@ def generate_batch(
                 "teacher": teacher.model,
                 "tools_sha256": TOOLS_SHA256,
             }
-            out.write(json.dumps(record, ensure_ascii=False) + "\n")
-            out.flush()
-            done.add(str(row["id"]))
+            _append(out, record)
+            _append(
+                ledger,
+                {"event": "outcome", "id": row_id, "kind": kind, "outcome": "kept"},
+            )
+            skip.add(row_id)
             state["kept"] += 1
             inputs.append({**_source_row(kind, row), "outcome": "kept"})
             if kept_before + state["kept"] >= n:
                 state["stopped"] = None
                 return
 
-    try:
-        with examples_path.open("a", encoding="utf-8") as out:
-            run(out)
-    except BaseException as exc:
-        state["stopped"] = "error"
-        state["error"] = type(exc).__name__
-        log.error("batch %s: stopped by %s", kind, state["error"])
-        raise
-    finally:
-        budget_used = teacher.used_tokens - used_at_start
+    def finish() -> str:
         counts = {
             "kept": state["kept"],
             "kept_before": kept_before,
             "skipped_done": state["skipped_done"],
+            "tokens_before": tokens_before,
             **{f"rejected_{r}": c for r, c in rejected.items()},
         }
         config = {
@@ -267,16 +366,35 @@ def generate_batch(
             "tools_sha256": TOOLS_SHA256,
         }
         _keep_old_manifest(manifest_path)
-        digest = write_manifest(
+        return write_manifest(
             manifest_path,
             "batch",
             inputs=inputs,
             counts=counts,
             config=config,
             teacher=teacher.model,
-            budget_used=budget_used,
+            budget_used=teacher.used_tokens - used_at_start,
             extra={"stopped": state["stopped"], "error": state["error"]},
         )
+
+    try:
+        with (
+            examples_path.open("a", encoding="utf-8") as out,
+            ledger_path.open("a", encoding="utf-8") as ledger,
+        ):
+            run(out, ledger)
+    except BaseException as exc:
+        state["stopped"] = "error"
+        state["error"] = type(exc).__name__
+        log.error("batch %s: stopped by %s", kind, state["error"])
+        try:
+            finish()
+        except Exception:
+            # The original exception matters more; the ledger still holds the spend.
+            log.exception("batch %s: manifest not written after %s", kind, state["error"])
+        raise
+    digest = finish()
+    budget_used = teacher.used_tokens - used_at_start
     log.info(
         "batch %s: kept %d (%d before), rejected %s, %d tokens, stopped %s",
         kind,
@@ -290,6 +408,7 @@ def generate_batch(
         "kept": state["kept"],
         "kept_before": kept_before,
         "skipped_done": state["skipped_done"],
+        "tokens_before": tokens_before,
         "rejected": rejected,
         "budget_used": budget_used,
         "stopped": state["stopped"],

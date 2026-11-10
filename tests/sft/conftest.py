@@ -39,6 +39,8 @@ class FakeSession:
     def post(self, url, *, json=None, headers=None, timeout=None):
         self.posts.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         reply = self.replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
         if isinstance(reply, FakeResponse):
             return reply
         return FakeResponse(reply)

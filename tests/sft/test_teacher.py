@@ -159,3 +159,16 @@ def test_no_network_guard_fires_for_a_real_session():
     t = Teacher("https://teacher.invalid/v1", KEY, "teach-1", 1000)
     with pytest.raises(AssertionError, match="network access in a test"):
         t.complete(_msgs(8), max_tokens=4)
+
+
+def test_failed_request_counts_its_estimate(fakes):
+    session = fakes.FakeSession(
+        [fakes.FakeResponse({}, status=503), requests.Timeout("read timed out")]
+    )
+    t = _teacher(session, budget=1000)
+    with pytest.raises(requests.HTTPError):
+        t.complete(_msgs(8), max_tokens=4)  # estimate 2 + 4
+    assert t.used_tokens == 6
+    with pytest.raises(requests.Timeout):
+        t.complete(_msgs(8), max_tokens=4)
+    assert t.used_tokens == 12

@@ -3,7 +3,9 @@
 The budget check runs before every request: when the tokens used so far plus the
 estimate of the next request (prompt characters / 4, rounded up, plus ``max_tokens``)
 would pass the cap, ``BudgetExceeded`` is raised and nothing is sent. Used tokens come
-from the response ``usage``. One request per call: no automatic retry in v1.
+from the response ``usage``. A request that fails after it may have been sent (HTTP
+error, timeout, unreadable reply) counts its estimate. One request per call: no
+automatic retry in v1.
 
 The API key goes into the request header and nowhere else: not into logs, ``repr``
 or exception text.
@@ -111,14 +113,24 @@ class Teacher:
             max_tokens,
             estimate,
         )
-        resp = self._session.post(
-            self._url,
-            json=payload,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            timeout=self.timeout_s,
-        )
-        resp.raise_for_status()
-        body = resp.json()
+        try:
+            resp = self._session.post(
+                self._url,
+                json=payload,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=self.timeout_s,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except BaseException as exc:
+            # The server may have spent tokens: count the estimate, then re-raise.
+            self.used_tokens += estimate
+            log.warning(
+                "teacher: request failed (%s); counting the estimate of %d tokens",
+                type(exc).__name__,
+                estimate,
+            )
+            raise
         self.used_tokens += self._usage(body, estimate)
         log.info("teacher: used %d of %d tokens", self.used_tokens, self.budget_tokens)
         try:

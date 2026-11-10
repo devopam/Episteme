@@ -6,6 +6,7 @@ import requests
 
 from episteme.harness.pbrer import PbrerFacts, gate, skeleton
 from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+from episteme.sft import batch as batch_mod
 from episteme.sft.batch import TOOLS_SHA256, generate_batch
 from episteme.sft.examples import GroundedQA
 from episteme.sft.teacher import Teacher
@@ -189,7 +190,9 @@ def test_request_error_writes_manifest_then_reraises(fakes, tmp_path):
     assert doc["stopped"] == "error"
     assert doc["error"] == "HTTPError"
     assert doc["counts"]["kept"] == 1
-    assert doc["budget_used"] == 5
+    # 5 tokens of the answered request plus the estimate of the failed one.
+    ledger = _jsonl(tmp_path / "requests.jsonl")
+    assert doc["budget_used"] == sum(e.get("tokens", 0) for e in ledger) > 5
     assert [r["source_row"]["id"] for r in _jsonl(tmp_path / "examples.jsonl")] == ["PMC1"]
 
 
@@ -280,8 +283,12 @@ def test_pbrer_tool_draft_batch_sends_headings_and_keeps_a_passing_draft(fakes, 
         ]
     )
     rows = [
-        _tool_row(1, pbrer_region="ich", skeleton=draft, task=f"Draft the PBRER {INTERVAL}."),
-        _tool_row(2, pbrer_region="ich", skeleton=draft, task=f"Draft the PBRER {INTERVAL}."),
+        _tool_row(
+            1, _result(), pbrer_region="ich", skeleton=draft, task=f"Draft the PBRER {INTERVAL}."
+        ),
+        _tool_row(
+            2, _result(), pbrer_region="ich", skeleton=draft, task=f"Draft the PBRER {INTERVAL}."
+        ),
     ]
     out = generate_batch(_teacher(session), rows, "tool_draft", 2, tmp_path, excluded=())
     assert out["kept"] == 1
@@ -359,3 +366,157 @@ def test_max_tokens_defaults_to_the_setting(fakes, tmp_path, monkeypatch):
         assert _manifest(tmp_path)["config"]["max_tokens"] == 77
     finally:
         cfg.get_settings.cache_clear()
+
+
+# --- fix round 2: ledger, guarded manifest, shapes, kind ------------------------------
+
+
+def _ledger(path) -> list[dict]:
+    return _jsonl(path / "requests.jsonl")
+
+
+def test_manifest_write_failure_keeps_the_original_exception(fakes, tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(batch_mod, "write_manifest", broken)
+    session = fakes.FakeSession([fakes.FakeResponse({}, status=503)])
+    with pytest.raises(requests.HTTPError):
+        generate_batch(_teacher(session), [_passage(1)], "grounded_qa", 1, tmp_path, excluded=())
+    # With no exception in flight, a manifest failure is the error the caller sees.
+    session = fakes.FakeSession([fakes.chat_reply(_qa_json("PMC2"), {"total_tokens": 1})])
+    with pytest.raises(OSError):
+        generate_batch(_teacher(session), [_passage(2)], "grounded_qa", 1, tmp_path, excluded=())
+
+
+def test_ledger_records_every_paid_request(fakes, tmp_path):
+    session = fakes.FakeSession(
+        [
+            fakes.chat_reply(_qa_json("PMC1"), {"total_tokens": 5}),
+            fakes.chat_reply(_qa_json("PMC2", '"999 patients" [PMC2]'), {"total_tokens": 6}),
+            fakes.chat_reply("not json", {"total_tokens": 7}),
+            fakes.FakeResponse({}, status=503),
+        ]
+    )
+    t = _teacher(session)
+    rows = [_passage(i) for i in range(1, 5)]
+    with pytest.raises(requests.HTTPError):
+        generate_batch(t, rows, "grounded_qa", 9, tmp_path, excluded=())
+    ledger = _ledger(tmp_path)
+    paid = [e for e in ledger if e["event"] in ("paid", "error")]
+    assert [(e["id"], e["event"]) for e in paid] == [
+        ("PMC1", "paid"),
+        ("PMC2", "paid"),
+        ("PMC3", "paid"),
+        ("PMC4", "error"),
+    ]
+    assert [e["tokens"] for e in paid[:3]] == [5, 6, 7]
+    assert paid[3]["tokens"] > 0 and paid[3]["error"] == "HTTPError"
+    outcomes = {e["id"]: (e["outcome"], e.get("reason")) for e in ledger if e["event"] == "outcome"}
+    assert outcomes == {
+        "PMC1": ("kept", None),
+        "PMC2": ("rejected", "citation"),
+        "PMC3": ("rejected", "format"),
+    }
+    assert all(e["kind"] == "grounded_qa" for e in ledger)
+    assert sum(e["tokens"] for e in paid) == t.used_tokens
+
+
+def test_resume_skips_rejected_ids_and_retries_errors(fakes, tmp_path):
+    first = fakes.FakeSession(
+        [
+            fakes.chat_reply(_qa_json("PMC1"), {"total_tokens": 5}),
+            fakes.chat_reply("not json", {"total_tokens": 6}),
+            fakes.FakeResponse({}, status=503),
+        ]
+    )
+    rows = [_passage(i) for i in range(1, 5)]
+    with pytest.raises(requests.HTTPError):
+        generate_batch(_teacher(first), rows, "grounded_qa", 3, tmp_path, excluded=())
+    second = fakes.FakeSession(
+        [
+            fakes.chat_reply(_qa_json("PMC3"), {"total_tokens": 1}),
+            fakes.chat_reply(_qa_json("PMC4"), {"total_tokens": 1}),
+        ]
+    )
+    out = generate_batch(_teacher(second), rows, "grounded_qa", 3, tmp_path, excluded=())
+    # PMC1 (kept) and PMC2 (rejected) were paid for: no new request. PMC3 failed: retried.
+    asked = [json.loads(p["json"]["messages"][1]["content"])["passage_ref"] for p in second.posts]
+    assert asked == ["PMC3", "PMC4"]
+    assert out["skipped_done"] == 2
+    assert out["kept"] == 2 and out["kept_before"] == 1
+
+
+def test_hard_kill_loses_at_most_the_in_flight_request(fakes, tmp_path, monkeypatch):
+    def killed(example):
+        raise KeyboardInterrupt
+
+    session = fakes.FakeSession([fakes.chat_reply(_qa_json("PMC1"), {"total_tokens": 9})])
+    monkeypatch.setattr(batch_mod, "run_checks", killed)
+    with pytest.raises(KeyboardInterrupt):
+        generate_batch(_teacher(session), [_passage(1)], "grounded_qa", 1, tmp_path, excluded=())
+    assert [(e["event"], e["id"], e["tokens"]) for e in _ledger(tmp_path)] == [("paid", "PMC1", 9)]
+    monkeypatch.undo()
+    again = fakes.FakeSession([])
+    out = generate_batch(_teacher(again), [_passage(1)], "grounded_qa", 1, tmp_path, excluded=())
+    assert again.posts == []
+    assert out["skipped_done"] == 1
+
+
+def test_budget_across_runs_reads_the_ledger(fakes, tmp_path):
+    first = fakes.FakeSession([fakes.chat_reply(_qa_json("PMC1"), {"total_tokens": 900})])
+    rows = [_passage(i) for i in range(1, 3)]
+    generate_batch(
+        _teacher(first, budget=1000),
+        rows[:1],
+        "grounded_qa",
+        2,
+        tmp_path,
+        excluded=(),
+        max_tokens=100,
+    )
+    assert len(first.posts) == 1
+    second = fakes.FakeSession([fakes.chat_reply(_qa_json("PMC2"), {"total_tokens": 1})])
+    out = generate_batch(
+        _teacher(second, budget=1000), rows, "grounded_qa", 2, tmp_path, excluded=(), max_tokens=100
+    )
+    assert second.posts == []
+    assert out["stopped"] == "budget"
+    assert _manifest(tmp_path)["counts"]["tokens_before"] == 900
+
+
+def test_malformed_claims_are_format_and_empty_claims_are_licence(fakes, tmp_path):
+    good = _result().to_json()
+    bad_claim = {"claims": ["not a claim"], "coverage": good["coverage"]}
+    bad_prov = {"claims": [{**good["claims"][0], "provenance": "x"}], "coverage": good["coverage"]}
+    empty = {"claims": [], "coverage": {"matched": 0, "missing": ["faers"], "notes": []}}
+
+    def row(i, result):
+        return {**_tool_row(i, _result()), "tool_results": [result]}
+
+    session = fakes.FakeSession([])
+    out = generate_batch(
+        _teacher(session),
+        [row(1, bad_claim), row(2, bad_prov), row(3, empty)],
+        "tool_draft",
+        3,
+        tmp_path,
+        excluded=(),
+    )
+    assert out["rejected"]["format"] == 2
+    assert out["rejected"]["licence"] == 1
+    assert session.posts == []
+
+
+def test_resume_refuses_another_kind(fakes, tmp_path):
+    session = fakes.FakeSession([fakes.chat_reply(_qa_json("PMC1"), {"total_tokens": 1})])
+    generate_batch(_teacher(session), [_passage(1)], "grounded_qa", 1, tmp_path, excluded=())
+    with pytest.raises(ValueError, match="grounded_qa"):
+        generate_batch(
+            _teacher(fakes.FakeSession([])),
+            [_passage(2, reason="unverified")],
+            "abstain",
+            1,
+            tmp_path,
+            excluded=(),
+        )
