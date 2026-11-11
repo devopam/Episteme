@@ -233,11 +233,14 @@ def test_openalex_load_refuses_without_the_dedup_indexes(loader, pg_conn, tmp_pa
     sequential scan of pubmed per shard."""
     shard = _shard(tmp_path)
     with pg_conn.cursor() as cur:
+        # Not committed: the loader uses this connection, and the rollback below
+        # restores the index, so episteme_test keeps a complete schema.
         cur.execute("DROP INDEX episteme.articles_pmid_idx")
-    pg_conn.commit()
     with pytest.raises(RuntimeError, match="articles_pmid_idx"):
         loader.load_source_file(pg_conn, source="openalex", staging_path=shard, run_id="x1")
     pg_conn.rollback()
     with pg_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM episteme.articles WHERE source = 'openalex'")
         assert cur.fetchone()[0] == 0
+        cur.execute("SELECT to_regclass('episteme.articles_pmid_idx') IS NOT NULL")
+        assert cur.fetchone()[0]

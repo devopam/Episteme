@@ -42,11 +42,30 @@ def _partition_of(cur, table: str, row_id: str, col: str) -> str:
     return cur.fetchone()[0]
 
 
+def test_0012_refuses_while_the_default_partition_holds_an_openalex_row(pg_conn):
+    """The documented precondition: purge first, or the migration stops with a message."""
+    _base_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        _insert(cur, "openalex", 1)
+        pg_conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="holds openalex rows"):
+            cur.execute(MIGRATION_0012.read_text(encoding="utf-8"))
+    pg_conn.rollback()
+    # leave no openalex row behind: a later apply of 0012 would refuse
+    with pg_conn.cursor() as cur:
+        cur.execute("DELETE FROM episteme.article_body WHERE source = 'openalex'")
+        cur.execute("DELETE FROM episteme.articles WHERE source = 'openalex'")
+    pg_conn.commit()
+
+
 def test_0012_routes_openalex_to_its_own_partitions(pg_conn):
     _base_schema(pg_conn)
     with pg_conn.cursor() as cur:
         cur.execute(MIGRATION_0012.read_text(encoding="utf-8"))
         cur.execute(MIGRATION_0012.read_text(encoding="utf-8"))  # idempotent
+    # Committed: the last test of the file leaves episteme_test with 0002-0012.
+    pg_conn.commit()
+    with pg_conn.cursor() as cur:
         for source in ("openalex", "chembl"):
             _insert(cur, source, 1)
         assert _partition_of(cur, "articles", "openalex:1", "id") == "episteme.articles_openalex"
@@ -69,15 +88,4 @@ def test_0012_routes_openalex_to_its_own_partitions(pg_conn):
         tables = {r[0] for r in cur.fetchall()}
         assert {"articles_pubmed", "articles_pmc"} <= tables
         assert all(t.startswith(("articles_pubmed", "articles_pmc")) for t in tables), tables
-    pg_conn.rollback()
-
-
-def test_0012_refuses_while_the_default_partition_holds_an_openalex_row(pg_conn):
-    """The documented precondition: purge first, or the migration stops with a message."""
-    _base_schema(pg_conn)
-    with pg_conn.cursor() as cur:
-        _insert(cur, "openalex", 1)
-        pg_conn.commit()
-        with pytest.raises(psycopg.errors.RaiseException, match="holds openalex rows"):
-            cur.execute(MIGRATION_0012.read_text(encoding="utf-8"))
     pg_conn.rollback()
