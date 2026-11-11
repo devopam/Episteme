@@ -70,7 +70,7 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "column:episteme.label_section.product",
     ],
     "0012_openalex_partitions.sql": [
-        "table:episteme.articles_openalex",
+        "table:episteme.article_body_openalex",
         "index:episteme.articles_pubmed_doi_lower_idx",
         "index:episteme.articles_pmc_doi_lower_idx",
     ],

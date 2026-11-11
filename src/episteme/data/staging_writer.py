@@ -157,8 +157,10 @@ def _write_parquet_stream(
     source: str,
     source_file: str,
     batch_size: int,
+    metadata: dict[str, str] | None = None,
 ) -> tuple[list[Path], int]:
-    """Stream rows into one Parquet file (one row group per batch); returns (paths, n_rows)."""
+    """Stream rows into one Parquet file (one row group per batch); returns (paths, n_rows).
+    ``metadata`` is added to the file's key-value metadata (UTF-8)."""
     import pyarrow.parquet as pq
 
     batches = _batches(rows, batch_size)
@@ -170,7 +172,15 @@ def _write_parquet_stream(
     tmp_path = out_path.with_name(out_path.name + ".tmp")
     n = 0
     try:
-        with pq.ParquetWriter(tmp_path, _article_schema(), compression="zstd") as writer:
+        schema = _article_schema()
+        if metadata:
+            schema = schema.with_metadata(
+                {
+                    **(schema.metadata or {}),
+                    **{k.encode("utf-8"): v.encode("utf-8") for k, v in metadata.items()},
+                }
+            )
+        with pq.ParquetWriter(tmp_path, schema, compression="zstd") as writer:
             for batch in itertools.chain([first], batches):
                 writer.write_table(_batch_to_table(batch))
                 n += len(batch)
@@ -248,13 +258,20 @@ def write_rows(
     source_file: str,
     prefer_parquet: bool = True,
     batch_size: int = WRITE_BATCH_ROWS,
+    metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """``metadata``: parquet key-value metadata for the shard (a JSONL shard has none)."""
     assert source in article_schema.SOURCES, f"unknown source {source!r}"
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if prefer_parquet and _pyarrow_available():
         paths, n = _write_parquet_stream(
-            rows, staging_root, source=source, source_file=source_file, batch_size=batch_size
+            rows,
+            staging_root,
+            source=source,
+            source_file=source_file,
+            batch_size=batch_size,
+            metadata=metadata,
         )
         return {"format": "parquet", "paths": [str(p) for p in paths], "n_rows": n}
     path, n = _write_jsonl_stream(rows, staging_root, source=source, source_file=source_file)

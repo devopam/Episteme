@@ -453,6 +453,28 @@ def _check_dedup_ready(cur) -> None:
         )
 
 
+def check_dedup_shard(staging_path: Path) -> None:
+    """Raise unless the shard carries the serializer's ids marker
+    (``article_schema.DEDUP_IDS_META_KEY`` = ``DEDUP_IDS_VERSION`` in the parquet
+    key-value metadata). An openalex shard staged before the serializer kept
+    ``ids.pmid`` / ``ids.pmcid`` has both empty and would dedup by DOI only,
+    silently. Reads the parquet footer only. A JSONL shard has no metadata."""
+    want = article_schema.DEDUP_IDS_VERSION.encode("utf-8")
+    got = None
+    if _shard_format(staging_path) == "parquet":
+        import pyarrow.parquet as pq
+
+        meta = pq.read_schema(staging_path).metadata or {}
+        got = meta.get(article_schema.DEDUP_IDS_META_KEY.encode("utf-8"))
+    if got != want:
+        raise RuntimeError(
+            f"{staging_path.name} was staged before the serializer kept ids.pmid/ids.pmcid "
+            f"(no {article_schema.DEDUP_IDS_META_KEY}={article_schema.DEDUP_IDS_VERSION} "
+            "in its parquet metadata): its rows would dedup by DOI only. Run serialize --force "
+            "--reason ... first (docs/10 section 5.2, OpenAlex load)"
+        )
+
+
 def _create_dedup_tables(cur) -> None:
     """Temp copies of articles and article_body for one shard (ON COMMIT DROP)."""
     for table, like in ((_DEDUP_HOT, "articles"), (_DEDUP_BODY, "article_body")):
@@ -460,46 +482,73 @@ def _create_dedup_tables(cur) -> None:
         cur.execute(f"CREATE TEMP TABLE {table} (LIKE episteme.{like}) ON COMMIT DROP")
 
 
-def _dedup_delete_sql(key: str, against: tuple[str, ...]) -> str:
-    """DELETE the temp rows whose ``key`` matches a row of a source in ``against``.
+def _key_expr(key: str, alias: str) -> str:
+    """The compared value of ``key`` on table ``alias``: lower() for the DOI."""
+    if key not in DEDUP_KEYS:
+        raise ValueError(f"unknown dedup key {key!r}")
+    return f"lower({alias}.doi)" if key == "doi" else f"{alias}.{key}"
+
+
+def _create_dedup_keys(cur, key: str) -> None:
+    """``pg_temp._dedup_keys``: the shard's DISTINCT values of ``key``, SORTED,
+    with a unique index and fresh statistics (the ``_load_ids`` pattern), so the
+    probe below reads each pubmed / pmc index leaf in key order, about once."""
+    cur.execute("DROP TABLE IF EXISTS pg_temp._dedup_keys")
+    cur.execute(
+        "CREATE TEMP TABLE _dedup_keys ON COMMIT DROP AS "
+        f"SELECT DISTINCT {_key_expr(key, 's')} AS k FROM {_DEDUP_HOT} s "
+        f"WHERE s.{key} IS NOT NULL ORDER BY 1"
+    )
+    cur.execute("CREATE UNIQUE INDEX ON pg_temp._dedup_keys (k)")
+    cur.execute("ANALYZE pg_temp._dedup_keys")
+
+
+def _dedup_probe_sql(key: str, against: tuple[str, ...]) -> str:
+    """SELECT the keys of ``pg_temp._dedup_keys`` that a row of ``against`` holds.
 
     The source literals come from ``DEDUP_AGAINST`` (code, not input) and are
     checked against ``article_schema.SOURCES``; they are inlined so the planner
     prunes to those partitions at plan time. ``IS NOT NULL`` on the articles side
     matches the partial index predicates."""
-    if key not in DEDUP_KEYS:
-        raise ValueError(f"unknown dedup key {key!r}")
     for src in against:
         if src not in article_schema.SOURCES:
             raise ValueError(f"unknown dedup source {src!r}")
     sources = ", ".join(f"'{src}'" for src in against)
-    if key == "doi":
-        match = "a.doi IS NOT NULL AND lower(a.doi) = lower(s.doi)"
-    else:
-        match = f"a.{key} IS NOT NULL AND a.{key} = s.{key}"
     return (
-        f"DELETE FROM {_DEDUP_HOT} s WHERE s.{key} IS NOT NULL AND EXISTS ("
-        f"SELECT 1 FROM episteme.articles a WHERE a.source IN ({sources}) AND {match})"
+        "SELECT k.k FROM pg_temp._dedup_keys k WHERE EXISTS ("
+        f"SELECT 1 FROM episteme.articles a WHERE a.source IN ({sources}) "
+        f"AND a.{key} IS NOT NULL AND {_key_expr(key, 'a')} = k.k)"
     )
 
 
 def _dedup_and_insert(cur, against: tuple[str, ...]) -> dict[str, int]:
     """Remove the temp rows that ``against`` already holds, then INSERT the rest.
 
-    Set-based: one DELETE per key, in ``DEDUP_KEYS`` order, each an index nested
-    loop into the pubmed / pmc partitions. The plan is forced, as for the id
-    deletes: the temp table is small, the partitions are huge, and their
-    statistics can be stale. Each DELETE's row count is the skip count of its
-    key, so a row is counted once, under its first matching key. Returns
-    ``{"skipped_<key>": n}`` per key."""
+    Set-based, per key in ``DEDUP_KEYS`` order: build the sorted distinct key
+    table, find the keys that pubmed / pmc hold (an index nested loop, forced as
+    for the id deletes: the key table is small, the partitions are huge, and their
+    statistics can be stale), then DELETE the temp rows with those keys. Each
+    DELETE's row count is the skip count of its key, so a row is counted once,
+    under its first matching key. Returns ``{"skipped_<key>": n}`` per key."""
     cur.execute(f"CREATE INDEX ON {_DEDUP_HOT} (id)")
     cur.execute(f"ANALYZE {_DEDUP_HOT}")
     skipped: dict[str, int] = {}
     with current().long_statement("dedup against " + ", ".join(against)):
-        with _forced_nested_loops(cur):
-            for key in DEDUP_KEYS:
-                cur.execute(_dedup_delete_sql(key, against))
-                skipped[f"skipped_{key}"] = cur.rowcount
+        for key in DEDUP_KEYS:
+            _create_dedup_keys(cur, key)
+            cur.execute("DROP TABLE IF EXISTS pg_temp._dedup_hits")
+            with _forced_nested_loops(cur):
+                cur.execute(
+                    "CREATE TEMP TABLE _dedup_hits ON COMMIT DROP AS "
+                    + _dedup_probe_sql(key, against)
+                )
+            cur.execute(
+                f"DELETE FROM {_DEDUP_HOT} s WHERE s.{key} IS NOT NULL "
+                f"AND {_key_expr(key, 's')} IN (SELECT k FROM pg_temp._dedup_hits)"
+            )
+            skipped[f"skipped_{key}"] = cur.rowcount
+            cur.execute("DROP TABLE pg_temp._dedup_hits")
+            cur.execute("DROP TABLE pg_temp._dedup_keys")
         hot_cols_sql = ", ".join(HOT_COLUMNS)
         cur.execute(
             f"INSERT INTO episteme.articles ({hot_cols_sql}) "
@@ -543,6 +592,7 @@ def load_source_file(
     fmt = _shard_format(staging_path)
     dedup_against = DEDUP_AGAINST.get(source)
     if dedup_against:
+        check_dedup_shard(staging_path)  # before the connection is touched
         with conn.cursor() as cur:
             _check_dedup_ready(cur)  # before any work on the shard
     content_hash = _file_sha256(staging_path)

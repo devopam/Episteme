@@ -412,17 +412,17 @@ def test_openalex_record_without_id_is_counted_and_skipped(tmp_path):
 # --------------------------------------------------------------------------- #
 # ids.pmid / ids.pmcid -> pmid / pmcid (owner decision 2026-11-11: the load
 # skips works that pubmed or pmc already hold, so the row keeps both ids).
-# Shapes: the OpenAlex Work object documentation (ids.pmid
-# "https://pubmed.ncbi.nlm.nih.gov/<digits>", ids.pmcid
-# "https://www.ncbi.nlm.nih.gov/pmc/articles/<id>"). No real record with ``ids``
-# is in the repo, so the documented shapes are tested plus the variants a
-# snapshot can hold (a PMC prefix or not, a trailing slash, the newer
-# pmc.ncbi.nlm.nih.gov host, a bare value).
+# Shapes: ids.pmid "https://pubmed.ncbi.nlm.nih.gov/<digits>" (confirmed on real
+# data, 2026-11-11); ids.pmcid "https://www.ncbi.nlm.nih.gov/pmc/articles/<id>"
+# from the OpenAlex Work documentation only (real snapshots carry no ids.pmcid).
+# The variants a snapshot could hold are tested too (a PMC prefix or not, a
+# trailing slash, the newer pmc.ncbi.nlm.nih.gov host, a bare value).
 # --------------------------------------------------------------------------- #
 
 
 def test_bare_pmid_from_documented_url():
     assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/29456894") == "29456894"
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/39940200") == "39940200"  # real
 
 
 def test_bare_pmid_variants():
@@ -488,3 +488,14 @@ def test_openalex_row_without_ids_keeps_none():
     assert row["pmid"] is None and row["pmcid"] is None
     row = openalex_row({**_work(), "ids": None}, "f.parquet")
     assert row["pmid"] is None and row["pmcid"] is None
+
+
+def test_serialized_shard_carries_the_dedup_ids_marker(tmp_path):
+    """The loader refuses an openalex shard without it (staged before pmid/pmcid)."""
+    import pyarrow.parquet as pq
+
+    serialize_openalex(FX, tmp_path)
+    shard = next((tmp_path / "staging" / "openalex").glob("*.parquet"))
+    meta = pq.read_schema(shard).metadata or {}
+    key = article_schema.DEDUP_IDS_META_KEY.encode()
+    assert meta.get(key) == article_schema.DEDUP_IDS_VERSION.encode()

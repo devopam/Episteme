@@ -92,6 +92,7 @@ def _oa_row(native: str, *, pmid=None, pmcid=None, doi=None) -> dict:
 
 
 def _shard(tmp_path: Path) -> Path:
+    from episteme.data.article_schema import DEDUP_IDS_META_KEY, DEDUP_IDS_VERSION
     from episteme.data.staging_writer import write_rows
 
     rows = [
@@ -105,8 +106,16 @@ def _shard(tmp_path: Path) -> Path:
         _oa_row("W4", pmid="999", pmcid="PMC999", doi="10.9999/new"),
         # pmid of a chembl row: not pubmed or pmc, so it loads
         _oa_row("W5", pmid="300"),
+        # the same DOI as W3 in another case: the distinct key table removes both
+        _oa_row("W6", doi="10.1016/S0140-6736(20)30183-5"),
     ]
-    info = write_rows(rows, tmp_path / "02_processed", source="openalex", source_file="oa_part")
+    info = write_rows(
+        rows,
+        tmp_path / "02_processed",
+        source="openalex",
+        source_file="oa_part",
+        metadata={DEDUP_IDS_META_KEY: DEDUP_IDS_VERSION},
+    )
     return Path(info["paths"][0])
 
 
@@ -122,10 +131,10 @@ def _loaded(conn) -> dict[str, list[str]]:
 
 
 EXPECTED_COUNTS = {
-    "rows_in": 5,
+    "rows_in": 6,
     "skipped_pmid": 1,
     "skipped_pmcid": 1,
-    "skipped_doi": 1,
+    "skipped_doi": 2,
     "loaded": 2,
 }
 
@@ -212,14 +221,16 @@ def test_other_sources_report_no_dedup_counts(loader, pg_conn, tmp_path):
 
 
 def test_dedup_plan_probes_indexes_not_seq_scans(loader, pg_conn):
-    """Each dedup probe reads the pubmed / pmc partitions by index (no Seq Scan),
-    even on empty, unanalyzed partitions."""
+    """Each dedup probe walks the sorted distinct key table and reads the pubmed /
+    pmc partitions by index (no Seq Scan), even on empty, unanalyzed partitions."""
     with pg_conn.cursor() as cur:
         loader._create_dedup_tables(cur)
-        with loader._forced_nested_loops(cur):
-            for key in loader.DEDUP_KEYS:
-                cur.execute("EXPLAIN " + loader._dedup_delete_sql(key, ("pubmed", "pmc")))
+        for key in loader.DEDUP_KEYS:
+            loader._create_dedup_keys(cur, key)
+            with loader._forced_nested_loops(cur):
+                cur.execute("EXPLAIN " + loader._dedup_probe_sql(key, ("pubmed", "pmc")))
                 plan = "\n".join(r[0] for r in cur.fetchall())
+                assert "_dedup_keys" in plan, plan
                 assert "articles_pubmed" in plan and "articles_pmc" in plan, plan
                 for line in plan.splitlines():
                     if "Seq Scan" in line:

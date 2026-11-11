@@ -37,6 +37,13 @@ SCHEMA_VERSION = "1.6"
 #        reference's DOI); is_retracted only for "Retracted Publication" or a
 #        RetractionIn link; pubmed writes graph relation files. Row shape unchanged.
 
+# Staging-shard marker (parquet key-value metadata) of an openalex shard written by a
+# serializer that keeps ids.pmid / ids.pmcid (2026-11-11). The loader's pubmed/pmc
+# dedup refuses an openalex shard without it: a shard staged earlier has pmid and
+# pmcid empty and would dedup by DOI only. Not a row column, so SCHEMA_VERSION stays.
+DEDUP_IDS_META_KEY = "episteme.dedup_ids"
+DEDUP_IDS_VERSION = "1"
+
 # Minimum text length for extract_status=ok when abstract/body absent
 MIN_OK_TEXT_LEN = 200
 

@@ -103,9 +103,12 @@ fetched shard). ``doi`` strips any ``https://doi.org/`` prefix the same way
 (``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``), normalised to the forms
 pubmed and pmc store (bare digits; ``PMC<digits>``), so that the load can skip
 a work pubmed or pmc already holds (owner decision 2026-11-11, see
-``postgres_loader.DEDUP_AGAINST``). The shapes are the OpenAlex Work
-documentation's, not read off a real record (see ``_bare_pmid`` /
-``_bare_pmcid``). ``title`` = the real ``title``
+``postgres_loader.DEDUP_AGAINST``). The ``ids.pmid`` shape is confirmed on real
+data (``https://pubmed.ncbi.nlm.nih.gov/39940200``, 2026-11-11); real snapshots
+carry no ``ids.pmcid`` (none in ~150k works sampled), so ``pmcid`` stays empty
+for now. Each staging shard carries the parquet metadata key
+``article_schema.DEDUP_IDS_META_KEY``; the loader refuses an openalex shard
+without it (staged before this change). ``title`` = the real ``title``
 field, falling back to ``display_name`` (same string in every real record
 sampled, but ``title`` is occasionally null while ``display_name`` is not).
 ``year`` = ``publication_year``. ``authors`` = ``[a.author.display_name for
@@ -180,6 +183,8 @@ from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    DEDUP_IDS_META_KEY,
+    DEDUP_IDS_VERSION,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -341,9 +346,10 @@ def _bare_pmcid(raw: object) -> str | None:
     in ``episteme.articles.pmcid``.
 
     Documented shape: ``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``, where
-    ``<id>`` is ``PMC5845130`` or the bare number ``5845130`` (both occur); the
-    newer ``https://pmc.ncbi.nlm.nih.gov/articles/PMC.../`` host also passes.
-    Anything else gives ``None``."""
+    ``<id>`` would be ``PMC5845130`` or the bare number ``5845130``; the newer
+    ``https://pmc.ncbi.nlm.nih.gov/articles/PMC.../`` host also passes. Anything
+    else gives ``None``. Real snapshots do not carry ``ids.pmcid`` at all (none in
+    ~150k works sampled, 2026-11-11), so this is a guard for a later snapshot."""
     seg = _last_segment(raw)
     m = _PMCID.match(seg) if seg else None
     if not m:
@@ -596,6 +602,8 @@ def process_one(
                 source_file=basename,
                 prefer_parquet=True,
                 batch_size=_WRITE_BATCH_ROWS,
+                # the loader's pubmed/pmc dedup refuses a shard without it
+                metadata={DEDUP_IDS_META_KEY: DEDUP_IDS_VERSION},
             )
         finally:
             gen.close()
