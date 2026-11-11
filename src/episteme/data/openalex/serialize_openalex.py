@@ -98,7 +98,17 @@ brief's own worked example and a repeated-word-at-multiple-positions case.
 field DOES carry this full-URL shape, not a bare id, against the real
 fetched shard). ``doi`` strips any ``https://doi.org/`` prefix the same way
 (real field: ``https://doi.org/10.xxxx/...``) to a bare DOI string, matching
-``extract_pubmed.py``'s bare-DOI convention. ``title`` = the real ``title``
+``extract_pubmed.py``'s bare-DOI convention. ``pmid`` / ``pmcid`` come from
+``ids.pmid`` (``https://pubmed.ncbi.nlm.nih.gov/<digits>``) and ``ids.pmcid``
+(``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``), normalised to the forms
+pubmed and pmc store (bare digits; ``PMC<digits>``), so that the load can skip
+a work pubmed or pmc already holds (owner decision 2026-11-11, see
+``postgres_loader.DEDUP_AGAINST``). The ``ids.pmid`` shape is confirmed on real
+data (``https://pubmed.ncbi.nlm.nih.gov/39940200``, 2026-11-11); real snapshots
+carry no ``ids.pmcid`` (none in ~150k works sampled), so ``pmcid`` stays empty
+for now. Each staging shard carries the parquet metadata key
+``article_schema.DEDUP_IDS_META_KEY``; the loader refuses an openalex shard
+without it (staged before this change). ``title`` = the real ``title``
 field, falling back to ``display_name`` (same string in every real record
 sampled, but ``title`` is occasionally null while ``display_name`` is not).
 ``year`` = ``publication_year``. ``authors`` = ``[a.author.display_name for
@@ -171,8 +181,11 @@ if str(_SRC) not in sys.path:
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import staging_writer as _staging_writer  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
+    DEDUP_IDS_META_KEY,
+    DEDUP_IDS_VERSION,
     SCHEMA_VERSION,
     finalize_row,
     normalize_license,
@@ -300,6 +313,59 @@ def _bare_doi(raw: str | None) -> str | None:
     return m.group(2) if m else s
 
 
+_DIGITS = re.compile(r"^\d+$")
+# PubMed's own record URL only (host checked): the real ids.pmid shape.
+_PUBMED_URL = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?$", re.I)
+_PMCID = re.compile(r"^(?:PMC)?(\d+)$", re.I)
+
+
+def _last_segment(raw: object) -> str | None:
+    """The last non-empty path segment of a URL-shaped id (or the bare value)."""
+    if raw is None:
+        return None
+    s = str(raw).strip().rstrip("/")
+    if not s:
+        return None
+    seg = s.rsplit("/", 1)[-1].strip()
+    return seg or None
+
+
+def _bare_pmid(raw: object) -> str | None:
+    """OpenAlex ``ids.pmid`` -> the bare PMID as pubmed stores it in
+    ``episteme.articles.pmid`` (text digits, no leading zeros).
+
+    Accepted: PubMed's own URL, ``http(s)://pubmed.ncbi.nlm.nih.gov/<digits>``
+    (the real shape, e.g. ``https://pubmed.ncbi.nlm.nih.gov/39940200``), a bare
+    digits string, or an int. Anything else gives ``None``, including a URL on
+    any other host: a wrong id must never match, and so never skip, a pubmed row."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    m = _PUBMED_URL.match(s)
+    digits = m.group(1) if m else (s if _DIGITS.match(s) else None)
+    if digits is None:
+        return None
+    n = int(digits)
+    return str(n) if n > 0 else None
+
+
+def _bare_pmcid(raw: object) -> str | None:
+    """OpenAlex ``ids.pmcid`` -> ``PMC<digits>``, the form pmc and pubmed store
+    in ``episteme.articles.pmcid``.
+
+    Documented shape: ``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``, where
+    ``<id>`` would be ``PMC5845130`` or the bare number ``5845130``; the newer
+    ``https://pmc.ncbi.nlm.nih.gov/articles/PMC.../`` host also passes. Anything
+    else gives ``None``. Real snapshots do not carry ``ids.pmcid`` at all (none in
+    ~150k works sampled, 2026-11-11), so this is a guard for a later snapshot."""
+    seg = _last_segment(raw)
+    m = _PMCID.match(seg) if seg else None
+    if not m:
+        return None
+    n = int(m.group(1))
+    return f"PMC{n}" if n > 0 else None
+
+
 def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """One real OpenAlex ``works_jsonl`` record (already confirmed
     biomedical by the caller -- see ``is_biomedical``) -> a finalized
@@ -309,6 +375,11 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None
     if not native_id:
         return None  # no native id: caller counts + skips (never synthesize an id)
     doi = _bare_doi(rec.get("doi"))
+    # ids.pmid / ids.pmcid: kept so the load can skip a work that pubmed or pmc
+    # already holds (owner decision 2026-11-11; postgres_loader dedup).
+    ids = rec.get("ids") if isinstance(rec.get("ids"), dict) else {}
+    pmid = _bare_pmid(ids.get("pmid"))
+    pmcid = _bare_pmcid(ids.get("pmcid"))
     title = rec.get("title") or rec.get("display_name")
     year_raw = rec.get("publication_year")
     try:
@@ -345,8 +416,8 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": native_id,
-        "pmid": None,
-        "pmcid": None,
+        "pmid": pmid,
+        "pmcid": pmcid,
         "doi": doi,
         "title": title or None,
         "abstract": abstract,
@@ -539,6 +610,8 @@ def process_one(
                 source_file=basename,
                 prefer_parquet=True,
                 batch_size=_WRITE_BATCH_ROWS,
+                # the loader's pubmed/pmc dedup refuses a shard without it
+                metadata={DEDUP_IDS_META_KEY: DEDUP_IDS_VERSION},
             )
         finally:
             gen.close()
@@ -633,6 +706,13 @@ def serialize_openalex(
     ``n_rejected_*`` counters are the finer-grained RECORD-level biomedical-
     filter split the brief's Step 6 sign-off reports.
     """
+    if not _staging_writer._pyarrow_available():
+        # The JSONL fallback cannot carry the dedup ids mark (parquet metadata), and
+        # the loader refuses an openalex shard without it: stop before any work.
+        raise RuntimeError(
+            "openalex serialize needs pyarrow (the shard's dedup ids mark is parquet "
+            "metadata; a JSONL shard cannot load): uv sync --extra data"
+        )
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)

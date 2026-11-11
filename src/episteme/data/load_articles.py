@@ -303,8 +303,16 @@ def main(argv: list[str] | None = None) -> int:
                     if "label_sections" in result
                     else ""
                 )
+                dedup_note = (
+                    f" rows_in={result['rows_in']} skipped_pmid={result['skipped_pmid']}"
+                    f" skipped_pmcid={result['skipped_pmcid']}"
+                    f" skipped_doi={result['skipped_doi']} loaded={result['loaded']}"
+                    if "rows_in" in result
+                    else ""
+                )
                 print(
-                    f"ok {name}{labels_note} rows={result['rows']} deleted={result['deleted']} "
+                    f"ok {name}{labels_note}{dedup_note} rows={result['rows']} "
+                    f"deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
                     f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "
                     f"rows_per_sec={result['rows_per_sec']}"

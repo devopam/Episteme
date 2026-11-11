@@ -120,6 +120,12 @@ if [ "$BULK" = "1" ] && { [ "$SOURCE" = "ema" ] || [ "$SOURCE" = "openfda" ] || 
     # indexes; the articles index group is not theirs.
     die "$SOURCE does not support --bulk (its load builds its own indexes)" 2
 fi
+if [ "$BULK" = "1" ] && [ "$SOURCE" = "openalex" ]; then
+    # The openalex load skips works that pubmed/pmc hold by probing articles_pmid_idx,
+    # articles_pmcid_idx and the lower(doi) indexes; --bulk would drop the first two,
+    # fail every shard and then rebuild the whole articles group for nothing.
+    die "openalex does not support --bulk (its pubmed/pmc dedup needs the articles indexes that --bulk drops)" 2
+fi
 if [ "$ZIP_SET" = "1" ]; then
     { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
     [ -n "$ZIP_PATH" ] || die "--zip requires a path" 2

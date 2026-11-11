@@ -258,3 +258,33 @@ def test_an_outer_runner_pid_is_kept(tree):
     proc, calls = _run(tree, "load", FAKE_LOAD="runner", EPISTEME_RUNNER_PID="4242")
     assert proc.returncode == 0, proc.stderr
     assert "runner 4242" in calls
+
+
+def test_openalex_load_bulk_is_refused_before_any_index_drop(tree):
+    """The openalex load probes the indexes that --bulk drops: refuse up front."""
+    script, calls, fake_py = tree
+    data = script.parent
+    _write(data / "openalex" / "load_openalex.sh", FAKE_LOAD)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("EPISTEME_", "PG"))}
+    env.update(
+        EPISTEME_ACTOR="pytest",
+        PYTHON=fake_py.as_posix(),
+        CALLS=calls.as_posix(),
+        EPISTEME_DB_MODE="restricted",
+        PGDATABASE="episteme_spawn_blocked",
+        EPISTEME_PRODUCTION_DATABASE="episteme_spawn_blocked",
+        EPISTEME_DATA_ROOT=(calls.parent / "data").as_posix(),
+        EPISTEME_RAW_ROOT=(calls.parent / "data" / "01_raw").as_posix(),
+        EPISTEME_PROCESSED_ROOT=(calls.parent / "data" / "02_processed").as_posix(),
+        EPISTEME_LOCK_DIR=(calls.parent / "data" / "_ops" / "locks").as_posix(),
+    )
+    proc = subprocess.run(
+        [BASH, str(script), "openalex", "load", "--bulk"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "openalex does not support --bulk" in proc.stderr
+    assert not calls.exists() or calls.read_text(encoding="utf-8").splitlines() == []

@@ -37,7 +37,7 @@ Episteme uses a **bimodal** data strategy:
 | **Europe PMC preprints** | Full-text preprints | Per-article CC; filter NC | EBI FTP (8 bulk files `PPR<a>_PPR<b>.xml.gz`, JATS; per-article licence, about 3% NC/ND) | **Done** (bulk files, read in bounded parts) |
 | **Europe PMC author manuscripts** | Accepted manuscripts | Text-mining / copyright notices | EPMC FTP | **Wired** (download, extract, load, graph) — see docs/12 |
 | **Europe PMC OA journals** | Overlap with PMC; EU-weighted | License-filter | EPMC / NCBI | Prefer NCBI `oa_comm` to avoid dup |
-| **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Wired** (download, serialize, load) — see docs/12; strong metadata/KG candidate |
+| **OpenAlex** (biomed slice) | Scholarly graph, OA links, metadata (CC0) | CC0 | `s3://openalex` | **Wired** (download, serialize, load) — see docs/12; strong metadata/KG candidate. **Dedup (owner, 2026-11-11):** only works that `pubmed` and `pmc` do not already hold are loaded: a work is skipped when a `pubmed` or `pmc` row has its `pmid`, else its `pmcid`, else its DOI (case-insensitive). Rows keep `pmid`, `pmcid` and DOI; own partition (migration 0012); runbook docs/10 section 5.2 |
 | **Semantic Scholar Open Research Corpus / abstracts** | Extra abstract coverage | Check current ToS/license | API / releases | Candidate |
 | **PubChem** (serialized to NL) | Chemistry taxonomy & structure–name language | Public domain (US gov) | PubChem FTP/API | **Wired** (download, serialize, load) — see docs/12 |
 | **Europe PMC / PMC ID mappings** | PMID–PMCID–DOI joins | Open | EPMC FTP | **Re-download integrity**; load `id_map` |

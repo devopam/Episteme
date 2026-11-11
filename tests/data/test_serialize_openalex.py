@@ -38,10 +38,13 @@ import polars as pl
 from episteme.data import article_schema
 from episteme.data.checkpoint_markers import input_key
 from episteme.data.openalex.serialize_openalex import (
+    _bare_pmcid,
+    _bare_pmid,
     discover_openalex_files,
     is_biomedical,
     iter_rows_from_file,
     main,
+    openalex_row,
     reconstruct_abstract,
     serialize_openalex,
 )
@@ -404,3 +407,120 @@ def test_openalex_record_without_id_is_counted_and_skipped(tmp_path):
         next((tmp_path / "processed" / "_ops" / "openalex" / "success").glob("*.ok")).read_text()
     )
     assert marker["stats"]["skipped_no_id"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# ids.pmid / ids.pmcid -> pmid / pmcid (owner decision 2026-11-11: the load
+# skips works that pubmed or pmc already hold, so the row keeps both ids).
+# Shapes: ids.pmid "https://pubmed.ncbi.nlm.nih.gov/<digits>" (confirmed on real
+# data, 2026-11-11); ids.pmcid "https://www.ncbi.nlm.nih.gov/pmc/articles/<id>"
+# from the OpenAlex Work documentation only (real snapshots carry no ids.pmcid).
+# The variants a snapshot could hold are tested too (a PMC prefix or not, a
+# trailing slash, the newer pmc.ncbi.nlm.nih.gov host, a bare value).
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_pmid_from_documented_url():
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/29456894") == "29456894"
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/39940200") == "39940200"  # real
+
+
+def test_bare_pmid_variants():
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/29456894/") == "29456894"
+    assert _bare_pmid("29456894") == "29456894"
+    assert _bare_pmid(29456894) == "29456894"
+    assert _bare_pmid(" https://pubmed.ncbi.nlm.nih.gov/007 ") == "7"  # as pubmed stores it
+
+
+def test_bare_pmid_rejects_non_numeric_and_empty():
+    assert _bare_pmid(None) is None
+    assert _bare_pmid("") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/abc") is None
+    assert _bare_pmid("0") is None
+
+
+def test_bare_pmcid_from_documented_url_with_and_without_prefix():
+    assert _bare_pmcid("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5845130") == "PMC5845130"
+    assert _bare_pmcid("https://www.ncbi.nlm.nih.gov/pmc/articles/5845130") == "PMC5845130"
+
+
+def test_bare_pmcid_variants():
+    assert _bare_pmcid("https://pmc.ncbi.nlm.nih.gov/articles/PMC5845130/") == "PMC5845130"
+    assert _bare_pmcid("pmc5845130") == "PMC5845130"
+    assert _bare_pmcid("5845130") == "PMC5845130"
+    assert _bare_pmcid(5845130) == "PMC5845130"
+
+
+def test_bare_pmcid_rejects_junk_and_empty():
+    assert _bare_pmcid(None) is None
+    assert _bare_pmcid("") is None
+    assert _bare_pmcid("https://www.ncbi.nlm.nih.gov/pmc/articles/") is None
+    assert _bare_pmcid("PMCxyz") is None
+
+
+def _work(**ids):
+    return {
+        "id": "https://openalex.org/W1",
+        "doi": "https://doi.org/10.1016/s0140-6736(20)30183-5",
+        "title": "A work",
+        "ids": {"openalex": "https://openalex.org/W1", **ids},
+    }
+
+
+def test_openalex_row_keeps_pmid_pmcid_and_doi():
+    row = openalex_row(
+        _work(
+            pmid="https://pubmed.ncbi.nlm.nih.gov/31986264",
+            pmcid="https://www.ncbi.nlm.nih.gov/pmc/articles/7159299",
+        ),
+        "f.parquet",
+    )
+    assert row["pmid"] == "31986264"
+    assert row["pmcid"] == "PMC7159299"
+    assert row["doi"] == "10.1016/s0140-6736(20)30183-5"
+
+
+def test_openalex_row_without_ids_keeps_none():
+    rec = _work()
+    del rec["ids"]
+    row = openalex_row(rec, "f.parquet")
+    assert row["pmid"] is None and row["pmcid"] is None
+    row = openalex_row({**_work(), "ids": None}, "f.parquet")
+    assert row["pmid"] is None and row["pmcid"] is None
+
+
+def test_serialized_shard_carries_the_dedup_ids_marker(tmp_path):
+    """The loader refuses an openalex shard without it (staged before pmid/pmcid)."""
+    import pyarrow.parquet as pq
+
+    serialize_openalex(FX, tmp_path)
+    shard = next((tmp_path / "staging" / "openalex").glob("*.parquet"))
+    meta = pq.read_schema(shard).metadata or {}
+    key = article_schema.DEDUP_IDS_META_KEY.encode()
+    assert meta.get(key) == article_schema.DEDUP_IDS_VERSION.encode()
+
+
+def test_bare_pmid_refuses_a_url_on_another_host():
+    """Only PubMed's own URL (or a bare number) gives a pmid: a work whose ids.pmid
+    points elsewhere must not skip a real pubmed row (PR 109 review)."""
+    assert _bare_pmid("http://pubmed.ncbi.nlm.nih.gov/12345") == "12345"
+    assert _bare_pmid("https://PubMed.ncbi.nlm.nih.gov/12345") == "12345"
+    assert _bare_pmid("https://evil.example/12345") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov.evil.example/12345") is None
+    assert _bare_pmid("https://evil.example/pubmed.ncbi.nlm.nih.gov/12345") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/abc/12345") is None
+    assert _bare_pmid("ftp://pubmed.ncbi.nlm.nih.gov/12345") is None
+
+
+def test_serialize_refuses_without_pyarrow(tmp_path, monkeypatch):
+    """No pyarrow: the JSONL fallback cannot carry the dedup ids mark, so the
+    serializer stops and says pyarrow is required (PR 109 review)."""
+    import pytest
+
+    from episteme.data import staging_writer
+
+    monkeypatch.setattr(staging_writer, "_pyarrow_available", lambda: False)
+    with pytest.raises(RuntimeError, match="needs pyarrow"):
+        serialize_openalex(FX, tmp_path)
+    assert not (tmp_path / "staging" / "openalex").exists()
