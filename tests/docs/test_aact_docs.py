@@ -113,8 +113,9 @@ def test_runbook_has_an_aact_section_with_the_operator_steps():
 def test_runbook_migration_loop_applies_and_checks_0011():
     text = doc(RUNBOOK)
     loop = [ln for ln in text.splitlines() if "for f in 0002_container_and_book_parts" in ln][0]
-    assert loop.split("; do")[0].split()[-1] == "0011_label_section_ordinal"
-    assert "expect `t|t|t|t|t|t`" in text and "column_name=\\$\\$ordinal\\$\\$" in text
+    assert "0011_label_section_ordinal" in loop.split("; do")[0].split()
+    assert loop.split("; do")[0].split()[-1] == "0012_openalex_partitions"
+    assert "expect `t|t|t|t|t|t|t`" in text and "column_name=\\$\\$ordinal\\$\\$" in text
     row = [ln for ln in text.splitlines() if ln.startswith("| `0011_label_section_ordinal")][0]
     assert "first `ema_epar` load" in row and "extract" not in row
 
