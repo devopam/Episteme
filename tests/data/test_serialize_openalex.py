@@ -499,3 +499,28 @@ def test_serialized_shard_carries_the_dedup_ids_marker(tmp_path):
     meta = pq.read_schema(shard).metadata or {}
     key = article_schema.DEDUP_IDS_META_KEY.encode()
     assert meta.get(key) == article_schema.DEDUP_IDS_VERSION.encode()
+
+
+def test_bare_pmid_refuses_a_url_on_another_host():
+    """Only PubMed's own URL (or a bare number) gives a pmid: a work whose ids.pmid
+    points elsewhere must not skip a real pubmed row (PR 109 review)."""
+    assert _bare_pmid("http://pubmed.ncbi.nlm.nih.gov/12345") == "12345"
+    assert _bare_pmid("https://PubMed.ncbi.nlm.nih.gov/12345") == "12345"
+    assert _bare_pmid("https://evil.example/12345") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov.evil.example/12345") is None
+    assert _bare_pmid("https://evil.example/pubmed.ncbi.nlm.nih.gov/12345") is None
+    assert _bare_pmid("https://pubmed.ncbi.nlm.nih.gov/abc/12345") is None
+    assert _bare_pmid("ftp://pubmed.ncbi.nlm.nih.gov/12345") is None
+
+
+def test_serialize_refuses_without_pyarrow(tmp_path, monkeypatch):
+    """No pyarrow: the JSONL fallback cannot carry the dedup ids mark, so the
+    serializer stops and says pyarrow is required (PR 109 review)."""
+    import pytest
+
+    from episteme.data import staging_writer
+
+    monkeypatch.setattr(staging_writer, "_pyarrow_available", lambda: False)
+    with pytest.raises(RuntimeError, match="needs pyarrow"):
+        serialize_openalex(FX, tmp_path)
+    assert not (tmp_path / "staging" / "openalex").exists()

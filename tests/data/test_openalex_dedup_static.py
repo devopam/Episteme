@@ -60,6 +60,8 @@ def test_0012_commits_the_partitions_before_it_builds_the_doi_indexes():
     assert not any("CONCURRENTLY" in s for s in second)
     assert "SET LOCAL LOCK_TIMEOUT = '60S'" in second
     assert any(s.startswith("SET LOCAL MAINTENANCE_WORK_MEM = ") for s in second)
+    # the dedup counts of an openalex load go into _lineage as well (PR 109 review)
+    assert "ALTER TABLE EPISTEME._LINEAGE ADD COLUMN IF NOT EXISTS DEDUP_COUNTS JSONB" in first
 
 
 def test_0012_header_no_longer_claims_reads_go_on_during_the_partition_ddl():
@@ -121,7 +123,7 @@ def test_loader_refuses_an_openalex_jsonl_shard(tmp_path):
     info = write_rows(
         _oa_rows(), tmp_path, source="openalex", source_file="j_part", prefer_parquet=False
     )
-    with pytest.raises(RuntimeError, match="staged before"):
+    with pytest.raises(RuntimeError, match="needs pyarrow"):
         postgres_loader.check_dedup_shard(Path(info["paths"][0]))
 
 

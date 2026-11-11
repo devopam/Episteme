@@ -45,6 +45,8 @@
 -- the new partitions, including the articles (source, source_file) index that the
 -- loader's per-shard deletes use and the article_body primary key (article_id,
 -- source).
+-- _lineage.dedup_counts (jsonb, nullable): the openalex dedup counts of each
+-- loaded source_file, next to rows_inserted / rows_deleted.
 -- Grants: DML through the parent checks the parent's privileges only, and
 -- schema.sql's ALTER DEFAULT PRIVILEGES covers the new tables as well.
 
@@ -66,6 +68,11 @@ BEGIN
     END IF;
 END
 $$;
+
+-- The dedup counts of an openalex load (rows_in, skipped_pmid, skipped_pmcid,
+-- skipped_doi, loaded) per loaded source_file; NULL for every other source.
+-- Nullable, no default: a catalog-only change.
+ALTER TABLE episteme._lineage ADD COLUMN IF NOT EXISTS dedup_counts jsonb;
 
 -- No year ladder (as 0009): one LIST partition each.
 CREATE TABLE IF NOT EXISTS episteme.articles_openalex

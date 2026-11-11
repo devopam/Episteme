@@ -181,6 +181,7 @@ if str(_SRC) not in sys.path:
 
 from episteme.audit_trail import record as _audit  # noqa: E402
 from episteme.config import get_settings  # noqa: E402
+from episteme.data import staging_writer as _staging_writer  # noqa: E402
 from episteme.data.article_schema import (  # noqa: E402
     ARTICLE_COLUMNS,
     DEDUP_IDS_META_KEY,
@@ -313,6 +314,8 @@ def _bare_doi(raw: str | None) -> str | None:
 
 
 _DIGITS = re.compile(r"^\d+$")
+# PubMed's own record URL only (host checked): the real ids.pmid shape.
+_PUBMED_URL = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?$", re.I)
 _PMCID = re.compile(r"^(?:PMC)?(\d+)$", re.I)
 
 
@@ -331,13 +334,18 @@ def _bare_pmid(raw: object) -> str | None:
     """OpenAlex ``ids.pmid`` -> the bare PMID as pubmed stores it in
     ``episteme.articles.pmid`` (text digits, no leading zeros).
 
-    Documented shape: ``https://pubmed.ncbi.nlm.nih.gov/29456894``. A bare value
-    or an int passes. Anything that is not all digits (or is 0) gives ``None``:
-    a wrong id must never match, and so never skip, a pubmed row."""
-    seg = _last_segment(raw)
-    if not seg or not _DIGITS.match(seg):
+    Accepted: PubMed's own URL, ``http(s)://pubmed.ncbi.nlm.nih.gov/<digits>``
+    (the real shape, e.g. ``https://pubmed.ncbi.nlm.nih.gov/39940200``), a bare
+    digits string, or an int. Anything else gives ``None``, including a URL on
+    any other host: a wrong id must never match, and so never skip, a pubmed row."""
+    if raw is None:
         return None
-    n = int(seg)
+    s = str(raw).strip()
+    m = _PUBMED_URL.match(s)
+    digits = m.group(1) if m else (s if _DIGITS.match(s) else None)
+    if digits is None:
+        return None
+    n = int(digits)
     return str(n) if n > 0 else None
 
 
@@ -698,6 +706,13 @@ def serialize_openalex(
     ``n_rejected_*`` counters are the finer-grained RECORD-level biomedical-
     filter split the brief's Step 6 sign-off reports.
     """
+    if not _staging_writer._pyarrow_available():
+        # The JSONL fallback cannot carry the dedup ids mark (parquet metadata), and
+        # the loader refuses an openalex shard without it: stop before any work.
+        raise RuntimeError(
+            "openalex serialize needs pyarrow (the shard's dedup ids mark is parquet "
+            "metadata; a JSONL shard cannot load): uv sync --extra data"
+        )
     raw_dir = Path(raw_dir)
     processed_dir = Path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)

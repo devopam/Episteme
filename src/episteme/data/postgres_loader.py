@@ -437,12 +437,19 @@ _DEDUP_BODY = "pg_temp._dedup_body"
 
 
 def _check_dedup_ready(cur) -> None:
-    """Raise unless every object of ``_DEDUP_REQUIRED`` exists."""
+    """Raise unless every object of ``_DEDUP_REQUIRED`` and the
+    ``_lineage.dedup_counts`` column (migration 0012) exist."""
     missing = []
     for name in _DEDUP_REQUIRED:
         cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
         if not cur.fetchone()[0]:
             missing.append(name)
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = "
+        "'episteme' AND table_name = '_lineage' AND column_name = 'dedup_counts')"
+    )
+    if not cur.fetchone()[0]:
+        missing.append("episteme._lineage.dedup_counts")
     if missing:
         raise RuntimeError(
             "the pubmed/pmc dedup needs "
@@ -458,14 +465,19 @@ def check_dedup_shard(staging_path: Path) -> None:
     (``article_schema.DEDUP_IDS_META_KEY`` = ``DEDUP_IDS_VERSION`` in the parquet
     key-value metadata). An openalex shard staged before the serializer kept
     ``ids.pmid`` / ``ids.pmcid`` has both empty and would dedup by DOI only,
-    silently. Reads the parquet footer only. A JSONL shard has no metadata."""
-    want = article_schema.DEDUP_IDS_VERSION.encode("utf-8")
-    got = None
-    if _shard_format(staging_path) == "parquet":
-        import pyarrow.parquet as pq
+    silently. Reads the parquet footer only. A JSONL shard (pyarrow missing at
+    serialize time) has no metadata and is refused with its own message."""
+    if _shard_format(staging_path) != "parquet":
+        raise RuntimeError(
+            f"{staging_path.name} is a JSONL shard: openalex staging needs pyarrow (the "
+            f"{article_schema.DEDUP_IDS_META_KEY} mark is parquet metadata). Install it "
+            "(uv sync --extra data) and run serialize --force --reason ... again"
+        )
+    import pyarrow.parquet as pq
 
-        meta = pq.read_schema(staging_path).metadata or {}
-        got = meta.get(article_schema.DEDUP_IDS_META_KEY.encode("utf-8"))
+    want = article_schema.DEDUP_IDS_VERSION.encode("utf-8")
+    meta = pq.read_schema(staging_path).metadata or {}
+    got = meta.get(article_schema.DEDUP_IDS_META_KEY.encode("utf-8"))
     if got != want:
         raise RuntimeError(
             f"{staging_path.name} was staged before the serializer kept ids.pmid/ids.pmcid "
@@ -744,6 +756,29 @@ def load_source_file(
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:
+            if dedup_counts is not None:
+                # A DEDUP_AGAINST source: the shard's counts too (migration 0012's
+                # _lineage.dedup_counts; an openalex shard has one source_file).
+                from psycopg.types.json import Jsonb
+
+                cur.execute(
+                    """
+                    INSERT INTO episteme._lineage
+                        (source, source_file, run_id, input_content_hash,
+                         rows_inserted, rows_deleted, dedup_counts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        source,
+                        sf,
+                        run_id,
+                        content_hash,
+                        per_file_inserted[sf],
+                        per_file_deleted[sf],
+                        Jsonb(dedup_counts),
+                    ),
+                )
+                continue
             cur.execute(
                 """
                 INSERT INTO episteme._lineage

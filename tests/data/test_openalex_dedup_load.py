@@ -158,10 +158,15 @@ def test_openalex_load_skips_pubmed_and_pmc_works(loader, pg_conn, tmp_path):
         cur.execute("SELECT pmid, pmcid, doi FROM episteme.articles WHERE id = 'openalex:W4'")
         assert cur.fetchone() == ("999", "PMC999", "10.9999/new")
         cur.execute(
-            "SELECT rows_inserted FROM episteme._lineage "
+            "SELECT rows_inserted, dedup_counts FROM episteme._lineage "
             "WHERE source = 'openalex' AND run_id = 'r1'"
         )
-        assert [r[0] for r in cur.fetchall()] == [2]
+        lineage = cur.fetchall()
+        assert [r[0] for r in lineage] == [2]
+        assert [r[1] for r in lineage] == [EXPECTED_COUNTS]
+        # other sources leave the column empty
+        cur.execute("SELECT count(*) FROM episteme._lineage WHERE dedup_counts IS NOT NULL")
+        assert cur.fetchone()[0] == 1
         cur.execute(
             "SELECT rows_affected, new_value FROM episteme._audit "
             "WHERE event_type = 'load_commit' AND run_id = 'r1'"
@@ -217,6 +222,8 @@ def test_other_sources_report_no_dedup_counts(loader, pg_conn, tmp_path):
             "SELECT new_value FROM episteme._audit "
             "WHERE run_id = 'p1' AND event_type = 'load_commit'"
         )
+        assert cur.fetchone()[0] is None
+        cur.execute("SELECT dedup_counts FROM episteme._lineage WHERE run_id = 'p1'")
         assert cur.fetchone()[0] is None
 
 
