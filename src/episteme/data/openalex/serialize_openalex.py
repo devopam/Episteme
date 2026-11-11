@@ -98,7 +98,14 @@ brief's own worked example and a repeated-word-at-multiple-positions case.
 field DOES carry this full-URL shape, not a bare id, against the real
 fetched shard). ``doi`` strips any ``https://doi.org/`` prefix the same way
 (real field: ``https://doi.org/10.xxxx/...``) to a bare DOI string, matching
-``extract_pubmed.py``'s bare-DOI convention. ``title`` = the real ``title``
+``extract_pubmed.py``'s bare-DOI convention. ``pmid`` / ``pmcid`` come from
+``ids.pmid`` (``https://pubmed.ncbi.nlm.nih.gov/<digits>``) and ``ids.pmcid``
+(``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``), normalised to the forms
+pubmed and pmc store (bare digits; ``PMC<digits>``), so that the load can skip
+a work pubmed or pmc already holds (owner decision 2026-11-11, see
+``postgres_loader.DEDUP_AGAINST``). The shapes are the OpenAlex Work
+documentation's, not read off a real record (see ``_bare_pmid`` /
+``_bare_pmcid``). ``title`` = the real ``title``
 field, falling back to ``display_name`` (same string in every real record
 sampled, but ``title`` is occasionally null while ``display_name`` is not).
 ``year`` = ``publication_year``. ``authors`` = ``[a.author.display_name for
@@ -300,6 +307,51 @@ def _bare_doi(raw: str | None) -> str | None:
     return m.group(2) if m else s
 
 
+_DIGITS = re.compile(r"^\d+$")
+_PMCID = re.compile(r"^(?:PMC)?(\d+)$", re.I)
+
+
+def _last_segment(raw: object) -> str | None:
+    """The last non-empty path segment of a URL-shaped id (or the bare value)."""
+    if raw is None:
+        return None
+    s = str(raw).strip().rstrip("/")
+    if not s:
+        return None
+    seg = s.rsplit("/", 1)[-1].strip()
+    return seg or None
+
+
+def _bare_pmid(raw: object) -> str | None:
+    """OpenAlex ``ids.pmid`` -> the bare PMID as pubmed stores it in
+    ``episteme.articles.pmid`` (text digits, no leading zeros).
+
+    Documented shape: ``https://pubmed.ncbi.nlm.nih.gov/29456894``. A bare value
+    or an int passes. Anything that is not all digits (or is 0) gives ``None``:
+    a wrong id must never match, and so never skip, a pubmed row."""
+    seg = _last_segment(raw)
+    if not seg or not _DIGITS.match(seg):
+        return None
+    n = int(seg)
+    return str(n) if n > 0 else None
+
+
+def _bare_pmcid(raw: object) -> str | None:
+    """OpenAlex ``ids.pmcid`` -> ``PMC<digits>``, the form pmc and pubmed store
+    in ``episteme.articles.pmcid``.
+
+    Documented shape: ``https://www.ncbi.nlm.nih.gov/pmc/articles/<id>``, where
+    ``<id>`` is ``PMC5845130`` or the bare number ``5845130`` (both occur); the
+    newer ``https://pmc.ncbi.nlm.nih.gov/articles/PMC.../`` host also passes.
+    Anything else gives ``None``."""
+    seg = _last_segment(raw)
+    m = _PMCID.match(seg) if seg else None
+    if not m:
+        return None
+    n = int(m.group(1))
+    return f"PMC{n}" if n > 0 else None
+
+
 def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """One real OpenAlex ``works_jsonl`` record (already confirmed
     biomedical by the caller -- see ``is_biomedical``) -> a finalized
@@ -309,6 +361,11 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None
     if not native_id:
         return None  # no native id: caller counts + skips (never synthesize an id)
     doi = _bare_doi(rec.get("doi"))
+    # ids.pmid / ids.pmcid: kept so the load can skip a work that pubmed or pmc
+    # already holds (owner decision 2026-11-11; postgres_loader dedup).
+    ids = rec.get("ids") if isinstance(rec.get("ids"), dict) else {}
+    pmid = _bare_pmid(ids.get("pmid"))
+    pmcid = _bare_pmcid(ids.get("pmcid"))
     title = rec.get("title") or rec.get("display_name")
     year_raw = rec.get("publication_year")
     try:
@@ -345,8 +402,8 @@ def openalex_row(rec: dict[str, Any], source_file: str) -> dict[str, Any] | None
         "source": SOURCE,
         "source_file": source_file,
         "source_record_id": native_id,
-        "pmid": None,
-        "pmcid": None,
+        "pmid": pmid,
+        "pmcid": pmcid,
         "doi": doi,
         "title": title or None,
         "abstract": abstract,

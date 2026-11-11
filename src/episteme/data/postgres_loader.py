@@ -13,6 +13,10 @@ owns the transaction boundary):
     4. stream the shard in batches; per batch COPY the hot (non-text) columns
        into episteme.articles,
     5. ... then (article_id, source, year + 4 text cols) into episteme.article_body
+    5a. a ``DEDUP_AGAINST`` source (openalex) COPYs steps 4-5 into temp copies
+       of the two tables instead, deletes the rows whose pmid, else pmcid, else
+       lower(doi) matches a pubmed or pmc row, and INSERTs the rest (counts in
+       the result and in the audit row's ``new_value``)
     6. INSERT one episteme._lineage row per distinct source_file
     7. audit_trail.record("load_replace" if anything was deleted else "load_commit")
 
@@ -346,6 +350,23 @@ _PLANNER_SETTINGS = ("enable_hashjoin", "enable_mergejoin", "enable_seqscan", "e
 
 
 @contextmanager
+def _forced_nested_loops(cur) -> Iterator[None]:
+    """SET LOCAL every ``_PLANNER_SETTINGS`` to off, then put each back to its
+    earlier value. Only the statements inside the block plan with them. After an
+    error the transaction is aborted and rolls the SET LOCALs back, so nothing is
+    restored then."""
+    cur.execute("SELECT " + ", ".join(f"current_setting('{n}')" for n in _PLANNER_SETTINGS))
+    saved = cur.fetchone()
+    for name in _PLANNER_SETTINGS:
+        cur.execute(f"SET LOCAL {name} = off")
+    yield
+    for name, value in zip(_PLANNER_SETTINGS, saved, strict=True):
+        if value not in ("on", "off"):  # booleans only; never format anything else
+            raise ValueError(f"unexpected {name} value {value!r}")
+        cur.execute(f"SET LOCAL {name} = '{value}'")
+
+
+@contextmanager
 def _ordered_index_probes(cur) -> Iterator[None]:
     """Force an index nested loop for the id-keyed deletes, then restore.
 
@@ -386,6 +407,112 @@ def _ordered_index_probes(cur) -> Iterator[None]:
         cur.execute(f"SET LOCAL {name} = '{value}'")
 
 
+# --------------------------------------------------------------------------- #
+# Dedup against pubmed / pmc (owner decision 2026-11-11, migration 0012).
+# --------------------------------------------------------------------------- #
+
+# A source listed here loads only the rows that none of the named sources hold.
+# openalex: ~79.4M staged biomedical works, many of them pubmed or pmc articles.
+DEDUP_AGAINST: dict[str, tuple[str, ...]] = {"openalex": ("pubmed", "pmc")}
+
+# Match keys in priority order: a row is counted under the first key that matches.
+# DOIs are case-insensitive and pubmed / pmc keep the publisher's case, so the DOI
+# compares lower(doi) (the expression indexes of migration 0012).
+DEDUP_KEYS: tuple[str, ...] = ("pmid", "pmcid", "doi")
+
+# Everything the dedup needs. Without these indexes each probe reads the pubmed /
+# pmc partitions in full, per shard; the load refuses instead (a --bulk drop of the
+# articles group removes the first two).
+_DEDUP_REQUIRED: tuple[str, ...] = (
+    "episteme.articles_pmid_idx",
+    "episteme.articles_pmcid_idx",
+    "episteme.articles_pubmed_doi_lower_idx",
+    "episteme.articles_pmc_doi_lower_idx",
+    "episteme.articles_openalex",
+    "episteme.article_body_openalex",
+)
+
+_DEDUP_HOT = "pg_temp._dedup_hot"
+_DEDUP_BODY = "pg_temp._dedup_body"
+
+
+def _check_dedup_ready(cur) -> None:
+    """Raise unless every object of ``_DEDUP_REQUIRED`` exists."""
+    missing = []
+    for name in _DEDUP_REQUIRED:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
+        if not cur.fetchone()[0]:
+            missing.append(name)
+    if missing:
+        raise RuntimeError(
+            "the pubmed/pmc dedup needs "
+            + ", ".join(missing)
+            + ": apply migration 0012, or finish the bulk-index rebuild "
+            "(bash scripts/data/db/bulk_load_indexes.sh rebuild); "
+            "never load openalex with --bulk"
+        )
+
+
+def _create_dedup_tables(cur) -> None:
+    """Temp copies of articles and article_body for one shard (ON COMMIT DROP)."""
+    for table, like in ((_DEDUP_HOT, "articles"), (_DEDUP_BODY, "article_body")):
+        cur.execute(f"DROP TABLE IF EXISTS {table}")
+        cur.execute(f"CREATE TEMP TABLE {table} (LIKE episteme.{like}) ON COMMIT DROP")
+
+
+def _dedup_delete_sql(key: str, against: tuple[str, ...]) -> str:
+    """DELETE the temp rows whose ``key`` matches a row of a source in ``against``.
+
+    The source literals come from ``DEDUP_AGAINST`` (code, not input) and are
+    checked against ``article_schema.SOURCES``; they are inlined so the planner
+    prunes to those partitions at plan time. ``IS NOT NULL`` on the articles side
+    matches the partial index predicates."""
+    if key not in DEDUP_KEYS:
+        raise ValueError(f"unknown dedup key {key!r}")
+    for src in against:
+        if src not in article_schema.SOURCES:
+            raise ValueError(f"unknown dedup source {src!r}")
+    sources = ", ".join(f"'{src}'" for src in against)
+    if key == "doi":
+        match = "a.doi IS NOT NULL AND lower(a.doi) = lower(s.doi)"
+    else:
+        match = f"a.{key} IS NOT NULL AND a.{key} = s.{key}"
+    return (
+        f"DELETE FROM {_DEDUP_HOT} s WHERE s.{key} IS NOT NULL AND EXISTS ("
+        f"SELECT 1 FROM episteme.articles a WHERE a.source IN ({sources}) AND {match})"
+    )
+
+
+def _dedup_and_insert(cur, against: tuple[str, ...]) -> dict[str, int]:
+    """Remove the temp rows that ``against`` already holds, then INSERT the rest.
+
+    Set-based: one DELETE per key, in ``DEDUP_KEYS`` order, each an index nested
+    loop into the pubmed / pmc partitions. The plan is forced, as for the id
+    deletes: the temp table is small, the partitions are huge, and their
+    statistics can be stale. Each DELETE's row count is the skip count of its
+    key, so a row is counted once, under its first matching key. Returns
+    ``{"skipped_<key>": n}`` per key."""
+    cur.execute(f"CREATE INDEX ON {_DEDUP_HOT} (id)")
+    cur.execute(f"ANALYZE {_DEDUP_HOT}")
+    skipped: dict[str, int] = {}
+    with current().long_statement("dedup against " + ", ".join(against)):
+        with _forced_nested_loops(cur):
+            for key in DEDUP_KEYS:
+                cur.execute(_dedup_delete_sql(key, against))
+                skipped[f"skipped_{key}"] = cur.rowcount
+        hot_cols_sql = ", ".join(HOT_COLUMNS)
+        cur.execute(
+            f"INSERT INTO episteme.articles ({hot_cols_sql}) "
+            f"SELECT {hot_cols_sql} FROM {_DEDUP_HOT}"
+        )
+        cur.execute(
+            f"INSERT INTO episteme.article_body ({', '.join(BODY_COLUMNS)}) "
+            f"SELECT {', '.join('b.' + c for c in BODY_COLUMNS)} FROM {_DEDUP_BODY} b "
+            f"WHERE EXISTS (SELECT 1 FROM {_DEDUP_HOT} h WHERE h.id = b.article_id)"
+        )
+    return skipped
+
+
 def load_source_file(
     conn,
     *,
@@ -414,6 +541,10 @@ def load_source_file(
         raise NotImplementedError(f"{source} loading is SP2+")
 
     fmt = _shard_format(staging_path)
+    dedup_against = DEDUP_AGAINST.get(source)
+    if dedup_against:
+        with conn.cursor() as cur:
+            _check_dedup_ready(cur)  # before any work on the shard
     content_hash = _file_sha256(staging_path)
 
     deleted = 0
@@ -516,8 +647,14 @@ def load_source_file(
 
         # (e)+(f) stream the rows: per batch, COPY the hot columns into
         # episteme.articles, then the text columns into episteme.article_body.
+        # A DEDUP_AGAINST source COPYs into temp copies of the two tables instead;
+        # (f2) below drops the rows pubmed / pmc already hold and inserts the rest.
         hot_cols_sql = ", ".join(HOT_COLUMNS)
         body_cols_sql = ", ".join(BODY_COLUMNS)
+        hot_target, body_target = "episteme.articles", "episteme.article_body"
+        if dedup_against:
+            _create_dedup_tables(cur)
+            hot_target, body_target = _DEDUP_HOT, _DEDUP_BODY
         per_file_inserted: Counter[str] = Counter()
         total = 0
         read_sec = 0.0
@@ -532,16 +669,28 @@ def load_source_file(
                 hot, body = _batch_tuples(cols)
                 t1 = time.perf_counter()
                 read_sec += t1 - t0
-                with cur.copy(f"COPY episteme.articles ({hot_cols_sql}) FROM STDIN") as cp:
+                with cur.copy(f"COPY {hot_target} ({hot_cols_sql}) FROM STDIN") as cp:
                     for row in hot:
                         cp.write_row(row)
-                with cur.copy(f"COPY episteme.article_body ({body_cols_sql}) FROM STDIN") as cp:
+                with cur.copy(f"COPY {body_target} ({body_cols_sql}) FROM STDIN") as cp:
                     for row in body:
                         cp.write_row(row)
                 copy_sec += time.perf_counter() - t1
                 per_file_inserted.update(cols["source_file"])
                 total += len(cols["id"])
                 current().progress(rows_done=_rows_committed() + total)
+
+        dedup_counts: dict[str, int] | None = None
+        if dedup_against:
+            # (f2) ``total`` so far is the shard's rows; what lands is what survives.
+            skipped = _dedup_and_insert(cur, dedup_against)
+            cur.execute(f"SELECT source_file, count(*) FROM {_DEDUP_HOT} GROUP BY source_file")
+            per_file_inserted = Counter({sf: n for sf, n in cur.fetchall()})
+            rows_in, total = total, sum(per_file_inserted.values())
+            dedup_counts = {"rows_in": rows_in, **skipped, "loaded": total}
+            if rows_in - sum(skipped.values()) != total:
+                raise RuntimeError(f"dedup counts do not add up: {dedup_counts}")
+            current().progress(rows_done=_rows_committed() + total)
 
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:
@@ -565,10 +714,13 @@ def load_source_file(
         object=f"{source} {staging_path.name}",
         input_content_hash=content_hash,
         rows_affected=total,
+        # A DEDUP_AGAINST source: its counts (ints, hash-safe: docs/11 section 3).
+        new_value=dedup_counts,
         run_id=run_id,
     )
 
     return {
+        **(dedup_counts or {}),
         "source_file": source_files,
         "rows": total,
         "deleted": deleted,
