@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from episteme.config import get_settings
 from episteme.data.regulatory.normalize import norm_ndc_product
 
 SIDECAR_SUFFIX = ".labels.parquet"
@@ -71,7 +72,6 @@ SIDECAR_COLUMNS = (
     "method",
 )
 _INT_COLUMNS = ("start_offset", "end_offset", "ordinal")
-_COPY_BATCH_ROWS = 20_000
 
 
 def sidecar_path(processed_dir: Path, part: str, source: str = SOURCE) -> Path:
@@ -221,11 +221,11 @@ def replace_labels(conn, source: str, shard: Path) -> dict[str, int]:
 
 
 def _sidecar_rows(side: Path, kind: str):
-    """The rows of one ``kind`` of a sidecar, in batches of ``_COPY_BATCH_ROWS``."""
+    """The rows of one ``kind`` of a sidecar, in batches (``dailymed_copy_batch_rows``)."""
     import pyarrow.parquet as pq
 
     with pq.ParquetFile(side, pre_buffer=False) as pf:
-        for rb in pf.iter_batches(batch_size=_COPY_BATCH_ROWS):
+        for rb in pf.iter_batches(batch_size=get_settings().dailymed_copy_batch_rows):
             for r in rb.to_pylist():
                 if (r["kind"] == "section") == (kind == "section"):
                     yield r

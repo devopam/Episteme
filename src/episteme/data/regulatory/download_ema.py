@@ -58,7 +58,6 @@ _LOG = logging.getLogger(__name__)
 MARKER_SOURCE = "ema_download"
 ATTEMPTS = 2  # the first try and one retry
 _EXT = {"ema_json": ".json", "article57_xlsx": ".xlsx"}
-_CONNECT_TIMEOUT_S = 30
 _CHUNK = 1 << 20
 
 
@@ -258,7 +257,9 @@ def download_to(
     deletes ``tmp``). The EMA feeds pass no cap."""
     try:
         resp = session.get(
-            url, stream=True, timeout=(_CONNECT_TIMEOUT_S, get_settings().ema_read_timeout_seconds)
+            url,
+            stream=True,
+            timeout=(get_settings().ema_connect_timeout_s, get_settings().ema_read_timeout_seconds),
         )
     except (requests.RequestException, OSError) as exc:
         raise Retryable(f"request failed: {exc}") from exc

@@ -157,6 +157,24 @@ DEFAULT_FAERS_MIN_LIVE_SHARE = 0.9
 DEFAULT_FAERS_PAIR_DRUG_CAP = 30
 # Dictionary entries that the FAERS bridge resolves in one transaction.
 DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
+# Rows per read batch when the DailyMed loader copies a sidecar.
+DEFAULT_DAILYMED_COPY_BATCH_ROWS = 20_000
+# Ids in flight per submit batch of the PMC download.
+DEFAULT_PMC_SUBMIT_BATCH = 2_000
+# SFT slice: rows per read batch, and rows per output part.
+DEFAULT_SFT_SLICE_BATCH_ROWS = 2_048
+DEFAULT_SFT_SLICE_ROWS_PER_PART = 50_000
+# Reference-docs acquire: request timeouts, unpack cap, wait caps (seconds, bytes).
+DEFAULT_REFERENCE_DOCS_CONNECT_TIMEOUT_S = 30.0
+DEFAULT_REFERENCE_DOCS_READ_TIMEOUT_S = 120.0
+DEFAULT_REFERENCE_DOCS_MAX_UNPACKED_BYTES = 2 * 1024**3
+DEFAULT_REFERENCE_DOCS_MAX_WAIT_S = 900.0
+DEFAULT_REFERENCE_DOCS_FALLBACK_THROTTLE_WAIT_S = 30.0
+# Connect timeout of an EMA request.
+DEFAULT_EMA_CONNECT_TIMEOUT_S = 30.0
+# Gate slice: largest Bookshelf package, and smallest Apollo file, that the slice takes.
+DEFAULT_BOOKSHELF_MAX_PACKAGE_BYTES = 1024**3
+DEFAULT_APOLLO_MIN_BYTES = 10 * 1024**2
 # A wider "X through Y" in recall text is more likely a typing error than a real list, so
 # only its two ends are kept.
 DEFAULT_RECALL_MAX_RANGE_LOTS = 1000
@@ -468,6 +486,19 @@ class Settings:
     faers_pair_drug_cap: int = DEFAULT_FAERS_PAIR_DRUG_CAP
     # Entries per transaction of the FAERS bridge (EPISTEME_FAERS_BRIDGE_BATCH_ROWS).
     faers_bridge_batch_rows: int = DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+    # Tuning values below: each has an env key of the same name in capitals, EPISTEME_ first.
+    dailymed_copy_batch_rows: int = DEFAULT_DAILYMED_COPY_BATCH_ROWS
+    pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
+    sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
+    sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
+    reference_docs_connect_timeout_s: float = DEFAULT_REFERENCE_DOCS_CONNECT_TIMEOUT_S
+    reference_docs_read_timeout_s: float = DEFAULT_REFERENCE_DOCS_READ_TIMEOUT_S
+    reference_docs_max_unpacked_bytes: int = DEFAULT_REFERENCE_DOCS_MAX_UNPACKED_BYTES
+    reference_docs_max_wait_s: float = DEFAULT_REFERENCE_DOCS_MAX_WAIT_S
+    reference_docs_fallback_throttle_wait_s: float = DEFAULT_REFERENCE_DOCS_FALLBACK_THROTTLE_WAIT_S
+    ema_connect_timeout_s: float = DEFAULT_EMA_CONNECT_TIMEOUT_S
+    bookshelf_max_package_bytes: int = DEFAULT_BOOKSHELF_MAX_PACKAGE_BYTES
+    apollo_min_bytes: int = DEFAULT_APOLLO_MIN_BYTES
     # Most lots that one written range in recall text may expand to
     # (EPISTEME_RECALL_MAX_RANGE_LOTS).
     recall_max_range_lots: int = DEFAULT_RECALL_MAX_RANGE_LOTS
@@ -667,6 +698,43 @@ def get_settings() -> Settings:
         ),
         faers_bridge_batch_rows=_get_positive_int_or_default(
             "EPISTEME_FAERS_BRIDGE_BATCH_ROWS", DEFAULT_FAERS_BRIDGE_BATCH_ROWS
+        ),
+        dailymed_copy_batch_rows=_get_positive_int_or_default(
+            "EPISTEME_DAILYMED_COPY_BATCH_ROWS", DEFAULT_DAILYMED_COPY_BATCH_ROWS
+        ),
+        pmc_submit_batch=_get_positive_int_or_default(
+            "EPISTEME_PMC_SUBMIT_BATCH", DEFAULT_PMC_SUBMIT_BATCH
+        ),
+        sft_slice_batch_rows=_get_positive_int_or_default(
+            "EPISTEME_SFT_SLICE_BATCH_ROWS", DEFAULT_SFT_SLICE_BATCH_ROWS
+        ),
+        sft_slice_rows_per_part=_get_positive_int_or_default(
+            "EPISTEME_SFT_SLICE_ROWS_PER_PART", DEFAULT_SFT_SLICE_ROWS_PER_PART
+        ),
+        reference_docs_connect_timeout_s=_get_positive_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_CONNECT_TIMEOUT_S", DEFAULT_REFERENCE_DOCS_CONNECT_TIMEOUT_S
+        ),
+        reference_docs_read_timeout_s=_get_positive_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_READ_TIMEOUT_S", DEFAULT_REFERENCE_DOCS_READ_TIMEOUT_S
+        ),
+        reference_docs_max_unpacked_bytes=_get_positive_int_or_default(
+            "EPISTEME_REFERENCE_DOCS_MAX_UNPACKED_BYTES", DEFAULT_REFERENCE_DOCS_MAX_UNPACKED_BYTES
+        ),
+        reference_docs_max_wait_s=_get_positive_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_MAX_WAIT_S", DEFAULT_REFERENCE_DOCS_MAX_WAIT_S
+        ),
+        reference_docs_fallback_throttle_wait_s=_get_positive_float_or_default(
+            "EPISTEME_REFERENCE_DOCS_FALLBACK_THROTTLE_WAIT_S",
+            DEFAULT_REFERENCE_DOCS_FALLBACK_THROTTLE_WAIT_S,
+        ),
+        ema_connect_timeout_s=_get_positive_float_or_default(
+            "EPISTEME_EMA_CONNECT_TIMEOUT_S", DEFAULT_EMA_CONNECT_TIMEOUT_S
+        ),
+        bookshelf_max_package_bytes=_get_positive_int_or_default(
+            "EPISTEME_BOOKSHELF_MAX_PACKAGE_BYTES", DEFAULT_BOOKSHELF_MAX_PACKAGE_BYTES
+        ),
+        apollo_min_bytes=_get_positive_int_or_default(
+            "EPISTEME_APOLLO_MIN_BYTES", DEFAULT_APOLLO_MIN_BYTES
         ),
         recall_max_range_lots=_get_positive_int_or_default(
             "EPISTEME_RECALL_MAX_RANGE_LOTS", DEFAULT_RECALL_MAX_RANGE_LOTS

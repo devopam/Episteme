@@ -78,12 +78,7 @@ _DOCUMENT_SUFFIXES = {
     ".json",
 }
 _CHUNK = 1 << 20
-_CONNECT_TIMEOUT_S = 30
-_READ_TIMEOUT_S = 120
 _SLEEP_SLICE_S = 1.0
-MAX_UNPACKED_BYTES = 2 * 1024**3
-DEFAULT_MAX_WAIT_S = 900.0
-_FALLBACK_THROTTLE_WAIT_S = 30.0
 
 
 class ZipSlipError(ValueError):
@@ -124,7 +119,9 @@ def _is_document(url: str, mimetype: str = "") -> bool:
 
 
 def _get_json(session: Any, url: str, headers: dict[str, str]) -> Any:
-    resp = session.get(url, headers=headers, timeout=(_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S))
+    settings = get_settings()
+    timeout = (settings.reference_docs_connect_timeout_s, settings.reference_docs_read_timeout_s)
+    resp = session.get(url, headers=headers, timeout=timeout)
     try:
         if resp.status_code != 200:
             raise RuntimeError(f"{url}: HTTP {resp.status_code}")
@@ -335,11 +332,13 @@ def extract_zip(zip_path: Path, dest_dir: Path) -> int:
 
     Every member name is checked first; a name that is absolute, has a drive, climbs out with
     ``..`` or resolves outside ``dest_dir``, a link member, or an archive that unpacks to more
-    than ``MAX_UNPACKED_BYTES`` raises ``ZipSlipError`` before any file is written."""
+    than ``Settings.reference_docs_max_unpacked_bytes`` raises ``ZipSlipError`` before any file
+    is written."""
     dest_root = Path(dest_dir).resolve()
     with zipfile.ZipFile(zip_path) as zf:
         infos = zf.infolist()
         total = 0
+        max_unpacked = get_settings().reference_docs_max_unpacked_bytes
         plan: list[tuple[zipfile.ZipInfo, Path]] = []
         for info in infos:
             name = info.filename.replace("\\", "/")
@@ -361,10 +360,8 @@ def extract_zip(zip_path: Path, dest_dir: Path) -> int:
             if stat.S_ISLNK(info.external_attr >> 16):
                 raise ZipSlipError(f"link member {info.filename!r} in {zip_path.name}")
             total += info.file_size
-            if total > MAX_UNPACKED_BYTES:
-                raise ZipSlipError(
-                    f"{zip_path.name} unpacks to more than {MAX_UNPACKED_BYTES} bytes"
-                )
+            if total > max_unpacked:
+                raise ZipSlipError(f"{zip_path.name} unpacks to more than {max_unpacked} bytes")
             plan.append((info, target))
         dest_root.mkdir(parents=True, exist_ok=True)
         for info, target in plan:
@@ -476,7 +473,7 @@ def fetch(
     budget_s: float | None,
     refresh: bool = False,
     adopt_only: bool = False,
-    max_wait_s: float = DEFAULT_MAX_WAIT_S,
+    max_wait_s: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = _sliced_sleep,
 ) -> int:
@@ -494,6 +491,8 @@ def fetch(
             raise ValueError(f"input_key collision {key!r}: {keys[key]} and {ref.url}")
         keys[key] = ref.url
     headers = _headers()
+    if max_wait_s is None:
+        max_wait_s = get_settings().reference_docs_max_wait_s
     start = clock()
     state: dict[str, Any] = {"last": None}
     manifests: dict[str, dict[str, dict[str, Any]]] = {}
@@ -519,7 +518,10 @@ def fetch(
                     ref.url,
                     headers=headers,
                     stream=True,
-                    timeout=(_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S),
+                    timeout=(
+                        get_settings().reference_docs_connect_timeout_s,
+                        get_settings().reference_docs_read_timeout_s,
+                    ),
                 )
             except requests.RequestException as exc:
                 state["last"] = clock()
@@ -531,7 +533,7 @@ def fetch(
             throttles += 1
             wait = _parse_retry_after(resp.headers.get("Retry-After"))
             if wait is None:
-                wait = max(min_interval_s, _FALLBACK_THROTTLE_WAIT_S)
+                wait = max(min_interval_s, get_settings().reference_docs_fallback_throttle_wait_s)
             wait = max(wait, min_interval_s)
             if throttles >= 2:
                 raise _Stop(f"HTTP {resp.status_code} twice for {ref.url}")

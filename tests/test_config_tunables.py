@@ -160,3 +160,61 @@ def test_sft_mix_weights_parse(clean_settings):
     clean_settings.setenv("EPISTEME_SFT_MIX_WEIGHTS", "pmc")
     with pytest.raises(cfg.ConfigError):
         cfg.get_settings()
+
+
+_NEW_TUNABLES = [
+    # (env key, Settings field, default, distinct valid value)
+    ("EPISTEME_DAILYMED_COPY_BATCH_ROWS", "dailymed_copy_batch_rows", 20_000, 111),
+    ("EPISTEME_PMC_SUBMIT_BATCH", "pmc_submit_batch", 2_000, 112),
+    ("EPISTEME_SFT_SLICE_BATCH_ROWS", "sft_slice_batch_rows", 2_048, 113),
+    ("EPISTEME_SFT_SLICE_ROWS_PER_PART", "sft_slice_rows_per_part", 50_000, 114),
+    ("EPISTEME_REFERENCE_DOCS_CONNECT_TIMEOUT_S", "reference_docs_connect_timeout_s", 30, 7.5),
+    ("EPISTEME_REFERENCE_DOCS_READ_TIMEOUT_S", "reference_docs_read_timeout_s", 120, 8.5),
+    (
+        "EPISTEME_REFERENCE_DOCS_MAX_UNPACKED_BYTES",
+        "reference_docs_max_unpacked_bytes",
+        2 * GB,
+        115,
+    ),
+    ("EPISTEME_REFERENCE_DOCS_MAX_WAIT_S", "reference_docs_max_wait_s", 900, 9.5),
+    (
+        "EPISTEME_REFERENCE_DOCS_FALLBACK_THROTTLE_WAIT_S",
+        "reference_docs_fallback_throttle_wait_s",
+        30,
+        10.5,
+    ),
+    ("EPISTEME_EMA_CONNECT_TIMEOUT_S", "ema_connect_timeout_s", 30, 11.5),
+    ("EPISTEME_BOOKSHELF_MAX_PACKAGE_BYTES", "bookshelf_max_package_bytes", GB, 116),
+    ("EPISTEME_APOLLO_MIN_BYTES", "apollo_min_bytes", 10 * MIB, 117),
+]
+
+
+@pytest.fixture
+def new_tunables_clean(clean_settings):
+    for key, *_ in _NEW_TUNABLES:
+        clean_settings.delenv(key, raising=False)
+    cfg.get_settings.cache_clear()
+    return clean_settings
+
+
+def test_new_tunables_default_to_todays_values(new_tunables_clean):
+    s = cfg.get_settings()
+    for key, field, default, _ in _NEW_TUNABLES:
+        assert getattr(s, field) == default, key
+
+
+def test_new_tunables_read_from_env(new_tunables_clean):
+    for key, field, _, value in _NEW_TUNABLES:
+        new_tunables_clean.setenv(key, str(value))
+        cfg.get_settings.cache_clear()
+        assert getattr(cfg.get_settings(), field) == value, key
+        new_tunables_clean.delenv(key)
+
+
+@pytest.mark.parametrize("bad", ["0", "abc"])
+def test_new_tunables_bad_values_fall_back(new_tunables_clean, bad):
+    for key, field, default, _ in _NEW_TUNABLES:
+        new_tunables_clean.setenv(key, bad)
+        cfg.get_settings.cache_clear()
+        assert getattr(cfg.get_settings(), field) == default, key
+        new_tunables_clean.delenv(key)

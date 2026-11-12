@@ -84,9 +84,8 @@ NONCOMMERCIAL_REASON = "non-commercial"
 REQUEST_FAILED = "request failed"
 MISSING = "metadata not found"
 
-# Futures in flight at once; main() submits the id list in batches of this size so
-# ~8 million ids never become ~8 million pending futures.
-SUBMIT_BATCH = 2000
+# Futures in flight at once (Settings.pmc_submit_batch): main() submits the id list in
+# batches of this size so ~8 million ids never become ~8 million pending futures.
 
 # Commercial-only: no author_manuscript, no NC licenses
 COMMERCIAL_ESEARCH = (
@@ -734,7 +733,11 @@ def main() -> None:
     ):
         start = 0
         while start < len(todo) and not (args.limit > 0 and ok_n >= args.limit):
-            size = SUBMIT_BATCH if args.limit <= 0 else max(1, min(SUBMIT_BATCH, args.limit - ok_n))
+            size = (
+                settings.pmc_submit_batch
+                if args.limit <= 0
+                else max(1, min(settings.pmc_submit_batch, args.limit - ok_n))
+            )
             batch = todo[start : start + size]
             start += size
             if settings.run_id:  # wait here while a heavy job holds or wants the heavy lock
