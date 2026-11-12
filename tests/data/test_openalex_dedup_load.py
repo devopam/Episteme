@@ -228,8 +228,11 @@ def test_other_sources_report_no_dedup_counts(loader, pg_conn, tmp_path):
 
 
 def test_dedup_plan_probes_indexes_not_seq_scans(loader, pg_conn):
-    """Each dedup probe walks the sorted distinct key table and reads the pubmed /
-    pmc partitions by index (no Seq Scan), even on empty, unanalyzed partitions."""
+    """Each dedup probe walks the key table and reads the pubmed / pmc partitions
+    only by an index probe on that key's index, once per key: no Seq Scan, no
+    Bitmap scan, and no Sort / Unique of the partitions' values (the turned-around
+    semi-join that read every pubmed DOI per shard in production)."""
+    key_index = {"pmid": "_pmid_idx", "pmcid": "_pmcid_idx", "doi": "_lower_idx"}
     with pg_conn.cursor() as cur:
         loader._create_dedup_tables(cur)
         for key in loader.DEDUP_KEYS:
@@ -239,9 +242,12 @@ def test_dedup_plan_probes_indexes_not_seq_scans(loader, pg_conn):
                 plan = "\n".join(r[0] for r in cur.fetchall())
                 assert "_dedup_keys" in plan, plan
                 assert "articles_pubmed" in plan and "articles_pmc" in plan, plan
+                assert "Limit" in plan, plan
+                for bad in ("Sort", "Unique", "Bitmap", "Hash"):
+                    assert bad not in plan, plan
                 for line in plan.splitlines():
-                    if "Seq Scan" in line:
-                        assert "articles_pubmed" not in line and "articles_pmc" not in line, plan
+                    if " on articles_pubmed" in line or " on articles_pmc" in line:
+                        assert "Index" in line and key_index[key] in line, plan
                 assert "articles_default" not in plan and "articles_chembl" not in plan, plan
     pg_conn.rollback()
 

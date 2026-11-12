@@ -521,15 +521,22 @@ def _dedup_probe_sql(key: str, against: tuple[str, ...]) -> str:
     The source literals come from ``DEDUP_AGAINST`` (code, not input) and are
     checked against ``article_schema.SOURCES``; they are inlined so the planner
     prunes to those partitions at plan time. ``IS NOT NULL`` on the articles side
-    matches the partial index predicates."""
+    matches the partial index predicates.
+
+    A LATERAL ``LIMIT 1`` per key, not ``WHERE EXISTS``: the planner may turn an
+    EXISTS semi-join around (sort + unique ALL pubmed / pmc values of the key, then
+    probe the small key table), which on the real partitions read ~3M blocks and
+    took ~440 s per shard for the DOI. A LATERAL subquery with a LIMIT cannot be
+    flattened, so each key is one index probe per partition (~25 s per 100k keys).
+    Each key still comes back at most once."""
     for src in against:
         if src not in article_schema.SOURCES:
             raise ValueError(f"unknown dedup source {src!r}")
     sources = ", ".join(f"'{src}'" for src in against)
     return (
-        "SELECT k.k FROM pg_temp._dedup_keys k WHERE EXISTS ("
+        "SELECT k.k FROM pg_temp._dedup_keys k CROSS JOIN LATERAL ("
         f"SELECT 1 FROM episteme.articles a WHERE a.source IN ({sources}) "
-        f"AND a.{key} IS NOT NULL AND {_key_expr(key, 'a')} = k.k)"
+        f"AND a.{key} IS NOT NULL AND {_key_expr(key, 'a')} = k.k LIMIT 1) hit"
     )
 
 
