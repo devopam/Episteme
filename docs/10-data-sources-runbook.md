@@ -198,11 +198,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0010_regulatory_sources.sql` | The regulatory sources: `reg_release`, `reg_record`, `substance`, `substance_xref`, the FAERS typed and signal tables, `recall_lot`, `label_section`, `label_substance`, and the `dailymed` and `ema_epar` LIST partitions (section 5.8 to 5.13) | Apply it only when **no load, graph or enrich job runs**: it scans the default partitions of `articles` and `article_body` under an exclusive lock. **Precondition:** this query returns no row: `SELECT 1 FROM episteme.articles_default WHERE source IN ('dailymed','ema_epar') LIMIT 1`. The file sets `lock_timeout = '60s'`. **On a lock timeout** (`canceling statement due to lock timeout`) nothing is applied (one transaction): find the session that holds `articles` or `article_body` (`pg_locks`, `pg_stat_activity`), let it finish or stop it, and apply the file again. Required before any `dailymed`, `ema`, `ema_epar`, `openfda` or `openfda_faers` load. |
 | `0011_label_section_ordinal.sql` | `label_section` gains `ordinal integer` and `product text` (both nullable; NULL for DailyMed) for the EPAR SmPC sections | Idempotent, one transaction, `lock_timeout = '60s'`. Apply it when no `dailymed` or `ema_epar` load runs. Required before the first `ema_epar` load (the load writes `ordinal` and `product`). The sample gate checks its two columns before every `--sample load`, so apply it to `episteme_test` first |
 | `0012_openalex_partitions.sql` | `openalex` LIST partitions `articles_openalex` and `article_body_openalex` (no year split); `_lineage.dedup_counts` (jsonb); expression indexes `articles_pubmed_doi_lower_idx` and `articles_pmc_doi_lower_idx` on `lower(doi)` of the `pubmed` and `pmc` partitions | Required before any `openalex` load: the load skips works that `pubmed` or `pmc` already hold and refuses to start without these objects (section 5.2, OpenAlex load). Two transactions, each with `lock_timeout = '60s'`. **Precondition:** no `openalex` row in `articles_default` / `article_body_default`; the file stops with `migration 0012: episteme.articles_default holds openalex rows` otherwise, so on a loaded database purge first (audited `DELETE ... WHERE source = 'openalex'`, then remove the purged shards' load markers and `episteme._lineage` rows, as for 0009). Apply with **no load, graph, enrich or query job running**. Transaction 1 creates the partitions: it scans `articles_default` and `article_body_default` (~15 GB) in full under ACCESS EXCLUSIVE, so every read and write of `articles` and `article_body` waits until it commits. Transaction 2 builds the two indexes (`maintenance_work_mem = '1GB'`, set in the file): it reads every `pubmed` and `pmc` row (~38 million on the E: NVMe disk: minutes to a few tens of minutes) and blocks writes to those partitions, not reads. The sample gate checks its markers before every `--sample load`, so apply it to `episteme_test` first |
+| `0013_reference_codes.sql` | `episteme.code_system`, `episteme.code` and the view `episteme.code_current` (one current release per code system; a non-empty licence notice is required) | Required before `refmeta load` (section 5.18). Idempotent, one transaction, `lock_timeout = '60s'`. It does not lock `articles`. Apply it to `episteme_test` before the first test load |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0012, apply those eleven directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0013, apply those twelve directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t|t|t`; the fourth column is 0004's `articles_id_idx`, the fifth is 0005's table, the sixth is 0011's `label_section.ordinal` and the seventh is 0012's `articles_openalex`):
@@ -377,6 +378,7 @@ Tokens the dispatcher does not recognise are not dropped: they are forwarded to 
 | Reference feeds: `ema`, `openfda` | yes | no | no | yes (to `episteme.reg_record`) | no | no | no | download, load (section 5.9, 5.11) |
 | `openfda_faers` | no (the zips come from `openfda download all_human`) | no | no | yes (typed tables, by generation) | no | no | no | not allowed (section 5.12) |
 | `aact` | yes | no | no | yes (to its own schema per release) | no | no | no | download, load (section 5.16) |
+| `refmeta` | yes | no | no | yes (to `episteme.code` / `code_current`) | no | no | no | download, load (section 5.18) |
 | `europepmc_abstracts`, `hf_corpus`, `cdisc_bc`, `cdisc_usdm` | yes | no | no | no | no | no | no | download only |
 | `ich`, `meddra_ptc`, `ema_guidance` | yes | no | no | no | no | no | no | download only (section 5.17) |
 | `corpus` (alias) | no | no | no | no | no | no | yes | not allowed |
@@ -1764,6 +1766,23 @@ PGDATABASE=episteme_test bash scripts/data/source_inventory.sh
 
 Without the `PGDATABASE=episteme_test` prefix both fall back to the production name, are refused by the guard under the shipped `restricted` mode, and `source_inventory.sh` shows `n/a` for every row count.
 
+### 5.18 Reference code lists (`refmeta`)
+
+Seven lookup lists: the E2B OID catalogue, the E2B code lists v2.11, LOINC, ISO 3166 code elements, ISO 639-2, UCUM and EDQM Standard Terms (every class the API lists). They load into `episteme.code_system` and `episteme.code`. The view `episteme.code_current` is the one current release of each list. They are not articles and they are not trained on. Design: `docs/superpowers/specs/2026-11-15-reference-metadata-design.md`. The source, licence and cadence of each list are in `docs/02` section 2.3.1.
+
+Apply migration `0013_reference_codes.sql` first (section 2.3). Confirm `server_version` is `19beta3`, then load into `episteme_test` before any production load.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download --dry-run
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta load
+```
+
+- **Download.** Public files only: UCUM (the essence XML and its licence, kept verbatim) and the Library of Congress ISO 639-2 list. EDQM is fetched only when `EDQM_STAPI_LOGIN` and `EDQM_STAPI_SECRET_KEY` are set. The download asks `/classes` and stores full data for every class, including non-traditional terms. If the keys are unset, a combined download logs a skip and exits 0. `refmeta download` with an explicit request for EDQM and no keys exits 3. LOINC and ISO 3166 are never downloaded. The owner places the LOINC zip and an ISO 3166 CSV (`alpha_2,alpha_3,numeric,short_name_en`). A PDF of an ISO standard is not a valid input.
+- **Where the files go.** `<raw>/refmeta/<system>/<release>/`, with `NOTICE.txt`. E2B rows point at the IG package already under `<raw>/ich/e2/ig_v1_11/` and are not copied again. The OID source is IG v5.03 section 3.2 tables 1 to 8. Appendix I (F) of that edition only points at the XML code lists.
+- **Load.** One transaction per list: delete that release, insert it, and mark it current. An empty notice or a release with no codes is refused. A second run of the same release is skipped. `--force --reason "<why>"` reloads it. A list with no files is skipped. A file that is present but invalid fails the run. EDQM fails until `NOTICE.txt` or `CONDITIONS.txt` sits beside the release: the API conditions of use were not read.
+- **Lookup.** MCPg reads `episteme.code_current`. Name one system and one code, and keep the version and the licence notice with the answer. Do not dump a whole list. `lookup_code` in `src/episteme/reference/codes.py` returns the same claim shape as the other lookups. The ICSR checker still reads its JSON rule file. No PBRER tool was added.
+
 ---
 
 ## 8. Ops cadence
@@ -1775,7 +1794,7 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | Daily | `pubmed download updates`, then `extract` and `load`; PMC delta if running continuous sync; author-manuscript incrementals (`europepmc_manuscript download incr`) when Europe PMC is up |
 | Weekly | `europepmc_lite download` then `enrich`; review failed markers under `<processed>/_ops/<source>/` |
 | Monthly | `europepmc_id_mappings download` (after the `head` integrity check) then `load`; `europepmc_abstracts download` |
-| On demand | `ich`, `meddra_ptc` and `ema_guidance` download (section 5.17); `ema_guidance` in chunks with `--budget-s` until all 55 files are stored |
+| On demand | `ich`, `meddra_ptc` and `ema_guidance` download (section 5.17); `ema_guidance` in chunks with `--budget-s` until all 55 files are stored; `refmeta download` then `refmeta load` when UCUM, ISO 639-2 or a placed list changes (section 5.18) |
 | On upstream release | Rerun `download` for the structured sources; `serialize` and `load`; `cdisc_bc` with `--force --reason`; `cdisc_usdm` on a new USDM release (no `--force` needed: a new tag gets a new folder) |
 | After each major pull | `--report` field-shape smoke check (section 6.3); `source_inventory.sh` |
 | Before and after any production or go-live change | `verify_audit_trail.sh`; the docs/11 section 8 checklist |
@@ -1800,3 +1819,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v2 | 2026-09-21 | SP5 rewrite: single operator runbook. Covers every wired source through `run_pipeline.sh`, the DB-mode guard, migrations 0002/0003 by hand, `episteme_test` targeting, `openalex` bounded fetch, `cdisc_bc`, verification. Dated status board replaced by `docs/12-source-inventory.md`; per-source facts checked against the wrappers |
 | v3 | 2026-11-09 | Section 5.17: reference documents (`ich`, `meddra_ptc`, `ema_guidance`), download-only |
 | v4 | 2026-11-10 | Section 6.4: SFT data and training handoff (Stage A slice, Stage B batches, copy to the GPU host, GGUF export, benchmark runner); ICH licence confirmed by the owner in section 5.17 |
+| v5 | 2026-11-15 | Section 5.18: reference code lists (`refmeta`); migration 0013 |

@@ -74,6 +74,11 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "index:episteme.articles_pubmed_doi_lower_idx",
         "index:episteme.articles_pmc_doi_lower_idx",
     ],
+    "0013_reference_codes.sql": [
+        "table:episteme.code_system",
+        "table:episteme.code",
+        "index:episteme.code_system_one_latest_idx",
+    ],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {

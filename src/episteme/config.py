@@ -519,6 +519,14 @@ class Settings:
     harness_request_timeout_s: int = DEFAULT_HARNESS_REQUEST_TIMEOUT_S
     bench_tenant: str = DEFAULT_BENCH_TENANT
     bench_caller: str = DEFAULT_BENCH_CALLER
+    # Reference code lists. URLs default in scripts/data/_lib/sources.env.
+    # The EDQM key and secret are never logged.
+    ucum_essence_url: str = ""
+    ucum_license_url: str = ""
+    iso639_2_url: str = ""
+    edqm_stapi_base: str = ""
+    edqm_stapi_login: str | None = field(default=None, repr=False)
+    edqm_stapi_secret_key: str | None = field(default=None, repr=False)
 
     def pg_dsn(self) -> str:
         return (
@@ -741,6 +749,12 @@ def get_settings() -> Settings:
         ),
         bench_tenant=_get("EPISTEME_BENCH_TENANT") or DEFAULT_BENCH_TENANT,
         bench_caller=_get("EPISTEME_BENCH_CALLER") or DEFAULT_BENCH_CALLER,
+        ucum_essence_url=_get("UCUM_ESSENCE_URL") or "",
+        ucum_license_url=_get("UCUM_LICENSE_URL") or "",
+        iso639_2_url=_get("ISO639_2_URL") or "",
+        edqm_stapi_base=_get("EDQM_STAPI_BASE") or "",
+        edqm_stapi_login=_get("EDQM_STAPI_LOGIN"),
+        edqm_stapi_secret_key=_get("EDQM_STAPI_SECRET_KEY"),
     )
 
 
