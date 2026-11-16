@@ -1,16 +1,22 @@
-"""Fetch the public reference lists, and EDQM when the owner has set the keys.
+"""Fetch the reference lists: UCUM and ISO 639-2 (public files), ISO 3166 (from the
+installed pycountry), and EDQM Standard Terms and LOINC when their keys are set.
 
-LOINC and ISO 3166 are not fetched. The owner places those files.
+EDQM and LOINC do not allow (EDQM) or discourage (LOINC) repeated downloads: each
+asks for its version first and downloads nothing when that version is stored, and
+nothing is retried.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from email.utils import formatdate
@@ -38,7 +44,45 @@ ISO639_NOTICE = (
     "Project ruling 2026-11-15; not a legal determination."
 )
 
-_ORDER = ("ucum", "iso639", "edqm")
+ISO3166_NOTICE = (
+    "ISO 3166-1 code elements from the pycountry package (Debian iso-codes data, "
+    "LGPL-2.1). ISO states that the code elements may be used, including in "
+    "software; the standard text is not included. Project ruling 2026-11-16; "
+    "not a legal determination."
+)
+
+LOINC_NOTICE = (
+    "This material contains content from LOINC (http://loinc.org). LOINC is "
+    "copyright (c) Regenstrief Institute, Inc. and the Logical Observation "
+    "Identifiers Names and Codes (LOINC) Committee and is available at no cost "
+    "under the license at http://loinc.org/license. LOINC(R) is a registered "
+    "United States trademark of Regenstrief Institute, Inc."
+)
+
+_ORDER = ("ucum", "iso639", "iso3166", "edqm", "loinc")
+_MD5_CHUNK = 1 << 20
+# EDQM classes not fetched through full_data_by_class: MAP is the mapping class
+# (served by the /mapping endpoint; it answered 500 with tags=1 and held no terms,
+# 2026-11-16). Mappings are deferred (drift log).
+EDQM_EXCLUDED_CLASSES = frozenset({"MAP"})
+
+
+def edqm_notice(retrieved_at: str) -> str:
+    """The EDQM Standard Terms conditions of use (web services), as they bind a
+    lookup copy: source and permission statement, no independent modification,
+    retrieval date and the not-static notice. Text from EDQM, received by the
+    owner 2026-11-16."""
+    return (
+        "Data from the EDQM Standard Terms database (http://standardterms.edqm.eu), "
+        "reproduced with the permission of the European Directorate for the Quality "
+        "of Medicines & HealthCare, Council of Europe (EDQM).\n"
+        f"Retrieved from the Standard Terms database on {retrieved_at}. The EDQM "
+        "Standard Terms database is not a static list and content can change over time.\n"
+        "The Standard Terms data is not modified independently. No other data is "
+        "represented as part of Standard Terms; any data shown alongside it does not "
+        "originate from Standard Terms.\n"
+        "Access to the Standard Terms APIs is provided free of charge and without guarantee.\n"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,15 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         plan = plan[: args.max_files]
     explicit = set(args.system or ())
     for system in plan:
-        if system == "edqm" and not _edqm_configured():
-            if "edqm" in explicit:
-                print(
-                    "refmeta download: EDQM_STAPI_LOGIN and EDQM_STAPI_SECRET_KEY are unset",
-                    file=sys.stderr,
-                )
-                return 3
-            _LOG.info("edqm: keys unset; skipped")
-            continue
+        if system in _CREDENTIALS:
+            check, keys = _CREDENTIALS[system]
+            if not check():
+                if system in explicit:
+                    print(f"refmeta download: {keys} are unset", file=sys.stderr)
+                    return 3
+                _LOG.info("%s: keys unset; skipped", system)
+                continue
         _fetch(system, raw, dry_run=args.dry_run, force=args.force)
     return 0
 
@@ -80,13 +123,29 @@ def _edqm_configured() -> bool:
     )
 
 
+def _loinc_configured() -> bool:
+    settings = get_settings()
+    return bool(settings.loinc_api_base and settings.loinc_username and settings.loinc_secret_key)
+
+
+# Systems that need credentials: (configured?, the env keys named in the message).
+_CREDENTIALS = {
+    "edqm": (_edqm_configured, "EDQM_STAPI_LOGIN and EDQM_STAPI_SECRET_KEY"),
+    "loinc": (_loinc_configured, "LOINC_USERNAME and LOINC_SECRET_KEY"),
+}
+
+
 def _fetch(system: str, raw: Path, *, dry_run: bool, force: bool) -> None:
     if system == "ucum":
         _fetch_ucum(raw, dry_run=dry_run, force=force)
     elif system == "iso639":
         _fetch_iso639(raw, dry_run=dry_run, force=force)
+    elif system == "iso3166":
+        _fetch_iso3166(raw, dry_run=dry_run, force=force)
     elif system == "edqm":
         _fetch_edqm(raw, dry_run=dry_run, force=force)
+    elif system == "loinc":
+        _fetch_loinc(raw, dry_run=dry_run, force=force)
     else:
         raise ValueError(system)
 
@@ -112,7 +171,7 @@ def _fetch_ucum(raw: Path, *, dry_run: bool, force: bool) -> None:
         {
             "ucum-essence.xml": body,
             "NOTICE.txt": notice,
-            "PROVENANCE.txt": _provenance("UCUM_ESSENCE_URL", release).encode(),
+            "PROVENANCE.txt": _provenance("UCUM_ESSENCE_URL", release)[0].encode(),
         },
     )
     _LOG.info("ucum: stored %s", release)
@@ -136,10 +195,122 @@ def _fetch_iso639(raw: Path, *, dry_run: bool, force: bool) -> None:
         {
             "ISO-639-2_utf-8.txt": body,
             "NOTICE.txt": (ISO639_NOTICE + "\n").encode(),
-            "PROVENANCE.txt": _provenance("ISO639_2_URL", release).encode(),
+            "PROVENANCE.txt": _provenance("ISO639_2_URL", release)[0].encode(),
         },
     )
     _LOG.info("iso639: stored %s", release)
+
+
+def iso3166_csv() -> tuple[str, bytes]:
+    """``(pycountry version, codes.csv bytes)``: every current ISO 3166-1 country,
+    sorted by alpha-2, in the header the loader expects (``iso3166.HEADER``)."""
+    import importlib.metadata
+
+    import pycountry
+
+    from episteme.data.refmeta.iso3166 import HEADER
+
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(HEADER)
+    for c in sorted(pycountry.countries, key=lambda c: c.alpha_2):
+        writer.writerow((c.alpha_2, c.alpha_3, c.numeric, c.name))
+    return importlib.metadata.version("pycountry"), out.getvalue().encode("utf-8")
+
+
+def _fetch_iso3166(raw: Path, *, dry_run: bool, force: bool) -> None:
+    if dry_run:
+        _LOG.info("iso3166: would write the code list of the installed pycountry")
+        return
+    version, body = iso3166_csv()
+    release = f"pycountry-{version}"
+    folder = raw / "refmeta" / "iso3166" / release
+    if not force and (folder / "codes.csv").is_file():
+        _LOG.info("iso3166: %s already stored", release)
+        return
+    _write(
+        folder,
+        {
+            "codes.csv": body,
+            "NOTICE.txt": (ISO3166_NOTICE + "\n").encode(),
+            "PROVENANCE.txt": _provenance("pycountry", release)[0].encode(),
+        },
+    )
+    _LOG.info("iso3166: stored %s", release)
+
+
+def _loinc_auth() -> tuple[str, str]:
+    settings = get_settings()
+    return settings.loinc_username or "", settings.loinc_secret_key or ""
+
+
+def loinc_metadata(version: str | None = None) -> dict:
+    """``GET /Loinc`` (current release, or ``version``): version, releaseDate,
+    numberOfLoincs, downloadUrl, downloadMD5Hash (loinc.org/kb/api/download)."""
+    base = get_settings().loinc_api_base.rstrip("/")
+    params = {"version": version} if version else None
+    response = requests.get(f"{base}/Loinc", params=params, auth=_loinc_auth(), timeout=120)
+    response.raise_for_status()
+    meta = response.json()
+    for key in ("version", "downloadUrl", "downloadMD5Hash"):
+        if not meta.get(key):
+            raise SystemExit(f"loinc: the metadata has no {key}")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", str(meta["version"])):
+        raise SystemExit(f"loinc: unexpected version string {meta['version']!r}")
+    # The zip must come from the API host over the same scheme (https): the Basic
+    # credentials are sent with it.
+    if urlsplit(meta["downloadUrl"])[:2] != urlsplit(base)[:2]:
+        raise SystemExit("loinc: downloadUrl is not on the LOINC API host")
+    return meta
+
+
+def _fetch_loinc(raw: Path, *, dry_run: bool, force: bool) -> None:
+    """One metadata call; the zip only when that version is not stored yet (LOINC
+    asks not to poll more than once a day). The MD5 from the metadata must match;
+    a mismatch is refused and never retried in the same run."""
+    if dry_run:
+        _LOG.info("loinc: would ask /Loinc for the current release and fetch it if new")
+        return
+    meta = loinc_metadata()
+    release = str(meta["version"])
+    folder = raw / "refmeta" / "loinc" / release
+    zip_name = f"Loinc_{release}.zip"
+    if not force and (folder / zip_name).is_file():
+        _LOG.info("loinc: %s already stored", release)
+        return
+    # Build the release in a staging folder beside the system folders (never under
+    # refmeta/loinc/, where the loader picks the newest folder), and move it into
+    # place only when it is whole: a failed download leaves no release folder.
+    staging = raw / "refmeta" / f".loinc-{release}.part"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        digest = hashlib.md5(usedforsecurity=False)
+        with requests.get(
+            meta["downloadUrl"], auth=_loinc_auth(), stream=True, timeout=600
+        ) as resp:
+            resp.raise_for_status()
+            with (staging / zip_name).open("wb") as fh:
+                for chunk in resp.iter_content(_MD5_CHUNK):
+                    fh.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest().lower() != str(meta["downloadMD5Hash"]).lower():
+            raise SystemExit(f"loinc: MD5 mismatch for {release}; nothing was stored")
+        _write(
+            staging,
+            {
+                "metadata.json": json.dumps(meta, indent=2, ensure_ascii=False).encode(),
+                "NOTICE.txt": (LOINC_NOTICE + "\n").encode(),
+                "PROVENANCE.txt": _provenance("LOINC_API_BASE", release)[0].encode(),
+            },
+        )
+        if folder.exists():  # --force over a stored release
+            shutil.rmtree(folder)
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, folder)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    _LOG.info("loinc: stored %s (%s LOINCs)", release, meta.get("numberOfLoincs"))
 
 
 def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:
@@ -147,39 +318,60 @@ def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:
     base = settings.edqm_stapi_base.rstrip("/")
     host = urlsplit(base).netloc
     if dry_run:
-        _LOG.info("edqm: would fetch every class from /classes, with full data and tags")
+        _LOG.info("edqm: would ask /versions, then fetch every class only if that is new")
         return
-    catalogue = _paged(base, host, classes_uri)
-    codes = class_codes(catalogue)
-    bodies = {code: _paged_document(base, host, code) for code in codes}
+    # Version first (one request): EDQM does not allow repeated downloads, so a
+    # stored release with the same /versions answer means nothing is fetched.
     try:
         versions = _edqm_get(base, versions_uri(), host)
-        label = _version_label(versions.decode("utf-8", errors="replace"))
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "error"
-        _LOG.info("edqm: versions request failed (%s); release id is a content hash", status)
+        if not force:
+            raise SystemExit(
+                f"edqm: /versions failed (HTTP {status}); without a version the download "
+                "could repeat a stored release, so nothing was fetched (use --force)"
+            ) from exc
         versions = b""
-        label = None
+    stored = _edqm_release_with_versions(raw, versions) if versions else None
+    if stored is not None and not force:
+        _LOG.info("edqm: version unchanged; %s already stored, nothing fetched", stored.name)
+        return
+    catalogue = _paged(base, host, classes_uri)
+    codes = [c for c in class_codes(catalogue) if c not in EDQM_EXCLUDED_CLASSES]
+    bodies: dict[str, bytes] = {}
+    for code in codes:
+        body = _class_document(base, host, code)
+        if body is None:
+            # A partial release would load as current and silently lose a class.
+            raise SystemExit(f"edqm: class {code} failed; no release was written (no retry)")
+        bodies[code] = body
     digest = hashlib.sha256()
     for code in codes:
         digest.update(code.encode())
         digest.update(bodies[code])
-    release = f"{label}-{digest.hexdigest()[:12]}" if label else digest.hexdigest()[:12]
+    release = digest.hexdigest()[:12]
     folder = raw / "refmeta" / "edqm" / release
-    if not force and all((folder / f"{code}.json").is_file() for code in codes):
-        _LOG.info("edqm: %s already stored", release)
-        return
     files = {f"{code}.json": bodies[code] for code in codes}
     files["classes.json"] = json.dumps({"content": catalogue}, ensure_ascii=False).encode()
     if versions:
         files["versions.json"] = versions
-    files["PROVENANCE.txt"] = _provenance("EDQM_STAPI_BASE", release).encode()
+    provenance, retrieved_at = _provenance("EDQM_STAPI_BASE", release)
+    files["PROVENANCE.txt"] = provenance.encode()
+    files["NOTICE.txt"] = edqm_notice(retrieved_at).encode()
     _write(folder, files)
-    _LOG.info(
-        "edqm: stored %s (%s classes; place NOTICE.txt or CONDITIONS.txt before load)",
-        release,
-        len(codes),
-    )
+    _LOG.info("edqm: stored %s (%s classes, with the EDQM conditions notice)", release, len(codes))
+
+
+def _edqm_release_with_versions(raw: Path, versions: bytes) -> Path | None:
+    """The stored EDQM release whose ``versions.json`` equals ``versions``, if any."""
+    root = raw / "refmeta" / "edqm"
+    if not root.is_dir():
+        return None
+    for folder in sorted(root.iterdir()):
+        stored = folder / "versions.json"
+        if folder.is_dir() and stored.is_file() and stored.read_bytes() == versions:
+            return folder
+    return None
 
 
 def _paged(base: str, host: str, uri_for) -> list:
@@ -195,31 +387,37 @@ def _paged(base: str, host: str, uri_for) -> list:
             raise SystemExit("edqm: a paged list did not end")
 
 
-def _paged_document(base: str, host: str, code: str) -> bytes:
-    rows = _paged(base, host, lambda **page: class_data_uri(code, **page))
+def _class_document(base: str, host: str, code: str) -> bytes | None:
+    """One class, in one request (``full_data_by_class`` is not paged). EDQM does
+    not allow repeated downloads (owner, 2026-11-16): a class that answers a server
+    error is skipped, never asked again in the same run; the caller records it.
+    (MAP answered 500 with tags=1 on 2026-11-16 and holds no terms.)"""
+    try:
+        body = _edqm_get(base, class_data_uri(code), host)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status is None or status < 500:
+            raise
+        _LOG.warning("edqm: class %s answered HTTP %s; skipped (no retry)", code, status)
+        return None
+    rows = content_rows(body)
     return json.dumps({"content": rows}, ensure_ascii=False).encode()
 
 
 def _edqm_get(base: str, uri: str, host: str) -> bytes:
     settings = get_settings()
     date = formatdate(usegmt=True)
+    # The server signs the path only: a signature over path + query is refused
+    # (403); the path-only signature with the query sent is accepted (2026-11-16).
     key = stapi_key(
         settings.edqm_stapi_login or "",
         settings.edqm_stapi_secret_key or "",
         verb="GET",
-        uri=uri,
+        uri=urlsplit(uri).path,
         host=host,
         date=date,
     )
     return _http_get(base + uri, {"X-STAPI-KEY": key, "Date": date})
-
-
-def _version_label(text: str) -> str | None:
-    match = re.search(r"<(?:[^>]*:)?version[^>]*>([^<]+)", text, re.IGNORECASE)
-    if not match:
-        return None
-    label = re.sub(r"[^A-Za-z0-9._-]+", "_", match.group(1).strip())
-    return label[:40] or None
 
 
 def _http_get(url: str, headers: dict[str, str] | None = None) -> bytes:
@@ -237,9 +435,10 @@ def _write(folder: Path, files: dict[str, bytes]) -> None:
         os.replace(tmp, target)
 
 
-def _provenance(source_key: str, release: str) -> str:
+def _provenance(source_key: str, release: str) -> tuple[str, str]:
+    """``(PROVENANCE.txt text, fetched_at)``."""
     when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f"source_key={source_key}\nrelease={release}\nfetched_at={when}\n"
+    return f"source_key={source_key}\nrelease={release}\nfetched_at={when}\n", when
 
 
 if __name__ == "__main__":

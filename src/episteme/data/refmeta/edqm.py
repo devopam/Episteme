@@ -38,12 +38,13 @@ def classes_uri(*, limit: int = PAGE, offset: int = 0) -> str:
     return f"/standardterms/api/v1/classes?limit={limit}&offset={offset}"
 
 
-def class_data_uri(code: str, *, limit: int = PAGE, offset: int = 0) -> str:
+def class_data_uri(code: str, *, tags: bool = True) -> str:
+    """``full_data_by_class`` has no paging (the API guide lists no limit/offset for
+    it, and the server ignores them: every call returns the whole class)."""
     if not _CODE.fullmatch(code):
         raise ValueError(f"EDQM class code {code!r} is not a safe path segment")
-    return (
-        f"/standardterms/api/v1/full_data_by_class/{code}/1/1?tags=1&limit={limit}&offset={offset}"
-    )
+    suffix = "?tags=1" if tags else ""
+    return f"/standardterms/api/v1/full_data_by_class/{code}/1/1{suffix}"
 
 
 def versions_uri() -> str:
@@ -126,7 +127,9 @@ def _read_json(path: Path) -> list[CodeRow]:
 
 
 def _json_name(item: dict) -> str | None:
-    for key in ("term", "name"):
+    # full_data_by_class rows carry the English term in "english" (2026-11-16);
+    # "translations" holds every language, so it is only a fallback.
+    for key in ("english", "term", "name"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -147,7 +150,7 @@ def _english_entry(entries: list) -> str | None:
             continue
         if not isinstance(entry, dict):
             continue
-        lang = str(entry.get("language") or entry.get("lang") or "")
+        lang = str(entry.get("language") or entry.get("lang") or entry.get("isocode") or "")
         text = entry.get("term") or entry.get("name")
         if isinstance(text, str) and text.strip():
             rank = 0 if lang.lower().startswith("en") else 1
