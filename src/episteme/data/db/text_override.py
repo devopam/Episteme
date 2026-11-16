@@ -142,6 +142,7 @@ def _walk(
     work: Callable[[tuple[str, str], tuple[str, str]], Any],
     log: Callable[[str], None],
     table: str = DEFAULT_TABLE,
+    extra: Callable[[], str] = lambda: "",
 ) -> int:
     """Call ``work(lo, hi)`` per key range (lo exclusive, hi inclusive); return rows seen."""
     lo = start_after if start_after is not None else ("", "")
@@ -157,7 +158,8 @@ def _walk(
         work(lo, hi)
         seen += n
         lo = hi
-        log(f"{partition}: scanned={seen} last_key={hi[0]!r},{hi[1]!r}")
+        # last_key is exactly the --start-after format: <article_id>,<source>
+        log(f"{partition}: scanned={seen}{extra()} last_key={hi[0]},{hi[1]}")
 
 
 def nullout(
@@ -188,7 +190,16 @@ def nullout(
             nulled += cur.rowcount
         conn.commit()
 
-    rows = _walk(conn, partition, batch_rows, start_after, work, log, table)
+    rows = _walk(
+        conn,
+        partition,
+        batch_rows,
+        start_after,
+        work,
+        log,
+        table,
+        extra=lambda: f" nulled={nulled}",
+    )
     log(f"{partition}: done rows={rows} nulled={nulled}")
     return {"rows": rows, "nulled": nulled}
 
@@ -212,6 +223,7 @@ def precheck(
     validate_partition(conn, partition, table)
     col = _text_column(conn, table)
     pre = col == "text"
+    conn.read_only = True
     if pre:
         expr_a = "count(*) FILTER (WHERE {col} IS NULL AND " + _ANY_PART_NONBLANK + ")"
         expr_b = "count(*) FILTER (WHERE {col} = '')"
@@ -235,7 +247,11 @@ def precheck(
         first += a
         second += b
 
-    rows = _walk(conn, partition, batch_rows, None, work, log, table)
+    try:
+        rows = _walk(conn, partition, batch_rows, None, work, log, table)
+    finally:
+        conn.rollback()
+        conn.read_only = False
     if pre:
         return {
             "partition": partition,
@@ -265,7 +281,21 @@ def report(conn: psycopg.Connection, table: str = DEFAULT_TABLE) -> list[dict]:
     col = _text_column(conn, table)
     schema, _ = _check_table(table)
     out: list[dict] = []
-    for part in list_partitions(conn, table):
+    parts = list_partitions(conn, table)
+    conn.read_only = True
+    try:
+        out = _report_parts(conn, parts, col, schema, table)
+    finally:
+        conn.rollback()
+        conn.read_only = False
+    return out
+
+
+def _report_parts(
+    conn: psycopg.Connection, parts: list[str], col: str, schema: str, table: str
+) -> list[dict]:
+    out: list[dict] = []
+    for part in parts:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT c.reltuples::bigint, pg_total_relation_size(c.oid) FROM pg_class c "
@@ -295,15 +325,51 @@ def report(conn: psycopg.Connection, table: str = DEFAULT_TABLE) -> list[dict]:
     return out
 
 
-def repack(conn: psycopg.Connection, partition: str, table: str = DEFAULT_TABLE) -> None:
-    """REPACK one partition (PG 19). Autocommit; takes ACCESS EXCLUSIVE at the swap."""
+def repack(
+    conn: psycopg.Connection,
+    partition: str,
+    table: str = DEFAULT_TABLE,
+    *,
+    lock_timeout_s: int | None = None,
+) -> None:
+    """REPACK one partition (PG 19). Autocommit.
+
+    Plain REPACK holds ACCESS EXCLUSIVE on the partition for the whole rewrite, so
+    readers and writers wait for its full length. A ``lock_timeout`` makes REPACK give
+    up when it cannot get the lock, so that other sessions do not queue behind it."""
     validate_partition(conn, partition, table)
+    if lock_timeout_s is None:
+        lock_timeout_s = get_settings().repack_lock_timeout_s
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute(sql.SQL("REPACK {rel}").format(rel=_rel(partition, table)))
+            cur.execute(sql.SQL("SET lock_timeout = {}").format(sql.Literal(f"{lock_timeout_s}s")))
+            try:
+                cur.execute(sql.SQL("REPACK {rel}").format(rel=_rel(partition, table)))
+            finally:
+                cur.execute("RESET lock_timeout")
     finally:
         conn.autocommit = False
+
+
+def parse_start_after(value: str) -> tuple[str, str]:
+    """Parse ``<article_id>,<source>``; split on the LAST comma (a source has none)."""
+    a, sep, src = value.rpartition(",")
+    if not sep or not a or not src:
+        raise argparse.ArgumentTypeError(
+            f"--start-after must be '<article_id>,<source>' (both parts not empty): {value!r}"
+        )
+    return a, src
+
+
+def _positive_int(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1: {value!r}")
+    return n
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -316,12 +382,14 @@ def build_parser() -> argparse.ArgumentParser:
     g = pc.add_mutually_exclusive_group(required=True)
     g.add_argument("--partition")
     g.add_argument("--all", action="store_true")
-    pc.add_argument("--batch-rows", type=int)
+    pc.add_argument("--batch-rows", type=_positive_int)
     sub.add_parser("report", help="read-only size and override estimate per partition")
     no = sub.add_parser("nullout", help="NULL text_override where it equals the join")
     no.add_argument("--partition", required=True)
-    no.add_argument("--batch-rows", type=int)
-    no.add_argument("--start-after", help="resume after this 'article_id,source' key")
+    no.add_argument("--batch-rows", type=_positive_int)
+    no.add_argument(
+        "--start-after", type=parse_start_after, help="resume after this 'article_id,source' key"
+    )
     rp = sub.add_parser("repack", help="REPACK one partition")
     rp.add_argument("--partition", required=True)
     rp.add_argument("--yes-repack", action="store_true")
@@ -378,11 +446,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("precheck: " + ("FAIL, do not apply 0014" if bad else "ok"))
                 return 1 if bad else 0
             if args.action == "nullout":
-                start = None
-                if args.start_after:
-                    a, _, s = args.start_after.rpartition(",")
-                    start = (a, s)
-                r = nullout(conn, args.partition, batch_rows=batch_rows, start_after=start)
+                r = nullout(
+                    conn,
+                    args.partition,
+                    batch_rows=batch_rows,
+                    start_after=args.start_after,
+                )
                 print(f"nullout {args.partition}: rows={r['rows']} nulled={r['nulled']}")
                 return 0
             repack(conn, args.partition)

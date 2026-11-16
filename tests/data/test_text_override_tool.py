@@ -68,13 +68,119 @@ def test_precheck_needs_partition_or_all():
         tool.build_parser().parse_args(["precheck"])
 
 
-def test_nullout_sql_compares_to_the_join_verbatim():
-    # the null-out must compare against the very expression the virtual column uses
-    update = tool.sql.SQL("x" + TEXT_JOIN_SQL)
-    assert TEXT_JOIN_SQL in update.as_string()
-    src = (REPO_ROOT / "src/episteme/data/db/text_override.py").read_text(encoding="utf-8")
-    assert "text_override IS NOT NULL AND text_override <> ''" in src
-    assert "TEXT_JOIN_SQL" in src
+class _StubCur:
+    def __init__(self, conn):
+        self.conn = conn
+        self.rowcount = 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, query, params=None):
+        text = query if isinstance(query, str) else query.as_string(None)
+        self.conn.executed.append(text)
+        self.conn.last = text
+
+    def fetchone(self):
+        if "pg_inherits" in self.conn.last:
+            return (1,)
+        if "array_agg" in self.conn.last:
+            return self.conn.batches.pop(0)
+        return None
+
+
+class _StubConn:
+    def __init__(self, batches):
+        self.executed = []
+        self.last = ""
+        self.batches = list(batches)
+
+    def cursor(self):
+        return _StubCur(self)
+
+    def rollback(self):
+        pass
+
+    def commit(self):
+        pass
+
+
+def test_nullout_composed_sql_compares_to_the_join_verbatim():
+    conn = _StubConn([(1, "a1", "pmc"), (0, None, None)])
+    logs = []
+    res = tool.nullout(conn, "article_body_pmc", batch_rows=5, log=logs.append)
+    updates = [q for q in conn.executed if q.startswith("UPDATE")]
+    assert len(updates) == 1
+    q = updates[0]
+    assert q.endswith("text_override = " + TEXT_JOIN_SQL)
+    assert "text_override IS NOT NULL AND text_override <> ''" in q
+    assert 'UPDATE "episteme"."article_body_pmc" SET text_override = NULL' in q
+    assert res == {"rows": 1, "nulled": 1}
+    assert "nulled=1" in logs[0] and "scanned=1" in logs[0]
+
+
+def test_log_last_key_is_the_start_after_format():
+    conn = _StubConn([(2, "PMC123", "pmc"), (0, None, None)])
+    logs = []
+    tool.nullout(conn, "article_body_pmc", batch_rows=5, log=logs.append)
+    key = logs[0].rsplit("last_key=", 1)[1]
+    assert key == "PMC123,pmc"
+    assert tool.parse_start_after(key) == ("PMC123", "pmc")
+
+
+def test_parse_start_after_splits_on_the_last_comma():
+    assert tool.parse_start_after("a,b,pmc") == ("a,b", "pmc")
+
+
+@pytest.mark.parametrize("bad", ["nocomma", ",pmc", "id,", ","])
+def test_parse_start_after_refuses_bad_values(bad):
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        tool.parse_start_after(bad)
+
+
+def test_start_after_without_comma_exits_2():
+    with pytest.raises(SystemExit) as e:
+        tool.main(["nullout", "--partition", "article_body_pmc", "--start-after", "nocomma"])
+    assert e.value.code == 2
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "x"])
+def test_batch_rows_must_be_positive(bad):
+    for action in ("precheck", "nullout"):
+        argv = [action, "--partition", "article_body_pmc", "--batch-rows", bad]
+        with pytest.raises(SystemExit) as e:
+            tool.main(argv)
+        assert e.value.code == 2
+
+
+def test_repack_lock_timeout_default_and_override(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("EPISTEME_REPACK_LOCK_TIMEOUT_S", raising=False)
+    cfg.get_settings.cache_clear()
+    try:
+        assert cfg.get_settings().repack_lock_timeout_s == 60
+        monkeypatch.setenv("EPISTEME_REPACK_LOCK_TIMEOUT_S", "9")
+        cfg.get_settings.cache_clear()
+        assert cfg.get_settings().repack_lock_timeout_s == 9
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_repack_sets_lock_timeout_before_repack():
+    class Conn(_StubConn):
+        autocommit = False
+
+    conn = Conn([])
+    tool.repack(conn, "article_body_pmc", lock_timeout_s=7)
+    sets = [i for i, q in enumerate(conn.executed) if q.startswith("SET lock_timeout")]
+    packs = [i for i, q in enumerate(conn.executed) if q.startswith("REPACK")]
+    assert sets and packs and sets[0] < packs[0]
+    assert "'7s'" in conn.executed[sets[0]]
 
 
 # --------------------------------------------------------------------------------- pg
@@ -166,6 +272,39 @@ def test_nullout_is_restartable(body):
     second = tool.nullout(body, "article_body_pmc", batch_rows=2, log=lambda m: None)
     assert first["nulled"] == 3
     assert second["nulled"] == 0 and second["rows"] == 6
+
+
+@pytest.mark.pg
+def test_resume_from_logged_key_matches_one_full_run(body):
+    rows = [(f"id,{n:02d}", "T", "A", "B", "T\n\nA\n\nB") for n in range(7)]
+    rows.append(("id,07", "T", "A", "B", "different"))
+    _insert(body, rows)
+    tool.nullout(body, "article_body_pmc", batch_rows=3, log=lambda m: None)
+    full = _overrides(body)
+    with body.cursor() as cur:
+        cur.execute("DELETE FROM episteme.article_body")
+    body.commit()
+    _insert(body, rows)
+
+    class Stop(Exception):
+        pass
+
+    logged = []
+
+    def log_then_stop(msg):
+        logged.append(msg)
+        raise Stop
+
+    with pytest.raises(Stop):
+        tool.nullout(body, "article_body_pmc", batch_rows=3, log=log_then_stop)
+    # the first batch committed; later rows are untouched
+    partial = _overrides(body)
+    assert partial["id,00"] is None and partial["id,05"] is not None
+    key = logged[0].rsplit("last_key=", 1)[1]
+    start = tool.parse_start_after(key)
+    assert start == ("id,02", "pmc")
+    tool.nullout(body, "article_body_pmc", batch_rows=3, log=lambda m: None, start_after=start)
+    assert _overrides(body) == full
 
 
 @pytest.mark.pg

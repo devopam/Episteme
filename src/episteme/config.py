@@ -161,6 +161,8 @@ DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
 DEFAULT_DAILYMED_COPY_BATCH_ROWS = 20_000
 # Rows per transaction of the article_body text_override null-out and precheck.
 DEFAULT_TEXT_NULLOUT_BATCH_ROWS = 50_000
+# Seconds REPACK waits for its table lock before it gives up.
+DEFAULT_REPACK_LOCK_TIMEOUT_S = 60
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -492,6 +494,7 @@ class Settings:
     dailymed_copy_batch_rows: int = DEFAULT_DAILYMED_COPY_BATCH_ROWS
     # Rows per batch of the text_override tool (EPISTEME_TEXT_NULLOUT_BATCH_ROWS).
     text_nullout_batch_rows: int = DEFAULT_TEXT_NULLOUT_BATCH_ROWS
+    repack_lock_timeout_s: int = DEFAULT_REPACK_LOCK_TIMEOUT_S
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -717,6 +720,9 @@ def get_settings() -> Settings:
         ),
         dailymed_copy_batch_rows=_get_positive_int_or_default(
             "EPISTEME_DAILYMED_COPY_BATCH_ROWS", DEFAULT_DAILYMED_COPY_BATCH_ROWS
+        ),
+        repack_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_REPACK_LOCK_TIMEOUT_S", DEFAULT_REPACK_LOCK_TIMEOUT_S
         ),
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
