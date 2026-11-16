@@ -219,23 +219,23 @@ PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c 
 
 Before 0014, each literature row stores its title, abstract and body twice. Migration 0014 makes `text` a virtual column. After 0014, a tool removes the stored copies and returns the disk space. Design: `docs/superpowers/specs/2026-11-16-article-text-virtual-design.md`.
 
-The tool is `bash scripts/data/db/text_override.sh`. It connects as `episteme_sys_admin` and refuses any server except `19beta3`. Write each run to a log in `D:/episteme/_runlogs/`.
+The tool is `bash scripts/data/db/text_override.sh`. It connects as `episteme_sys_admin` and refuses any server except `19beta3`. The wrapper needs the env keys `EPISTEME_ACTOR` and `EPISTEME_SYS_ADMIN_PASSWORD` (names only). The wrapper writes no log. Pipe each run to a log: `... 2>&1 | tee D:/episteme/_runlogs/<name>.log`.
 
-1. Run `bash scripts/data/db/text_override.sh precheck --all` on the database BEFORE 0014. The result must say `ok`: no row with `text IS NULL` and a non-blank part, and no row with `text = ''`. Stop if it does not say `ok`.
+1. Run `bash scripts/data/db/text_override.sh precheck --all` on the database BEFORE 0014. The result must say `ok`: no row with `text IS NULL` and a non-blank part, and no row with `text = ''`. Stop if it does not say `ok`. `precheck --all` reads every row of every `article_body` partition (about 370 GB, in key batches). It is a heavy read job: run it alone.
 2. Apply `0014_article_text_virtual.sql` with no load running.
 3. Run `bash scripts/data/db/text_override.sh report`. Note the sizes.
-4. Do step 4a and step 4b for one partition at a time. Use this order: `dailymed`, `pmc`, then `pubmed` (owner go first), then `openalex` (owner go first). Run one heavy job at a time.
-   - 4a. Run `bash scripts/data/db/text_override.sh nullout --partition NAME`. It sets `text_override` to NULL where it equals the join. Each batch commits. The log shows `scanned=N nulled=M last_key=ID,SOURCE`.
-   - 4b. Run `bash scripts/data/db/text_override.sh repack --partition NAME --yes-repack`. Run no load and no corpus job on that source during REPACK. REPACK holds ACCESS EXCLUSIVE on the partition for the whole rewrite. The tool sets `lock_timeout` first.
+4. Do step 4a and step 4b for one partition at a time. Use this order: `article_body_dailymed`, `article_body_pmc`, then `article_body_pubmed` (owner go first), then `article_body_openalex` (owner go first). `NAME` is the full partition name. Run one heavy job at a time.
+   - 4a. Run `bash scripts/data/db/text_override.sh nullout --partition NAME`, for example `bash scripts/data/db/text_override.sh nullout --partition article_body_dailymed`. It sets `text_override` to NULL where it equals the join. Each batch commits. The log shows `scanned=N nulled=M last_key=ID,SOURCE`.
+   - 4b. Run `bash scripts/data/db/text_override.sh repack --partition NAME --yes-repack`. Run no load and no corpus job on that source during REPACK. REPACK writes a new copy of the partition before it drops the old one. Check that E: has free space at least the size of the partition (`report` shows it): about 71 GB for pubmed and 123 GB for openalex. REPACK holds ACCESS EXCLUSIVE on the partition for the whole rewrite. The tool sets `lock_timeout` first.
 5. Write the sizes before and after each REPACK in the drift log (`docs/project-incubation-baseline.md`).
 
-To resume a stopped `nullout`, run it again with `--start-after` and the `last_key` value from the last log line. A repeated batch changes nothing.
+To resume a stopped `nullout`, run it again with `--start-after`. Pass the text after `last_key=` in the last log line (form `<article_id>,<source>`) to `--start-after ID,SOURCE`. A repeated batch changes nothing.
 
 Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULLOUT_BATCH_ROWS` (rows per batch) and `EPISTEME_REPACK_LOCK_TIMEOUT_S` (seconds). `--batch-rows` overrides the first for one run.
 
 After 0014, `precheck` is for information only.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0012 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0014 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
