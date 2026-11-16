@@ -32,10 +32,11 @@ import sys
 import time
 import zipfile
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import ijson
 import psutil
@@ -49,6 +50,7 @@ from episteme.data.checkpoint_markers import (
     mark_success,
     success_marker_path,
 )
+from episteme.data.pacing import foreign_wait, pacing_path, record_request
 from episteme.data.regulatory.feeds import Feed, load_feeds
 from episteme.data.regulatory.parsers import ema_total
 from episteme.ops.stop import stage_guard
@@ -58,7 +60,6 @@ _LOG = logging.getLogger(__name__)
 MARKER_SOURCE = "ema_download"
 ATTEMPTS = 2  # the first try and one retry
 _EXT = {"ema_json": ".json", "article57_xlsx": ".xlsx"}
-_CONNECT_TIMEOUT_S = 30
 _CHUNK = 1 << 20
 
 
@@ -258,7 +259,9 @@ def download_to(
     deletes ``tmp``). The EMA feeds pass no cap."""
     try:
         resp = session.get(
-            url, stream=True, timeout=(_CONNECT_TIMEOUT_S, get_settings().ema_read_timeout_seconds)
+            url,
+            stream=True,
+            timeout=(get_settings().ema_connect_timeout_s, get_settings().ema_read_timeout_seconds),
         )
     except (requests.RequestException, OSError) as exc:
         raise Retryable(f"request failed: {exc}") from exc
@@ -342,13 +345,17 @@ def fetch_ema_feeds(
     backoff_s: float | None = None,
     max_backoff_s: float | None = None,
     max_throttles: int | None = None,
+    pacing_dir: Path | None = None,
+    now: Callable[[], datetime] = _utcnow,
 ) -> dict:
     """Download every EMA feed in ``feeds`` into ``raw_dir``.
 
     Returns ``{"fetched": [...], "skipped": [...], "failed": {name: reason}}``.
     Raises ``FeedVerificationError`` (after its failed marker) when EMA answers with
     its verification page, and ``RateLimited`` (after its failed marker) after too many
-    throttles in a row. ``session`` and ``sleep`` are seams for tests.
+    throttles in a row. ``session``, ``sleep``, ``now`` and ``pacing_dir`` are seams for tests.
+    The time of every request goes to ``<raw root>/_pacing/<host>.json``; a run waits out what
+    is left of ``delay_s`` since the last request of an earlier run, and of a ``Retry-After``.
     """
     raw_dir = Path(raw_dir)
     settings = get_settings()
@@ -363,6 +370,7 @@ def fetch_ema_feeds(
 
     result: dict = {"fetched": [], "skipped": [], "failed": {}}
     requests_made = 0
+    own_last: dict[str, datetime] = {}
     selected = ema_feeds(feeds)
     if max_files is not None:
         selected = selected[:max_files]
@@ -377,16 +385,25 @@ def fetch_ema_feeds(
             result["skipped"].append(feed.name)
             continue
         url = source_url(feed.url_key)
+        pace_file = pacing_path(urlsplit(url).hostname or "", pacing_dir)
+        host = pace_file.stem
         tmp = raw_dir / f".{final.name}.{os.getpid()}.tmp"
         last_error = ""
         attempt = 0
         waited = False
         while attempt < ATTEMPTS:
             # The pause after a throttle is the delay: no second wait before the new request.
-            if requests_made and delay > 0 and not waited:
-                sleep(delay)
+            wait = delay if requests_made and delay > 0 and not waited else 0.0
+            if delay > 0:  # an earlier run's request (or a Retry-After) counts too
+                wait = max(
+                    wait,
+                    foreign_wait(pace_file, own_last.get(host), now(), delay, gate.max_backoff_s),
+                )
+            if wait > 0:
+                sleep(wait)
             waited = False
             requests_made += 1
+            seen_at: datetime | None = None  # a time set ahead after a Retry-After
             try:
                 stats = _download_once(session, url, feed, tmp)
             except KeyboardInterrupt:
@@ -395,6 +412,9 @@ def fetch_ema_feeds(
                 raise
             except Throttled as exc:
                 tmp.unlink(missing_ok=True)
+                if exc.retry_after is not None:
+                    ahead = max(0.0, min(exc.retry_after, gate.max_backoff_s) - delay)
+                    seen_at = now() + timedelta(seconds=ahead)
                 try:
                     gate.on_throttle(exc, feed.name)
                 except RateLimited as stop_exc:
@@ -428,6 +448,9 @@ def fetch_ema_feeds(
                 attempt += 1
                 _LOG.warning("%s: attempt %d of %d failed: %s", feed.name, attempt, ATTEMPTS, exc)
                 continue
+            finally:
+                own_last[host] = seen_at or now()
+                record_request(pace_file, own_last[host])
             os.replace(tmp, final)
             mark_success(
                 processed_root, MARKER_SOURCE, key, stats={**stats, "url_key": feed.url_key}

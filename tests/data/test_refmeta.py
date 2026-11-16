@@ -100,6 +100,23 @@ def test_code_list_prefers_gc_xml_and_keeps_english(tmp_path: Path):
     assert release.release_id.startswith("v2.11-")
 
 
+def test_ucum_codes_use_the_code_attribute(tmp_path: Path):
+    ucum = parse_ucum(
+        _write(
+            tmp_path / "ucum-essence.xml",
+            "<root><unit Code='10*'><name>the number ten for arbitrary powers</name>"
+            "<printSymbol>10</printSymbol></unit>"
+            "<unit Code='10^'><name>the number ten for arbitrary powers</name>"
+            "<printSymbol>10</printSymbol></unit></root>",
+        ),
+        notice=_NOTICE,
+        source_file="ucum",
+        release_id="abc",
+    )
+    assert [row.code for row in ucum.codes] == ["unit:10*", "unit:10^"]
+    assert [row.extra["print_symbol"] for row in ucum.codes] == ["10", "10"]
+
+
 def test_ucum_iso639_iso3166_and_loinc(tmp_path: Path):
     ucum = parse_ucum(
         _write(

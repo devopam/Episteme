@@ -29,7 +29,7 @@ Third-party term content inside the guide (MedDRA terms, ISO term lists, UCUM co
 | `loinc` | `LOINC_NUM` | the owner’s folder name | owner places the zip and `NOTICE.txt` |
 | `iso3166` | alpha-2 | the owner’s folder name | owner places `codes.csv` with the header `alpha_2,alpha_3,numeric,short_name_en`, plus `NOTICE.txt` |
 | `iso639` | bibliographic alpha-3 | sha12 of the file | `ISO639_2_URL` |
-| `ucum` | `<kind>:<printSymbol or name>` | sha12 of the essence file | `UCUM_ESSENCE_URL` and `UCUM_LICENSE_URL`. The XML is stored verbatim |
+| `ucum` | `<kind>:<Code>` (fallback printSymbol, then name) | sha12 of the essence file | `UCUM_ESSENCE_URL` and `UCUM_LICENSE_URL`. The XML is stored verbatim |
 | `edqm` | `<class>:<term code>` | version label, or a content hash | `EDQM_STAPI_BASE`. Every class from `/classes`, full data, `tags=1`. Only when both keys are set |
 
 Licence and cadence for each list are in `docs/02` section 2.3.1. SIL ISO 639-3 is out of scope: its terms forbid a product that redistributes the code set, and a table MCPg can read would do that.

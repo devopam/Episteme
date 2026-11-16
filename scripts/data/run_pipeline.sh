@@ -45,6 +45,7 @@ NO_WAIT=0
 REASON=""
 MAX_FILES=""
 SKIP_UNITS=()
+SYSTEMS=()
 # I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
 # hf_corpus `<repo_id>`, chembl `all`, …). Collect and forward them to the
 # table-driven wrapper rather than WARN-and-drop — the wrapper is the layer that
@@ -89,6 +90,15 @@ while [ $# -gt 0 ]; do
         # aact load only: load this release zip instead of the newest one. The gate pass
         # check applies as for any other full run.
         --zip) ZIP_SET=1; ZIP_PATH="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        # refmeta only: load or download just the named code systems (repeatable). Other
+        # sources keep the old behaviour: the token falls through to the passthrough list.
+        --system)
+            if [ "$SOURCE" = "refmeta" ]; then
+                [ $# -ge 2 ] && [ -n "$2" ] || die "--system requires a system name" 2
+                SYSTEMS+=("$2"); shift 2
+            else
+                passthrough+=("$1"); shift
+            fi ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -125,6 +135,17 @@ if [ "$BULK" = "1" ] && [ "$SOURCE" = "openalex" ]; then
     # articles_pmcid_idx and the lower(doi) indexes; --bulk would drop the first two,
     # fail every shard and then rebuild the whole articles group for nothing.
     die "openalex does not support --bulk (its pubmed/pmc dedup needs the articles indexes that --bulk drops)" 2
+fi
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "pubmed" ] || [ "$SOURCE" = "pmc" ]; }     && [ "$STAGE" = "load" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+    # The pubmed/pmc load sweeps the openalex rows it duplicates (Ruling R2) and probes the key
+    # indexes that --bulk drops; the loader would refuse after the drop and leave them dropped.
+    oa_rc=0
+    "$PY" -m episteme.ops.openalex_rows || oa_rc=$?
+    if [ "$oa_rc" -eq 1 ]; then
+        die "$SOURCE --bulk is refused while episteme.articles_openalex holds rows: --bulk drops the indexes the openalex sweep needs. Load without --bulk (drift log 2026-11-16, ruling R2)." 2
+    elif [ "$oa_rc" -ne 0 ]; then
+        die "could not check episteme.articles_openalex for rows (exit $oa_rc)" 1
+    fi
 fi
 if [ "$ZIP_SET" = "1" ]; then
     { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
@@ -772,6 +793,7 @@ extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_rea
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
 [ "$ZIP_SET" = "1" ] && load_args+=(--zip "$ZIP_PATH")
+for _s in "${SYSTEMS[@]+"${SYSTEMS[@]}"}"; do load_args+=(--system "$_s"); done
 if [ "$ALLOW_PARTIAL" = "1" ]; then
     load_args+=(--allow-partial)
     [ "$FORCE" = "1" ] || load_args+=(--reason "$REASON")
@@ -812,6 +834,7 @@ case "$SOURCE" in
 esac
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")
+for _s in "${SYSTEMS[@]+"${SYSTEMS[@]}"}"; do wrapper_args+=(--system "$_s"); done
 # I1: forward the collected MODE positionals last (guard the expansion for set -u).
 [ "${#passthrough[@]}" -eq 0 ] || wrapper_args+=("${passthrough[@]}")
 

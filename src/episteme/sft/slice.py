@@ -19,10 +19,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from episteme.config import get_settings
 from episteme.sft.manifest import write_manifest
 
-_BATCH_ROWS = 2048
-_ROWS_PER_PART = 50_000
 _OUT_COLUMNS = ("text", "source", "year", "id", "pmid", "doi", "license", "content_hash")
 
 
@@ -52,7 +51,9 @@ def _read_columns(shard: Path) -> tuple[list[str], bool]:
 
 def _iter_rows(shard: Path, cols: list[str], has_subset: bool):
     """Yield ``(row_dict, is_commercial)`` for each row, streamed by batch."""
-    for batch in pq.ParquetFile(shard).iter_batches(batch_size=_BATCH_ROWS, columns=cols):
+    for batch in pq.ParquetFile(shard).iter_batches(
+        batch_size=get_settings().sft_slice_batch_rows, columns=cols
+    ):
         data = {c: batch.column(c).to_pylist() for c in cols}
         for i in range(batch.num_rows):
             row = {c: data[c][i] for c in cols if c != "subset"}
@@ -140,7 +141,7 @@ def build_slice(
             state["writer"] = pq.ParquetWriter(path, state["schema"], compression="zstd")
         state["writer"].write_table(table)
         state["part_rows"] += table.num_rows
-        if state["part_rows"] >= _ROWS_PER_PART:
+        if state["part_rows"] >= get_settings().sft_slice_rows_per_part:
             state["writer"].close()
             state["writer"] = None
             state["part"] += 1
@@ -174,7 +175,7 @@ def build_slice(
                 buf.setdefault(c, []).append(v)
             rows_kept += 1
             tok_kept += _tokens(text)
-            if len(buf["text"]) >= _BATCH_ROWS:
+            if len(buf["text"]) >= get_settings().sft_slice_batch_rows:
                 flush()
         flush()
         totals["rows_kept"] += rows_kept

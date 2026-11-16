@@ -45,7 +45,9 @@ def _ok(vid):
 
 def test_pause_point_runs_once_per_submit_batch(tmp_path, monkeypatch):
     cfg = _env(tmp_path, monkeypatch)
-    monkeypatch.setattr(dp, "SUBMIT_BATCH", 2)
+    monkeypatch.setenv("EPISTEME_PMC_SUBMIT_BATCH", "2")
+    cfg.get_settings.cache_clear()
+    dp.get_settings.cache_clear()  # the module may hold a pre-reload get_settings
     calls = []
     monkeypatch.setattr(dp.ops_lock, "pause_point", lambda run_id, **kw: calls.append(run_id))
     _go(monkeypatch, tmp_path, {n: 1 for n in range(1, 6)}, lambda vid: None)
@@ -113,7 +115,9 @@ def test_progress_once_per_submit_batch(tmp_path, monkeypatch):
     from episteme.ops import status
 
     cfg = _env(tmp_path, monkeypatch)
-    monkeypatch.setattr(dp, "SUBMIT_BATCH", 2)
+    monkeypatch.setenv("EPISTEME_PMC_SUBMIT_BATCH", "2")
+    cfg.get_settings.cache_clear()
+    dp.get_settings.cache_clear()  # the module may hold a pre-reload get_settings
     monkeypatch.setattr(dp.ops_lock, "pause_point", lambda run_id, **kw: False)
     seen = []
     real = status.RunStatus.progress

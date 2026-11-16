@@ -98,9 +98,16 @@ class _Cursor:
 
     def execute(self, sql, params=None):
         self.rowcount = 0
+        self.sql = sql
 
     def fetchone(self):
-        return ("on", "on", "on", "on", True)  # the planner settings read
+        # The planner settings reads (four, plus the id-index flag in
+        # _ordered_index_probes; one for enable_bitmapscan in the pubmed
+        # sweep), else a readiness check: True.
+        if "current_setting" not in self.sql:
+            return (True,)
+        n = self.sql.count("current_setting")
+        return ("on",) * n + ((True,) if "to_regclass" in self.sql else ())
 
     def copy(self, sql):
         target = sql.split("(")[0].replace("COPY", "").strip()
@@ -153,6 +160,29 @@ def test_result_carries_timing_fields(tmp_path):
     for key in ("read_sec", "copy_sec", "rows_per_sec"):
         assert isinstance(result[key], float), key
         assert result[key] >= 0.0, key
+
+
+def test_pubmed_load_runs_the_openalex_sweep(tmp_path):
+    """A pubmed load sweeps openalex after its insert: the probe and the two
+    openalex-only deletes run, and the result carries swept_openalex (the fake
+    cursor's rowcount is 0)."""
+    shard = _shard(tmp_path, parquet=True)
+    seen: list[str] = []
+
+    class _Spy(_Cursor):
+        def execute(self, sql, params=None):
+            seen.append(sql)
+            super().execute(sql, params)
+
+    conn = _Conn()
+    conn.cursor = lambda: _Spy(conn)
+    result = postgres_loader.load_source_file(conn, source="pubmed", staging_path=shard, run_id="r")
+    assert result["swept_openalex"] == 0
+    probes = [q for q in seen if "CROSS JOIN LATERAL" in q]
+    assert len(probes) == len(postgres_loader.DEDUP_KEYS)
+    deletes = [q for q in seen if q.startswith("DELETE") and "_sweep_ids" in q]
+    assert [q.split()[2] for q in deletes] == ["episteme.article_body", "episteme.articles"]
+    assert all("source = 'openalex'" in q for q in deletes)
 
 
 def test_batch_tuples_cap_oversized_list_elements_from_old_shards():

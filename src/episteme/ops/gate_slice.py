@@ -20,13 +20,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from episteme.config import get_settings
+
 GB = 1024**3
 MB = 1024**2
 
-BOOKSHELF_MAX_PACKAGE_BYTES = 1 * GB
 BOOKSHELF_SPREAD = 20
 BOOKSHELF_PERCENTILE = 0.99
-APOLLO_MIN_BYTES = 10 * MB
 
 _EUROPEPMC_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.tar\.gz$")
 
@@ -56,9 +56,16 @@ def _size(path: Path) -> int:
 def _select_bookshelf(raw: Path) -> list[Path]:
     from episteme.data.bookshelf.extract_bookshelf import discover_bookshelf_files
 
-    files = [p for p in discover_bookshelf_files(raw) if _size(p) <= BOOKSHELF_MAX_PACKAGE_BYTES]
+    files = [
+        p
+        for p in discover_bookshelf_files(raw)
+        if _size(p) <= get_settings().bookshelf_max_package_bytes
+    ]
     if not files:
-        raise SliceError(f"bookshelf: no package of at most 1 GB under {raw}")
+        raise SliceError(
+            "bookshelf: no package of at most "
+            f"{get_settings().bookshelf_max_package_bytes} bytes under {raw}"
+        )
     n = len(files)
     if n <= BOOKSHELF_SPREAD:
         picked = set(range(n))
@@ -145,11 +152,12 @@ def _select_apollo(raw: Path) -> list[Path]:
         cands = [
             p
             for p in files
-            if match(p.relative_to(raw).parts[:-1], p.name) and _size(p) >= APOLLO_MIN_BYTES
+            if match(p.relative_to(raw).parts[:-1], p.name)
+            and _size(p) >= get_settings().apollo_min_bytes
         ]
         if not cands:
             raise SliceError(
-                f"apollo: no file of at least {APOLLO_MIN_BYTES} bytes in group "
+                f"apollo: no file of at least {get_settings().apollo_min_bytes} bytes in group "
                 f"'{label}' under {raw}"
             )
         out.append(min(cands, key=lambda p: (_size(p), p.name)))

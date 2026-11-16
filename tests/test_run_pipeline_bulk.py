@@ -58,6 +58,9 @@ esac
 """
 FAKE_PY = """#!/usr/bin/env bash
 case "$*" in
+    *openalex_rows*)
+        [ -n "${FAKE_OA_LOG:-}" ] && echo "openalex_rows" >> "$CALLS"
+        exit "${FAKE_OA_RC:-0}" ;;
     *run_start*) echo "run_start" >> "$CALLS" ;;
     *run_end*) echo "run_end" >> "$CALLS" ;;
 esac
@@ -288,3 +291,28 @@ def test_openalex_load_bulk_is_refused_before_any_index_drop(tree):
     assert proc.returncode == 2, proc.stderr
     assert "openalex does not support --bulk" in proc.stderr
     assert not calls.exists() or calls.read_text(encoding="utf-8").splitlines() == []
+
+
+def test_pubmed_bulk_is_refused_before_any_drop_while_openalex_rows_exist(tree):
+    proc, calls = _run(tree, "load", "--bulk", FAKE_OA_RC="1")
+    assert proc.returncode == 2, proc.stderr
+    assert "articles_openalex holds rows" in proc.stderr
+    assert "bulk drop" not in calls and "load" not in calls
+    assert "run_start" not in calls
+
+
+def test_pubmed_bulk_runs_when_no_openalex_row_exists(tree):
+    proc, calls = _run(tree, "load", "--bulk", FAKE_OA_LOG="1")
+    assert proc.returncode == 0, proc.stderr
+    assert calls[:3] == ["openalex_rows", "run_start", "bulk drop"]
+
+
+def test_pubmed_bulk_check_error_stops_before_any_drop(tree):
+    proc, calls = _run(tree, "load", "--bulk", FAKE_OA_RC="2")
+    assert proc.returncode == 1, proc.stderr
+    assert "bulk drop" not in calls
+
+
+def test_the_openalex_check_is_skipped_on_a_dry_run(tree):
+    proc, calls = _run(tree, "load", "--bulk", "--dry-run", FAKE_OA_RC="1", FAKE_OA_LOG="1")
+    assert "openalex_rows" not in calls

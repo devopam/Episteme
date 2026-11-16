@@ -6,7 +6,28 @@ from pathlib import Path
 
 import pytest
 
+import episteme.config as cfg
 from episteme.ops import gate_slice
+
+
+def _set(monkeypatch, key: str, value: int) -> None:
+    """Set a tuning env key; the settings cache is cleared now and after the test."""
+    monkeypatch.setenv(key, str(value))
+    _clear()
+
+
+def _clear() -> None:
+    # tests/test_config.py reloads episteme.config, so the module may hold an older
+    # get_settings than cfg does: clear both.
+    cfg.get_settings.cache_clear()
+    gate_slice.get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings():
+    _clear()
+    yield
+    _clear()
 
 
 def _w(path: Path, size: int = 10) -> Path:
@@ -50,7 +71,7 @@ def test_bookshelf_percentile_pick_added_when_not_in_spread(roots):
 
 def test_bookshelf_excludes_oversize(roots, monkeypatch):
     raw, _, _ = roots
-    monkeypatch.setattr(gate_slice, "BOOKSHELF_MAX_PACKAGE_BYTES", 150)
+    _set(monkeypatch, "EPISTEME_BOOKSHELF_MAX_PACKAGE_BYTES", 150)
     d = _bookshelf(raw, 10)  # sizes 100..109 all fit
     _w(d / "huge.tar.gz", 1000)
     names = [p.name for p in gate_slice.select("bookshelf", raw)]
@@ -199,7 +220,7 @@ def _apollo(raw: Path, sizes: dict[str, int]) -> Path:
 
 def test_apollo_smallest_over_threshold_per_group(roots, monkeypatch):
     raw, processed, sample = roots
-    monkeypatch.setattr(gate_slice, "APOLLO_MIN_BYTES", 100)
+    _set(monkeypatch, "EPISTEME_APOLLO_MIN_BYTES", 100)
     d = _apollo(raw, APOLLO)
     rels = [p.relative_to(d).as_posix() for p in gate_slice.select("apollo", raw)]
     assert rels == [
@@ -213,7 +234,7 @@ def test_apollo_smallest_over_threshold_per_group(roots, monkeypatch):
 
 def test_apollo_group_without_qualifying_file_raises(roots, monkeypatch):
     raw, _, _ = roots
-    monkeypatch.setattr(gate_slice, "APOLLO_MIN_BYTES", 100)
+    _set(monkeypatch, "EPISTEME_APOLLO_MIN_BYTES", 100)
     sizes = {k: v for k, v in APOLLO.items() if "sft/medicalExam_en_clean" not in k}
     _apollo(raw, sizes)
     with pytest.raises(gate_slice.SliceError, match="train/sft medical"):
@@ -227,7 +248,7 @@ def test_unknown_source(roots):
 
 def test_slice_lands_at_raw_subpath_per_source(roots, monkeypatch):
     raw, processed, sample = roots
-    monkeypatch.setattr(gate_slice, "APOLLO_MIN_BYTES", 100)
+    _set(monkeypatch, "EPISTEME_APOLLO_MIN_BYTES", 100)
     _bookshelf(raw, 3)
     _europepmc(raw)
     _apollo(raw, APOLLO)

@@ -26,6 +26,7 @@ REAL_PY = Path(sys.executable).as_posix()
 # episteme.ops call runs for real; anything else (bulk_indexes, ...) is a no-op.
 FAKE_PY = """#!/usr/bin/env bash
 case "$*" in
+    *openalex_rows*) exit "${FAKE_OA_RC:-0}" ;;  # the --bulk guard: no openalex rows
     *audit_trail*run_start*) echo "run_start" >> "$AUDIT"; exit 0 ;;
     *audit_trail*run_end*) echo "run_end $*" >> "$AUDIT"; exit 0 ;;
     *audit_trail*) exit 0 ;;
