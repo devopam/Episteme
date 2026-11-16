@@ -58,7 +58,8 @@ def _insert_article(conn, *, id_, source, source_file):
 def _insert_body(conn, *, article_id, source, text="body text"):
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             (article_id, source, text),
         )
 

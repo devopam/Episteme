@@ -143,6 +143,42 @@ def build_text(
     return normalize_whitespace("\n\n".join(parts))
 
 
+# Migration 0014: episteme.article_body.text is a VIRTUAL generated column. It reads
+# the stored text_override, or else this join of the non-blank parts. A part is blank
+# when it is NULL or only space, tab, CR or LF (btrim with that set gives ''). The
+# expression is IMMUTABLE (|| and CASE only; concat_ws is refused in a generation
+# expression). It yields '' when every part is blank. The .sql files carry this text
+# verbatim (a test checks it), so it stays one line.
+_BLANK_T = r"coalesce(btrim(title, E' \t\r\n'), '') = ''"
+_BLANK_A = r"coalesce(btrim(abstract, E' \t\r\n'), '') = ''"
+_BLANK_B = r"coalesce(btrim(body_text, E' \t\r\n'), '') = ''"
+TEXT_JOIN_SQL = (
+    f"(CASE WHEN {_BLANK_T} THEN '' ELSE title END"
+    f" || CASE WHEN {_BLANK_A} THEN ''"
+    rf" ELSE CASE WHEN {_BLANK_T} THEN '' ELSE E'\n\n' END || abstract END"
+    f" || CASE WHEN {_BLANK_B} THEN ''"
+    rf" ELSE CASE WHEN {_BLANK_T} AND {_BLANK_A} THEN '' ELSE E'\n\n' END || body_text END)"
+)
+
+# The full generated expression of article_body.text (migration 0014 and schema.sql).
+TEXT_EXPR_SQL = (
+    "CASE WHEN text_override = '' THEN NULL ELSE coalesce(text_override, nullif("
+    + TEXT_JOIN_SQL
+    + ", '')) END"
+)
+
+_SQL_BLANK_CHARS = " \t\r\n"
+
+
+def sql_join(title: str | None, abstract: str | None, body_text: str | None) -> str | None:
+    """The non-blank parts joined by a blank line; ``None`` when every part is blank.
+
+    Mirrors ``TEXT_JOIN_SQL`` byte for byte (blank = ``None`` or only space, tab, CR,
+    LF). No whitespace normalisation: this is not ``build_text``."""
+    parts = [p for p in (title, abstract, body_text) if p is not None and p.strip(_SQL_BLANK_CHARS)]
+    return "\n\n".join(parts) if parts else None
+
+
 def content_hash(text: str | None) -> str | None:
     if not text:
         return None

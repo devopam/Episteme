@@ -6,10 +6,12 @@ therefore never reads ``_migrations``. It checks the objects each migration
 creates, read-only (``to_regclass``, ``information_schema.columns``,
 ``pg_indexes``).
 
-A marker is ``table:<schema>.<name>``, ``column:<schema>.<table>.<column>`` or
-``index:<schema>.<name>``. Every migration file needs an entry (a test enforces
-it). Note: the 0004 indexes are dropped on purpose during a bulk load, so 0004
-can show as missing while a load is in progress.
+A marker is ``table:<schema>.<name>``, ``column:<schema>.<table>.<column>``,
+``index:<schema>.<name>`` or ``virtual:<schema>.<table>.<column>`` (the column is a
+VIRTUAL generated column, ``pg_attribute.attgenerated = 'v'``). Every migration
+file needs an entry (a test enforces it). Note: the 0004 indexes are dropped on
+purpose during a bulk load, so 0004 can show as missing while a load is in
+progress.
 
 Production's ``episteme._migrations`` table is empty because migrations were
 applied by hand, which is why the check uses objects.
@@ -79,6 +81,10 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme.code",
         "index:episteme.code_system_one_latest_idx",
     ],
+    "0014_article_text_virtual.sql": [
+        "column:episteme.article_body.text_override",
+        "virtual:episteme.article_body.text",
+    ],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {
@@ -105,6 +111,16 @@ def _present(cur: Any, marker: str) -> bool:
         cur.execute(
             "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = %s AND indexname = %s)",
             (schema, name),
+        )
+    elif kind == "virtual":
+        schema, table, column = ref.split(".")
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s "
+            "AND a.attgenerated = 'v' AND NOT a.attisdropped)",
+            (schema, table, column),
         )
     else:
         raise ValueError(f"unknown migration marker: {marker}")

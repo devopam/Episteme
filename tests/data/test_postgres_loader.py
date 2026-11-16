@@ -311,12 +311,14 @@ def _scenario(conn, tmp_path, *, batch_size: int, fmt: str) -> tuple[dict, list[
             ("chembl:C1", "chembl", "F_old.db"),
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C1", "chembl", "old body"),
         )
         # a body row with no articles row, for an incoming id: only the id delete hits it
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C2", "chembl", "orphan body"),
         )
         # another source sharing an id and a source_file name: never touched
@@ -325,7 +327,8 @@ def _scenario(conn, tmp_path, *, batch_size: int, fmt: str) -> tuple[dict, list[
             ("chembl:C3", "pubmed", "F_a.db"),
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C3", "pubmed", "other source"),
         )
     conn.commit()
@@ -530,7 +533,7 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
             "SELECT 'chembl:C' || g, 'chembl', 'F_' || (g % 7) FROM generate_series(1, 5000) g"
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) "
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
             "SELECT 'chembl:C' || g, 'chembl', 'b' FROM generate_series(1, 5000) g"
         )
         cur.execute("ANALYZE episteme.articles")
@@ -608,3 +611,50 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
             inner_scans
         )
         assert all(n.get("Index Cond") for n in inner_scans), inner_scans
+
+
+def test_text_reads_back_through_the_virtual_column(pg_conn, tmp_path, monkeypatch):
+    """A row whose shard text is NULL but has a non-blank part loads the '' sentinel
+    and reads back NULL; text equal to the join loads NULL override and reads the join;
+    a differing text reads back as itself."""
+    _fresh_config(tmp_path, monkeypatch)
+    _setup_schema(pg_conn)
+
+    from episteme.data import postgres_loader
+    from episteme.data.article_schema import empty_article_row, finalize_row
+    from episteme.data.staging_writer import write_rows
+
+    def _row(n: int, **kw) -> dict:
+        return {
+            **empty_article_row(),
+            "id": f"pmcid:PMC{n}",
+            "source": "pmc",
+            "source_file": "V01.json",
+            "pmcid": f"PMC{n}",
+            "year": 2024,
+            "license": "CC BY",
+            "subset": "commercial",
+            **kw,
+        }
+
+    rows = [
+        finalize_row(_row(1, title="T1", abstract="A1")),
+        finalize_row(_row(2, title="T2", abstract="A2")),
+        finalize_row(_row(3, title="T3", abstract="A3")),
+    ]
+    rows[0]["text"] = None  # sentinel: NULL shard text, non-blank parts
+    rows[1]["text"] = "T2\n\nA2"  # equals the join
+    rows[2]["text"] = "T3\n\nA3  extra"  # differs from the join
+    info = write_rows(rows, tmp_path / "02_processed", source="pmc", source_file="V01.json")
+    shard = Path(info["paths"][0])
+    postgres_loader.load_source_file(pg_conn, source="pmc", staging_path=shard, run_id="v1")
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT article_id, text_override, text FROM episteme.article_body ORDER BY article_id"
+        )
+        got = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    assert got["pmcid:PMC1"] == ("", None)
+    assert got["pmcid:PMC2"] == (None, "T2\n\nA2")
+    assert got["pmcid:PMC3"] == ("T3\n\nA3  extra", "T3\n\nA3  extra")

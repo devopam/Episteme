@@ -81,7 +81,7 @@ The originally proposed Parquet tables map onto Postgres like this:
 
 | Proposed | Shipped |
 |----------|---------|
-| `articles` (pmid, title, abstract, journal, year, ...) | `episteme.articles` (narrow) + `episteme.article_body` (title, abstract, body_text, text), see `docs/09-extraction-contract.md` |
+| `articles` (pmid, title, abstract, journal, year, ...) | `episteme.articles` (narrow) + `episteme.article_body` (title, abstract, body_text, text_override, and the virtual `text`), see `docs/09-extraction-contract.md` |
 | `citations` | `episteme.article_cites` |
 | `mesh_assignments` | `episteme.article_mesh` (columns as in section 3.2) |
 | `mesh_descriptors` | Rows of `episteme.articles` with `source = 'mesh'`, plus `episteme.mesh_hierarchy` for the tree. Tree numbers are re-parsed from the raw descriptor XML at graph-build time and are not stored as a column. |

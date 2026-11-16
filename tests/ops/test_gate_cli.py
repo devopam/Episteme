@@ -344,7 +344,7 @@ def test_every_migration_file_has_markers():
     assert set(gate_migrations.MIGRATION_MARKERS) | deferred == files
     for markers in gate_migrations.MIGRATION_MARKERS.values():
         assert 1 <= len(markers) <= 3
-        assert all(m.split(":")[0] in ("table", "column", "index") for m in markers)
+        assert all(m.split(":")[0] in ("table", "column", "index", "virtual") for m in markers)
 
 
 class _MarkerCur:
@@ -359,7 +359,15 @@ class _MarkerCur:
         return False
 
     def execute(self, sql, params=None):
-        kind = "table" if "to_regclass" in sql else "column" if "columns" in sql else "index"
+        kind = (
+            "table"
+            if "to_regclass" in sql
+            else "column"
+            if "columns" in sql
+            else "virtual"
+            if "attgenerated = 'v'" in sql
+            else "index"
+        )
         self._ans = f"{kind}:{'.'.join(params)}" in self.present
 
     def fetchone(self):
@@ -402,6 +410,20 @@ def test_migrations_check_lists_missing_objects(tmp_path, monkeypatch, capsys):
     conn.present |= {"table:s.c"}
     assert gate.main(["migrations-check"]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_virtual_marker_checks_attgenerated():
+    """0014: text_override is a column and text is a VIRTUAL generated column."""
+    assert gate_migrations.MIGRATION_MARKERS["0014_article_text_virtual.sql"] == [
+        "column:episteme.article_body.text_override",
+        "virtual:episteme.article_body.text",
+    ]
+    conn = _MarkerConn({"column:episteme.article_body.text_override"})
+    assert gate_migrations.missing_markers(conn, ["0014_article_text_virtual.sql"]) == {
+        "0014_article_text_virtual.sql": ["virtual:episteme.article_body.text"]
+    }
+    conn.present |= {"virtual:episteme.article_body.text"}
+    assert gate_migrations.missing_markers(conn, ["0014_article_text_virtual.sql"]) == {}
 
 
 @pytest.mark.pg
