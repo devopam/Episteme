@@ -136,6 +136,17 @@ if [ "$BULK" = "1" ] && [ "$SOURCE" = "openalex" ]; then
     # fail every shard and then rebuild the whole articles group for nothing.
     die "openalex does not support --bulk (its pubmed/pmc dedup needs the articles indexes that --bulk drops)" 2
 fi
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "pubmed" ] || [ "$SOURCE" = "pmc" ]; }     && { [ "$STAGE" = "load" ] || [ "$STAGE" = "all" ]; } && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+    # The pubmed/pmc load sweeps the openalex rows it duplicates (Ruling R2) and probes the key
+    # indexes that --bulk drops; the loader would refuse after the drop and leave them dropped.
+    oa_rc=0
+    "$PY" -m episteme.ops.openalex_rows || oa_rc=$?
+    if [ "$oa_rc" -eq 1 ]; then
+        die "$SOURCE --bulk is refused while episteme.articles_openalex holds rows: --bulk drops the indexes the openalex sweep needs. Load without --bulk (drift log 2026-11-16, ruling R2)." 2
+    elif [ "$oa_rc" -ne 0 ]; then
+        die "could not check episteme.articles_openalex for rows (exit $oa_rc)" 1
+    fi
+fi
 if [ "$ZIP_SET" = "1" ]; then
     { [ "$SOURCE" = "aact" ] && [ "$STAGE" = "load" ]; } || die "--zip is valid with aact load only" 2
     [ -n "$ZIP_PATH" ] || die "--zip requires a path" 2
