@@ -38,6 +38,7 @@ import polars as pl
 from episteme.data import article_schema
 from episteme.data.checkpoint_markers import input_key
 from episteme.data.openalex.serialize_openalex import (
+    _bare_doi,
     _bare_pmcid,
     _bare_pmid,
     discover_openalex_files,
@@ -524,3 +525,11 @@ def test_serialize_refuses_without_pyarrow(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="needs pyarrow"):
         serialize_openalex(FX, tmp_path)
     assert not (tmp_path / "staging" / "openalex").exists()
+
+
+def test_bare_doi_is_lower_case():
+    """OpenAlex DOIs are stored lower case, so the pubmed/pmc reverse sweep can
+    compare lower(<their doi>) through the plain articles_openalex_doi_idx."""
+    assert _bare_doi("https://doi.org/10.1000/ABC.Def") == "10.1000/abc.def"
+    assert _bare_doi("10.1000/ABC.Def") == "10.1000/abc.def"
+    assert _bare_doi(None) is None

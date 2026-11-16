@@ -6,6 +6,7 @@ import pytest
 pytestmark = pytest.mark.pg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MIG = REPO_ROOT / "src/episteme/data/db/migrations"
 
 
 def _setup_schema(conn):
@@ -17,6 +18,12 @@ def _setup_schema(conn):
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute(ext.read())
         cur.execute(sch.read())
+        # A pmc / pubmed load sweeps openalex (postgres_loader.SWEEP_INTO) and
+        # needs migration 0012 (its partitions, _lineage.dedup_counts), which
+        # needs 0007. 0001 needs pgvector (not on the local build).
+        for path in sorted(MIG.glob("00*.sql")):
+            if not path.name.startswith("0001_"):
+                cur.execute(path.read_text(encoding="utf-8"))
     conn.commit()
 
 

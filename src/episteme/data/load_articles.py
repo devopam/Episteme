@@ -310,8 +310,13 @@ def main(argv: list[str] | None = None) -> int:
                     if "rows_in" in result
                     else ""
                 )
+                sweep_note = (
+                    f" swept_openalex={result['swept_openalex']}"
+                    if "swept_openalex" in result
+                    else ""
+                )
                 print(
-                    f"ok {name}{labels_note}{dedup_note} rows={result['rows']} "
+                    f"ok {name}{labels_note}{dedup_note}{sweep_note} rows={result['rows']} "
                     f"deleted={result['deleted']} "
                     f"body_deleted={result['body_deleted']} event={result['event']} "
                     f"read_sec={result['read_sec']} copy_sec={result['copy_sec']} "

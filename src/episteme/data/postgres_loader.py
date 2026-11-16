@@ -17,6 +17,10 @@ owns the transaction boundary):
        of the two tables instead, deletes the rows whose pmid, else pmcid, else
        lower(doi) matches a pubmed or pmc row, and INSERTs the rest (counts in
        the result and in the audit row's ``new_value``)
+    5b. a ``SWEEP_INTO`` source (pubmed, pmc) then deletes every openalex row
+       whose pmid, pmcid or DOI matches a row it just inserted
+       (``swept_openalex`` in the result, ``_lineage.dedup_counts`` and the
+       audit row's ``new_value``)
     6. INSERT one episteme._lineage row per distinct source_file
     7. audit_trail.record("load_replace" if anything was deleted else "load_commit")
 
@@ -581,6 +585,200 @@ def _dedup_and_insert(cur, against: tuple[str, ...]) -> dict[str, int]:
     return skipped
 
 
+# --------------------------------------------------------------------------- #
+# Reverse sweep: pubmed / pmc loads remove the openalex rows they duplicate
+# (owner decision 2026-11-12, spec 2026-11-12-load-followups section 2).
+# --------------------------------------------------------------------------- #
+
+# A source listed here removes, after its own insert, every row of the named
+# source that shares a pmid, pmcid or DOI with the rows it just inserted. The
+# mirror of DEDUP_AGAINST: an openalex load skips what pubmed / pmc hold; a later
+# pubmed / pmc load removes what openalex loaded first.
+SWEEP_INTO: dict[str, str] = {"pubmed": "openalex", "pmc": "openalex"}
+
+# Everything the sweep needs. The three indexes are the articles_openalex copies
+# of the parent pmid / pmcid / doi indexes, which a --bulk drop of the articles
+# group removes (bulk_indexes.COVERED_INDEXES).
+_SWEEP_REQUIRED: tuple[str, ...] = (
+    "episteme.articles_openalex",
+    "episteme.article_body_openalex",
+    "episteme.articles_openalex_pmid_idx",
+    "episteme.articles_openalex_pmcid_idx",
+    "episteme.articles_openalex_doi_idx",
+)
+_SWEEP_PARTITIONS: tuple[str, ...] = _SWEEP_REQUIRED[:2]
+
+_SWEEP_FILES = "pg_temp._sweep_files"
+_SWEEP_ROWS = "pg_temp._sweep_rows"
+_SWEEP_KEYS = "pg_temp._sweep_keys"
+_SWEEP_HITS = "pg_temp._sweep_hits"
+_SWEEP_IDS = "pg_temp._sweep_ids"
+
+
+def _sweep_target(target: str) -> str:
+    """``target`` as a SQL literal; only a known source (code, not input)."""
+    if target not in article_schema.SOURCES or target not in SWEEP_INTO.values():
+        raise ValueError(f"unknown sweep target {target!r}")
+    return f"'{target}'"
+
+
+def _check_sweep_ready(cur, target: str) -> bool:
+    """Whether the reverse sweep into ``target`` can run on this database.
+
+    Raises when a partition of ``target`` or ``_lineage.dedup_counts`` is
+    missing (migration 0012 not applied). When one of the three key indexes is
+    missing (a ``--bulk`` drop, Ruling R2): returns False (skip, count 0) while
+    no ``target`` row exists, and raises while one does -- without the indexes
+    each probe would read the whole openalex partition, per shard."""
+    lit = _sweep_target(target)
+    missing = []
+    for name in _SWEEP_PARTITIONS:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
+        if not cur.fetchone()[0]:
+            missing.append(name)
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = "
+        "'episteme' AND table_name = '_lineage' AND column_name = 'dedup_counts')"
+    )
+    if not cur.fetchone()[0]:
+        missing.append("episteme._lineage.dedup_counts")
+    if missing:
+        raise RuntimeError(
+            f"the {target} sweep of a pubmed/pmc load needs " + ", ".join(missing) + ": "
+            "apply migration 0012"
+        )
+    for name in _SWEEP_REQUIRED[len(_SWEEP_PARTITIONS) :]:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (name,))
+        if not cur.fetchone()[0]:
+            missing.append(name)
+    if not missing:
+        return True
+    cur.execute(f"SELECT EXISTS (SELECT 1 FROM episteme.articles WHERE source = {lit})")
+    if not cur.fetchone()[0]:
+        return False
+    raise RuntimeError(
+        f"the {target} sweep of a pubmed/pmc load needs " + ", ".join(missing) + " "
+        f"(episteme holds {target} rows): finish the bulk-index rebuild first "
+        "(bash scripts/data/db/bulk_load_indexes.sh rebuild), or load pubmed/pmc "
+        "without --bulk. A bulk load followed by one sweep after the rebuild is "
+        "deferred (docs/project-incubation-baseline.md, 2026-11-12 load follow-ups)"
+    )
+
+
+def _sweep_probe_sql(key: str, target: str) -> str:
+    """SELECT the ids of the ``target`` rows that hold a key of
+    ``pg_temp._sweep_keys``.
+
+    The PR 110 pattern of ``_dedup_probe_sql``: a LATERAL subquery per key, so
+    each key is one index probe into ``articles_<target>`` and the planner cannot
+    turn the join around. No LIMIT: a key can match more than one row (two works
+    with one DOI) and every match goes. The raw ``a.<key>``: OpenAlex DOIs are
+    lower case (``serialize_openalex._bare_doi``) and the key table holds
+    ``lower(doi)``, so the plain ``articles_openalex_doi_idx`` serves the DOI."""
+    lit = _sweep_target(target)
+    if key not in DEDUP_KEYS:
+        raise ValueError(f"unknown dedup key {key!r}")
+    return (
+        f"SELECT a.id FROM {_SWEEP_KEYS} k CROSS JOIN LATERAL ("
+        f"SELECT a.id FROM episteme.articles a WHERE a.source = {lit} "
+        f"AND a.{key} IS NOT NULL AND a.{key} = k.k) a"
+    )
+
+
+def _create_sweep_rows(cur, source_files: list[str], source: str) -> None:
+    """``pg_temp._sweep_rows``: pmid, pmcid and lower(doi) of the ``source`` rows
+    of ``source_files`` (the rows this load just inserted), read once through the
+    (source, source_file) index. The file names go in through a temp table."""
+    if source not in SWEEP_INTO:
+        raise ValueError(f"{source!r} does not sweep")
+    lit = f"'{source}'"  # a SWEEP_INTO key: code, not input
+    cur.execute(f"DROP TABLE IF EXISTS {_SWEEP_FILES}")
+    cur.execute(f"DROP TABLE IF EXISTS {_SWEEP_ROWS}")
+    cur.execute("CREATE TEMP TABLE _sweep_files (sf text PRIMARY KEY) ON COMMIT DROP")
+    with cur.copy(f"COPY {_SWEEP_FILES} (sf) FROM STDIN") as cp:
+        for sf in sorted(set(source_files)):
+            cp.write_row((sf,))
+    cur.execute(f"ANALYZE {_SWEEP_FILES}")
+    cur.execute(
+        "CREATE TEMP TABLE _sweep_rows ON COMMIT DROP AS "
+        f"SELECT a.pmid, a.pmcid, {_key_expr('doi', 'a')} AS doi FROM episteme.articles a "
+        f"WHERE a.source = {lit} AND a.source_file IN (SELECT sf FROM {_SWEEP_FILES})"
+    )
+
+
+def _create_sweep_keys(cur, key: str) -> None:
+    """``pg_temp._sweep_keys``: the DISTINCT non-null ``key`` values of
+    ``_sweep_rows`` (``doi`` there is already lower case), SORTED, with a unique
+    index and fresh statistics (the ``_create_dedup_keys`` pattern)."""
+    if key not in DEDUP_KEYS:
+        raise ValueError(f"unknown dedup key {key!r}")
+    cur.execute(f"DROP TABLE IF EXISTS {_SWEEP_KEYS}")
+    cur.execute(
+        "CREATE TEMP TABLE _sweep_keys ON COMMIT DROP AS "
+        f"SELECT DISTINCT r.{key} AS k FROM {_SWEEP_ROWS} r "
+        f"WHERE r.{key} IS NOT NULL ORDER BY 1"
+    )
+    cur.execute(f"CREATE UNIQUE INDEX ON {_SWEEP_KEYS} (k)")
+    cur.execute(f"ANALYZE {_SWEEP_KEYS}")
+
+
+@contextmanager
+def _no_bitmap_scans(cur) -> Iterator[None]:
+    """SET LOCAL enable_bitmapscan = off, then put it back (as
+    ``_forced_nested_loops``). The sweep probe has no LIMIT, so without this the
+    planner may read each key's matches by a bitmap scan instead of the plain
+    index scan the probe is built for."""
+    cur.execute("SELECT current_setting('enable_bitmapscan')")
+    (saved,) = cur.fetchone()
+    cur.execute("SET LOCAL enable_bitmapscan = off")
+    yield
+    if saved not in ("on", "off"):  # booleans only; never format anything else
+        raise ValueError(f"unexpected enable_bitmapscan value {saved!r}")
+    cur.execute(f"SET LOCAL enable_bitmapscan = '{saved}'")
+
+
+def _sweep(cur, source_files: list[str], source: str, target: str) -> int:
+    """Delete every ``target`` row that shares a pmid, pmcid or (case-insensitive)
+    DOI with the ``source`` rows of ``source_files``. Returns the number of
+    ``articles`` rows deleted (each row once, however many keys match it).
+
+    Per key in ``DEDUP_KEYS``: the sorted distinct key table, then one forced
+    index-probe per key into the ``target`` partition; the matched ids collect in
+    ``_sweep_hits``. Then the ids, DISTINCT and SORTED with a unique index (the
+    ``_load_ids`` pattern), drive two id deletes, ``article_body`` first, both
+    restricted to ``source = target``."""
+    lit = _sweep_target(target)
+    _create_sweep_rows(cur, source_files, source)
+    cur.execute(f"DROP TABLE IF EXISTS {_SWEEP_HITS}")
+    cur.execute(f"DROP TABLE IF EXISTS {_SWEEP_IDS}")
+    cur.execute("CREATE TEMP TABLE _sweep_hits (id text) ON COMMIT DROP")
+    with current().long_statement(f"sweep {target} rows that {source} holds"):
+        for key in DEDUP_KEYS:
+            _create_sweep_keys(cur, key)
+            with _forced_nested_loops(cur), _no_bitmap_scans(cur):
+                cur.execute(f"INSERT INTO {_SWEEP_HITS} (id) " + _sweep_probe_sql(key, target))
+            cur.execute(f"DROP TABLE {_SWEEP_KEYS}")
+        cur.execute(
+            "CREATE TEMP TABLE _sweep_ids ON COMMIT DROP AS "
+            f"SELECT DISTINCT id FROM {_SWEEP_HITS} ORDER BY id"
+        )
+        cur.execute(f"CREATE UNIQUE INDEX ON {_SWEEP_IDS} (id)")
+        cur.execute(f"ANALYZE {_SWEEP_IDS}")
+        with _ordered_index_probes(cur):
+            cur.execute(
+                f"DELETE FROM episteme.article_body WHERE source = {lit} "
+                f"AND article_id IN (SELECT id FROM {_SWEEP_IDS})"
+            )
+            cur.execute(
+                f"DELETE FROM episteme.articles WHERE source = {lit} "
+                f"AND id IN (SELECT id FROM {_SWEEP_IDS})"
+            )
+            swept = cur.rowcount
+        for table in (_SWEEP_IDS, _SWEEP_HITS, _SWEEP_ROWS, _SWEEP_FILES):
+            cur.execute(f"DROP TABLE {table}")
+    return swept
+
+
 def load_source_file(
     conn,
     *,
@@ -614,6 +812,11 @@ def load_source_file(
         check_dedup_shard(staging_path)  # before the connection is touched
         with conn.cursor() as cur:
             _check_dedup_ready(cur)  # before any work on the shard
+    sweep_into = SWEEP_INTO.get(source)
+    sweep_ready = False
+    if sweep_into:
+        with conn.cursor() as cur:
+            sweep_ready = _check_sweep_ready(cur, sweep_into)  # before any work on the shard
     content_hash = _file_sha256(staging_path)
 
     deleted = 0
@@ -761,11 +964,21 @@ def load_source_file(
                 raise RuntimeError(f"dedup counts do not add up: {dedup_counts}")
             current().progress(rows_done=_rows_committed() + total)
 
+        if sweep_into:
+            # (f3) a SWEEP_INTO source: remove the openalex rows that share a key
+            # with the rows just inserted (0 when _check_sweep_ready said skip:
+            # bulk indexes dropped and no openalex row exists). Not in ``deleted``:
+            # that stays this shard's own replaced rows (event load_replace).
+            swept = _sweep(cur, source_files, source, sweep_into) if sweep_ready else 0
+            dedup_counts = {f"swept_{sweep_into}": swept}
+
         # (g) one _lineage row per distinct source_file (pmc shards have one).
         for sf in source_files:
             if dedup_counts is not None:
                 # A DEDUP_AGAINST source: the shard's counts too (migration 0012's
                 # _lineage.dedup_counts; an openalex shard has one source_file).
+                # A SWEEP_INTO source: {"swept_openalex": n}, the shard's total, on
+                # each of its lineage rows.
                 from psycopg.types.json import Jsonb
 
                 cur.execute(
@@ -806,7 +1019,8 @@ def load_source_file(
         object=f"{source} {staging_path.name}",
         input_content_hash=content_hash,
         rows_affected=total,
-        # A DEDUP_AGAINST source: its counts (ints, hash-safe: docs/11 section 3).
+        # A DEDUP_AGAINST or SWEEP_INTO source: its counts (ints, hash-safe:
+        # docs/11 section 3).
         new_value=dedup_counts,
         run_id=run_id,
     )

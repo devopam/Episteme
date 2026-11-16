@@ -191,7 +191,8 @@ def test_openalex_load_skips_pubmed_and_pmc_works(loader, pg_conn, tmp_path):
 
 
 def test_other_sources_report_no_dedup_counts(loader, pg_conn, tmp_path):
-    """The dedup path is openalex only: a pmc load returns the old stats shape."""
+    """The dedup path is openalex only: a pmc load has no skip counts. It sweeps
+    openalex instead (test_openalex_sweep.py): with no openalex row, 0."""
     from episteme.data.article_schema import empty_article_row, finalize_row
     from episteme.data.staging_writer import write_rows
 
@@ -216,15 +217,22 @@ def test_other_sources_report_no_dedup_counts(loader, pg_conn, tmp_path):
     )
     pg_conn.commit()
     assert r["rows"] == 1
-    assert "skipped_pmid" not in r
+    assert "skipped_pmid" not in r and "rows_in" not in r
+    assert r["swept_openalex"] == 0
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT new_value FROM episteme._audit "
             "WHERE run_id = 'p1' AND event_type = 'load_commit'"
         )
-        assert cur.fetchone()[0] is None
+        new_value = cur.fetchone()[0]
+        if isinstance(new_value, str):
+            new_value = json.loads(new_value)
+        assert new_value == {"swept_openalex": 0}
         cur.execute("SELECT dedup_counts FROM episteme._lineage WHERE run_id = 'p1'")
-        assert cur.fetchone()[0] is None
+        assert cur.fetchone()[0] == {"swept_openalex": 0}
+        # the seeded pubmed / pmc / chembl rows stay
+        cur.execute("SELECT count(*) FROM episteme.articles WHERE source_file = 'seed'")
+        assert cur.fetchone()[0] == 4
 
 
 def test_dedup_plan_probes_indexes_not_seq_scans(loader, pg_conn):

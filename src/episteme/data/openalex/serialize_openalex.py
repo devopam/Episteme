@@ -304,13 +304,17 @@ def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | N
 
 def _bare_doi(raw: str | None) -> str | None:
     """``https://doi.org/10.xxxx/...`` -> ``10.xxxx/...`` (bare DOI, matches
-    extract_pubmed.py's convention); a bare DOI or ``None`` passes through
-    unchanged."""
+    extract_pubmed.py's convention), in lower case; ``None`` passes through.
+
+    Lower case: DOIs are case-insensitive, and the pubmed / pmc reverse sweep
+    (postgres_loader._sweep) compares ``lower(<pubmed or pmc doi>)`` with the raw
+    openalex DOI through the plain ``articles_openalex_doi_idx``. OpenAlex writes
+    DOIs in lower case already; this keeps it true for later snapshots."""
     if not raw:
         return None
     s = str(raw).strip()
     m = re.match(r"^https?://(dx\.)?doi\.org/(.+)$", s, re.I)
-    return m.group(2) if m else s
+    return (m.group(2) if m else s).lower()
 
 
 _DIGITS = re.compile(r"^\d+$")
