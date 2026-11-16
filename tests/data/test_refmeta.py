@@ -492,15 +492,113 @@ def test_loinc_download_verifies_md5_and_stores_a_loadable_release(monkeypatch, 
     assert [url for url, _, _ in calls] == ["https://loinc.regenstrief.org/api/v1/Loinc"]
 
 
-def test_loinc_md5_mismatch_is_refused_and_leaves_no_zip(monkeypatch, tmp_path: Path):
+def test_loinc_md5_mismatch_is_refused_and_leaves_no_release_folder(monkeypatch, tmp_path: Path):
     _loinc_settings(monkeypatch)
     calls: list = []
     _loinc_requests(monkeypatch, _loinc_zip_bytes(), "0" * 32, calls)
     with pytest.raises(SystemExit, match="MD5 mismatch"):
         download._fetch_loinc(tmp_path, dry_run=False, force=False)
-    folder = tmp_path / "refmeta" / "loinc" / "2.83"
-    assert not any(p.suffix in (".zip", ".part") for p in folder.iterdir())
+    # No release folder and no staging folder: the next load is not blocked.
+    assert not (tmp_path / "refmeta" / "loinc").exists()
+    assert list((tmp_path / "refmeta").iterdir()) == []
     assert len([c for c in calls if c[2]]) == 1  # one download attempt, no retry
+    assert collect(tmp_path, ("loinc",), required=False) == []
+
+
+def test_loader_ignores_staging_and_quarantine_folders(tmp_path: Path):
+    from episteme.data.refmeta.load import _newest
+
+    root = tmp_path / "x"
+    (root / ".loinc-2.84.part").mkdir(parents=True)
+    (root / "_bad").mkdir()
+    assert _newest(root) is None
+    (root / "2.83").mkdir()
+    assert _newest(root).name == "2.83"
+
+
+def test_combined_download_skips_lists_without_keys(monkeypatch, tmp_path: Path):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        raw_root=tmp_path,
+        edqm_stapi_base="https://e",
+        edqm_stapi_login=None,
+        edqm_stapi_secret_key=None,
+        loinc_api_base="https://l",
+        loinc_username=None,
+        loinc_secret_key=None,
+    )
+    monkeypatch.setattr(download, "get_settings", lambda: fake)
+    fetched: list[str] = []
+    monkeypatch.setattr(download, "_fetch", lambda system, raw, **kw: fetched.append(system))
+    assert download.main([]) == 0
+    assert fetched == ["ucum", "iso639", "iso3166"]
+
+
+def _edqm_fake(monkeypatch, *, versions=b'{"v": 1}', fail=(), versions_status=200):
+    """Fake EDQM server: records every requested path."""
+    from types import SimpleNamespace
+
+    import requests
+
+    monkeypatch.setattr(
+        download, "get_settings", lambda: SimpleNamespace(edqm_stapi_base="https://e.example")
+    )
+    calls: list[str] = []
+    catalogue = [{"code": "ROA"}, {"code": "MAP"}, {"code": "SOM"}]
+
+    def fake_get(base, uri, host):
+        calls.append(uri)
+        if uri.endswith("/versions"):
+            if versions_status != 200:
+                resp = requests.Response()
+                resp.status_code = versions_status
+                raise requests.HTTPError(response=resp)
+            return versions
+        if "/classes" in uri:
+            return b'{"content": ' + __import__("json").dumps(catalogue).encode() + b"}"
+        code = uri.split("full_data_by_class/")[1].split("/")[0]
+        if code in fail:
+            resp = requests.Response()
+            resp.status_code = 500
+            raise requests.HTTPError(response=resp)
+        return b'{"content": [{"class": "%s", "code": "1", "english": "x"}]}' % code.encode()
+
+    monkeypatch.setattr(download, "_edqm_get", fake_get)
+    return calls
+
+
+def test_edqm_new_version_writes_notice_and_leaves_map_out(monkeypatch, tmp_path: Path):
+    calls = _edqm_fake(monkeypatch)
+    download._fetch_edqm(tmp_path, dry_run=False, force=False)
+    [folder] = list((tmp_path / "refmeta" / "edqm").iterdir())
+    names = {p.name for p in folder.iterdir()}
+    assert {"ROA.json", "SOM.json", "NOTICE.txt", "PROVENANCE.txt", "versions.json"} <= names
+    assert "MAP.json" not in names and not any("MAP" in c for c in calls)
+    assert "Retrieved from the Standard Terms database on" in (folder / "NOTICE.txt").read_text()
+
+
+def test_edqm_stored_version_fetches_nothing_more(monkeypatch, tmp_path: Path):
+    _edqm_fake(monkeypatch)
+    download._fetch_edqm(tmp_path, dry_run=False, force=False)
+    calls = _edqm_fake(monkeypatch)
+    download._fetch_edqm(tmp_path, dry_run=False, force=False)
+    assert calls == ["/standardterms/api/v1/versions"]  # one request, no class fetched
+
+
+def test_edqm_failing_class_writes_no_release(monkeypatch, tmp_path: Path):
+    calls = _edqm_fake(monkeypatch, fail=("SOM",))
+    with pytest.raises(SystemExit, match="class SOM failed"):
+        download._fetch_edqm(tmp_path, dry_run=False, force=False)
+    assert not (tmp_path / "refmeta" / "edqm").exists()
+    assert sum("SOM" in c for c in calls) == 1  # no retry
+
+
+def test_edqm_without_a_version_fetches_nothing(monkeypatch, tmp_path: Path):
+    calls = _edqm_fake(monkeypatch, versions_status=503)
+    with pytest.raises(SystemExit, match="/versions failed"):
+        download._fetch_edqm(tmp_path, dry_run=False, force=False)
+    assert calls == ["/standardterms/api/v1/versions"]
 
 
 def test_loinc_download_url_on_another_host_is_refused(monkeypatch):

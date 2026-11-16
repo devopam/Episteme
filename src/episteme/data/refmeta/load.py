@@ -315,7 +315,9 @@ def _read_codelists(raw: Path) -> CodeRelease | None:
 def _newest(folder: Path) -> Path | None:
     if not folder.is_dir():
         return None
-    children = [p for p in folder.iterdir() if p.is_dir()]
+    # A folder whose name starts with "." or "_" is a staging or quarantine folder,
+    # never a release.
+    children = [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))]
     if not children:
         return None
     return max(children, key=lambda p: p.stat().st_mtime)

@@ -148,7 +148,7 @@ Notes:
 | **UCUM** | Units of measure | UCUM License 1.1: lookup only, the essence file kept verbatim (section 2.3.1) | Wired as `refmeta` |
 | **MeSH** | Subject headings | NLM terms | Align with PubMed extract |
 | **RxNorm** | Drug names / normal forms | **UMLS license** required | Stream 2 if license held |
-| **LOINC** | Lab/observation codes | LOINC licence: lookup only, notice kept, Group 1 names unchanged (section 2.3.1) | Wired as `refmeta`; the owner places the table |
+| **LOINC** | Lab/observation codes | LOINC licence: lookup only, notice kept, Group 1 names unchanged (section 2.3.1) | Wired as `refmeta`; fetched through the LOINC Download API (`LOINC_USERNAME`, `LOINC_SECRET_KEY`) |
 | **HPO** | Phenotype terms | Open | Stream 2 / KG |
 | **MONDO** | Disease ontology | Open | Stream 2 / KG |
 | **ICD-10 / ICD-11** | Diagnosis coding | **WHO license terms** — not “public domain dump” everywhere | Stream 2 only with rights |

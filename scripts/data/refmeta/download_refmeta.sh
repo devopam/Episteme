@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Reference code lists: UCUM and ISO 639-2, and EDQM when the keys are set.
-# LOINC and ISO 3166 are owner-placed and are not fetched here.
+# Reference code lists: UCUM and ISO 639-2 (public files), ISO 3166 (from the
+# installed pycountry), and EDQM and LOINC when their keys are set. --system NAME
+# picks lists. EDQM and LOINC ask for their version first and fetch nothing that
+# is already stored; nothing is retried.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
