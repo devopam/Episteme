@@ -1,7 +1,9 @@
 """UCUM essence XML as a read-only projection.
 
 The XML file stays verbatim on disk. This module does not rewrite it. The code
-is ``<kind>:<printSymbol or name>`` (``prefix``, ``base-unit`` or ``unit``).
+is ``<kind>:<Code attribute>`` (``prefix``, ``base-unit`` or ``unit``). UCUM keeps
+``Code`` unique; ``printSymbol`` is not (``10*`` and ``10^`` both print ``10``), so it is
+only a fallback, then ``name``.
 """
 
 from __future__ import annotations
@@ -22,14 +24,19 @@ def parse_ucum(path: Path, *, notice: str, source_file: str, release_id: str) ->
         kind = node.tag.rsplit("}", 1)[-1]
         if kind not in _KINDS:
             continue
-        symbol = _child_text(node, "printSymbol") or node.get("Code") or _child_text(node, "name")
+        print_symbol = _child_text(node, "printSymbol")
+        symbol = node.get("Code") or print_symbol or _child_text(node, "name")
         if not symbol:
-            raise ValueError(f"{path}: a {kind} has no printSymbol, Code or name")
+            raise ValueError(f"{path}: a {kind} has no Code, printSymbol or name")
         rows.append(
             CodeRow(
                 code=f"{kind}:{symbol}",
                 display=_child_text(node, "name") or symbol,
-                extra={"kind": kind, "code_attr": node.get("Code")},
+                extra={
+                    "kind": kind,
+                    "code_attr": node.get("Code"),
+                    "print_symbol": print_symbol,
+                },
             )
         )
     return CodeRelease(

@@ -181,3 +181,11 @@ def test_bulk_is_rejected_for_the_regulatory_feeds(tree, source, stage):
     if stage == "load":
         assert "does not support --bulk" in proc.stderr
     assert calls == []
+
+
+def test_refmeta_load_forwards_every_system_option(tree):
+    data = tree[0].parent
+    _write(data / "refmeta" / "load_refmeta.sh", FAKE_STAGE)
+    proc, calls = _run(tree, "refmeta", "load", "--system", "ucum", "--system", "iso639")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == ["load_refmeta.sh --system ucum --system iso639"]

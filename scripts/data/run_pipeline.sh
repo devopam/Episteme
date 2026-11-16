@@ -45,6 +45,7 @@ NO_WAIT=0
 REASON=""
 MAX_FILES=""
 SKIP_UNITS=()
+SYSTEMS=()
 # I1: unrecognised tokens are wrapper MODE positionals (openalex `parquet`,
 # hf_corpus `<repo_id>`, chembl `all`, …). Collect and forward them to the
 # table-driven wrapper rather than WARN-and-drop — the wrapper is the layer that
@@ -89,6 +90,15 @@ while [ $# -gt 0 ]; do
         # aact load only: load this release zip instead of the newest one. The gate pass
         # check applies as for any other full run.
         --zip) ZIP_SET=1; ZIP_PATH="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        # refmeta only: load or download just the named code systems (repeatable). Other
+        # sources keep the old behaviour: the token falls through to the passthrough list.
+        --system)
+            if [ "$SOURCE" = "refmeta" ]; then
+                [ $# -ge 2 ] && [ -n "$2" ] || die "--system requires a system name" 2
+                SYSTEMS+=("$2"); shift 2
+            else
+                passthrough+=("$1"); shift
+            fi ;;
         *) passthrough+=("$1"); shift ;;
     esac
 done
@@ -772,6 +782,7 @@ extract_args+=("${skip_args[@]+"${skip_args[@]}"}" "${skip_reason[@]+"${skip_rea
 load_args+=("${skip_args[@]+"${skip_args[@]}"}")
 [ "$FORCE" = "1" ] || load_args+=("${skip_reason[@]+"${skip_reason[@]}"}")
 [ "$ZIP_SET" = "1" ] && load_args+=(--zip "$ZIP_PATH")
+for _s in "${SYSTEMS[@]+"${SYSTEMS[@]}"}"; do load_args+=(--system "$_s"); done
 if [ "$ALLOW_PARTIAL" = "1" ]; then
     load_args+=(--allow-partial)
     [ "$FORCE" = "1" ] || load_args+=(--reason "$REASON")
@@ -812,6 +823,7 @@ case "$SOURCE" in
 esac
 [ -n "$MAX_FILES" ] && wrapper_args+=(--max-files "$MAX_FILES")
 [ "$FORCE" = "1" ] && wrapper_args+=(--force --reason "$REASON")
+for _s in "${SYSTEMS[@]+"${SYSTEMS[@]}"}"; do wrapper_args+=(--system "$_s"); done
 # I1: forward the collected MODE positionals last (guard the expansion for set -u).
 [ "${#passthrough[@]}" -eq 0 ] || wrapper_args+=("${passthrough[@]}")
 
