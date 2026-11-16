@@ -37,7 +37,11 @@ def test_sweep_probe_is_lateral_without_limit(key):
     assert "CROSS JOIN LATERAL" in sql
     assert "LIMIT" not in sql
     assert "EXISTS" not in sql
-    assert "a.source = 'openalex'" in sql
+    # The partition itself, no source predicate: through the parent the source
+    # predicate let the planner pick the (source, source_file) index instead.
+    assert "episteme.articles_openalex a " in sql
+    assert "a.source =" not in sql
+    assert "episteme.articles a " not in sql
     assert f"a.{key} IS NOT NULL" in sql
     assert "pg_temp._sweep_keys" in sql
     # The raw column, so the plain articles_openalex_<key>_idx serves the probe

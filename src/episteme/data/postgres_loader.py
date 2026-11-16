@@ -43,6 +43,7 @@ import hashlib
 import itertools
 import json
 import logging
+import re
 import threading
 import time
 from collections import Counter
@@ -613,6 +614,8 @@ _SWEEP_ROWS = "pg_temp._sweep_rows"
 _SWEEP_KEYS = "pg_temp._sweep_keys"
 _SWEEP_HITS = "pg_temp._sweep_hits"
 _SWEEP_IDS = "pg_temp._sweep_ids"
+# The probe names the partition: built from a validated target, and checked.
+_PARTITION_NAME = re.compile(r"[a-z_]+")
 
 
 def _sweep_target(target: str) -> str:
@@ -674,14 +677,25 @@ def _sweep_probe_sql(key: str, target: str) -> str:
     turn the join around. No LIMIT: a key can match more than one row (two works
     with one DOI) and every match goes. The raw ``a.<key>``: OpenAlex DOIs are
     lower case (``serialize_openalex._bare_doi``) and the key table holds
-    ``lower(doi)``, so the plain ``articles_openalex_doi_idx`` serves the DOI."""
-    lit = _sweep_target(target)
+    ``lower(doi)``, so the plain ``articles_openalex_doi_idx`` serves the DOI.
+
+    The probe reads the partition ``articles_<target>`` directly, with no
+    ``source`` predicate (the partition holds only that source). Through the
+    parent, ``a.source = '<target>'`` matches the leading column of the
+    (source, source_file) index, and on a partition with poor statistics the
+    planner chose that index with ``Index Cond: source = ...`` and a join filter
+    on the key: a read of the whole partition per key (found by the pg plan test,
+    Task 3 fix round 1). With no source predicate, only the key index fits."""
+    _sweep_target(target)
     if key not in DEDUP_KEYS:
         raise ValueError(f"unknown dedup key {key!r}")
+    partition = f"articles_{target}"
+    if not _PARTITION_NAME.fullmatch(partition):
+        raise ValueError(f"unexpected partition name {partition!r}")
     return (
         f"SELECT a.id FROM {_SWEEP_KEYS} k CROSS JOIN LATERAL ("
-        f"SELECT a.id FROM episteme.articles a WHERE a.source = {lit} "
-        f"AND a.{key} IS NOT NULL AND a.{key} = k.k) a"
+        f"SELECT a.id FROM episteme.{partition} a "
+        f"WHERE a.{key} IS NOT NULL AND a.{key} = k.k) a"
     )
 
 
