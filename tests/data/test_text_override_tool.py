@@ -177,14 +177,126 @@ def test_text_unchanged_after_nullout(body):
 
 
 @pytest.mark.pg
-def test_precheck_clean_after_0014_shape(body):
-    _insert(body, _fixture_rows())
+def test_precheck_post_0014_reports_phase_and_is_ok(body):
+    _insert(body, _fixture_rows() + [("a7", None, None, None, "")])
     res = tool.precheck(body, "article_body_pmc", batch_rows=2, log=lambda m: None)
-    assert res["column"] == "text_override"
-    # a5 has NULL override with non-blank parts: it reads as the join, so it is counted
-    assert res["null_with_parts"] == 1
-    assert res["empty_string"] == 1
-    assert res["rows"] == 6
+    assert res["phase"] == "post-0014" and res["column"] == "text_override"
+    assert res["rows"] == 7
+    # a4: sentinel with parts; a7: sentinel with all parts blank. A NULL override is
+    # normal after 0014 and is not counted.
+    assert res["sentinel_with_parts"] == 1
+    assert res["sentinel_all_blank"] == 1
+    assert res["ok"] is True
+
+
+# ---- pre-0014 shape: scratch schema t3pre, stored column ``text``
+
+PRE = "t3pre"
+PRE_TABLE = f"{PRE}.article_body"
+_PRE_SHAPE = f"""
+DROP SCHEMA IF EXISTS {PRE} CASCADE;
+CREATE SCHEMA {PRE};
+CREATE TABLE {PRE}.article_body (
+    article_id  text NOT NULL,
+    source      text NOT NULL,
+    year        int,
+    title       text,
+    abstract    text,
+    body_text   text,
+    text        text,
+    PRIMARY KEY (article_id, source)
+) PARTITION BY LIST (source);
+CREATE TABLE {PRE}.article_body_pmc
+    PARTITION OF {PRE}.article_body FOR VALUES IN ('pmc');
+"""
+
+
+@pytest.fixture
+def pre(pg_conn):
+    with pg_conn.cursor() as cur:
+        cur.execute(_PRE_SHAPE)
+    pg_conn.commit()
+    try:
+        yield pg_conn
+    finally:
+        pg_conn.rollback()
+        with pg_conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {PRE} CASCADE")
+        pg_conn.commit()
+
+
+def _pre_insert(conn, rows):
+    with conn.cursor() as cur:
+        for aid, title, abstract, body_text, text in rows:
+            cur.execute(
+                f"INSERT INTO {PRE}.article_body "
+                "(article_id, source, title, abstract, body_text, text) "
+                "VALUES (%s, 'pmc', %s, %s, %s, %s)",
+                (aid, title, abstract, body_text, text),
+            )
+    conn.commit()
+
+
+def _pre_check(conn):
+    return tool.precheck(
+        conn, "article_body_pmc", batch_rows=2, log=lambda m: None, table=PRE_TABLE
+    )
+
+
+@pytest.mark.pg
+def test_precheck_pre_0014_counts_null_text_with_parts(pre):
+    _pre_insert(
+        pre,
+        [
+            ("p1", "T", "A", "B", None),  # NULL text, parts: counted
+            ("p2", None, "A", None, None),  # NULL text, parts: counted
+            ("p3", " \t", None, None, None),  # NULL text, all blank: not counted
+            ("p4", "T", None, None, "T"),
+        ],
+    )
+    res = _pre_check(pre)
+    assert res["phase"] == "pre-0014" and res["column"] == "text"
+    assert res["null_with_parts"] == 2
+    assert res["empty_string"] == 0
+    assert res["ok"] is False
+
+
+@pytest.mark.pg
+def test_precheck_pre_0014_counts_empty_text(pre):
+    _pre_insert(
+        pre,
+        [("p1", "T", "A", None, ""), ("p2", None, None, None, ""), ("p3", "T", None, None, "T")],
+    )
+    res = _pre_check(pre)
+    assert res["empty_string"] == 2
+    assert res["null_with_parts"] == 0
+    assert res["ok"] is False
+
+
+@pytest.mark.pg
+def test_precheck_pre_0014_clean_is_ok(pre):
+    _pre_insert(
+        pre,
+        [
+            ("p1", "T", "A", "B", "T\n\nA\n\nB"),
+            ("p2", None, None, None, None),  # NULL text, no parts: fine
+            ("p3", "T", None, None, "different"),
+            ("p4", "T", None, None, "T"),
+            ("p5", "T", None, None, "T"),
+        ],
+    )
+    res = _pre_check(pre)
+    assert res["rows"] == 5
+    assert res["null_with_parts"] == 0 and res["empty_string"] == 0
+    assert res["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "table", ["episteme.article_body; drop", "episteme.articles", "Episteme.article_body", ""]
+)
+def test_table_name_refused_before_any_sql(table):
+    with pytest.raises(tool.TextOverrideError):
+        tool.validate_partition(_NoDbConn(), "article_body_pmc", table)
 
 
 @pytest.mark.pg

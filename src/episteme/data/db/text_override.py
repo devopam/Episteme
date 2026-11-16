@@ -30,7 +30,9 @@ from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
 
 REQUIRED_SERVER_VERSION = "19beta3"
 PARTITION_RE = re.compile(r"^article_body_[a-z0-9_]+$")
-SCHEMA = "episteme"
+DEFAULT_TABLE = "episteme.article_body"
+# The table is injectable for tests only; the CLI never exposes it.
+TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*\.article_body$")
 
 # A part is blank when NULL or only space, tab, CR, LF (the join's definition).
 _ANY_PART_NONBLANK = (
@@ -60,8 +62,16 @@ def check_server_version(conn: psycopg.Connection) -> None:
         )
 
 
-def validate_partition(conn: psycopg.Connection, partition: str) -> str:
+def _check_table(table: str) -> tuple[str, str]:
+    if not isinstance(table, str) or not TABLE_RE.fullmatch(table):
+        raise TextOverrideError(f"invalid table name: {table!r}")
+    schema, _, name = table.partition(".")
+    return schema, name
+
+
+def validate_partition(conn: psycopg.Connection, partition: str, table: str = DEFAULT_TABLE) -> str:
     """Return ``partition`` when it is a partition of episteme.article_body; else raise."""
+    schema, _ = _check_table(table)
     if not isinstance(partition, str) or not PARTITION_RE.fullmatch(partition):
         raise TextOverrideError(f"invalid partition name: {partition!r}")
     with conn.cursor() as cur:
@@ -69,56 +79,59 @@ def validate_partition(conn: psycopg.Connection, partition: str) -> str:
             "SELECT 1 FROM pg_inherits i "
             "JOIN pg_class c ON c.oid = i.inhrelid "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE i.inhparent = 'episteme.article_body'::regclass "
+            "WHERE i.inhparent = %s::regclass "
             "AND n.nspname = %s AND c.relname = %s",
-            (SCHEMA, partition),
+            (table, schema, partition),
         )
         found = cur.fetchone()
     conn.rollback()
     if not found:
-        raise TextOverrideError(f"{partition!r} is not a partition of episteme.article_body")
+        raise TextOverrideError(f"{partition!r} is not a partition of {table}")
     return partition
 
 
-def list_partitions(conn: psycopg.Connection) -> list[str]:
+def list_partitions(conn: psycopg.Connection, table: str = DEFAULT_TABLE) -> list[str]:
+    schema, _ = _check_table(table)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT c.relname FROM pg_inherits i "
             "JOIN pg_class c ON c.oid = i.inhrelid "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE i.inhparent = 'episteme.article_body'::regclass AND n.nspname = %s "
+            "WHERE i.inhparent = %s::regclass AND n.nspname = %s "
             "ORDER BY c.relname",
-            (SCHEMA,),
+            (table, schema),
         )
         names = [r[0] for r in cur.fetchall()]
     conn.rollback()
     return [n for n in names if PARTITION_RE.fullmatch(n)]
 
 
-def _rel(partition: str) -> sql.Composed:
-    return sql.SQL("{}.{}").format(sql.Identifier(SCHEMA), sql.Identifier(partition))
+def _rel(partition: str, table: str = DEFAULT_TABLE) -> sql.Composed:
+    schema, _ = _check_table(table)
+    return sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(partition))
 
 
-def _text_column(conn: psycopg.Connection) -> str:
+def _text_column(conn: psycopg.Connection, table: str = DEFAULT_TABLE) -> str:
     """``text_override`` once 0014 is applied, else the stored ``text`` column."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM pg_attribute WHERE attrelid = 'episteme.article_body'::regclass "
-            "AND attname = 'text_override' AND NOT attisdropped"
+            "SELECT 1 FROM pg_attribute WHERE attrelid = %s::regclass "
+            "AND attname = 'text_override' AND NOT attisdropped",
+            (table,),
         )
         found = cur.fetchone()
     conn.rollback()
     return "text_override" if found else "text"
 
 
-def _next_batch_sql(partition: str) -> sql.Composed:
+def _next_batch_sql(partition: str, table: str = DEFAULT_TABLE) -> sql.Composed:
     """Count and last key of the next N keys after (%s, %s) in primary-key order."""
     return sql.SQL(
         "SELECT count(*), (array_agg(article_id ORDER BY article_id DESC, source DESC))[1],"
         " (array_agg(source ORDER BY article_id DESC, source DESC))[1] FROM ("
         "SELECT article_id, source FROM {rel} WHERE (article_id, source) > (%s, %s)"
         " ORDER BY article_id, source LIMIT %s) k"
-    ).format(rel=_rel(partition))
+    ).format(rel=_rel(partition, table))
 
 
 def _walk(
@@ -128,13 +141,14 @@ def _walk(
     start_after: tuple[str, str] | None,
     work: Callable[[tuple[str, str], tuple[str, str]], Any],
     log: Callable[[str], None],
+    table: str = DEFAULT_TABLE,
 ) -> int:
     """Call ``work(lo, hi)`` per key range (lo exclusive, hi inclusive); return rows seen."""
     lo = start_after if start_after is not None else ("", "")
     seen = 0
     while True:
         with conn.cursor() as cur:
-            cur.execute(_next_batch_sql(partition), (lo[0], lo[1], batch_rows))
+            cur.execute(_next_batch_sql(partition, table), (lo[0], lo[1], batch_rows))
             n, hi_id, hi_src = cur.fetchone()
         conn.rollback()
         if not n:
@@ -153,9 +167,10 @@ def nullout(
     batch_rows: int,
     log: Callable[[str], None] = _log_stdout,
     start_after: tuple[str, str] | None = None,
+    table: str = DEFAULT_TABLE,
 ) -> dict:
     """Set text_override NULL where it equals the join exactly. One transaction per batch."""
-    validate_partition(conn, partition)
+    validate_partition(conn, partition, table)
     if batch_rows < 1:
         raise TextOverrideError("batch_rows must be positive")
     update = sql.SQL(
@@ -163,7 +178,7 @@ def nullout(
         " WHERE (article_id, source) > (%s, %s) AND (article_id, source) <= (%s, %s)"
         " AND text_override IS NOT NULL AND text_override <> ''"
         " AND text_override = " + TEXT_JOIN_SQL.replace("%", "%%")
-    ).format(rel=_rel(partition))
+    ).format(rel=_rel(partition, table))
     nulled = 0
 
     def work(lo: tuple[str, str], hi: tuple[str, str]) -> None:
@@ -173,7 +188,7 @@ def nullout(
             nulled += cur.rowcount
         conn.commit()
 
-    rows = _walk(conn, partition, batch_rows, start_after, work, log)
+    rows = _walk(conn, partition, batch_rows, start_after, work, log, table)
     log(f"{partition}: done rows={rows} nulled={nulled}")
     return {"rows": rows, "nulled": nulled}
 
@@ -184,50 +199,86 @@ def precheck(
     *,
     batch_rows: int,
     log: Callable[[str], None] = _log_stdout,
+    table: str = DEFAULT_TABLE,
 ) -> dict:
-    """Read-only. Count rows that would read differently after 0014 (both must be 0)."""
-    validate_partition(conn, partition)
-    col = _text_column(conn)
+    """Read-only. Say which phase the table is in and whether 0014 may be applied.
+
+    Before 0014 (column ``text``): count (a) ``text IS NULL`` with a non-blank part and
+    (b) ``text = ''``; ``ok`` only when both are 0. After 0014 (column ``text_override``)
+    (a) does not apply (NULL then means: use the join). The sentinel rows
+    (``text_override = ''``) are counted for information: ``sentinel_all_blank`` is
+    harmless, ``sentinel_with_parts`` is the stored NULL-text of a row with parts.
+    ``ok`` is True after 0014."""
+    validate_partition(conn, partition, table)
+    col = _text_column(conn, table)
+    pre = col == "text"
+    if pre:
+        expr_a = "count(*) FILTER (WHERE {col} IS NULL AND " + _ANY_PART_NONBLANK + ")"
+        expr_b = "count(*) FILTER (WHERE {col} = '')"
+    else:
+        expr_a = "count(*) FILTER (WHERE {col} = '' AND NOT " + _ANY_PART_NONBLANK + ")"
+        expr_b = "count(*) FILTER (WHERE {col} = '' AND " + _ANY_PART_NONBLANK + ")"
+    ident = sql.Identifier(col)
     count = sql.SQL(
-        "SELECT count(*) FILTER (WHERE {col} IS NULL AND " + _ANY_PART_NONBLANK + "),"
-        " count(*) FILTER (WHERE {col} = '') FROM {rel}"
+        "SELECT " + expr_a + ", " + expr_b + " FROM {rel}"
         " WHERE (article_id, source) > (%s, %s) AND (article_id, source) <= (%s, %s)"
-    ).format(col=sql.Identifier(col), rel=_rel(partition))
-    totals = {"null_with_parts": 0, "empty_string": 0}
+    ).format(col=ident, rel=_rel(partition, table))
+    first = 0
+    second = 0
 
     def work(lo: tuple[str, str], hi: tuple[str, str]) -> None:
+        nonlocal first, second
         with conn.cursor() as cur:
             cur.execute(count, (lo[0], lo[1], hi[0], hi[1]))
             a, b = cur.fetchone()
         conn.rollback()
-        totals["null_with_parts"] += a
-        totals["empty_string"] += b
+        first += a
+        second += b
 
-    rows = _walk(conn, partition, batch_rows, None, work, log)
-    return {"partition": partition, "column": col, "rows": rows, **totals}
+    rows = _walk(conn, partition, batch_rows, None, work, log, table)
+    if pre:
+        return {
+            "partition": partition,
+            "phase": "pre-0014",
+            "column": col,
+            "rows": rows,
+            "null_with_parts": first,
+            "empty_string": second,
+            "ok": first == 0 and second == 0,
+        }
+    return {
+        "partition": partition,
+        "phase": "post-0014",
+        "column": col,
+        "rows": rows,
+        "sentinel_all_blank": first,
+        "sentinel_with_parts": second,
+        "ok": True,
+    }
 
 
-def report(conn: psycopg.Connection) -> list[dict]:
+def report(conn: psycopg.Connection, table: str = DEFAULT_TABLE) -> list[dict]:
     """Per partition: rows (reltuples), override NULL share (0.1 percent sample), size.
 
     The NULL count is an estimate from TABLESAMPLE SYSTEM (0.1) scaled to reltuples.
     Nothing is written."""
-    col = _text_column(conn)
+    col = _text_column(conn, table)
+    schema, _ = _check_table(table)
     out: list[dict] = []
-    for part in list_partitions(conn):
+    for part in list_partitions(conn, table):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT c.reltuples::bigint, pg_total_relation_size(c.oid) FROM pg_class c "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = %s AND c.relname = %s",
-                (SCHEMA, part),
+                (schema, part),
             )
             reltuples, size = cur.fetchone()
             cur.execute(
                 sql.SQL(
                     "SELECT count(*), count(*) FILTER (WHERE {c} IS NULL) "
                     "FROM {rel} TABLESAMPLE SYSTEM (0.1)"
-                ).format(c=sql.Identifier(col), rel=_rel(part))
+                ).format(c=sql.Identifier(col), rel=_rel(part, table))
             )
             sampled, sampled_null = cur.fetchone()
         conn.rollback()
@@ -244,13 +295,13 @@ def report(conn: psycopg.Connection) -> list[dict]:
     return out
 
 
-def repack(conn: psycopg.Connection, partition: str) -> None:
+def repack(conn: psycopg.Connection, partition: str, table: str = DEFAULT_TABLE) -> None:
     """REPACK one partition (PG 19). Autocommit; takes ACCESS EXCLUSIVE at the swap."""
-    validate_partition(conn, partition)
+    validate_partition(conn, partition, table)
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute(sql.SQL("REPACK {rel}").format(rel=_rel(partition)))
+            cur.execute(sql.SQL("REPACK {rel}").format(rel=_rel(partition, table)))
     finally:
         conn.autocommit = False
 
@@ -309,12 +360,21 @@ def main(argv: list[str] | None = None) -> int:
                 bad = 0
                 for part in parts:
                     r = precheck(conn, part, batch_rows=batch_rows)
+                    if r["phase"] == "pre-0014":
+                        detail = (
+                            f"null_with_parts={r['null_with_parts']} "
+                            f"empty_string={r['empty_string']}"
+                        )
+                    else:
+                        detail = (
+                            f"sentinel_all_blank={r['sentinel_all_blank']} "
+                            f"sentinel_with_parts={r['sentinel_with_parts']}"
+                        )
                     print(
-                        f"precheck {part}: rows={r['rows']} column={r['column']} "
-                        f"null_with_parts={r['null_with_parts']} "
-                        f"empty_string={r['empty_string']}"
+                        f"precheck {part}: phase={r['phase']} rows={r['rows']} "
+                        f"column={r['column']} {detail} ok={r['ok']}"
                     )
-                    bad += r["null_with_parts"] + r["empty_string"]
+                    bad += 0 if r["ok"] else 1
                 print("precheck: " + ("FAIL, do not apply 0014" if bad else "ok"))
                 return 1 if bad else 0
             if args.action == "nullout":
