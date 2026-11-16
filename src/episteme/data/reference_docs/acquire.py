@@ -39,7 +39,7 @@ import time
 import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
@@ -48,6 +48,7 @@ import requests
 
 from episteme.config import get_settings, source_url
 from episteme.data.checkpoint_markers import input_key
+from episteme.data.pacing import foreign_wait, pacing_path, record_request
 
 _LOG = logging.getLogger(__name__)
 
@@ -476,6 +477,8 @@ def fetch(
     max_wait_s: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = _sliced_sleep,
+    pacing_dir: Path | None = None,
+    now: Callable[[], datetime] = _utcnow,
 ) -> int:
     """Fetch ``refs`` one at a time. Returns 0 (done), 3 (stopped; run again to resume) or 1
     (done, but some files failed). See the module text. With ``adopt_only`` no request is
@@ -494,15 +497,30 @@ def fetch(
     if max_wait_s is None:
         max_wait_s = get_settings().reference_docs_max_wait_s
     start = clock()
-    state: dict[str, Any] = {"last": None}
+    state: dict[str, Any] = {"last": None, "own": {}}
     manifests: dict[str, dict[str, dict[str, Any]]] = {}
     failed: list[str] = []
     counts = {"skipped": 0, "adopted": 0, "fetched": 0, "versioned": 0, "left": 0}
 
-    def pace() -> None:
+    def pace_file(url: str) -> Path:
+        return pacing_path(_host(url), pacing_dir)
+
+    def note_request(url: str, at: datetime) -> None:
+        """Write the request time to the host's pacing file (a failure only logs)."""
+        record_request(pace_file(url), at)
+        state["own"][_host(url)] = at
+
+    def pace(url: str) -> None:
         wait = 0.0
         if state["last"] is not None:
             wait = max(0.0, min_interval_s - (clock() - state["last"]))
+        # A request of an earlier run (or of the other EMA downloader) counts too.
+        wait = max(
+            wait,
+            foreign_wait(
+                pace_file(url), state["own"].get(_host(url)), now(), min_interval_s, max_wait_s
+            ),
+        )
         if budget_s is not None and (clock() - start) + wait >= budget_s:
             raise _Stop("time budget used")
         if wait > 0:
@@ -512,7 +530,7 @@ def fetch(
         """The response of a 200, after pacing and one wait on a throttle."""
         throttles = 0
         while True:
-            pace()
+            pace(ref.url)
             try:
                 resp = session.get(
                     ref.url,
@@ -525,8 +543,10 @@ def fetch(
                 )
             except requests.RequestException as exc:
                 state["last"] = clock()
+                note_request(ref.url, now())
                 raise _NetError(str(exc)) from exc
             state["last"] = clock()
+            note_request(ref.url, now())
             if resp.status_code not in (429, 503):
                 return resp
             resp.close()
@@ -535,6 +555,9 @@ def fetch(
             if wait is None:
                 wait = max(min_interval_s, get_settings().reference_docs_fallback_throttle_wait_s)
             wait = max(wait, min_interval_s)
+            # The next run, even a stopped one's, waits out the Retry-After too: the pacing
+            # file holds a time set ahead so that ``interval - elapsed`` equals ``wait``.
+            note_request(ref.url, now() + timedelta(seconds=max(0.0, wait - min_interval_s)))
             if throttles >= 2:
                 raise _Stop(f"HTTP {resp.status_code} twice for {ref.url}")
             if wait > max_wait_s:

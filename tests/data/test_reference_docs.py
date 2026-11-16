@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -776,3 +778,57 @@ def test_same_bytes_on_disk_after_a_refresh_are_labelled_adopted(tmp_path):
     assert rc == 0
     assert dest.stat().st_mtime_ns == mtime
     assert _manifest(tmp_path)[0]["adopted"] is True
+
+
+# ----------------------------------------------------------------------------- pacing file
+
+T0 = datetime(2026, 11, 12, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def _paced(refs, raw, session, pacing_dir, at, **kw):
+    kw.setdefault("min_interval_s", 60)
+    kw.setdefault("max_wait_s", 600)
+    return _run(refs, raw, session, pacing_dir=pacing_dir, now=lambda: at, **kw)
+
+
+def test_second_run_waits_remaining_interval(tmp_path):
+    pdir = tmp_path / "pacing"
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+    s1 = FakeSession({a.url: FakeResp(body=b"a")})
+    rc, c1 = _paced([a], tmp_path, s1, pdir, T0)
+    assert rc == 0 and c1.sleeps == []  # the first request of a first run does not wait
+    s2 = FakeSession({b.url: FakeResp(body=b"b")})
+    rc, c2 = _paced([b], tmp_path, s2, pdir, T0 + timedelta(seconds=14))
+    assert rc == 0
+    assert c2.sleeps == [46.0]
+
+
+def test_retry_after_is_honoured_by_next_run(tmp_path):
+    pdir = tmp_path / "pacing"
+    a, b = _ref("a.pdf"), _ref("b.pdf")
+    s1 = FakeSession({a.url: FakeResp(status=429, headers={"Retry-After": "120"})})
+    rc, _ = _paced([a], tmp_path, s1, pdir, T0)
+    assert rc == 3  # throttled twice: the run stops
+    s2 = FakeSession({b.url: FakeResp(body=b"b")})
+    rc, c2 = _paced([b], tmp_path, s2, pdir, T0 + timedelta(seconds=10))
+    assert rc == 0
+    assert c2.sleeps == [110.0]  # T0 + (120 - 60) is the stored time; 60 - (10 - 60) = 110
+
+
+def test_the_runs_own_requests_do_not_double_the_wait(tmp_path):
+    refs = [_ref(f"f{i}.pdf") for i in range(3)]
+    session = FakeSession({r.url: FakeResp(body=b"x") for r in refs})
+    rc, clock = _paced(refs, tmp_path, session, tmp_path / "pacing", T0)
+    assert rc == 0 and clock.sleeps == [60.0, 60.0]
+
+
+def test_unreadable_pacing_file_does_not_stop_the_run(tmp_path, caplog):
+    pdir = tmp_path / "pacing"
+    (pdir / "files.test.json").mkdir(parents=True)  # a directory where the file should be
+    a = _ref("a.pdf")
+    session = FakeSession({a.url: FakeResp(body=b"a")})
+    with caplog.at_level(logging.WARNING):
+        rc, _ = _paced([a], tmp_path, session, pdir, T0)
+    assert rc == 0
+    assert (tmp_path / SOURCE / "a.pdf").read_bytes() == b"a"
+    assert any("pacing file" in r.getMessage() for r in caplog.records)

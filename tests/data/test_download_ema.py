@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -305,3 +307,70 @@ def test_two_feeds_with_one_name_are_refused_before_any_download(env):
     with pytest.raises(ValueError, match="ema_a.json"):
         fetch_ema_feeds(env["raw"], {"one": a1, "two": a2}, session=session, **env["kw"])
     assert session.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Pacing file: request spacing across runs
+# ---------------------------------------------------------------------------
+T0 = datetime(2026, 11, 12, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def _paced_run(env, feed, session, pdir, at, **extra):
+    kw = {**env["kw"], "delay_s": 60.0, "max_backoff_s": 600.0, **extra}
+    return fetch_ema_feeds(
+        env["raw"], {feed.name: feed}, session=session, pacing_dir=pdir, now=lambda: at, **kw
+    )
+
+
+def test_second_run_waits_remaining_interval(env, tmp_path):
+    pdir = tmp_path / "pacing"
+    a = _feed("ema_a")
+    session = FakeSession({_url(a): [FakeResp(_json_body(3))]})
+    _paced_run(env, a, session, pdir, T0)
+    assert env["sleeps"] == []
+    _paced_run(env, a, session, pdir, T0 + timedelta(seconds=14), force=True)
+    assert env["sleeps"] == [46.0]
+
+
+def test_retry_after_is_honoured_by_next_run(env, tmp_path):
+    pdir = tmp_path / "pacing"
+    a = _feed("ema_a")
+    throttled = FakeSession({_url(a): [_throttle_resp("120")]})
+    with pytest.raises(dl.RateLimited):
+        _paced_run(env, a, throttled, pdir, T0, max_throttles=1)
+    assert env["sleeps"] == []
+    ok = FakeSession({_url(a): [FakeResp(_json_body(3))]})
+    _paced_run(env, a, ok, pdir, T0 + timedelta(seconds=10))
+    assert env["sleeps"] == [110.0]  # stored T0 + (120 - 60); 60 - (10 - 60) = 110
+
+
+def _throttle_resp(retry_after: str) -> FakeResp:
+    resp = FakeResp(b"slow down", 429, "text/plain")
+    resp.headers["Retry-After"] = retry_after
+    return resp
+
+
+def test_feeds_of_one_run_wait_the_delay_once_each(env, tmp_path):
+    a, b = _feed("ema_a"), _feed("ema_b")
+    session = FakeSession({_url(a): [FakeResp(_json_body(1))], _url(b): [FakeResp(_json_body(1))]})
+    kw = {**env["kw"], "delay_s": 60.0}
+    fetch_ema_feeds(
+        env["raw"],
+        {"ema_a": a, "ema_b": b},
+        session=session,
+        pacing_dir=tmp_path / "pacing",
+        now=lambda: T0,
+        **kw,
+    )
+    assert env["sleeps"] == [60.0]
+
+
+def test_unreadable_pacing_file_does_not_stop_the_run(env, tmp_path, caplog):
+    pdir = tmp_path / "pacing"
+    (pdir / "ema.test.json").mkdir(parents=True)  # a directory where the file should be
+    a = _feed("ema_a")
+    session = FakeSession({_url(a): [FakeResp(_json_body(3))]})
+    with caplog.at_level(logging.WARNING):
+        out = _paced_run(env, a, session, pdir, T0)
+    assert out["fetched"] == ["ema_a"] and not out["failed"]
+    assert any("pacing file" in r.getMessage() for r in caplog.records)
