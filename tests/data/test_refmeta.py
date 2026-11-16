@@ -292,3 +292,71 @@ def test_input_key_collision_two_inputs_never_share_a_marker_match(tmp_path: Pat
         tmp_path / "m.ok", database="d", source_file=ka, digest=release_digest(_release(ka))
     )
     assert not marker_counts(m, database="d", source_file=kb, digest=release_digest(_release(kb)))
+
+
+def test_edqm_get_signs_the_path_without_the_query(monkeypatch):
+    """EDQM refuses a signature over path + query (403, 2026-11-16) and accepts the
+    path-only signature with the query sent."""
+    signed: list[str] = []
+    sent: list[str] = []
+    monkeypatch.setattr(
+        download, "stapi_key", lambda login, secret, **kw: signed.append(kw["uri"]) or "x|y"
+    )
+    monkeypatch.setattr(download, "_http_get", lambda url, headers=None: sent.append(url) or b"{}")
+    download._edqm_get("https://h.example", "/standardterms/api/v1/classes?limit=5&offset=0", "h")
+    assert signed == ["/standardterms/api/v1/classes"]
+    assert sent == ["https://h.example/standardterms/api/v1/classes?limit=5&offset=0"]
+
+
+def test_iso3166_csv_from_pycountry_parses_back():
+    version, body = download.iso3166_csv()
+    assert version
+    rel = parse_iso3166(body.decode("utf-8"), notice=_NOTICE, source_file="x", release_id="r")
+    codes = [row.code for row in rel.codes]
+    assert len(codes) >= 249 and len(codes) == len(set(codes))
+    de = next(row for row in rel.codes if row.code == "DE")
+    assert de.extra == {"alpha_3": "DEU", "numeric": "276"}
+    assert de.display == "Germany"
+
+
+def test_iso3166_download_writes_a_loadable_release(tmp_path: Path):
+    download._fetch_iso3166(tmp_path, dry_run=False, force=False)
+    folders = list((tmp_path / "refmeta" / "iso3166").iterdir())
+    assert len(folders) == 1 and folders[0].name.startswith("pycountry-")
+    assert {p.name for p in folders[0].iterdir()} == {"codes.csv", "NOTICE.txt", "PROVENANCE.txt"}
+    releases = collect(tmp_path, ("iso3166",), required=True)
+    assert releases[0].system_key == "iso3166" and len(releases[0].codes) >= 249
+    # A second run with the same pycountry version is skipped.
+    download._fetch_iso3166(tmp_path, dry_run=False, force=False)
+    assert len(list((tmp_path / "refmeta" / "iso3166").iterdir())) == 1
+
+
+def test_edqm_class_retries_without_tags_after_a_server_error(monkeypatch):
+    import requests
+
+    calls: list[str] = []
+
+    def fake_get(base, uri, host):
+        calls.append(uri)
+        if "tags=1" in uri:
+            resp = requests.Response()
+            resp.status_code = 500
+            raise requests.HTTPError(response=resp)
+        return b'{"content": []}'
+
+    monkeypatch.setattr(download, "_edqm_get", fake_get)
+    assert download._paged_document("https://h", "h", "MAP") == b'{"content": []}'
+    assert "tags=1" in calls[0] and "tags" not in calls[1]
+
+
+def test_edqm_class_does_not_retry_a_client_error(monkeypatch):
+    import requests
+
+    def fake_get(base, uri, host):
+        resp = requests.Response()
+        resp.status_code = 403
+        raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr(download, "_edqm_get", fake_get)
+    with pytest.raises(requests.HTTPError):
+        download._paged_document("https://h", "h", "SOM")

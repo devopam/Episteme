@@ -38,12 +38,13 @@ def classes_uri(*, limit: int = PAGE, offset: int = 0) -> str:
     return f"/standardterms/api/v1/classes?limit={limit}&offset={offset}"
 
 
-def class_data_uri(code: str, *, limit: int = PAGE, offset: int = 0) -> str:
+def class_data_uri(code: str, *, tags: bool = True) -> str:
+    """``full_data_by_class`` has no paging (the API guide lists no limit/offset for
+    it, and the server ignores them: every call returns the whole class)."""
     if not _CODE.fullmatch(code):
         raise ValueError(f"EDQM class code {code!r} is not a safe path segment")
-    return (
-        f"/standardterms/api/v1/full_data_by_class/{code}/1/1?tags=1&limit={limit}&offset={offset}"
-    )
+    suffix = "?tags=1" if tags else ""
+    return f"/standardterms/api/v1/full_data_by_class/{code}/1/1{suffix}"
 
 
 def versions_uri() -> str:

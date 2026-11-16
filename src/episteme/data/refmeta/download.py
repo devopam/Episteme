@@ -6,7 +6,9 @@ LOINC and ISO 3166 are not fetched. The owner places those files.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -38,7 +40,14 @@ ISO639_NOTICE = (
     "Project ruling 2026-11-15; not a legal determination."
 )
 
-_ORDER = ("ucum", "iso639", "edqm")
+ISO3166_NOTICE = (
+    "ISO 3166-1 code elements from the pycountry package (Debian iso-codes data, "
+    "LGPL-2.1). ISO states that the code elements may be used, including in "
+    "software; the standard text is not included. Project ruling 2026-11-16; "
+    "not a legal determination."
+)
+
+_ORDER = ("ucum", "iso639", "iso3166", "edqm")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +94,8 @@ def _fetch(system: str, raw: Path, *, dry_run: bool, force: bool) -> None:
         _fetch_ucum(raw, dry_run=dry_run, force=force)
     elif system == "iso639":
         _fetch_iso639(raw, dry_run=dry_run, force=force)
+    elif system == "iso3166":
+        _fetch_iso3166(raw, dry_run=dry_run, force=force)
     elif system == "edqm":
         _fetch_edqm(raw, dry_run=dry_run, force=force)
     else:
@@ -142,6 +153,44 @@ def _fetch_iso639(raw: Path, *, dry_run: bool, force: bool) -> None:
     _LOG.info("iso639: stored %s", release)
 
 
+def iso3166_csv() -> tuple[str, bytes]:
+    """``(pycountry version, codes.csv bytes)``: every current ISO 3166-1 country,
+    sorted by alpha-2, in the header the loader expects (``iso3166.HEADER``)."""
+    import importlib.metadata
+
+    import pycountry
+
+    from episteme.data.refmeta.iso3166 import HEADER
+
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(HEADER)
+    for c in sorted(pycountry.countries, key=lambda c: c.alpha_2):
+        writer.writerow((c.alpha_2, c.alpha_3, c.numeric, c.name))
+    return importlib.metadata.version("pycountry"), out.getvalue().encode("utf-8")
+
+
+def _fetch_iso3166(raw: Path, *, dry_run: bool, force: bool) -> None:
+    if dry_run:
+        _LOG.info("iso3166: would write the code list of the installed pycountry")
+        return
+    version, body = iso3166_csv()
+    release = f"pycountry-{version}"
+    folder = raw / "refmeta" / "iso3166" / release
+    if not force and (folder / "codes.csv").is_file():
+        _LOG.info("iso3166: %s already stored", release)
+        return
+    _write(
+        folder,
+        {
+            "codes.csv": body,
+            "NOTICE.txt": (ISO3166_NOTICE + "\n").encode(),
+            "PROVENANCE.txt": _provenance("pycountry", release).encode(),
+        },
+    )
+    _LOG.info("iso3166: stored %s", release)
+
+
 def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:
     settings = get_settings()
     base = settings.edqm_stapi_base.rstrip("/")
@@ -196,18 +245,33 @@ def _paged(base: str, host: str, uri_for) -> list:
 
 
 def _paged_document(base: str, host: str, code: str) -> bytes:
-    rows = _paged(base, host, lambda **page: class_data_uri(code, **page))
+    """One class, in one request (``full_data_by_class`` is not paged)."""
+    try:
+        body = _edqm_get(base, class_data_uri(code), host)
+    except requests.HTTPError as exc:
+        # The server answers 500 for some classes with tags=1 (MAP, 2026-11-16)
+        # and 200 without tags: retry the class once without tags.
+        status = exc.response.status_code if exc.response is not None else None
+        if status is None or status < 500:
+            raise
+        _LOG.warning(
+            "edqm: class %s failed with tags (HTTP %s); retrying without tags", code, status
+        )
+        body = _edqm_get(base, class_data_uri(code, tags=False), host)
+    rows = content_rows(body)
     return json.dumps({"content": rows}, ensure_ascii=False).encode()
 
 
 def _edqm_get(base: str, uri: str, host: str) -> bytes:
     settings = get_settings()
     date = formatdate(usegmt=True)
+    # The server signs the path only: a signature over path + query is refused
+    # (403); the path-only signature with the query sent is accepted (2026-11-16).
     key = stapi_key(
         settings.edqm_stapi_login or "",
         settings.edqm_stapi_secret_key or "",
         verb="GET",
-        uri=uri,
+        uri=urlsplit(uri).path,
         host=host,
         date=date,
     )
