@@ -10,6 +10,7 @@ from episteme.data.article_schema import (
     MIN_OK_TEXT_LEN,
     SCHEMA_VERSION,
     SOURCES,
+    TEXT_EXPR_SQL,
     TEXT_JOIN_SQL,
     build_text,
     cap_list_elements,
@@ -261,4 +262,6 @@ def test_sql_files_carry_the_join_expression():
     mig = _REPO / "src/episteme/data/db/migrations/0014_article_text_virtual.sql"
     schema = _REPO / "src/episteme/data/db/schema.sql"
     for path in (mig, schema):
-        assert TEXT_JOIN_SQL in path.read_text(encoding="utf-8"), path.name
+        body = path.read_text(encoding="utf-8")
+        assert TEXT_JOIN_SQL in body, path.name
+        assert TEXT_EXPR_SQL in body, path.name

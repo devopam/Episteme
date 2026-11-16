@@ -61,7 +61,8 @@ def _legacy_override(r: dict) -> str | None:
 
 
 def _legacy_tuples(rows: list[dict]) -> tuple[list[tuple], list[tuple]]:
-    """The pre-change dict path, kept verbatim as the reference."""
+    """The dict path as the reference: hot values and body parts as before, text_override
+    from the independent ``_legacy_override`` rule."""
     hot = [
         tuple(postgres_loader._hot_value(r, c) for c in postgres_loader.HOT_COLUMNS) for r in rows
     ]
@@ -256,3 +257,30 @@ def test_override_is_empty_sentinel_when_text_null_and_parts_present():
 
 def test_override_null_when_all_null():
     assert _body_row()["text_override"] is None
+
+
+@pytest.mark.parametrize(
+    ("title", "abstract", "body_text", "text", "expected"),
+    [
+        # all parts blank (whitespace counts as blank), text NULL: join is NULL -> derive
+        ("  ", None, None, None, None),
+        # blank title, body present, text NULL: join is "B", not NULL -> sentinel
+        ("  ", None, "B", None, ""),
+        # text equals the join of the non-blank parts -> derive
+        ("  ", None, "B", "B", None),
+        # shard text '' while the join is non-blank: keep '' (not NULL)
+        ("T", "A", None, "", ""),
+        # text differs from the join only by a trailing newline -> keep the override
+        ("T", "A", None, "T\n\nA\n", "T\n\nA\n"),
+        # no parts and text '' : join is NULL, '' differs -> keep ''
+        (None, None, None, "", ""),
+    ],
+)
+def test_text_override_rule(title, abstract, body_text, text, expected):
+    assert postgres_loader._text_override(title, abstract, body_text, text) == expected
+    assert (
+        _legacy_override(
+            {"title": title, "abstract": abstract, "body_text": body_text, "text": text}
+        )
+        == expected
+    )

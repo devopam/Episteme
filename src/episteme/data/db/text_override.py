@@ -24,7 +24,7 @@ import psycopg
 from psycopg import sql
 
 from episteme.config import ConfigError, get_settings
-from episteme.data.article_schema import TEXT_JOIN_SQL
+from episteme.data.article_schema import _BLANK_A, _BLANK_B, _BLANK_T, TEXT_JOIN_SQL
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
 
@@ -35,11 +35,7 @@ DEFAULT_TABLE = "episteme.article_body"
 TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*\.article_body$")
 
 # A part is blank when NULL or only space, tab, CR, LF (the join's definition).
-_ANY_PART_NONBLANK = (
-    "(coalesce(btrim(title, E' \\t\\r\\n'), '') <> ''"
-    " OR coalesce(btrim(abstract, E' \\t\\r\\n'), '') <> ''"
-    " OR coalesce(btrim(body_text, E' \\t\\r\\n'), '') <> '')"
-)
+_ANY_PART_NONBLANK = f"(NOT ({_BLANK_T}) OR NOT ({_BLANK_A}) OR NOT ({_BLANK_B}))"
 
 
 class TextOverrideError(Exception):
@@ -208,7 +204,7 @@ def precheck(
     conn: psycopg.Connection,
     partition: str,
     *,
-    batch_rows: int,
+    batch_rows: int | None = None,
     log: Callable[[str], None] = _log_stdout,
     table: str = DEFAULT_TABLE,
 ) -> dict:
@@ -219,7 +215,8 @@ def precheck(
     (a) does not apply (NULL then means: use the join). The sentinel rows
     (``text_override = ''``) are counted for information: ``sentinel_all_blank`` is
     harmless, ``sentinel_with_parts`` is the stored NULL-text of a row with parts.
-    ``ok`` is True after 0014."""
+    ``ok`` is True after 0014. One sequential read per partition; ``batch_rows`` is
+    accepted for call compatibility and unused."""
     validate_partition(conn, partition, table)
     col = _text_column(conn, table)
     pre = col == "text"
@@ -230,28 +227,18 @@ def precheck(
     else:
         expr_a = "count(*) FILTER (WHERE {col} = '' AND NOT " + _ANY_PART_NONBLANK + ")"
         expr_b = "count(*) FILTER (WHERE {col} = '' AND " + _ANY_PART_NONBLANK + ")"
-    ident = sql.Identifier(col)
-    count = sql.SQL(
-        "SELECT " + expr_a + ", " + expr_b + " FROM {rel}"
-        " WHERE (article_id, source) > (%s, %s) AND (article_id, source) <= (%s, %s)"
-    ).format(col=ident, rel=_rel(partition, table))
-    first = 0
-    second = 0
-
-    def work(lo: tuple[str, str], hi: tuple[str, str]) -> None:
-        nonlocal first, second
-        with conn.cursor() as cur:
-            cur.execute(count, (lo[0], lo[1], hi[0], hi[1]))
-            a, b = cur.fetchone()
-        conn.rollback()
-        first += a
-        second += b
-
+    # One sequential read of the partition (ACCESS SHARE only), no key batches.
+    count = sql.SQL("SELECT count(*), " + expr_a + ", " + expr_b + " FROM {rel}").format(
+        col=sql.Identifier(col), rel=_rel(partition, table)
+    )
     try:
-        rows = _walk(conn, partition, batch_rows, None, work, log, table)
+        with conn.cursor() as cur:
+            cur.execute(count)
+            rows, first, second = cur.fetchone()
     finally:
         conn.rollback()
         conn.read_only = False
+    log(f"{partition}: precheck rows={rows}")
     if pre:
         return {
             "partition": partition,

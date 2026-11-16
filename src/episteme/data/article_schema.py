@@ -160,6 +160,13 @@ TEXT_JOIN_SQL = (
     rf" ELSE CASE WHEN {_BLANK_T} AND {_BLANK_A} THEN '' ELSE E'\n\n' END || body_text END)"
 )
 
+# The full generated expression of article_body.text (migration 0014 and schema.sql).
+TEXT_EXPR_SQL = (
+    "CASE WHEN text_override = '' THEN NULL ELSE coalesce(text_override, nullif("
+    + TEXT_JOIN_SQL
+    + ", '')) END"
+)
+
 _SQL_BLANK_CHARS = " \t\r\n"
 
 

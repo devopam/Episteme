@@ -58,6 +58,60 @@ def test_repack_without_yes_flag_exits_2(capsys):
     assert "--yes-repack" in capsys.readouterr().err
 
 
+class _FakeConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _patch_main(monkeypatch):
+    class _S:
+        text_nullout_batch_rows = 10
+
+    monkeypatch.setattr(tool, "get_settings", lambda: _S())
+    monkeypatch.setattr(tool.db_connection, "admin_dsn_from_settings", lambda: "dsn")
+    monkeypatch.setattr(tool, "pool_kwargs", lambda s: {})
+    monkeypatch.setattr(tool.psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(tool, "check_server_version", lambda c: None)
+
+
+def test_main_precheck_not_ok_exits_1(monkeypatch, capsys):
+    _patch_main(monkeypatch)
+    monkeypatch.setattr(
+        tool,
+        "precheck",
+        lambda conn, part, **k: {
+            "phase": "pre-0014",
+            "column": "text",
+            "rows": 3,
+            "null_with_parts": 1,
+            "empty_string": 0,
+            "ok": False,
+        },
+    )
+    assert tool.main(["precheck", "--partition", "article_body_pmc"]) == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_main_precheck_ok_exits_0(monkeypatch, capsys):
+    _patch_main(monkeypatch)
+    monkeypatch.setattr(
+        tool,
+        "precheck",
+        lambda conn, part, **k: {
+            "phase": "post-0014",
+            "column": "text_override",
+            "rows": 3,
+            "sentinel_all_blank": 0,
+            "sentinel_with_parts": 0,
+            "ok": True,
+        },
+    )
+    assert tool.main(["precheck", "--partition", "article_body_pmc"]) == 0
+
+
 def test_repack_parser_accepts_flag():
     args = tool.build_parser().parse_args(["repack", "--partition", "x", "--yes-repack"])
     assert args.yes_repack is True
@@ -106,6 +160,14 @@ class _StubConn:
 
     def commit(self):
         pass
+
+
+def test_any_part_nonblank_is_the_negation_of_the_schema_blank_rule():
+    from episteme.data import article_schema as sch
+
+    for blank in (sch._BLANK_T, sch._BLANK_A, sch._BLANK_B):
+        assert f"NOT ({blank})" in tool._ANY_PART_NONBLANK
+    assert tool._ANY_PART_NONBLANK.count("NOT (") == 3
 
 
 def test_nullout_composed_sql_compares_to_the_join_verbatim():

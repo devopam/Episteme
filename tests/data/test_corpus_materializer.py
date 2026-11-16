@@ -93,14 +93,39 @@ def test_materialize_dedup_decontam_and_shard(pg_conn, tmp_path, monkeypatch):
                 "VALUES (%s, 'pmc', 2024, %s)",
                 (art_id, _text),
             )
+    # Derived row: text_override NULL, so the virtual text is the join of the parts.
+    # Sentinel row: text_override '' reads back NULL and the materializer skips it.
+    derived_title = "Distinct derived title about renal tubular transport physiology"
+    derived_abs = (
+        "A separate abstract on glomerular filtration, proximal tubule sodium handling "
+        "and loop diuretic pharmacology, unrelated to the other fixture documents."
+    )
+    extra = [
+        ("art_d", "hash_d", derived_title, derived_abs, None),
+        ("art_s", "hash_s", "Sentinel title", "Sentinel abstract", ""),
+    ]
+    with pg_conn.cursor() as cur:
+        for art_id, content_hash, title, abstract, override in extra:
+            cur.execute(
+                "INSERT INTO episteme.articles "
+                "(id, source, year, pmid, doi, license, subset, extract_status, content_hash) "
+                "VALUES (%s, 'pmc', 2024, %s, %s, 'CC BY', 'commercial', 'ok', %s)",
+                (art_id, f"pmid_{art_id}", f"10.1/{art_id}", content_hash),
+            )
+            cur.execute(
+                "INSERT INTO episteme.article_body "
+                "(article_id, source, year, title, abstract, text_override) "
+                "VALUES (%s, 'pmc', 2024, %s, %s, %s)",
+                (art_id, title, abstract, override),
+            )
     pg_conn.commit()  # DuckDB attaches a separate connection -> rows must be visible
 
     res = corpus_materializer.materialize(
         pg_conn, out_root=tmp_path, run_id="m1", pg_dsn=os.environ["TEST_PG_DSN"]
     )
 
-    assert res["rows_in"] == 3
-    assert res["rows_out"] == 1
+    assert res["rows_in"] == 4  # art_s (sentinel, text NULL) is filtered out
+    assert res["rows_out"] == 2
     assert res["dropped_dup"] >= 1
     assert res["dropped_contam"] >= 1
 
@@ -111,8 +136,12 @@ def test_materialize_dedup_decontam_and_shard(pg_conn, tmp_path, monkeypatch):
     import pyarrow.parquet as pq
 
     table = pq.read_table(shard)
-    assert table.num_rows == 1
-    assert table.column("id").to_pylist() == ["art_a"]
+    assert table.num_rows == 2
+    ids = table.column("id").to_pylist()
+    assert sorted(ids) == ["art_a", "art_d"]
+    assert "art_s" not in ids
+    texts = dict(zip(ids, table.column("text").to_pylist(), strict=True))
+    assert texts["art_d"] == f"{derived_title}\n\n{derived_abs}"
 
     pg_conn.commit()
     with pg_conn.cursor() as cur:

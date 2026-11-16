@@ -83,7 +83,7 @@ A script reports per partition: rows, rows with `text_override` NULL, on-disk si
 
 ## 6. Rollout
 
-1. Merge. Apply 0014 to `episteme_test`, run the pg tests, then apply to `episteme` (no load running).
+1. Run `text_override precheck --all` on `episteme` (read-only, alone), then merge, then apply 0014 back to back: once merged, every load into `article_body` fails until 0014 is applied, so no load runs between the precheck and 0014. Apply 0014 to `episteme_test`, run the pg tests, then apply to `episteme` (no load running).
 2. Null-out + REPACK: `dailymed`, then `pmc` (measure), then owner go for `pubmed`, then owner go for `openalex`.
 3. Record sizes in the drift log.
 
