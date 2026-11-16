@@ -25,8 +25,8 @@ CREATE SCHEMA IF NOT EXISTS episteme;
 
 -- -----------------------------------------------------------------------------
 -- episteme.articles -- narrow hot table, LIST (source) -> RANGE (year)
---   Columns mirror article_schema.ARTICLE_COLUMNS MINUS the four text columns
---   (title, abstract, body_text, text) which live in episteme.article_body.
+--   Columns mirror article_schema.ARTICLE_COLUMNS MINUS the text columns
+--   (title, abstract, body_text, text_override, virtual text) which live in episteme.article_body.
 --   No PRIMARY KEY: a unique constraint on a partitioned table must include
 --   every partition-key column -> (id, source, year); the brief neither asks
 --   for that nor for a unique index on id, so it is intentionally omitted.
@@ -122,22 +122,28 @@ CREATE TABLE episteme.article_body (
     title       text,
     abstract    text,
     body_text   text,
-    text        text,
+    text_override text,
+    -- text (migration 0014): text_override where set ('' means NULL), else the
+    -- join of the non-blank parts (article_schema.TEXT_JOIN_SQL, verbatim). A
+    -- virtual column has no storage: the duplicate of title + abstract + body is
+    -- not stored.
+    text        text GENERATED ALWAYS AS (CASE WHEN text_override = '' THEN NULL ELSE coalesce(text_override, nullif((CASE WHEN coalesce(btrim(title, E' \t\r\n'), '') = '' THEN '' ELSE title END || CASE WHEN coalesce(btrim(abstract, E' \t\r\n'), '') = '' THEN '' ELSE CASE WHEN coalesce(btrim(title, E' \t\r\n'), '') = '' THEN '' ELSE E'\n\n' END || abstract END || CASE WHEN coalesce(btrim(body_text, E' \t\r\n'), '') = '' THEN '' ELSE CASE WHEN coalesce(btrim(title, E' \t\r\n'), '') = '' AND coalesce(btrim(abstract, E' \t\r\n'), '') = '' THEN '' ELSE E'\n\n' END || body_text END), '')) END) VIRTUAL,
     PRIMARY KEY (article_id, source)
 ) PARTITION BY LIST (source);
 
--- ADR-0002 asks for zstd TOAST compression on body_text / text. The PG19beta3
+-- ADR-0002 asks for zstd TOAST compression on body_text / text_override (the
+-- stored text; the virtual text column has no storage). The PG19beta3
 -- build here rejects `zstd` (SQLSTATE 22023, invalid compression method), so
 -- fall back to lz4 and record the deviation. Compression set on the parent is
 -- inherited by partitions created afterwards.
 DO $$ BEGIN
     EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN body_text SET COMPRESSION zstd';
-    EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN text      SET COMPRESSION zstd';
-    RAISE NOTICE 'article_body.body_text/text: zstd TOAST compression (ADR-0002)';
+    EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN text_override SET COMPRESSION zstd';
+    RAISE NOTICE 'article_body.body_text/text_override: zstd TOAST compression (ADR-0002)';
 EXCEPTION WHEN invalid_parameter_value OR feature_not_supported THEN
     EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN body_text SET COMPRESSION lz4';
-    EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN text      SET COMPRESSION lz4';
-    RAISE NOTICE 'zstd unavailable on this build - article_body.body_text/text fell back to lz4 (ADR-0002 specifies zstd)';
+    EXECUTE 'ALTER TABLE episteme.article_body ALTER COLUMN text_override SET COMPRESSION lz4';
+    RAISE NOTICE 'zstd unavailable on this build - article_body.body_text/text_override fell back to lz4 (ADR-0002 specifies zstd)';
 END $$;
 
 CREATE TABLE episteme.article_body_pmc

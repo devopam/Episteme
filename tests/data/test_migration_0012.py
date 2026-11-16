@@ -30,7 +30,8 @@ def _insert(cur, source: str, n: int) -> None:
         (f"{source}:{n}", source, str(n)),
     )
     cur.execute(
-        "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, 'x')",
+        "INSERT INTO episteme.article_body (article_id, source, text_override) "
+        "VALUES (%s, %s, 'x')",
         (f"{source}:{n}", source),
     )
 

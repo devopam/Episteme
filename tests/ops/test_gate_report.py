@@ -232,12 +232,12 @@ def test_measure_load_orphans(pg_conn):
                 (f"g{i}", src, "f.parquet"),
             )
             cur.execute(
-                "INSERT INTO episteme.article_body (article_id, source, year, text) "
+                "INSERT INTO episteme.article_body (article_id, source, year, text_override) "
                 "VALUES (%s, %s, 0, 'x')",
                 (f"g{i}", src),
             )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, year, text) "
+            "INSERT INTO episteme.article_body (article_id, source, year, text_override) "
             "VALUES ('orphan', %s, 0, 'x')",
             (src,),
         )

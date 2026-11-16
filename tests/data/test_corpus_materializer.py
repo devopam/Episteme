@@ -89,7 +89,7 @@ def test_materialize_dedup_decontam_and_shard(pg_conn, tmp_path, monkeypatch):
                 (art_id, f"pmid_{art_id}", f"10.1/{art_id}", content_hash),
             )
             cur.execute(
-                "INSERT INTO episteme.article_body (article_id, source, year, text) "
+                "INSERT INTO episteme.article_body (article_id, source, year, text_override) "
                 "VALUES (%s, 'pmc', 2024, %s)",
                 (art_id, _text),
             )

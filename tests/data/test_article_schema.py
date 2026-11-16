@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from episteme.data.article_schema import (
@@ -8,11 +10,13 @@ from episteme.data.article_schema import (
     MIN_OK_TEXT_LEN,
     SCHEMA_VERSION,
     SOURCES,
+    TEXT_JOIN_SQL,
     build_text,
     cap_list_elements,
     decide_extract_status,
     finalize_row,
     normalize_license,
+    sql_join,
     subset_from_license,
 )
 
@@ -223,3 +227,38 @@ def test_cap_list_elements_passes_none_and_non_strings_through():
 def test_sources_include_the_regulatory_text_sources():
     assert "dailymed" in SOURCES
     assert "ema_epar" in SOURCES
+
+
+# --- sql_join: the Python mirror of the SQL <join> of migration 0014 -----------------
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def test_sql_join_joins_non_blank_parts():
+    assert sql_join("T", "A", None) == "T\n\nA"
+    assert sql_join(None, "A", "B") == "A\n\nB"
+    assert sql_join("T", None, "B") == "T\n\nB"
+
+
+def test_sql_join_all_blank_is_none():
+    assert sql_join(None, None, None) is None
+    assert sql_join("", " ", "\r\n\t") is None
+
+
+def test_sql_join_skips_whitespace_only_parts():
+    assert sql_join("  ", "\t", "B") == "B"
+
+
+def test_sql_join_nbsp_is_not_blank():
+    assert sql_join("\u00a0", None, "B") == "\u00a0\n\nB"
+
+
+def test_sql_join_does_not_normalise():
+    assert sql_join(" a  b ", None, None) == " a  b "
+
+
+def test_sql_files_carry_the_join_expression():
+    mig = _REPO / "src/episteme/data/db/migrations/0014_article_text_virtual.sql"
+    schema = _REPO / "src/episteme/data/db/schema.sql"
+    for path in (mig, schema):
+        assert TEXT_JOIN_SQL in path.read_text(encoding="utf-8"), path.name

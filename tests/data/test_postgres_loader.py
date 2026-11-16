@@ -311,12 +311,14 @@ def _scenario(conn, tmp_path, *, batch_size: int, fmt: str) -> tuple[dict, list[
             ("chembl:C1", "chembl", "F_old.db"),
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C1", "chembl", "old body"),
         )
         # a body row with no articles row, for an incoming id: only the id delete hits it
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C2", "chembl", "orphan body"),
         )
         # another source sharing an id and a source_file name: never touched
@@ -325,7 +327,8 @@ def _scenario(conn, tmp_path, *, batch_size: int, fmt: str) -> tuple[dict, list[
             ("chembl:C3", "pubmed", "F_a.db"),
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) VALUES (%s, %s, %s)",
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
+            "VALUES (%s, %s, %s)",
             ("chembl:C3", "pubmed", "other source"),
         )
     conn.commit()
@@ -530,7 +533,7 @@ def test_id_probes_plan_as_ordered_index_scans(pg_conn):
             "SELECT 'chembl:C' || g, 'chembl', 'F_' || (g % 7) FROM generate_series(1, 5000) g"
         )
         cur.execute(
-            "INSERT INTO episteme.article_body (article_id, source, text) "
+            "INSERT INTO episteme.article_body (article_id, source, text_override) "
             "SELECT 'chembl:C' || g, 'chembl', 'b' FROM generate_series(1, 5000) g"
         )
         cur.execute("ANALYZE episteme.articles")
