@@ -159,6 +159,8 @@ DEFAULT_FAERS_PAIR_DRUG_CAP = 30
 DEFAULT_FAERS_BRIDGE_BATCH_ROWS = 50_000
 # Rows per read batch when the DailyMed loader copies a sidecar.
 DEFAULT_DAILYMED_COPY_BATCH_ROWS = 20_000
+# Rows per transaction of the article_body text_override null-out and precheck.
+DEFAULT_TEXT_NULLOUT_BATCH_ROWS = 50_000
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -488,6 +490,8 @@ class Settings:
     faers_bridge_batch_rows: int = DEFAULT_FAERS_BRIDGE_BATCH_ROWS
     # Tuning values below: each has an env key of the same name in capitals, EPISTEME_ first.
     dailymed_copy_batch_rows: int = DEFAULT_DAILYMED_COPY_BATCH_ROWS
+    # Rows per batch of the text_override tool (EPISTEME_TEXT_NULLOUT_BATCH_ROWS).
+    text_nullout_batch_rows: int = DEFAULT_TEXT_NULLOUT_BATCH_ROWS
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -713,6 +717,9 @@ def get_settings() -> Settings:
         ),
         dailymed_copy_batch_rows=_get_positive_int_or_default(
             "EPISTEME_DAILYMED_COPY_BATCH_ROWS", DEFAULT_DAILYMED_COPY_BATCH_ROWS
+        ),
+        text_nullout_batch_rows=_get_positive_int_or_default(
+            "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
         ),
         pmc_submit_batch=_get_positive_int_or_default(
             "EPISTEME_PMC_SUBMIT_BATCH", DEFAULT_PMC_SUBMIT_BATCH

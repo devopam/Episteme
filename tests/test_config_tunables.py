@@ -218,3 +218,12 @@ def test_new_tunables_bad_values_fall_back(new_tunables_clean, bad):
         cfg.get_settings.cache_clear()
         assert getattr(cfg.get_settings(), field) == default, key
         new_tunables_clean.delenv(key)
+
+
+def test_text_nullout_batch_rows_default_and_override(clean_settings):
+    clean_settings.delenv("EPISTEME_TEXT_NULLOUT_BATCH_ROWS", raising=False)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().text_nullout_batch_rows == 50_000
+    clean_settings.setenv("EPISTEME_TEXT_NULLOUT_BATCH_ROWS", "123")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().text_nullout_batch_rows == 123
