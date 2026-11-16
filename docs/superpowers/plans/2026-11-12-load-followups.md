@@ -134,3 +134,23 @@
 - [ ] **Step 1:** Write the doc changes in plain STE style (short sentences, one instruction per step).
 - [ ] **Step 2:** Run the URL guard and `pytest -m "not pg" -q tests/docs` (if doc tests exist); expect nothing printed / PASS.
 - [ ] **Step 3:** Commit `docs: load follow-ups (sweep, pacing, tunables)`.
+
+### Task 5: refmeta fixes from the PR 111 rollout (added 2026-11-16, controller ruling)
+
+The production rollout of PR 111 (2026-11-16) found two defects. They join this branch (owner rule: no piecemeal PRs). `main` (with PR 111) is merged into this branch (de4f71f1).
+
+**Files:**
+- Modify: `src/episteme/data/refmeta/ucum.py`
+- Modify: `scripts/data/run_pipeline.sh` (the option parsing that builds `load_args` / `download_args` for `refmeta`)
+- Modify: `docs/superpowers/specs/2026-11-15-reference-metadata-design.md` (the `ucum` row of the key table)
+- Test: `tests/data/test_refmeta.py`; the existing `run_pipeline` argument tests (`grep -ln "run_pipeline" tests/*.py`)
+
+**Interfaces:**
+- `parse_ucum(path, *, notice, source_file, release_id) -> CodeRelease`: unchanged signature. The code becomes `<kind>:<Code attribute>` (case-sensitive; UCUM keeps `Code` unique), falling back to `printSymbol`, then `name`, only when `Code` is absent. `extra` keeps `kind`, `code_attr` and adds `print_symbol`.
+- `run_pipeline.sh refmeta load` and `refmeta download` forward `--system <name>` (repeatable) to the wrapper.
+
+- [ ] **Step 1:** Tests: in `tests/data/test_refmeta.py` update `test_ucum_iso639_iso3166_and_loinc` to expect `["prefix:k", "unit:m/s"]` from `Code` (same values as today) and add `test_ucum_codes_use_the_code_attribute`: two units `<unit Code="10*"><printSymbol>10</printSymbol>...` and `<unit Code="10^"><printSymbol>10</printSymbol>...` give codes `unit:10*` and `unit:10^` (no duplicate), with `extra["print_symbol"] == "10"`. A test for the pipeline: `run_pipeline.sh refmeta load --system ucum --system iso639` passes both `--system` options to `load_refmeta.sh` (use the existing dry-run / argument-capture pattern of the run_pipeline tests; no database, no network).
+- [ ] **Step 2:** Run; expect FAIL. Implement; run; expect PASS.
+- [ ] **Step 3:** Real-file check (read-only, no database): `.venv/Scripts/python.exe -c "..."` parse `D:/episteme/01_raw/refmeta/ucum/dfccea1b5dc2/ucum-essence.xml` with `parse_ucum` and print the code count and the number of distinct codes (must be equal). Put the output in the report.
+- [ ] **Step 4:** Spec row: `ucum` key = `<kind>:<Code>` (fallback printSymbol, name).
+- [ ] **Step 5:** `pytest -m "not pg" -q` on the touched tests; ruff; commit `fix(refmeta): UCUM codes keyed on the Code attribute; run_pipeline forwards --system`.
