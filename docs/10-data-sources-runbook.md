@@ -1788,10 +1788,9 @@ Apply migration `0013_reference_codes.sql` first (section 2.3). Confirm `server_
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download --dry-run
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta load
-PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download --system ucum
 ```
 
-`--system <name>` (repeatable) limits `refmeta download` and `refmeta load` to the named lists. `run_pipeline.sh` forwards it.
+The flag `--system <name>` (repeatable) limits `refmeta download` and `refmeta load` to the named lists. `run_pipeline.sh` forwards it.
 
 - **Download.** Public files only: UCUM (the essence XML and its licence, kept verbatim) and the Library of Congress ISO 639-2 list. EDQM is fetched only when `EDQM_STAPI_LOGIN` and `EDQM_STAPI_SECRET_KEY` are set. The download asks `/classes` and stores full data for every class, including non-traditional terms. If the keys are unset, a combined download logs a skip and exits 0. `refmeta download` with an explicit request for EDQM and no keys exits 3. LOINC and ISO 3166 are never downloaded. The owner places the LOINC zip and an ISO 3166 CSV (`alpha_2,alpha_3,numeric,short_name_en`). A PDF of an ISO standard is not a valid input.
 - **Where the files go.** `<raw>/refmeta/<system>/<release>/`, with `NOTICE.txt`. E2B rows point at the IG package already under `<raw>/ich/e2/ig_v1_11/` and are not copied again. The OID source is IG v5.03 section 3.2 tables 1 to 8. Appendix I (F) of that edition only points at the XML code lists.
