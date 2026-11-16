@@ -199,6 +199,7 @@ declare -A WRAPPER=(
     [ich]="reference_docs/download_reference_docs.sh"
     [meddra_ptc]="reference_docs/download_reference_docs.sh"
     [ema_guidance]="reference_docs/download_reference_docs.sh"
+    [refmeta]="refmeta/download_refmeta.sh"
 )
 
 # ich, meddra_ptc and ema_guidance (reference documents) are download-only: they sit in
@@ -222,7 +223,7 @@ _is_structured() { case " $STRUCTURED_SOURCES " in *" $1 "*) return 0 ;; *) retu
 # release. ema and openfda load into episteme.reg_record (one partition per release;
 # src/episteme/data/regulatory/load_reg.py); aact loads into its own schema per release,
 # exposed by the views of schema aact (src/episteme/data/aact/load_aact.py).
-REG_SOURCES="ema openfda aact"
+REG_SOURCES="ema openfda aact refmeta"
 _is_reg() { case " $REG_SOURCES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # The FAERS generation loader (src/episteme/data/regulatory/faers/load.py).
