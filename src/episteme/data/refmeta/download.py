@@ -47,7 +47,21 @@ ISO3166_NOTICE = (
     "not a legal determination."
 )
 
-_ORDER = ("ucum", "iso639", "iso3166", "edqm")
+LOINC_NOTICE = (
+    "This material contains content from LOINC (http://loinc.org). LOINC is "
+    "copyright (c) Regenstrief Institute, Inc. and the Logical Observation "
+    "Identifiers Names and Codes (LOINC) Committee and is available at no cost "
+    "under the license at http://loinc.org/license. LOINC(R) is a registered "
+    "United States trademark of Regenstrief Institute, Inc."
+)
+
+_ORDER = ("ucum", "iso639", "iso3166", "edqm", "loinc")
+# Systems that need credentials: (configured?, the env keys named in the message).
+_CREDENTIALS = {
+    "edqm": ("_edqm_configured", "EDQM_STAPI_LOGIN and EDQM_STAPI_SECRET_KEY"),
+    "loinc": ("_loinc_configured", "LOINC_USERNAME and LOINC_SECRET_KEY"),
+}
+_MD5_CHUNK = 1 << 20
 
 
 def edqm_notice(retrieved_at: str) -> str:
@@ -87,15 +101,14 @@ def main(argv: list[str] | None = None) -> int:
         plan = plan[: args.max_files]
     explicit = set(args.system or ())
     for system in plan:
-        if system == "edqm" and not _edqm_configured():
-            if "edqm" in explicit:
-                print(
-                    "refmeta download: EDQM_STAPI_LOGIN and EDQM_STAPI_SECRET_KEY are unset",
-                    file=sys.stderr,
-                )
-                return 3
-            _LOG.info("edqm: keys unset; skipped")
-            continue
+        if system in _CREDENTIALS:
+            check, keys = _CREDENTIALS[system]
+            if not globals()[check]():
+                if system in explicit:
+                    print(f"refmeta download: {keys} are unset", file=sys.stderr)
+                    return 3
+                _LOG.info("%s: keys unset; skipped", system)
+                continue
         _fetch(system, raw, dry_run=args.dry_run, force=args.force)
     return 0
 
@@ -107,6 +120,11 @@ def _edqm_configured() -> bool:
     )
 
 
+def _loinc_configured() -> bool:
+    settings = get_settings()
+    return bool(settings.loinc_api_base and settings.loinc_username and settings.loinc_secret_key)
+
+
 def _fetch(system: str, raw: Path, *, dry_run: bool, force: bool) -> None:
     if system == "ucum":
         _fetch_ucum(raw, dry_run=dry_run, force=force)
@@ -116,6 +134,8 @@ def _fetch(system: str, raw: Path, *, dry_run: bool, force: bool) -> None:
         _fetch_iso3166(raw, dry_run=dry_run, force=force)
     elif system == "edqm":
         _fetch_edqm(raw, dry_run=dry_run, force=force)
+    elif system == "loinc":
+        _fetch_loinc(raw, dry_run=dry_run, force=force)
     else:
         raise ValueError(system)
 
@@ -207,6 +227,68 @@ def _fetch_iso3166(raw: Path, *, dry_run: bool, force: bool) -> None:
         },
     )
     _LOG.info("iso3166: stored %s", release)
+
+
+def _loinc_auth() -> tuple[str, str]:
+    settings = get_settings()
+    return settings.loinc_username or "", settings.loinc_secret_key or ""
+
+
+def loinc_metadata(version: str | None = None) -> dict:
+    """``GET /Loinc`` (current release, or ``version``): version, releaseDate,
+    numberOfLoincs, downloadUrl, downloadMD5Hash (loinc.org/kb/api/download)."""
+    base = get_settings().loinc_api_base.rstrip("/")
+    params = {"version": version} if version else None
+    response = requests.get(f"{base}/Loinc", params=params, auth=_loinc_auth(), timeout=120)
+    response.raise_for_status()
+    meta = response.json()
+    for key in ("version", "downloadUrl", "downloadMD5Hash"):
+        if not meta.get(key):
+            raise SystemExit(f"loinc: the metadata has no {key}")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", str(meta["version"])):
+        raise SystemExit(f"loinc: unexpected version string {meta['version']!r}")
+    # The zip must come from the API host, never from a URL elsewhere.
+    if urlsplit(meta["downloadUrl"]).netloc != urlsplit(base).netloc:
+        raise SystemExit("loinc: downloadUrl is not on the LOINC API host")
+    return meta
+
+
+def _fetch_loinc(raw: Path, *, dry_run: bool, force: bool) -> None:
+    """One metadata call; the zip only when that version is not stored yet (LOINC
+    asks not to poll more than once a day). The MD5 from the metadata must match;
+    a mismatch is refused and never retried in the same run."""
+    if dry_run:
+        _LOG.info("loinc: would ask /Loinc for the current release and fetch it if new")
+        return
+    meta = loinc_metadata()
+    release = str(meta["version"])
+    folder = raw / "refmeta" / "loinc" / release
+    zip_name = f"Loinc_{release}.zip"
+    if not force and (folder / zip_name).is_file():
+        _LOG.info("loinc: %s already stored", release)
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    part = folder / f".{zip_name}.part"
+    digest = hashlib.md5(usedforsecurity=False)
+    with requests.get(meta["downloadUrl"], auth=_loinc_auth(), stream=True, timeout=600) as resp:
+        resp.raise_for_status()
+        with part.open("wb") as fh:
+            for chunk in resp.iter_content(_MD5_CHUNK):
+                fh.write(chunk)
+                digest.update(chunk)
+    if digest.hexdigest().lower() != str(meta["downloadMD5Hash"]).lower():
+        part.unlink(missing_ok=True)
+        raise SystemExit(f"loinc: MD5 mismatch for {release}; the file was removed")
+    os.replace(part, folder / zip_name)
+    _write(
+        folder,
+        {
+            "metadata.json": json.dumps(meta, indent=2, ensure_ascii=False).encode(),
+            "NOTICE.txt": (LOINC_NOTICE + "\n").encode(),
+            "PROVENANCE.txt": _provenance("LOINC_API_BASE", release).encode(),
+        },
+    )
+    _LOG.info("loinc: stored %s (%s LOINCs)", release, meta.get("numberOfLoincs"))
 
 
 def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import zipfile
 from pathlib import Path
 
@@ -399,3 +400,131 @@ def test_edqm_display_is_the_english_field_of_a_real_row(tmp_path: Path):
     (folder / "ROA.json").write_text(json.dumps({"content": [no_english]}), encoding="utf-8")
     rel = edqm.parse_edqm_dir(folder, notice=_NOTICE, source_file="x", release_id="r1")
     assert rel.codes[0].display == "Oral use"
+
+
+class _FakeResponse:
+    def __init__(self, *, json_body=None, content=b"", status=200):
+        self._json = json_body
+        self._content = content
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(response=self)
+
+    def json(self):
+        return self._json
+
+    def iter_content(self, size):
+        for i in range(0, len(self._content), size):
+            yield self._content[i : i + size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _loinc_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "LoincTable/Loinc.csv",
+            "LOINC_NUM,LONG_COMMON_NAME,STATUS,COMPONENT\n"
+            "2345-7,Glucose [Mass/volume] in Serum or Plasma,ACTIVE,Glucose\n",
+        )
+    return buf.getvalue()
+
+
+def _loinc_settings(monkeypatch):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        loinc_api_base="https://loinc.regenstrief.org/api/v1",
+        loinc_username="user",
+        loinc_secret_key="secret",
+    )
+    monkeypatch.setattr(download, "get_settings", lambda: fake)
+
+
+def _loinc_requests(monkeypatch, body: bytes, md5: str, calls: list):
+    meta = {
+        "version": "2.83",
+        "releaseDate": "2026-08-01T00:00:00",
+        "numberOfLoincs": 1,
+        "downloadUrl": "https://loinc.regenstrief.org/api/v1/Loinc/Download?version=2.83",
+        "downloadMD5Hash": md5,
+    }
+
+    def fake_get(url, params=None, auth=None, timeout=None, stream=False):
+        calls.append((url, auth, stream))
+        if url.endswith("/Loinc"):
+            return _FakeResponse(json_body=meta)
+        return _FakeResponse(content=body)
+
+    monkeypatch.setattr(download.requests, "get", fake_get)
+
+
+def test_loinc_download_verifies_md5_and_stores_a_loadable_release(monkeypatch, tmp_path: Path):
+    import hashlib
+
+    _loinc_settings(monkeypatch)
+    body = _loinc_zip_bytes()
+    calls: list = []
+    _loinc_requests(monkeypatch, body, hashlib.md5(body).hexdigest(), calls)
+    download._fetch_loinc(tmp_path, dry_run=False, force=False)
+    folder = tmp_path / "refmeta" / "loinc" / "2.83"
+    assert {p.name for p in folder.iterdir()} == {
+        "Loinc_2.83.zip",
+        "metadata.json",
+        "NOTICE.txt",
+        "PROVENANCE.txt",
+    }
+    assert all(auth == ("user", "secret") for _, auth, _ in calls)
+    rel = collect(tmp_path, ("loinc",), required=True)[0]
+    assert [(c.code, c.status) for c in rel.codes] == [("2345-7", "ACTIVE")]
+    # A second run makes one metadata call and no download.
+    calls.clear()
+    download._fetch_loinc(tmp_path, dry_run=False, force=False)
+    assert [url for url, _, _ in calls] == ["https://loinc.regenstrief.org/api/v1/Loinc"]
+
+
+def test_loinc_md5_mismatch_is_refused_and_leaves_no_zip(monkeypatch, tmp_path: Path):
+    _loinc_settings(monkeypatch)
+    calls: list = []
+    _loinc_requests(monkeypatch, _loinc_zip_bytes(), "0" * 32, calls)
+    with pytest.raises(SystemExit, match="MD5 mismatch"):
+        download._fetch_loinc(tmp_path, dry_run=False, force=False)
+    folder = tmp_path / "refmeta" / "loinc" / "2.83"
+    assert not any(p.suffix in (".zip", ".part") for p in folder.iterdir())
+    assert len([c for c in calls if c[2]]) == 1  # one download attempt, no retry
+
+
+def test_loinc_download_url_on_another_host_is_refused(monkeypatch):
+    _loinc_settings(monkeypatch)
+
+    def fake_get(url, params=None, auth=None, timeout=None, stream=False):
+        return _FakeResponse(
+            json_body={
+                "version": "2.83",
+                "downloadUrl": "https://elsewhere.example/Loinc.zip",
+                "downloadMD5Hash": "0" * 32,
+            }
+        )
+
+    monkeypatch.setattr(download.requests, "get", fake_get)
+    with pytest.raises(SystemExit, match="not on the LOINC API host"):
+        download.loinc_metadata()
+
+
+def test_loinc_without_keys_is_skipped_or_refused(monkeypatch, tmp_path: Path):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        raw_root=tmp_path, loinc_api_base="https://x", loinc_username=None, loinc_secret_key=None
+    )
+    monkeypatch.setattr(download, "get_settings", lambda: fake)
+    assert download.main(["--system", "loinc"]) == 3

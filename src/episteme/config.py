@@ -558,6 +558,10 @@ class Settings:
     edqm_stapi_base: str = ""
     edqm_stapi_login: str | None = field(default=None, repr=False)
     edqm_stapi_secret_key: str | None = field(default=None, repr=False)
+    # LOINC Download API (HTTP Basic: LOINC username and password). Never logged.
+    loinc_api_base: str = ""
+    loinc_username: str | None = field(default=None, repr=False)
+    loinc_secret_key: str | None = field(default=None, repr=False)
 
     def pg_dsn(self) -> str:
         return (
@@ -823,6 +827,9 @@ def get_settings() -> Settings:
         edqm_stapi_base=_get("EDQM_STAPI_BASE") or "",
         edqm_stapi_login=_get("EDQM_STAPI_LOGIN"),
         edqm_stapi_secret_key=_get("EDQM_STAPI_SECRET_KEY"),
+        loinc_api_base=_get("LOINC_API_BASE") or "",
+        loinc_username=_get("LOINC_USERNAME"),
+        loinc_secret_key=_get("LOINC_SECRET_KEY"),
     )
 
 
