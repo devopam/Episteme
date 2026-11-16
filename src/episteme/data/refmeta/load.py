@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -119,7 +120,11 @@ def load_release(
     marker = load_success_marker_path(
         processed_root, "refmeta", f"{release.system_key}__{release.release_id}"
     )
-    if marker.is_file() and not force:
+    database = _db_identity(conn)
+    digest = release_digest(release)
+    if not force and marker_counts(
+        marker, database=database, source_file=release.source_file, digest=digest
+    ):
         return "skipped"
     with conn.cursor() as cur:
         cur.execute("LOCK TABLE episteme.code_system IN EXCLUSIVE MODE")
@@ -191,10 +196,58 @@ def load_release(
             "release_id": release.release_id,
             "rows": len(release.codes),
             "source_file": release.source_file,
+            "database": database,
+            "digest": digest,
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
     )
     return "replaced" if replaced else "loaded"
+
+
+def release_digest(release: CodeRelease) -> str:
+    """SHA-256 of what a load writes (header and every code row), so a changed file
+    under the same release folder is loaded again."""
+    h = hashlib.sha256()
+    head = [
+        release.system_key,
+        release.release_id,
+        release.version,
+        release.oid,
+        release.licence_notice,
+        release.source_file,
+    ]
+    h.update(json.dumps(head, ensure_ascii=False).encode())
+    for row in release.codes:
+        item = [row.code, row.display, row.status, row.extra]
+        h.update(json.dumps(item, ensure_ascii=False, sort_keys=True).encode())
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def marker_counts(marker: Path, *, database: str, source_file: str, digest: str) -> bool:
+    """A load marker skips a release only when it was written for the same target
+    database, the same input (``input_key``) and the same content. A load into
+    episteme_test must not make the production load skip, and a replaced file in
+    the same release folder must load again."""
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        data.get("database") == database
+        and data.get("source_file") == source_file
+        and data.get("digest") == digest
+    )
+
+
+def _db_identity(conn: psycopg.Connection) -> str:
+    """Name, server address and port of the target database (no credentials)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database(), inet_server_addr()::text, inet_server_port()")
+        row = cur.fetchone()
+    return "|".join(str(v) for v in row) if row else "unknown"
 
 
 def _read_system(raw: Path, system: str) -> CodeRelease | None:

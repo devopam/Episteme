@@ -199,3 +199,79 @@ def test_download_skips_edqm_without_keys_and_refuses_an_explicit_request(tmp_pa
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _release(source_file: str, display: str = "Spontaneous Report") -> CodeRelease:
+    return CodeRelease(
+        system_key="ucum",
+        release_id="abc123",
+        licence_notice=_NOTICE,
+        source_file=source_file,
+        codes=(CodeRow(code="1", display=display),),
+    )
+
+
+def _marker(path: Path, **payload) -> Path:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_marker_counts_only_for_the_same_database_input_and_content(tmp_path: Path):
+    from episteme.data.refmeta.load import marker_counts, release_digest
+
+    rel = _release("refmeta/ucum/abc123/ucum-essence.xml")
+    digest = release_digest(rel)
+    m = _marker(
+        tmp_path / "m.ok",
+        database="episteme_test|::1|5433",
+        source_file=rel.source_file,
+        digest=digest,
+    )
+    assert marker_counts(
+        m, database="episteme_test|::1|5433", source_file=rel.source_file, digest=digest
+    )
+    # A load into episteme_test must not make the production load skip.
+    assert not marker_counts(
+        m, database="episteme|::1|5433", source_file=rel.source_file, digest=digest
+    )
+    # A changed file in the same release folder loads again.
+    changed = release_digest(_release(rel.source_file, display="Changed"))
+    assert changed != digest
+    assert not marker_counts(
+        m, database="episteme_test|::1|5433", source_file=rel.source_file, digest=changed
+    )
+    # A marker from before this change (no database / digest) never counts.
+    old = _marker(tmp_path / "old.ok", source_file=rel.source_file, rows=1)
+    assert not marker_counts(
+        old, database="episteme_test|::1|5433", source_file=rel.source_file, digest=digest
+    )
+    assert not marker_counts(tmp_path / "missing.ok", database="x", source_file="y", digest="z")
+    bad = tmp_path / "bad.ok"
+    bad.write_text("{not json", encoding="utf-8")
+    assert not marker_counts(bad, database="x", source_file="y", digest="z")
+
+
+def test_input_key_collision_two_inputs_never_share_a_marker_match(tmp_path: Path):
+    """Project rule: the stored source_file is input_key(path, raw); two different
+    inputs with the same file name (different release folders or systems) give
+    different keys, and a marker of one never skips the other."""
+    from episteme.data.checkpoint_markers import input_key
+    from episteme.data.refmeta.load import marker_counts, release_digest
+
+    raw = tmp_path / "raw"
+    a = raw / "refmeta" / "ucum" / "aaa" / "ucum-essence.xml"
+    b = raw / "refmeta" / "ucum" / "bbb" / "ucum-essence.xml"
+    c = raw / "refmeta" / "iso639" / "aaa" / "ucum-essence.xml"
+    for p in (a, b, c):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("<root/>", encoding="utf-8")
+    keys = {input_key(p, raw) for p in (a, b, c)}
+    assert len(keys) == 3
+    ka, kb = input_key(a, raw), input_key(b, raw)
+    m = _marker(
+        tmp_path / "m.ok", database="d", source_file=ka, digest=release_digest(_release(ka))
+    )
+    assert not marker_counts(m, database="d", source_file=kb, digest=release_digest(_release(kb)))
