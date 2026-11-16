@@ -145,16 +145,34 @@ Notes:
 
 | Source | What it contributes | License notes | Induction status |
 |--------|---------------------|---------------|------------------|
-| **UCUM** | Units of measure | UCUM license (typically free use with notice — confirm) | **List for Stream 2**; small artifact |
+| **UCUM** | Units of measure | UCUM License 1.1: lookup only, the essence file kept verbatim (section 2.3.1) | Wired as `refmeta` |
 | **MeSH** | Subject headings | NLM terms | Align with PubMed extract |
 | **RxNorm** | Drug names / normal forms | **UMLS license** required | Stream 2 if license held |
-| **LOINC** | Lab/observation codes | LOINC license (free but terms) | Stream 2 |
+| **LOINC** | Lab/observation codes | LOINC licence: lookup only, notice kept, Group 1 names unchanged (section 2.3.1) | Wired as `refmeta`; the owner places the table |
 | **HPO** | Phenotype terms | Open | Stream 2 / KG |
 | **MONDO** | Disease ontology | Open | Stream 2 / KG |
 | **ICD-10 / ICD-11** | Diagnosis coding | **WHO license terms** — not “public domain dump” everywhere | Stream 2 only with rights |
 | **ATC** (WHO) | Anat. therapeutic chemical class | WHO terms | Stream 2 with rights |
 | **ORDO / rare disease** | Rare disease ontology | Check | Candidate |
 | **NCIt** | NCI thesaurus | Open-ish NCI terms | Candidate |
+
+#### 2.3.1 Reference code lists (`refmeta`)
+
+Read 2026-11-15. These seven lists are lookup data. They are not `episteme.articles` rows and they are not part of the training corpus. The pipeline source is `refmeta` (download, then load into `episteme.code` / `episteme.code_current`). A row is not loaded without a non-empty licence notice. Project rulings, not legal determinations.
+
+Appendix I (F) of ICH E2B(R3) IG v5.03 (18 July 2025) is not the OID catalogue. On page 162 it says the XML code lists are provided separately. The OIDs are section 3.2, tables 1 to 8, of the same guide (ten IDMP rows in table 1, which have no numeric OID yet, then tables 2 to 8). The code stored is `t<n>:<element id>`, because many elements share one OID. The OID itself is kept beside the row. MedDRA, ISO, UCUM and EDQM *terms* are not copied from the guide. The MedDRA OID is stored only as an identifier ICH publishes.
+
+| List | What is stored | Source | Licence (project ruling) | Cadence |
+|------|----------------|--------|--------------------------|---------|
+| `e2b_oid` | OID, element id, name, scheme. Table 1 stores the ISO identifier standard and no numeric OID | IG v5.03 section 3.2 tables 1–8, package `e2/ig_v1_11` already under `<raw>/ich/` | ICH public licence, with attribution. Third-party term content is excluded | When a new IG package is downloaded |
+| `e2b_cl` | E2B code lists v2.11. Code `CLn:<code>`, English display, Japanese beside it, `cf=n` marked retired | `7_E2B Bilingual Code Lists v2.11` in the same package | Same ICH licence | With the IG package |
+| `loinc` | `LOINC_NUM`, `LONG_COMMON_NAME`, `STATUS`, and the six Group 1 parts under their published names | Regenstrief LOINC Table zip. The owner places it. No password is stored | Royalty-free use with the copyright notice and the version. Do not rename Group 1 fields. Do not use the table to publish a competing observation standard. Lookup only | About twice a year |
+| `iso3166` | alpha-2 (the code), alpha-3, numeric, English short name | Owner-placed CSV with the header `alpha_2,alpha_3,numeric,short_name_en`. A PDF of the standard is refused | ISO states that the code elements may be used, including in software. The standard text is sold and stays download-only (section 2.7) | When ISO 3166/MA publishes a change |
+| `iso639` | ISO 639-2: bibliographic alpha-3 (the code), terminologic alpha-3, alpha-2, English, French | Library of Congress UTF-8 list (`ISO639_2_URL`) | The Library of Congress states the file may be loaded into a database. SIL ISO 639-3 is out of scope: its terms forbid a product that redistributes the code set | When the Library of Congress updates the file |
+| `ucum` | A read projection of prefix, unit and base-unit. The essence XML stays verbatim on disk | `UCUM_ESSENCE_URL`, licence file `UCUM_LICENSE_URL` | UCUM License 1.1 (June 2024): reproduce and distribute verbatim with the notice. Do not modify the work or make a derivative standard. Class remains "use with caution, fine as a lookup" (section 2.7). The ontologies serializer still skips UCUM | When the upstream file changes |
+| `edqm` | Every class `/classes` returns, traditional and non-traditional (`tags`). Code `<class>:<term code>`. The other fields of each term are kept beside it | EDQM Standard Terms API (`EDQM_STAPI_BASE`). Fetched only when `EDQM_STAPI_LOGIN` and `EDQM_STAPI_SECRET_KEY` are set | Free of charge. The API conditions of use were not read. The loader refuses the release until the owner places `NOTICE.txt` or `CONDITIONS.txt` beside it | When EDQM publishes a version |
+
+MCPg reads `episteme.code_current`. A lookup names one system, one code, the version and the licence notice. It does not dump a whole list. No PBRER tool was added: those tools follow the section map.
 
 ### 2.4 Licensed vocabularies (RBAC / customer-supplied only)
 
