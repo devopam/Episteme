@@ -73,7 +73,7 @@ BODY_COLUMNS: tuple[str, ...] = (
     "title",
     "abstract",
     "body_text",
-    "text",
+    "text_override",
 )
 
 # Rows per streamed batch (the loader's memory bound) and the content-hash
@@ -276,6 +276,19 @@ def _iter_batches(
         yield cols
 
 
+def _text_override(
+    title: str | None, abstract: str | None, body_text: str | None, text: str | None
+) -> str | None:
+    """The stored ``article_body.text_override`` for one row.
+
+    NULL when the shard ``text`` equals the SQL join of the parts (the virtual ``text``
+    then derives it); ``''`` when ``text`` is NULL but the join is not (reads back NULL);
+    else the shard ``text`` itself."""
+    if text == article_schema.sql_join(title, abstract, body_text):
+        return None
+    return "" if text is None else text
+
+
 def _batch_tuples(cols: dict[str, list[Any]]) -> tuple[list[tuple], list[tuple]]:
     """(episteme.articles tuples in HOT_COLUMNS order, episteme.article_body
     tuples in BODY_COLUMNS order) -- the same values the old per-row dict path
@@ -293,6 +306,12 @@ def _batch_tuples(cols: dict[str, list[Any]]) -> tuple[list[tuple], list[tuple]]
         else:
             hot_lists.append(cols[c])
     hot = list(zip(*hot_lists, strict=True))
+    overrides = [
+        _text_override(t, a, b, x)
+        for t, a, b, x in zip(
+            cols["title"], cols["abstract"], cols["body_text"], cols["text"], strict=True
+        )
+    ]
     body = list(
         zip(
             cols["id"],
@@ -301,7 +320,7 @@ def _batch_tuples(cols: dict[str, list[Any]]) -> tuple[list[tuple], list[tuple]]
             cols["title"],
             cols["abstract"],
             cols["body_text"],
-            cols["text"],
+            overrides,
             strict=True,
         )
     )

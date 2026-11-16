@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from episteme.data import postgres_loader
-from episteme.data.article_schema import empty_article_row, finalize_row
+from episteme.data.article_schema import empty_article_row, finalize_row, sql_join
 from episteme.data.staging_writer import write_rows
 
 
@@ -51,6 +51,15 @@ def _dicts(shard: Path) -> list[dict]:
     return [json.loads(x) for x in shard.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
+def _legacy_override(r: dict) -> str | None:
+    """text_override per the spec rule, written out independently of the loader."""
+    joined = sql_join(r.get("title"), r.get("abstract"), r.get("body_text"))
+    text = r.get("text")
+    if text == joined:
+        return None
+    return "" if text is None else text
+
+
 def _legacy_tuples(rows: list[dict]) -> tuple[list[tuple], list[tuple]]:
     """The pre-change dict path, kept verbatim as the reference."""
     hot = [
@@ -64,7 +73,7 @@ def _legacy_tuples(rows: list[dict]) -> tuple[list[tuple], list[tuple]]:
             r.get("title"),
             r.get("abstract"),
             r.get("body_text"),
-            r.get("text"),
+            _legacy_override(r),
         )
         for r in rows
     ]
@@ -207,3 +216,43 @@ def test_batch_tuples_cap_oversized_list_elements_from_old_shards():
     authors = hot[0][postgres_loader.HOT_COLUMNS.index("authors")]
     assert authors[0] == "Jane Doe"
     assert authors[1].endswith("…")
+
+
+def _body_row(**kw):
+    cols = {
+        "id": ["x:1"],
+        "source": ["pmc"],
+        "year": [2024],
+        "title": [kw.get("title")],
+        "abstract": [kw.get("abstract")],
+        "body_text": [kw.get("body_text")],
+        "text": [kw.get("text")],
+    }
+    for c in postgres_loader.HOT_COLUMNS:
+        cols.setdefault(c, [None])
+    _, body = postgres_loader._batch_tuples(cols)
+    return dict(zip(postgres_loader.BODY_COLUMNS, body[0], strict=True))
+
+
+def test_body_columns_write_text_override_not_text():
+    assert "text_override" in postgres_loader.BODY_COLUMNS
+    assert "text" not in postgres_loader.BODY_COLUMNS
+
+
+def test_override_is_null_when_text_equals_the_join():
+    row = _body_row(title="T", abstract="A", text="T\n\nA")
+    assert row["text_override"] is None
+
+
+def test_override_is_text_when_it_differs():
+    row = _body_row(title="T", abstract="A", text="T\n\nA  B")
+    assert row["text_override"] == "T\n\nA  B"
+
+
+def test_override_is_empty_sentinel_when_text_null_and_parts_present():
+    row = _body_row(title="T", abstract="A", text=None)
+    assert row["text_override"] == ""
+
+
+def test_override_null_when_all_null():
+    assert _body_row()["text_override"] is None
