@@ -596,6 +596,8 @@ def _dedup_and_insert(cur, against: tuple[str, ...]) -> dict[str, int]:
 # mirror of DEDUP_AGAINST: an openalex load skips what pubmed / pmc hold; a later
 # pubmed / pmc load removes what openalex loaded first.
 SWEEP_INTO: dict[str, str] = {"pubmed": "openalex", "pmc": "openalex"}
+# A source in both maps would overwrite its own dedup counts.
+assert not set(DEDUP_AGAINST) & set(SWEEP_INTO), "DEDUP_AGAINST and SWEEP_INTO share a source"
 
 # Everything the sweep needs. The three indexes are the articles_openalex copies
 # of the parent pmid / pmcid / doi indexes, which a --bulk drop of the articles

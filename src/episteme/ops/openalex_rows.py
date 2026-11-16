@@ -2,19 +2,42 @@
 
 ``--bulk`` drops the key indexes that the openalex sweep of a pubmed/pmc load needs
 (Ruling R2), so run_pipeline.sh refuses it while ``episteme.articles_openalex`` holds a
-row. Exit 0: no rows (or no table). Exit 1: rows exist. Exit 2: error.
+row. Exit 0: migration 0012 present and no rows. Exit 1: rows exist. Exit 2: error, also when
+migration 0012 is missing (the loader would refuse too).
 """
 
 from __future__ import annotations
 
 import sys
 
+_NEEDS = (
+    ("episteme.articles_openalex", "SELECT to_regclass('episteme.articles_openalex') IS NOT NULL"),
+    (
+        "episteme.article_body_openalex",
+        "SELECT to_regclass('episteme.article_body_openalex') IS NOT NULL",
+    ),
+    (
+        "episteme._lineage.dedup_counts",
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = "
+        "'episteme' AND table_name = '_lineage' AND column_name = 'dedup_counts')",
+    ),
+)
+
+
+class MigrationMissing(RuntimeError):
+    pass
+
 
 def openalex_rows_exist(conn) -> bool:
+    """True when openalex rows exist. Raises MigrationMissing without migration 0012."""
     with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('episteme.articles_openalex') IS NOT NULL")
-        if not cur.fetchone()[0]:
-            return False
+        missing = []
+        for name, sql in _NEEDS:
+            cur.execute(sql)
+            if not cur.fetchone()[0]:
+                missing.append(name)
+        if missing:
+            raise MigrationMissing("missing " + ", ".join(missing) + ": apply migration 0012")
         cur.execute("SELECT EXISTS (SELECT 1 FROM episteme.articles_openalex)")
         return bool(cur.fetchone()[0])
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
+
 from episteme.ops import openalex_rows as mod
 
 
 class _Cur:
-    def __init__(self, table: bool, rows: bool):
-        self.table, self.rows, self._last = table, rows, None
+    def __init__(self, present: dict, rows: bool):
+        self.present, self.rows, self._last = present, rows, None
 
     def __enter__(self):
         return self
@@ -18,24 +20,38 @@ class _Cur:
         return False
 
     def execute(self, sql, params=None):
-        self._last = self.table if "to_regclass" in sql else self.rows
+        if "to_regclass('episteme.articles_openalex')" in sql:
+            self._last = self.present["articles"]
+        elif "to_regclass('episteme.article_body_openalex')" in sql:
+            self._last = self.present["body"]
+        elif "information_schema" in sql:
+            self._last = self.present["column"]
+        else:
+            self._last = self.rows
 
     def fetchone(self):
         return (self._last,)
 
 
 class _Conn:
-    def __init__(self, table=True, rows=True):
-        self._c = _Cur(table, rows)
+    def __init__(self, rows=True, **missing):
+        present = {"articles": True, "body": True, "column": True}
+        present.update({k: False for k in missing})
+        self._c = _Cur(present, rows)
 
     def cursor(self):
         return self._c
 
 
-def test_rows_no_rows_no_table():
-    assert mod.openalex_rows_exist(_Conn(True, True)) is True
-    assert mod.openalex_rows_exist(_Conn(True, False)) is False
-    assert mod.openalex_rows_exist(_Conn(False, True)) is False
+def test_rows_and_no_rows():
+    assert mod.openalex_rows_exist(_Conn(True)) is True
+    assert mod.openalex_rows_exist(_Conn(False)) is False
+
+
+@pytest.mark.parametrize("gone", ["articles", "body", "column"])
+def test_missing_migration_0012_raises(gone):
+    with pytest.raises(mod.MigrationMissing, match="migration 0012"):
+        mod.openalex_rows_exist(_Conn(False, **{gone: True}))
 
 
 def _patch(monkeypatch, conn=None, error=None):
@@ -49,9 +65,14 @@ def _patch(monkeypatch, conn=None, error=None):
 
 
 def test_main_exit_codes(monkeypatch):
-    _patch(monkeypatch, _Conn(True, True))
+    _patch(monkeypatch, _Conn(True))
     assert mod.main() == 1
-    _patch(monkeypatch, _Conn(True, False))
+    _patch(monkeypatch, _Conn(False))
     assert mod.main() == 0
     _patch(monkeypatch, error=RuntimeError("down"))
+    assert mod.main() == 2
+
+
+def test_main_exits_2_without_migration_0012(monkeypatch):
+    _patch(monkeypatch, _Conn(False, articles=True))
     assert mod.main() == 2

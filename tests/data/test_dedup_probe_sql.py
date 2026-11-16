@@ -59,3 +59,7 @@ def test_sweep_probe_refuses_unknown_target_and_key():
 
 def test_sweep_into_maps_pubmed_and_pmc_to_openalex():
     assert loader.SWEEP_INTO == {"pubmed": "openalex", "pmc": "openalex"}
+
+
+def test_dedup_against_and_sweep_into_share_no_source():
+    assert not set(loader.DEDUP_AGAINST) & set(loader.SWEEP_INTO)

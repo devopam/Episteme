@@ -136,7 +136,7 @@ if [ "$BULK" = "1" ] && [ "$SOURCE" = "openalex" ]; then
     # fail every shard and then rebuild the whole articles group for nothing.
     die "openalex does not support --bulk (its pubmed/pmc dedup needs the articles indexes that --bulk drops)" 2
 fi
-if [ "$BULK" = "1" ] && { [ "$SOURCE" = "pubmed" ] || [ "$SOURCE" = "pmc" ]; }     && { [ "$STAGE" = "load" ] || [ "$STAGE" = "all" ]; } && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
+if [ "$BULK" = "1" ] && { [ "$SOURCE" = "pubmed" ] || [ "$SOURCE" = "pmc" ]; }     && [ "$STAGE" = "load" ] && [ "${EPISTEME_DRY_RUN:-0}" != "1" ]; then
     # The pubmed/pmc load sweeps the openalex rows it duplicates (Ruling R2) and probes the key
     # indexes that --bulk drops; the loader would refuse after the drop and leave them dropped.
     oa_rc=0
