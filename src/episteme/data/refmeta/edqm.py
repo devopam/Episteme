@@ -127,7 +127,9 @@ def _read_json(path: Path) -> list[CodeRow]:
 
 
 def _json_name(item: dict) -> str | None:
-    for key in ("term", "name"):
+    # full_data_by_class rows carry the English term in "english" (2026-11-16);
+    # "translations" holds every language, so it is only a fallback.
+    for key in ("english", "term", "name"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -148,7 +150,7 @@ def _english_entry(entries: list) -> str | None:
             continue
         if not isinstance(entry, dict):
             continue
-        lang = str(entry.get("language") or entry.get("lang") or "")
+        lang = str(entry.get("language") or entry.get("lang") or entry.get("isocode") or "")
         text = entry.get("term") or entry.get("name")
         if isinstance(text, str) and text.strip():
             rank = 0 if lang.lower().startswith("en") else 1

@@ -50,6 +50,24 @@ ISO3166_NOTICE = (
 _ORDER = ("ucum", "iso639", "iso3166", "edqm")
 
 
+def edqm_notice(retrieved_at: str) -> str:
+    """The EDQM Standard Terms conditions of use (web services), as they bind a
+    lookup copy: source and permission statement, no independent modification,
+    retrieval date and the not-static notice. Text from EDQM, received by the
+    owner 2026-11-16."""
+    return (
+        "Data from the EDQM Standard Terms database (http://standardterms.edqm.eu), "
+        "reproduced with the permission of the European Directorate for the Quality "
+        "of Medicines & HealthCare, Council of Europe (EDQM).\n"
+        f"Retrieved from the Standard Terms database on {retrieved_at}. The EDQM "
+        "Standard Terms database is not a static list and content can change over time.\n"
+        "The Standard Terms data is not modified independently. No other data is "
+        "represented as part of Standard Terms; any data shown alongside it does not "
+        "originate from Standard Terms.\n"
+        "Access to the Standard Terms APIs is provided free of charge and without guarantee.\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download reference code lists")
     parser.add_argument("--system", action="append", choices=_ORDER)
@@ -200,7 +218,10 @@ def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:
         return
     catalogue = _paged(base, host, classes_uri)
     codes = class_codes(catalogue)
-    bodies = {code: _paged_document(base, host, code) for code in codes}
+    fetched = {code: _class_document(base, host, code) for code in codes}
+    skipped = [code for code, body in fetched.items() if body is None]
+    bodies = {code: body for code, body in fetched.items() if body is not None}
+    codes = [code for code in codes if code in bodies]
     try:
         versions = _edqm_get(base, versions_uri(), host)
         label = _version_label(versions.decode("utf-8", errors="replace"))
@@ -222,13 +243,14 @@ def _fetch_edqm(raw: Path, *, dry_run: bool, force: bool) -> None:
     files["classes.json"] = json.dumps({"content": catalogue}, ensure_ascii=False).encode()
     if versions:
         files["versions.json"] = versions
-    files["PROVENANCE.txt"] = _provenance("EDQM_STAPI_BASE", release).encode()
+    provenance = _provenance("EDQM_STAPI_BASE", release)
+    retrieved_at = provenance.split("fetched_at=", 1)[1].strip()
+    if skipped:
+        provenance += f"skipped_classes={','.join(skipped)} (server error, not retried)\n"
+    files["PROVENANCE.txt"] = provenance.encode()
+    files["NOTICE.txt"] = edqm_notice(retrieved_at).encode()
     _write(folder, files)
-    _LOG.info(
-        "edqm: stored %s (%s classes; place NOTICE.txt or CONDITIONS.txt before load)",
-        release,
-        len(codes),
-    )
+    _LOG.info("edqm: stored %s (%s classes, with the EDQM conditions notice)", release, len(codes))
 
 
 def _paged(base: str, host: str, uri_for) -> list:
@@ -244,20 +266,19 @@ def _paged(base: str, host: str, uri_for) -> list:
             raise SystemExit("edqm: a paged list did not end")
 
 
-def _paged_document(base: str, host: str, code: str) -> bytes:
-    """One class, in one request (``full_data_by_class`` is not paged)."""
+def _class_document(base: str, host: str, code: str) -> bytes | None:
+    """One class, in one request (``full_data_by_class`` is not paged). EDQM does
+    not allow repeated downloads (owner, 2026-11-16): a class that answers a server
+    error is skipped, never asked again in the same run; the caller records it.
+    (MAP answered 500 with tags=1 on 2026-11-16 and holds no terms.)"""
     try:
         body = _edqm_get(base, class_data_uri(code), host)
     except requests.HTTPError as exc:
-        # The server answers 500 for some classes with tags=1 (MAP, 2026-11-16)
-        # and 200 without tags: retry the class once without tags.
         status = exc.response.status_code if exc.response is not None else None
         if status is None or status < 500:
             raise
-        _LOG.warning(
-            "edqm: class %s failed with tags (HTTP %s); retrying without tags", code, status
-        )
-        body = _edqm_get(base, class_data_uri(code, tags=False), host)
+        _LOG.warning("edqm: class %s answered HTTP %s; skipped (no retry)", code, status)
+        return None
     rows = content_rows(body)
     return json.dumps({"content": rows}, ensure_ascii=False).encode()
 

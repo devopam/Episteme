@@ -331,7 +331,7 @@ def test_iso3166_download_writes_a_loadable_release(tmp_path: Path):
     assert len(list((tmp_path / "refmeta" / "iso3166").iterdir())) == 1
 
 
-def test_edqm_class_retries_without_tags_after_a_server_error(monkeypatch):
+def test_edqm_class_with_a_server_error_is_skipped_not_retried(monkeypatch):
     import requests
 
     calls: list[str] = []
@@ -345,8 +345,9 @@ def test_edqm_class_retries_without_tags_after_a_server_error(monkeypatch):
         return b'{"content": []}'
 
     monkeypatch.setattr(download, "_edqm_get", fake_get)
-    assert download._paged_document("https://h", "h", "MAP") == b'{"content": []}'
-    assert "tags=1" in calls[0] and "tags" not in calls[1]
+    # EDQM forbids repeated downloads: one request, no retry, the class is skipped.
+    assert download._class_document("https://h", "h", "MAP") is None
+    assert len(calls) == 1 and "tags=1" in calls[0]
 
 
 def test_edqm_class_does_not_retry_a_client_error(monkeypatch):
@@ -359,4 +360,42 @@ def test_edqm_class_does_not_retry_a_client_error(monkeypatch):
 
     monkeypatch.setattr(download, "_edqm_get", fake_get)
     with pytest.raises(requests.HTTPError):
-        download._paged_document("https://h", "h", "SOM")
+        download._class_document("https://h", "h", "SOM")
+
+
+def test_edqm_notice_carries_the_conditions_of_use():
+    text = download.edqm_notice("2026-11-16T08:48:56Z")
+    assert "EDQM Standard Terms database (http://standardterms.edqm.eu)" in text
+    assert "with the permission of the European Directorate" in text
+    assert "Retrieved from the Standard Terms database on 2026-11-16T08:48:56Z" in text
+    assert "not a static list" in text
+    assert "not modified independently" in text
+
+
+def test_edqm_display_is_the_english_field_of_a_real_row(tmp_path: Path):
+    """Shape of a real full_data_by_class row (2026-11-16): the English term is in
+    "english"; translations list every language and must not win."""
+    import json
+
+    folder = tmp_path / "edqm" / "r1"
+    folder.mkdir(parents=True)
+    row = {
+        "class": "ROA",
+        "code": "20053000",
+        "status": "Current",
+        "domain": "Human and Veterinary",
+        "english": "Oral use",
+        "translations": [
+            {"isocode": "ro", "term": "Administrare orală"},
+            {"isocode": "fr", "term": "Voie orale"},
+        ],
+    }
+    (folder / "ROA.json").write_text(json.dumps({"content": [row]}), encoding="utf-8")
+    (folder / "classes.json").write_text(json.dumps({"content": []}), encoding="utf-8")
+    rel = edqm.parse_edqm_dir(folder, notice=_NOTICE, source_file="x", release_id="r1")
+    assert [(r.code, r.display) for r in rel.codes] == [("ROA:20053000", "Oral use")]
+    no_english = {k: v for k, v in row.items() if k != "english"}
+    no_english["translations"].append({"isocode": "en", "term": "Oral use"})
+    (folder / "ROA.json").write_text(json.dumps({"content": [no_english]}), encoding="utf-8")
+    rel = edqm.parse_edqm_dir(folder, notice=_NOTICE, source_file="x", release_id="r1")
+    assert rel.codes[0].display == "Oral use"
