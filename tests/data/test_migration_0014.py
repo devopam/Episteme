@@ -47,9 +47,10 @@ _ROWS = [
     ("structured", "chembl", None, None, None, "S"),
     # all-empty row
     ("empty", "chembl", None, None, None, None),
-    # NULL text while a part is non-blank: must stay NULL (the '' sentinel)
-    ("nulltext", "pubmed", "T", None, "B", None),
 ]
+# No fixture has a NULL (or '') text with a non-blank part: 0014 is metadata only,
+# and the text_override tool's read-only precheck must report 0 such rows before
+# 0014 is applied (controller ruling, fix round 1).
 
 
 def _migration_sql() -> str:
@@ -115,14 +116,20 @@ def test_0014_text_unchanged_for_every_shape(scratch):
         assert cur.fetchone() == (f"{SCRATCH}.article_body_pmc", "T\n\nA B\n\nC")
 
 
-def test_0014_null_text_with_parts_stays_null(scratch):
+def _stored(conn, text_col: str) -> dict[str, tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT article_id, title, abstract, body_text, {text_col} FROM {SCRATCH}.article_body"
+        )
+        return {r[0]: r[1:] for r in cur.fetchall()}
+
+
+def test_0014_changes_no_row_data(scratch):
+    """Metadata only: every stored value is kept; text_override is the old text."""
+    before = _stored(scratch, "text")
     _migrate(scratch)
-    assert _texts(scratch)["nulltext"] is None
-    overrides = _overrides(scratch)
-    assert overrides["nulltext"] == ""
-    # only that row gets the sentinel; the all-empty row keeps a NULL override
-    assert overrides["empty"] is None
-    assert [k for k, v in overrides.items() if v == ""] == ["nulltext"]
+    assert _stored(scratch, "text_override") == before
+    assert _texts(scratch) == {k: v[3] for k, v in before.items()}
 
 
 def test_0014_is_idempotent(scratch):
@@ -140,7 +147,7 @@ def test_0014_is_idempotent(scratch):
     _migrate(scratch)  # second run: guarded, no error, no change
     assert _texts(scratch) == before
     assert _overrides(scratch) == overrides
-    assert overrides["lit"] is None  # the sentinel UPDATE did not run again
+    assert overrides["lit"] is None  # the guarded second run changed no row
 
 
 _EDGE_CASES = [
