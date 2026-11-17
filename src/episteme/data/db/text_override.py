@@ -9,7 +9,9 @@ Migration 0014 turns ``article_body.text`` into a VIRTUAL column; the stored col
 * ``repack``    ``REPACK`` of one partition (PG 19), only with ``--yes-repack``.
 
 Every batch walks the primary key (article_id, source), so no statement scans a whole
-partition. ``main()`` connects as the table owner and refuses any server except 19beta3.
+partition. ``nullout --order physical`` walks heap block ranges instead
+(``nullout_physical``). ``main()`` connects as the table owner and refuses any server
+except 19beta3.
 """
 
 from __future__ import annotations
@@ -158,6 +160,13 @@ def _walk(
         log(f"{partition}: scanned={seen}{extra()} last_key={hi[0]},{hi[1]}")
 
 
+# One predicate for both nullout orders. "%" is doubled: the statements run with params.
+_NULLOUT_PREDICATE = (
+    "text_override IS NOT NULL AND text_override <> ''"
+    " AND text_override = " + TEXT_JOIN_SQL.replace("%", "%%")
+)
+
+
 def nullout(
     conn: psycopg.Connection,
     partition: str,
@@ -174,8 +183,7 @@ def nullout(
     update = sql.SQL(
         "UPDATE {rel} SET text_override = NULL"
         " WHERE (article_id, source) > (%s, %s) AND (article_id, source) <= (%s, %s)"
-        " AND text_override IS NOT NULL AND text_override <> ''"
-        " AND text_override = " + TEXT_JOIN_SQL.replace("%", "%%")
+        " AND " + _NULLOUT_PREDICATE
     ).format(rel=_rel(partition, table))
     nulled = 0
 
@@ -198,6 +206,57 @@ def nullout(
     )
     log(f"{partition}: done rows={rows} nulled={nulled}")
     return {"rows": rows, "nulled": nulled}
+
+
+def nullout_physical(
+    conn: psycopg.Connection,
+    partition: str,
+    *,
+    batch_blocks: int,
+    start_block: int = 0,
+    log: Callable[[str], None] = _log_stdout,
+    table: str = DEFAULT_TABLE,
+) -> dict:
+    """Like ``nullout``, but walk heap block ranges (TID Range Scan) instead of keys.
+
+    The block count is read once at the start. Each step updates ``ctid`` in
+    ``[b, b + batch_blocks)`` in one transaction, so the heap is read sequentially.
+    Updated rows get new versions, possibly past the starting end block; they have
+    ``text_override`` NULL and never match again, so walking to the starting end block
+    covers every row that existed at the start. ``rows`` in the result is the
+    ``pg_class.reltuples`` estimate at the start (rows are not counted while walking).
+    Resume with ``start_block`` = the ``last_block`` of the last log line."""
+    validate_partition(conn, partition, table)
+    if batch_blocks < 1:
+        raise TextOverrideError("batch_blocks must be positive")
+    if start_block < 0:
+        raise TextOverrideError("start_block must not be negative")
+    schema, _ = _check_table(table)
+    qualified = f"{schema}.{partition}"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_relation_size(%s::regclass) / current_setting('block_size')::int,"
+            " (SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass)",
+            (qualified, qualified),
+        )
+        end_block, reltuples = cur.fetchone()
+    conn.rollback()
+    update = sql.SQL(
+        "UPDATE {rel} SET text_override = NULL"
+        " WHERE ctid >= %s::tid AND ctid < %s::tid"
+        " AND " + _NULLOUT_PREDICATE
+    ).format(rel=_rel(partition, table))
+    nulled = 0
+    for b in range(start_block, end_block, batch_blocks):
+        last = b + batch_blocks
+        with conn.cursor() as cur:
+            cur.execute(update, (f"({b},0)", f"({last},0)"))
+            nulled += cur.rowcount
+        conn.commit()
+        done = min(last, end_block)
+        log(f"{partition}: blocks={done}/{end_block} nulled={nulled} last_block={last}")
+    log(f"{partition}: done blocks={end_block} nulled={nulled}")
+    return {"rows": max(reltuples or 0, 0), "nulled": nulled, "end_block": end_block}
 
 
 def precheck(
@@ -359,6 +418,16 @@ def _positive_int(value: str) -> int:
     return n
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be at least 0: {value!r}")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m episteme.data.db.text_override",
@@ -377,6 +446,16 @@ def build_parser() -> argparse.ArgumentParser:
     no.add_argument(
         "--start-after", type=parse_start_after, help="resume after this 'article_id,source' key"
     )
+    no.add_argument(
+        "--order",
+        choices=("key", "physical"),
+        default="key",
+        help="key: primary-key order (default); physical: heap block ranges, for big partitions",
+    )
+    no.add_argument("--batch-blocks", type=_positive_int, help="blocks per step (physical only)")
+    no.add_argument(
+        "--start-block", type=_non_negative_int, help="resume at this block (physical only)"
+    )
     rp = sub.add_parser("repack", help="REPACK one partition")
     rp.add_argument("--partition", required=True)
     rp.add_argument("--yes-repack", action="store_true")
@@ -389,6 +468,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "repack" and not args.yes_repack:
         print("error: repack needs --yes-repack", file=sys.stderr)
         return 2
+
+    if args.action == "nullout":
+        if args.order == "physical" and args.start_after is not None:
+            print("error: --start-after is for --order key; use --start-block", file=sys.stderr)
+            return 2
+        if args.order == "key" and (args.start_block is not None or args.batch_blocks is not None):
+            print("error: --start-block and --batch-blocks need --order physical", file=sys.stderr)
+            return 2
 
     try:
         settings = get_settings()
@@ -432,6 +519,15 @@ def main(argv: list[str] | None = None) -> int:
                     bad += 0 if r["ok"] else 1
                 print("precheck: " + ("FAIL, do not apply 0014" if bad else "ok"))
                 return 1 if bad else 0
+            if args.action == "nullout" and args.order == "physical":
+                r = nullout_physical(
+                    conn,
+                    args.partition,
+                    batch_blocks=args.batch_blocks or settings.text_nullout_batch_blocks,
+                    start_block=args.start_block or 0,
+                )
+                print(f"nullout {args.partition}: rows={r['rows']} nulled={r['nulled']}")
+                return 0
             if args.action == "nullout":
                 r = nullout(
                     conn,

@@ -227,3 +227,12 @@ def test_text_nullout_batch_rows_default_and_override(clean_settings):
     clean_settings.setenv("EPISTEME_TEXT_NULLOUT_BATCH_ROWS", "123")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().text_nullout_batch_rows == 123
+
+
+def test_text_nullout_batch_blocks_default_and_override(clean_settings):
+    clean_settings.delenv("EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS", raising=False)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().text_nullout_batch_blocks == 4096
+    clean_settings.setenv("EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS", "9")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().text_nullout_batch_blocks == 9

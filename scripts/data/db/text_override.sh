@@ -5,6 +5,7 @@
 #   text_override.sh precheck --partition NAME | --all   # read-only; run BEFORE 0014; exit 1 if any row would change
 #   text_override.sh report                              # read-only sizes and sampled estimate
 #   text_override.sh nullout --partition NAME [--batch-rows N] [--start-after ID,SOURCE]
+#   text_override.sh nullout --partition NAME --order physical [--batch-blocks N] [--start-block B]
 #   text_override.sh repack --partition NAME --yes-repack
 # Tee the output to D:/episteme/_runlogs/. Refuses any server except 19beta3.
 set -uo pipefail

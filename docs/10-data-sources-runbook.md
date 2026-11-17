@@ -231,7 +231,9 @@ The tool is `bash scripts/data/db/text_override.sh`. It connects as `episteme_sy
 
 To resume a stopped `nullout`, run it again with `--start-after`. Pass the text after `last_key=` in the last log line (form `<article_id>,<source>`) to `--start-after ID,SOURCE`. A repeated batch changes nothing.
 
-Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULLOUT_BATCH_ROWS` (rows per batch) and `EPISTEME_REPACK_LOCK_TIMEOUT_S` (seconds). `--batch-rows` overrides the first for one run.
+For the big partitions (`article_body_pubmed`, `article_body_openalex`) use `--order physical`: `bash scripts/data/db/text_override.sh nullout --partition NAME --order physical`. The key order reads heap pages scattered over the whole partition (about 180 s per 50,000-row batch on pubmed). The physical order walks block ranges in sequence (a TID Range Scan). It reads the block count once, then updates `--batch-blocks` blocks per transaction (default 4096, about 32 MB). The log shows `blocks=DONE/END nulled=M last_block=B`. To resume a stopped physical run, pass `--start-block B` with the `last_block` of the last log line. `--start-after` is refused in physical mode, and `--start-block` is refused in key mode (exit 2). The last line is the same in both orders: `nullout NAME: rows=N nulled=M`. In physical order, `rows` is the `reltuples` estimate at the start. Rows loaded after the start are not walked: the loader already writes them in the final form.
+
+Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULLOUT_BATCH_ROWS` (rows per batch), `EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS` (blocks per physical step) and `EPISTEME_REPACK_LOCK_TIMEOUT_S` (seconds). `--batch-rows` and `--batch-blocks` override the first two for one run.
 
 After 0014, `precheck` is for information only.
 

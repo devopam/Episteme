@@ -136,11 +136,14 @@ class _StubCur:
     def execute(self, query, params=None):
         text = query if isinstance(query, str) else query.as_string(None)
         self.conn.executed.append(text)
+        self.conn.params.append(params)
         self.conn.last = text
 
     def fetchone(self):
         if "pg_inherits" in self.conn.last:
             return (1,)
+        if "pg_relation_size" in self.conn.last:
+            return (self.conn.end_block, 1234)
         if "array_agg" in self.conn.last:
             return self.conn.batches.pop(0)
         return None
@@ -149,6 +152,8 @@ class _StubCur:
 class _StubConn:
     def __init__(self, batches):
         self.executed = []
+        self.params = []
+        self.end_block = 5
         self.last = ""
         self.batches = list(batches)
 
@@ -243,6 +248,110 @@ def test_repack_sets_lock_timeout_before_repack():
     packs = [i for i, q in enumerate(conn.executed) if q.startswith("REPACK")]
     assert sets and packs and sets[0] < packs[0]
     assert "'7s'" in conn.executed[sets[0]]
+
+
+def test_physical_composed_sql_has_tid_range_and_the_shared_predicate():
+    conn = _StubConn([])
+    conn.end_block = 5
+    logs = []
+    res = tool.nullout_physical(conn, "article_body_pmc", batch_blocks=2, log=logs.append)
+    idx = [i for i, q in enumerate(conn.executed) if q.startswith("UPDATE")]
+    assert len(idx) == 3  # blocks 0-2, 2-4, 4-6
+    q = conn.executed[idx[0]]
+    assert "WHERE ctid >= %s::tid AND ctid < %s::tid AND " in q
+    assert q.endswith(tool._NULLOUT_PREDICATE)
+    assert q.endswith("text_override = " + TEXT_JOIN_SQL)
+    assert [conn.params[i] for i in idx] == [
+        ("(0,0)", "(2,0)"),
+        ("(2,0)", "(4,0)"),
+        ("(4,0)", "(6,0)"),
+    ]
+    assert logs[0] == "article_body_pmc: blocks=2/5 nulled=1 last_block=2"
+    assert "blocks=5/5" in logs[2] and logs[2].endswith("last_block=6")
+    assert res == {"rows": 1234, "nulled": 3, "end_block": 5}
+
+
+def test_physical_start_block_skips_earlier_blocks():
+    conn = _StubConn([])
+    conn.end_block = 5
+    tool.nullout_physical(
+        conn, "article_body_pmc", batch_blocks=2, start_block=4, log=lambda m: None
+    )
+    ups = [i for i, q in enumerate(conn.executed) if q.startswith("UPDATE")]
+    assert [conn.params[i] for i in ups] == [("(4,0)", "(6,0)")]
+
+
+def test_key_mode_and_physical_mode_share_one_predicate():
+    conn = _StubConn([(1, "a1", "pmc"), (0, None, None)])
+    tool.nullout(conn, "article_body_pmc", batch_rows=5, log=lambda m: None)
+    key_q = next(q for q in conn.executed if q.startswith("UPDATE"))
+    assert key_q.endswith(tool._NULLOUT_PREDICATE)
+
+
+@pytest.mark.parametrize("kw", [{"batch_blocks": 0}, {"batch_blocks": 1, "start_block": -1}])
+def test_physical_refuses_bad_numbers_before_any_update(kw):
+    conn = _StubConn([])
+    with pytest.raises(tool.TextOverrideError):
+        tool.nullout_physical(conn, "article_body_pmc", log=lambda m: None, **kw)
+    assert not any(q.startswith("UPDATE") for q in conn.executed)
+
+
+def test_physical_refuses_bad_partition_before_any_sql():
+    with pytest.raises(tool.TextOverrideError):
+        tool.nullout_physical(_NoDbConn(), "x; drop", batch_blocks=1, log=lambda m: None)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--order", "physical", "--start-after", "a,pmc"],
+        ["--start-block", "3"],
+        ["--batch-blocks", "3"],
+        ["--order", "key", "--start-block", "3"],
+    ],
+)
+def test_exclusive_order_options_exit_2(argv, capsys):
+    assert tool.main(["nullout", "--partition", "article_body_pmc", *argv]) == 2
+    assert "error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--batch-blocks", "0"],
+        ["--batch-blocks", "-1"],
+        ["--batch-blocks", "x"],
+        ["--start-block", "-1"],
+        ["--start-block", "x"],
+        ["--order", "random"],
+    ],
+)
+def test_physical_numeric_options_are_validated(argv):
+    with pytest.raises(SystemExit) as e:
+        tool.main(["nullout", "--partition", "article_body_pmc", "--order", "physical", *argv])
+    assert e.value.code == 2
+
+
+def test_physical_main_uses_settings_default_and_prints_final_line(monkeypatch, capsys):
+    _patch_main(monkeypatch)
+    seen = {}
+
+    def fake(conn, part, **kw):
+        seen.update(kw, part=part)
+        return {"rows": 10, "nulled": 4, "end_block": 3}
+
+    monkeypatch.setattr(tool, "nullout_physical", fake)
+    monkeypatch.setattr(
+        tool,
+        "get_settings",
+        lambda: type("S", (), {"text_nullout_batch_blocks": 77, "text_nullout_batch_rows": 10})(),
+    )
+    argv = ["nullout", "--partition", "article_body_pmc", "--order", "physical"]
+    assert tool.main(argv) == 0
+    assert capsys.readouterr().out.strip() == "nullout article_body_pmc: rows=10 nulled=4"
+    assert seen["batch_blocks"] == 77 and seen["start_block"] == 0
+    assert tool.main([*argv, "--batch-blocks", "5", "--start-block", "9"]) == 0
+    assert seen["batch_blocks"] == 5 and seen["start_block"] == 9
 
 
 # --------------------------------------------------------------------------------- pg
@@ -504,3 +613,85 @@ def test_table_name_refused_before_any_sql(table):
 def test_nullout_refuses_a_non_partition_name(body):
     with pytest.raises(tool.TextOverrideError):
         tool.nullout(body, "article_body_nope", batch_rows=10, log=lambda m: None)
+
+
+# ------------------------------------------------------------ physical order (pg)
+
+
+def _phys(conn, **kw):
+    kw.setdefault("batch_blocks", 1)
+    return tool.nullout_physical(conn, "article_body_pmc", log=kw.pop("log", lambda m: None), **kw)
+
+
+def _spread_rows():
+    """Enough wide rows to fill several heap blocks."""
+    import hashlib
+
+    def pad(n):
+        return "".join(hashlib.md5(f"{n}-{i}".encode()).hexdigest() for i in range(60))
+
+    rows = [(f"p{n:03d}", "T", "A", pad(n), f"T\n\nA\n\n{pad(n)}") for n in range(60)]
+    rows += [(f"q{n:03d}", "T", "A", pad(n), "different") for n in range(10)]
+    return rows
+
+
+@pytest.mark.pg
+def test_physical_nullout_nulls_only_equal_rows(body):
+    _insert(body, _fixture_rows())
+    res = _phys(body)
+    ov = _overrides(body)
+    assert res["nulled"] == 3
+    assert ov["a1"] is None and ov["a2"] is None and ov["a6"] is None
+    assert ov["a3"] == "different text" and ov["a4"] == "" and ov["a5"] is None
+
+
+@pytest.mark.pg
+def test_physical_nullout_is_restartable_from_logged_block(body):
+    rows = _spread_rows()
+    _insert(body, rows)
+    _phys(body)
+    full = _overrides(body)
+    with body.cursor() as cur:
+        cur.execute("DELETE FROM episteme.article_body")
+    body.commit()
+    _insert(body, rows)
+
+    class Stop(Exception):
+        pass
+
+    logged = []
+
+    def log_then_stop(msg):
+        logged.append(msg)
+        raise Stop
+
+    with pytest.raises(Stop):
+        _phys(body, log=log_then_stop)
+    last_block = int(logged[0].rsplit("last_block=", 1)[1])
+    assert last_block == 1
+    partial = _overrides(body)
+    assert any(v is None for v in partial.values()) and any(v is not None for v in partial.values())
+    _phys(body, start_block=last_block)
+    assert _overrides(body) == full
+
+
+@pytest.mark.pg
+def test_physical_nullout_text_unchanged(body):
+    _insert(body, _fixture_rows() + _spread_rows())
+    before = _texts(body)
+    _phys(body)
+    assert _texts(body) == before
+
+
+@pytest.mark.pg
+def test_physical_update_uses_tid_range_scan(body):
+    _insert(body, _fixture_rows())
+    stmt = tool.sql.SQL(
+        "EXPLAIN UPDATE {rel} SET text_override = NULL"
+        " WHERE ctid >= %s::tid AND ctid < %s::tid AND " + tool._NULLOUT_PREDICATE
+    ).format(rel=tool._rel("article_body_pmc"))
+    with body.cursor() as cur:
+        cur.execute(stmt, ("(0,0)", "(4096,0)"))
+        plan = "\n".join(r[0] for r in cur.fetchall())
+    body.rollback()
+    assert "Tid Range Scan" in plan, plan
