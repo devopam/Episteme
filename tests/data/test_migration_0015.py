@@ -108,3 +108,45 @@ def test_sync_writes_config(pg_conn):
         "source_subset": len(LOOKUP_SOURCE_SUBSETS),
         "result_limit": len(api_result_limits()),
     }
+
+
+def test_0015_upgrades_the_first_draft_shapes(pg_conn):
+    """A database with the first 0015 draft (claim_row.confidence real, substance_family
+    without provenance columns) gets the final shapes when 0015 is applied again."""
+    _apply(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute("DROP FUNCTION IF EXISTS episteme_api.substance_family(bigint)")
+        cur.execute("DROP FUNCTION IF EXISTS episteme_api_internal.substance_family(bigint)")
+        cur.execute(
+            "ALTER TYPE episteme_api_internal.claim_row ALTER ATTRIBUTE confidence TYPE real"
+        )
+        cur.execute(
+            "CREATE FUNCTION episteme_api_internal.substance_family(p_substance_key bigint) "
+            "RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, "
+            "preferred_name text) LANGUAGE sql AS $$ SELECT 1::bigint, 1::bigint, "
+            "NULL::text, NULL::text WHERE false $$"
+        )
+        cur.execute(
+            "CREATE FUNCTION episteme_api.substance_family(p_substance_key bigint) "
+            "RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, "
+            "preferred_name text) LANGUAGE sql AS $$ SELECT * FROM "
+            "episteme_api_internal.substance_family(p_substance_key) $$"
+        )
+    pg_conn.commit()
+    _apply(pg_conn)
+    assert (
+        _one(
+            pg_conn,
+            "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+            "WHERE a.attrelid = 'episteme_api_internal.claim_row'::regclass "
+            "AND a.attname = 'confidence'",
+        )
+        == "double precision"
+    )
+    for schema in ("episteme_api_internal", "episteme_api"):
+        result = _one(
+            pg_conn,
+            "SELECT pg_get_function_result(%s::regprocedure)",
+            (f"{schema}.substance_family(bigint)",),
+        )
+        assert result.endswith("source text, release_id text, licence text)")

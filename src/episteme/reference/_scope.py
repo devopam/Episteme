@@ -83,7 +83,9 @@ def substance_scope(conn: psycopg.Connection, substance_key: int) -> SubstanceSc
     if not rows:
         return None
     moiety = int(rows[0][1])
-    family = [(key, unii, name) for key, _, unii, name in rows]
+    # Columns: substance_key, moiety_key, unii, preferred_name, source, release_id,
+    # licence. The scope keeps the first four; the provenance is for SQL callers.
+    family = [(row[0], row[2], row[3]) for row in rows]
     keys = tuple(dict.fromkeys([int(substance_key)] + [int(k) for k, _, _ in family]))
     with conn.cursor() as cur:
         cur.execute(

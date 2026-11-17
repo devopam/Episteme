@@ -12,6 +12,7 @@ from episteme.config import LOOKUP_SOURCE_SUBSETS
 from episteme.reference import _api, _scope, api_settings, resolve
 
 from . import _legacy as legacy
+from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS
 
 pytestmark = pytest.mark.pg
@@ -34,13 +35,25 @@ def api_schema(ref_schema):
 @pytest.fixture
 def db(api_schema, ref_db, clean_substance):
     """The ref_db substances (1 metformin, 2 its salt, 3 aspirin), the salt also named
-    'metformin' (an ambiguous name), and the API settings from config."""
+    'metformin' (an ambiguous name), three moieties 4-6 named 'trio' (n = 3), and the
+    API settings from config."""
     api_settings.sync(ref_db)
     with ref_db.cursor() as cur:
         cur.execute(
             "INSERT INTO episteme.substance_xref "
             "(substance_key, id_type, id_value, method, confidence, source) VALUES "
             "(2, 'name', 'metformin', 'normalised_name', 1.0, 'fda_substance')"
+        )
+        cur.execute(
+            "INSERT INTO episteme.substance (substance_key, unii, preferred_name, moiety_key) "
+            "VALUES (4, 'UNIITRI04', 'Trio A', 4), (5, 'UNIITRI05', 'Trio B', 5), "
+            "(6, 'UNIITRI06', 'Trio C', 6)"
+        )
+        cur.execute(
+            "INSERT INTO episteme.substance_xref "
+            "(substance_key, id_type, id_value, method, confidence, source) "
+            "SELECT k, 'name', 'trio', 'normalised_name', 1.0, 'fda_substance' "
+            "FROM generate_series(4, 6) AS k"
         )
     ref_db.commit()
     return ref_db
@@ -62,6 +75,7 @@ def _rows(conn, query, params=()):
         ("no such drug", None),  # unknown name
         ("   ", None),  # empty
         ("metformin", None),  # ambiguous: moiety 1, salt 2
+        ("trio", None),  # ambiguous, n = 3: confidence 1/3 exactly as the float
         ("aspirin", "unii"),  # id_type 'unii' given a name
         ("UNIIMET01", "unii"),
         ("metformin", "name"),
@@ -70,7 +84,14 @@ def _rows(conn, query, params=()):
 def test_resolve_parity(db, text, id_type):
     old = legacy.resolve_entity(db, text, **KW, id_type=id_type)
     new = resolve.resolve_entity(db, text, **KW, id_type=id_type)
-    assert new == old
+    assert_same_fields(new, old)
+
+
+def test_resolve_one_third_is_exact(db):
+    (c,) = resolve.resolve_entity(db, "trio", **KW).claims
+    assert c.confidence == 1 / 3
+    assert [a.confidence for a in c.alternatives] == [1 / 3, 1 / 3]
+    assert c.confidence_basis == "3 substances share this name"
 
 
 def test_resolve_ambiguous_returns_alternatives(db):
@@ -136,20 +157,47 @@ def test_resolve_release_none_without_release(db):
     assert c.provenance.release is None
 
 
-@pytest.mark.parametrize("key", [1, 2, 3, 99])
+@pytest.mark.parametrize("key", [1, 2, 3, 4, 99])
 def test_family_matches_scope(db, key):
-    assert _scope.substance_scope(db, key) == legacy.substance_scope(db, key)
+    assert_same_fields(_scope.substance_scope(db, key), legacy.substance_scope(db, key))
 
 
 def test_family_rows(db):
-    expected = [(1, 1, "UNIIMET01", "Metformin"), (2, 1, "UNIIMET02", "Metformin Hydrochloride")]
+    lic = LOOKUP_SOURCE_SUBSETS["substance"]
+    expected = [
+        (1, 1, "UNIIMET01", "Metformin", "substance", None, lic),
+        (2, 1, "UNIIMET02", "Metformin Hydrochloride", "substance", None, lic),
+    ]
     for schema in ("episteme_api_internal", "episteme_api"):
         assert _rows(db, f"SELECT * FROM {schema}.substance_family(2)") == expected
         assert _rows(db, f"SELECT * FROM {schema}.substance_family(3)") == [
-            (3, 3, "UNIIASP03", "Aspirin")
+            (3, 3, "UNIIASP03", "Aspirin", "substance", None, lic)
         ]
         assert _rows(db, f"SELECT * FROM {schema}.substance_family(99)") == []
     assert _api.call(db, "substance_family", 1) == expected
+
+
+def test_family_release_filled(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.reg_release (dataset, release_id, rows, status, is_latest) "
+            "VALUES ('fda_substance', '2026-10', 3, 'loaded', false), "
+            "('fda_substance', '2026-11', 3, 'loaded', true)"
+        )
+    db.commit()
+    for schema in ("episteme_api_internal", "episteme_api"):
+        rows = _rows(db, f"SELECT source, release_id FROM {schema}.substance_family(1)")
+        assert rows == [("substance", "2026-11"), ("substance", "2026-11")]
+
+
+def test_claim_row_confidence_is_double(db):
+    (typ,) = _rows(
+        db,
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+        "WHERE a.attrelid = 'episteme_api_internal.claim_row'::regclass "
+        "AND a.attname = 'confidence'",
+    )[0]
+    assert typ == "double precision"
 
 
 def test_public_resolve_caps(db):

@@ -351,7 +351,7 @@ BEGIN
             text              text,
             value             text,
             method            text,
-            confidence        real,
+            confidence        double precision,
             confidence_basis  text,
             source            text,
             release_id        text,
@@ -374,6 +374,21 @@ BEGIN
             licence     text,
             note        text
         );
+    END IF;
+END
+$$;
+
+-- claim_row.confidence was `real` in the first 0015 draft; a database that has that
+-- shape gets double precision (no table column uses this type, so ALTER is safe).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = 'episteme_api_internal.claim_row'::regclass
+           AND a.attname = 'confidence' AND NOT a.attisdropped
+           AND a.atttypid = 'real'::regtype) THEN
+        ALTER TYPE episteme_api_internal.claim_row
+            ALTER ATTRIBUTE confidence TYPE double precision;
     END IF;
 END
 $$;
@@ -516,6 +531,27 @@ BEGIN
 END
 $$;
 
+-- The is_latest release of the substance dataset 'fda_substance'
+-- (load_substance.DATASET), or NULL (also when reg_release does not exist). The
+-- release_id of every substance row (resolve_entity, substance_family).
+CREATE OR REPLACE FUNCTION episteme_api_internal.substance_release()
+RETURNS text
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v text;
+BEGIN
+    IF to_regclass('episteme.reg_release') IS NULL THEN
+        RETURN NULL;
+    END IF;
+    SELECT rr.release_id INTO v
+      FROM episteme.reg_release rr
+     WHERE rr.dataset = 'fda_substance' AND rr.is_latest;
+    RETURN v;
+END
+$$;
+
 -- Entity resolution: a drug name or a UNII to substances (SQL form of the former
 -- resolve.py query). The input is trimmed; the UNII form is its upper case, the name
 -- key is norm_name with inner white space collapsed (load_substance.resolve_key).
@@ -540,7 +576,7 @@ DECLARE
     v_raw     text := regexp_replace(coalesce(p_text, ''), '^\s+|\s+$', '', 'g');
     v_key     text;
     v_unii    text;
-    v_release text;
+    v_release text := episteme_api_internal.substance_release();
     v_licence text := episteme_api_internal.licence_for('substance');
     v_missing episteme_api_internal.claim_row;
 BEGIN
@@ -555,11 +591,7 @@ BEGIN
         RETURN NEXT v_missing;
         RETURN;
     END IF;
-    IF to_regclass('episteme.reg_release') IS NOT NULL THEN
-        SELECT rr.release_id INTO v_release
-          FROM episteme.reg_release rr
-         WHERE rr.dataset = 'fda_substance' AND rr.is_latest;
-    END IF;
+    v_release := episteme_api_internal.substance_release();
     RETURN QUERY
     WITH matched AS (
         SELECT s.substance_key FROM episteme.substance s
@@ -590,7 +622,7 @@ BEGIN
            coalesce(k.pname, k.unii, k.skey::text),
            k.skey::text,
            CASE WHEN k.n = 1 THEN 'fetched' ELSE 'mapped' END,
-           (1.0 / k.n)::real,
+           1.0::double precision / k.n,
            CASE WHEN k.n = 1 THEN 'exact UNII or normalised name match'
                 ELSE k.n || ' substances share this name' END,
            'substance'::text,
@@ -609,16 +641,34 @@ $$;
 
 -- The moiety family of a substance (SQL form of _scope.substance_scope): the moiety
 -- M = COALESCE(moiety_key, substance_key) of the input, and every substance whose own
--- COALESCE(moiety_key, substance_key) is M. moiety_key is M on every row. No rows
--- when the substance or the substance table does not exist.
+-- COALESCE(moiety_key, substance_key) is M. moiety_key is M on every row. Provenance
+-- per row: source 'substance', the substance release, licence_for('substance'). No
+-- rows when the substance or the substance table does not exist.
+-- The first 0015 draft returned no provenance columns; a return type cannot change
+-- in place, so an old shape is dropped (both functions) before the CREATE.
+DO $$
+BEGIN
+    IF to_regprocedure('episteme_api_internal.substance_family(bigint)') IS NOT NULL
+       AND pg_get_function_result(
+               'episteme_api_internal.substance_family(bigint)'::regprocedure)
+           NOT LIKE '%licence text%' THEN
+        DROP FUNCTION IF EXISTS episteme_api.substance_family(bigint);
+        DROP FUNCTION episteme_api_internal.substance_family(bigint);
+    END IF;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION episteme_api_internal.substance_family(p_substance_key bigint)
-RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text)
+RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text,
+               source text, release_id text, licence text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 #variable_conflict use_column
 DECLARE
-    v_m bigint;
+    v_m       bigint;
+    v_release text := episteme_api_internal.substance_release();
+    v_licence text := episteme_api_internal.licence_for('substance');
 BEGIN
     IF to_regclass('episteme.substance') IS NULL THEN
         RETURN;
@@ -631,7 +681,8 @@ BEGIN
     END IF;
     -- Written so that substance_moiety_key_idx and the primary key serve it.
     RETURN QUERY
-    SELECT s.substance_key, v_m, s.unii, s.preferred_name
+    SELECT s.substance_key, v_m, s.unii, s.preferred_name,
+           'substance'::text, v_release, v_licence
       FROM episteme.substance s
      WHERE s.moiety_key = v_m OR (s.moiety_key IS NULL AND s.substance_key = v_m)
      ORDER BY s.substance_key;
@@ -651,11 +702,13 @@ $$;
 
 -- A family is one moiety and its salts and esters: small, so no cap.
 CREATE OR REPLACE FUNCTION episteme_api.substance_family(p_substance_key bigint)
-RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text)
+RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text,
+               source text, release_id text, licence text)
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
-    SELECT f.substance_key, f.moiety_key, f.unii, f.preferred_name
+    SELECT f.substance_key, f.moiety_key, f.unii, f.preferred_name,
+           f.source, f.release_id, f.licence
       FROM episteme_api_internal.substance_family(p_substance_key) AS f
 $$;
 
