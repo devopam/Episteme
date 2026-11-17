@@ -384,4 +384,335 @@ AS $$
       FROM episteme_api_internal.substance_family(p_substance_key) AS f
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Task 3: approval_status and safety_actions (SQL form of the former
+-- lookups._reg_lookup, _reg_claim and _get). Family 'regulatory'.
+-- ---------------------------------------------------------------------------
+
+-- A note row (the note in `text`) and a missing row (the source in `source`, with
+-- its licence). claim_group and alt_rank stay NULL.
+CREATE OR REPLACE FUNCTION episteme_api_internal.note_row(p_text text)
+RETURNS episteme_api_internal.claim_row
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT ROW('note', NULL, NULL, p_text, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL)::episteme_api_internal.claim_row
+$$;
+
+CREATE OR REPLACE FUNCTION episteme_api_internal.missing_row(p_source text)
+RETURNS episteme_api_internal.claim_row
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT ROW('missing', NULL, NULL, NULL, NULL, NULL, NULL, NULL, p_source, NULL, NULL,
+               NULL, NULL, episteme_api_internal.licence_for(p_source))
+           ::episteme_api_internal.claim_row
+$$;
+
+-- Scalar values at a dotted path of a jsonb document (the former lookups._get).
+-- At each step one level of array is walked and only objects are read; a missing
+-- key and a JSON null are skipped. The values found are flattened one level. A
+-- string is its text; a JSON null inside a final array is 'None' and a boolean is
+-- 'True' or 'False' (as Python str()); any other value is its jsonb text. Each
+-- value is stripped of outer white space; empty values and repeats are dropped,
+-- first-seen order kept. Never NULL.
+CREATE OR REPLACE FUNCTION episteme_api_internal.json_values(p_doc jsonb, p_path text)
+RETURNS text[]
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_vals jsonb[] := ARRAY[p_doc];
+    v_next jsonb[];
+    v_part text;
+    v_val  jsonb;
+    v_item jsonb;
+    v_s    text;
+    v_out  text[] := '{}';
+BEGIN
+    IF p_doc IS NULL OR p_path IS NULL THEN
+        RETURN v_out;
+    END IF;
+    FOREACH v_part IN ARRAY string_to_array(p_path, '.') LOOP
+        v_next := '{}';
+        FOREACH v_val IN ARRAY v_vals LOOP
+            FOR v_item IN
+                SELECT e FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(v_val) = 'array' THEN v_val
+                         ELSE jsonb_build_array(v_val) END) AS e
+            LOOP
+                IF jsonb_typeof(v_item) = 'object'
+                   AND (v_item -> v_part) IS NOT NULL
+                   AND jsonb_typeof(v_item -> v_part) <> 'null' THEN
+                    v_next := array_append(v_next, v_item -> v_part);
+                END IF;
+            END LOOP;
+        END LOOP;
+        v_vals := v_next;
+    END LOOP;
+    FOREACH v_val IN ARRAY v_vals LOOP
+        FOR v_item IN
+            SELECT e FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(v_val) = 'array' THEN v_val
+                     ELSE jsonb_build_array(v_val) END) AS e
+        LOOP
+            v_s := CASE jsonb_typeof(v_item)
+                       WHEN 'string' THEN v_item #>> '{}'
+                       WHEN 'null' THEN 'None'
+                       WHEN 'boolean' THEN CASE WHEN v_item = 'true'::jsonb
+                                                THEN 'True' ELSE 'False' END
+                       ELSE v_item::text
+                   END;
+            v_s := regexp_replace(v_s, '^\s+|\s+$', '', 'g');
+            IF v_s <> '' AND NOT (v_s = ANY (v_out)) THEN
+                v_out := array_append(v_out, v_s);
+            END IF;
+        END LOOP;
+    END LOOP;
+    RETURN v_out;
+END
+$$;
+
+-- Payload fields of a reg_record claim, per dataset (the former lookups
+-- _STATUS_FIELDS, _DETAIL_FIELDS and _NO_STATUS_FIELD). The first status field with
+-- a value gives the claim value. status_note: whether a claim with no status value
+-- adds '<dataset>: status field not found' (an Article 57 entry is itself the fact,
+-- so it has no status field). Article 57 names are checked in
+-- parsers.ARTICLE57_COLUMNS. The EMA keys were checked against the loaded 2026-11
+-- releases (2026-11-10); the FDA keys are not checked against a downloaded file.
+-- The arrays are never NULL.
+CREATE OR REPLACE FUNCTION episteme_api_internal.reg_fields(
+    p_dataset text,
+    OUT status_fields text[], OUT detail_fields text[], OUT status_note boolean)
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT coalesce(v.s, '{}'::text[]), coalesce(v.d, '{}'::text[]),
+           p_dataset IS DISTINCT FROM 'ema_article57'
+      FROM (SELECT 1) AS one
+      LEFT JOIN (VALUES
+          ('fda_drugsfda', ARRAY['products.marketing_status'],
+                           ARRAY['sponsor_name', 'products.brand_name']),
+          ('ema_medicines', ARRAY['medicine_status'],
+                            ARRAY['name_of_medicine',
+                                  'marketing_authorisation_developer_applicant_holder']),
+          ('ema_article57', '{}'::text[],
+                            ARRAY['product_name', 'product_authorisation_country',
+                                  'marketing_authorisation_holder']),
+          ('ema_outside_eu', ARRAY['ema_opinion_status'], ARRAY['name_of_medicine']),
+          ('fda_enforcement', ARRAY['classification', 'status'],
+                              ARRAY['recall_number', 'reason_for_recall']),
+          ('ema_referrals', ARRAY['current_status'],
+                            ARRAY['referral_name', 'reference_number']),
+          ('ema_dhpc', ARRAY['dhpc_type', 'regulatory_outcome'],
+                       ARRAY['name_of_medicine', 'dhpc_type']),
+          ('ema_psusa', ARRAY['regulatory_outcome'], ARRAY['procedure_number'])
+      ) AS v(ds, s, d) ON v.ds = p_dataset
+$$;
+
+-- reg_record claims of a substance's moiety family, one dataset after the other in
+-- p_datasets order (the former lookups._reg_lookup).
+--   * No substance tables, or an unknown substance: the note 'substance <key> not
+--     found' and every dataset as a 'missing' row.
+--   * A dataset is a 'missing' row when reg_record or reg_release does not exist or
+--     the dataset has no is_latest release (no fallback to an older release).
+--   * Names: the family's preferred names (norm_name, inner white space collapsed,
+--     as reg_record.substance_names) and the family's 'name' xref rows. With no name,
+--     no claims and the note 'substance <key> has no name to match' (last row).
+--   * Claims: the records of the latest release whose substance_names overlap the
+--     names, ordered by event_date DESC NULLS LAST, record_key. With p_interval, only
+--     event_date BETWEEN p_from AND p_to, after the note '<dataset>: <n> records with
+--     no date not checked' (n > 0).
+--   * A dataset with a claim that has no status value adds the note '<dataset>:
+--     status field not found' after its claims (see reg_fields).
+-- Dataset and release are SQL literals in the reg_record queries, so that the plan
+-- prunes to one leaf partition (migration 0010).
+CREATE OR REPLACE FUNCTION episteme_api_internal.reg_lookup(
+    p_datasets text[], p_substance_key bigint, p_interval boolean,
+    p_from date, p_to date)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_ds        text;
+    v_release   text;
+    v_names     text[];
+    v_keys      bigint[];
+    v_has_reg   boolean;
+    v_undated   bigint;
+    v_sfields   text[];
+    v_dfields   text[];
+    v_snote     boolean;
+    v_no_status boolean;
+    v_group     int := 0;
+    v_field     text;
+    v_vals      text[];
+    v_status    text[];
+    v_parts     text[];
+    v_where     text;
+    v_rec       record;
+    v_row       episteme_api_internal.claim_row;
+BEGIN
+    IF to_regclass('episteme.substance') IS NOT NULL
+       AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
+        SELECT array_agg(f.substance_key ORDER BY f.substance_key) INTO v_keys
+          FROM episteme_api_internal.substance_family(p_substance_key) AS f;
+    END IF;
+    IF v_keys IS NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('substance %s not found', p_substance_key));
+        FOREACH v_ds IN ARRAY p_datasets LOOP
+            RETURN NEXT episteme_api_internal.missing_row(v_ds);
+        END LOOP;
+        RETURN;
+    END IF;
+    SELECT coalesce(array_agg(DISTINCT n.nm), '{}'::text[]) INTO v_names
+      FROM (SELECT btrim(regexp_replace(episteme_api_internal.norm_name(f.preferred_name),
+                                        '\s+', ' ', 'g')) AS nm
+              FROM episteme_api_internal.substance_family(p_substance_key) AS f
+            UNION ALL
+            SELECT x.id_value
+              FROM episteme.substance_xref x
+             WHERE x.substance_key = ANY (v_keys) AND x.id_type = 'name') AS n
+     WHERE n.nm IS NOT NULL AND n.nm <> '';
+    v_has_reg := to_regclass('episteme.reg_record') IS NOT NULL
+                 AND to_regclass('episteme.reg_release') IS NOT NULL;
+    FOREACH v_ds IN ARRAY p_datasets LOOP
+        v_release := NULL;
+        IF v_has_reg THEN
+            SELECT rr.release_id INTO v_release
+              FROM episteme.reg_release rr
+             WHERE rr.dataset = v_ds AND rr.is_latest;
+        END IF;
+        IF v_release IS NULL THEN
+            RETURN NEXT episteme_api_internal.missing_row(v_ds);
+            CONTINUE;
+        END IF;
+        IF cardinality(v_names) = 0 THEN
+            CONTINUE;
+        END IF;
+        v_where := format(
+            'rr.dataset = %L AND rr.release_id = %L AND rr.substance_names && $1',
+            v_ds, v_release);
+        IF p_interval THEN
+            EXECUTE 'SELECT count(*) FROM episteme.reg_record rr WHERE ' || v_where
+                    || ' AND rr.event_date IS NULL'
+               INTO v_undated USING v_names;
+            IF v_undated > 0 THEN
+                RETURN NEXT episteme_api_internal.note_row(
+                    format('%s: %s records with no date not checked', v_ds, v_undated));
+            END IF;
+            v_where := v_where || ' AND rr.event_date BETWEEN $2 AND $3';
+        END IF;
+        SELECT f.status_fields, f.detail_fields, f.status_note
+          INTO v_sfields, v_dfields, v_snote
+          FROM episteme_api_internal.reg_fields(v_ds) AS f;
+        v_no_status := false;
+        FOR v_rec IN EXECUTE
+            'SELECT rr.record_key, rr.jurisdiction, rr.event_date, rr.payload, rr.source_file '
+            || 'FROM episteme.reg_record rr WHERE ' || v_where
+            || ' ORDER BY rr.event_date DESC NULLS LAST, rr.record_key'
+            USING v_names, p_from, p_to
+        LOOP
+            v_status := '{}';
+            FOREACH v_field IN ARRAY v_sfields LOOP
+                v_vals := episteme_api_internal.json_values(v_rec.payload, v_field);
+                IF cardinality(v_vals) > 0 THEN
+                    v_status := v_vals;
+                    EXIT;
+                END IF;
+            END LOOP;
+            v_parts := ARRAY[v_ds || ' ' || v_rec.record_key];
+            FOREACH v_field IN ARRAY v_dfields LOOP
+                v_vals := episteme_api_internal.json_values(v_rec.payload, v_field);
+                IF cardinality(v_vals) > 0 THEN
+                    v_parts := array_append(v_parts, split_part(v_field, '.', -1) || ': '
+                                                     || array_to_string(v_vals, '; '));
+                END IF;
+            END LOOP;
+            IF cardinality(v_status) > 0 THEN
+                v_parts := array_append(v_parts, 'status: ' || array_to_string(v_status, '; '));
+            ELSE
+                v_no_status := true;
+            END IF;
+            IF v_rec.event_date IS NOT NULL THEN
+                v_parts := array_append(v_parts,
+                                        'date: ' || to_char(v_rec.event_date, 'YYYY-MM-DD'));
+            END IF;
+            IF coalesce(v_rec.jurisdiction, '') <> '' THEN
+                v_parts := array_append(v_parts, 'jurisdiction: ' || v_rec.jurisdiction);
+            END IF;
+            v_group := v_group + 1;
+            v_row := ROW('claim', v_group, 0,
+                         array_to_string(v_parts, ', '),
+                         CASE WHEN cardinality(v_status) > 0
+                              THEN array_to_string(v_status, '; ') END,
+                         'fetched', 1.0::double precision,
+                         'exact normalised substance name in the latest release',
+                         v_ds, v_release, v_rec.source_file, v_rec.record_key,
+                         v_rec.jurisdiction, episteme_api_internal.licence_for(v_ds));
+            RETURN NEXT v_row;
+        END LOOP;
+        IF v_snote AND v_no_status THEN
+            RETURN NEXT episteme_api_internal.note_row(
+                format('%s: status field not found', v_ds));
+        END IF;
+    END LOOP;
+    IF cardinality(v_names) = 0 THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('substance %s has no name to match', p_substance_key));
+    END IF;
+END
+$$;
+
+-- Marketing records per jurisdiction: Drugs@FDA, EMA medicines, Article 57 and EMA
+-- opinions outside the EU (lookups.APPROVAL_DATASETS), latest release of each.
+CREATE OR REPLACE FUNCTION episteme_api_internal.approval_status(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.reg_lookup(
+        ARRAY['fda_drugsfda', 'ema_medicines', 'ema_article57', 'ema_outside_eu'],
+        p_substance_key, false, NULL::date, NULL::date)
+$$;
+
+-- FDA recalls, EMA referrals, DHPCs and PSUSA outcomes (lookups.SAFETY_DATASETS)
+-- whose event_date is in [p_from, p_to]; records with no date are counted in a note.
+CREATE OR REPLACE FUNCTION episteme_api_internal.safety_actions(
+    p_substance_key bigint, p_from date, p_to date)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.reg_lookup(
+        ARRAY['fda_enforcement', 'ema_referrals', 'ema_dhpc', 'ema_psusa'],
+        p_substance_key, true, p_from, p_to)
+$$;
+
+-- Public, capped functions (family 'regulatory').
+CREATE OR REPLACE FUNCTION episteme_api.approval_status(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.approval_status(p_substance_key) AS r),
+        'regulatory')
+$$;
+
+CREATE OR REPLACE FUNCTION episteme_api.safety_actions(
+    p_substance_key bigint, p_from date, p_to date)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.safety_actions(p_substance_key, p_from, p_to)
+              AS r),
+        'regulatory')
+$$;
+
 COMMIT;

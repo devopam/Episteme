@@ -17,11 +17,11 @@ its moiety key.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
 
 import psycopg
 from psycopg import sql
 
+from episteme.reference import _api
 from episteme.reference._scope import (
     SCHEMA,
     SubstanceScope,
@@ -50,6 +50,8 @@ __all__ = [
 # constant so that a test can point it at its own schema.
 AACT_SCHEMA = "aact"
 
+# approval_status and safety_actions run in SQL (migration 0015: reg_lookup, its payload
+# fields in reg_fields). These two tuples name the same datasets in the same order.
 APPROVAL_DATASETS = ("fda_drugsfda", "ema_medicines", "ema_article57", "ema_outside_eu")
 SAFETY_DATASETS = ("fda_enforcement", "ema_referrals", "ema_dhpc", "ema_psusa")
 # The names that coverage.missing uses, per function.
@@ -66,51 +68,6 @@ LABEL_HISTORY_GAP = "change history not determinable"
 FAERS_LABEL = "US public spontaneous reports (FAERS)"
 FAERS_QUARTER_RULE = "quarters that overlap the interval are counted whole"
 
-# Payload fields shown in a claim, read with .get(): a missing key is skipped. The first
-# field of each "status" tuple is the claim value. Article 57 names are checked in
-# parsers.ARTICLE57_COLUMNS. The EMA keys were checked against the loaded 2026-11
-# releases (2026-11-10); the FDA keys are not checked against a downloaded file.
-_STATUS_FIELDS: dict[str, tuple[str, ...]] = {
-    "fda_drugsfda": ("products.marketing_status",),
-    "ema_medicines": ("medicine_status",),
-    "ema_outside_eu": ("ema_opinion_status",),
-    "fda_enforcement": ("classification", "status"),
-    "ema_referrals": ("current_status",),
-    "ema_psusa": ("regulatory_outcome",),
-    "ema_dhpc": ("dhpc_type", "regulatory_outcome"),
-}
-# Datasets with no status field: a record is itself the fact (an Article 57 entry is an
-# authorised product). Their claims have no value and raise no "status field not found".
-_NO_STATUS_FIELD = frozenset({"ema_article57"})
-_DETAIL_FIELDS: dict[str, tuple[str, ...]] = {
-    "fda_drugsfda": ("sponsor_name", "products.brand_name"),
-    "ema_medicines": ("name_of_medicine", "marketing_authorisation_developer_applicant_holder"),
-    "ema_article57": (
-        "product_name",
-        "product_authorisation_country",
-        "marketing_authorisation_holder",
-    ),
-    "ema_outside_eu": ("name_of_medicine",),
-    "fda_enforcement": ("recall_number", "reason_for_recall"),
-    "ema_referrals": ("referral_name", "reference_number"),
-    "ema_dhpc": ("name_of_medicine", "dhpc_type"),
-    "ema_psusa": ("procedure_number",),
-}
-
-_REG_SQL = """
-SELECT record_key, jurisdiction, event_date, payload, source_file
-FROM episteme.reg_record
-WHERE dataset = %(ds)s AND release_id = %(rel)s AND substance_names && %(names)s::text[]
-  {interval}
-ORDER BY event_date DESC NULLS LAST, record_key
-"""
-_INTERVAL = "AND event_date BETWEEN %(start)s AND %(end)s"
-_UNDATED_SQL = """
-SELECT count(*) FROM episteme.reg_record
-WHERE dataset = %(ds)s AND release_id = %(rel)s AND substance_names && %(names)s::text[]
-  AND event_date IS NULL
-"""
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -123,95 +80,6 @@ def _no_substance(function: str, substance_key: int) -> LookupResult:
     )
 
 
-def _get(payload: Any, path: str) -> list[str]:
-    """Scalar values at a dotted ``path``; lists are walked."""
-    values = [payload]
-    for part in path.split("."):
-        nxt: list[Any] = []
-        for v in values:
-            items = v if isinstance(v, list) else [v]
-            nxt.extend(i.get(part) for i in items if isinstance(i, dict))
-        values = [v for v in nxt if v is not None]
-    flat: list[str] = []
-    for v in values:
-        for item in v if isinstance(v, list) else [v]:
-            s = str(item).strip()
-            if s and s not in flat:
-                flat.append(s)
-    return flat
-
-
-def _reg_claim(dataset: str, release: str, row: tuple) -> Claim:
-    record_key, jurisdiction, event_date, payload, source_file = row
-    status = next((vals for f in _STATUS_FIELDS.get(dataset, ()) if (vals := _get(payload, f))), [])
-    parts = [f"{dataset} {record_key}"]
-    for field in _DETAIL_FIELDS.get(dataset, ()):
-        if vals := _get(payload, field):
-            parts.append(f"{field.split('.')[-1]}: {'; '.join(vals)}")
-    if status:
-        parts.append(f"status: {'; '.join(status)}")
-    if event_date is not None:
-        parts.append(f"date: {event_date.isoformat()}")
-    if jurisdiction:
-        parts.append(f"jurisdiction: {jurisdiction}")
-    return Claim(
-        text=", ".join(parts),
-        value="; ".join(status) if status else None,
-        method="fetched",
-        provenance=Provenance(
-            source=dataset,
-            release=release,
-            source_file=source_file,
-            record_key=record_key,
-            jurisdiction=jurisdiction,
-        ),
-        confidence=1.0,
-        confidence_basis="exact normalised substance name in the latest release",
-    )
-
-
-def _reg_lookup(
-    conn: psycopg.Connection,
-    function: str,
-    substance_key: int,
-    interval: tuple[date, date] | None = None,
-) -> LookupResult:
-    scope = substance_scope(conn, substance_key)
-    if scope is None:
-        return _no_substance(function, substance_key)
-    has_table = relation_exists(conn, f"{SCHEMA}.reg_record")
-    claims: list[Claim] = []
-    missing: list[str] = []
-    notes: list[str] = []
-    for ds in PBRER_DATASETS[function]:
-        release = latest_release(conn, ds) if has_table else None
-        if release is None:
-            missing.append(ds)
-            continue
-        if not scope.names:
-            continue
-        params: dict[str, Any] = {"ds": ds, "rel": release, "names": list(scope.names)}
-        query = _REG_SQL.format(interval=_INTERVAL if interval else "")
-        with conn.cursor() as cur:
-            if interval:
-                params["start"], params["end"] = interval
-                cur.execute(_UNDATED_SQL, params)
-                undated = cur.fetchone()[0]
-                if undated:
-                    notes.append(f"{ds}: {undated} records with no date not checked")
-            cur.execute(query, params)
-            found = [_reg_claim(ds, release, r) for r in cur.fetchall()]
-        if ds not in _NO_STATUS_FIELD and any(c.value is None for c in found):
-            notes.append(f"{ds}: status field not found")
-        claims.extend(found)
-    if not scope.names:
-        notes.append(f"substance {substance_key} has no name to match")
-    return LookupResult(
-        claims=tuple(claims),
-        coverage=Coverage(matched=len(claims), missing=tuple(missing), notes=tuple(notes)),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Lookups
 # ---------------------------------------------------------------------------
@@ -219,8 +87,9 @@ def approval_status(
     conn: psycopg.Connection, substance_key: int, *, tenant: str, caller: str
 ) -> LookupResult:
     """Marketing records per jurisdiction: Drugs@FDA, EMA medicines, Article 57 and
-    EMA opinions outside the EU, from the latest release of each."""
-    return _reg_lookup(conn, "approval_status", substance_key)
+    EMA opinions outside the EU, from the latest release of each. Runs the SQL function
+    ``episteme_api_internal.approval_status`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "approval_status", int(substance_key)))
 
 
 def safety_actions(
@@ -233,8 +102,9 @@ def safety_actions(
     caller: str,
 ) -> LookupResult:
     """FDA recalls, EMA referrals, DHPCs and PSUSA outcomes whose ``event_date`` is in
-    ``[start, end]``. Records with no date are counted in a note."""
-    return _reg_lookup(conn, "safety_actions", substance_key, (start, end))
+    ``[start, end]``. Records with no date are counted in a note. Runs the SQL function
+    ``episteme_api_internal.safety_actions`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "safety_actions", int(substance_key), start, end))
 
 
 _LABEL_SQL = """
