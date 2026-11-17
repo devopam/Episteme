@@ -250,6 +250,8 @@ def nullout_physical(
     for b in range(start_block, end_block, batch_blocks):
         last = b + batch_blocks
         with conn.cursor() as cur:
+            # Never fall back to a full Seq Scan per step: only a TID Range Scan is allowed.
+            cur.execute("SET LOCAL enable_seqscan = off")
             cur.execute(update, (f"({b},0)", f"({last},0)"))
             nulled += cur.rowcount
         conn.commit()

@@ -661,14 +661,26 @@ def test_physical_nullout_is_restartable_from_logged_block(body):
 
     logged = []
 
-    def log_then_stop(msg):
+    # Observe the real layout: the DELETE left dead tuples, so block 0 may hold no live row.
+    with body.cursor() as cur:
+        cur.execute(
+            "SELECT (ctid::text::point)[0]::bigint FROM episteme.article_body "
+            "WHERE article_id LIKE 'p%' ORDER BY 1"
+        )
+        eq_blocks = [r[0] for r in cur.fetchall()]
+    body.commit()
+    first_eq = eq_blocks[0]
+    assert eq_blocks[-1] > first_eq, eq_blocks  # equal rows remain after the stop point
+
+    def stop_after_first_equal_block(msg):
         logged.append(msg)
-        raise Stop
+        if int(msg.rsplit("last_block=", 1)[1]) > first_eq:
+            raise Stop
 
     with pytest.raises(Stop):
-        _phys(body, log=log_then_stop)
-    last_block = int(logged[0].rsplit("last_block=", 1)[1])
-    assert last_block == 1
+        _phys(body, log=stop_after_first_equal_block)
+    last_block = int(logged[-1].rsplit("last_block=", 1)[1])
+    assert last_block == first_eq + 1
     partial = _overrides(body)
     assert any(v is None for v in partial.values()) and any(v is not None for v in partial.values())
     _phys(body, start_block=last_block)
@@ -691,7 +703,17 @@ def test_physical_update_uses_tid_range_scan(body):
         " WHERE ctid >= %s::tid AND ctid < %s::tid AND " + tool._NULLOUT_PREDICATE
     ).format(rel=tool._rel("article_body_pmc"))
     with body.cursor() as cur:
+        cur.execute("SET LOCAL enable_seqscan = off")  # as nullout_physical does per step
         cur.execute(stmt, ("(0,0)", "(4096,0)"))
         plan = "\n".join(r[0] for r in cur.fetchall())
     body.rollback()
     assert "Tid Range Scan" in plan, plan
+
+
+def test_physical_step_forbids_seq_scan_before_each_update():
+    conn = _StubConn([])
+    conn.end_block = 3
+    tool.nullout_physical(conn, "article_body_pmc", batch_blocks=1, log=lambda m: None)
+    steps = [q for q in conn.executed if q.startswith(("SET LOCAL", "UPDATE"))]
+    assert steps == ["SET LOCAL enable_seqscan = off", steps[1]] * 3
+    assert steps[1].startswith("UPDATE")
