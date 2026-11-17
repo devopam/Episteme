@@ -717,3 +717,15 @@ def test_physical_step_forbids_seq_scan_before_each_update():
     steps = [q for q in conn.executed if q.startswith(("SET LOCAL", "UPDATE"))]
     assert steps == ["SET LOCAL enable_seqscan = off", steps[1]] * 3
     assert steps[1].startswith("UPDATE")
+
+
+def test_physical_start_block_past_end_logs_nothing_to_do():
+    conn = _StubConn([])
+    conn.end_block = 3
+    logs = []
+    res = tool.nullout_physical(
+        conn, "article_body_pmc", batch_blocks=1, start_block=3, log=logs.append
+    )
+    assert any("start_block 3 >= end_block 3: nothing to do" in m for m in logs)
+    assert not any(q.startswith("UPDATE") for q in conn.executed)
+    assert res["nulled"] == 0

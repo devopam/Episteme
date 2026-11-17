@@ -247,6 +247,8 @@ def nullout_physical(
         " AND " + _NULLOUT_PREDICATE
     ).format(rel=_rel(partition, table))
     nulled = 0
+    if start_block >= end_block:
+        log(f"{partition}: start_block {start_block} >= end_block {end_block}: nothing to do")
     for b in range(start_block, end_block, batch_blocks):
         last = b + batch_blocks
         with conn.cursor() as cur:
