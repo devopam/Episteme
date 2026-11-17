@@ -236,3 +236,12 @@ def test_text_nullout_batch_blocks_default_and_override(clean_settings):
     clean_settings.setenv("EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS", "9")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().text_nullout_batch_blocks == 9
+
+
+def test_api_result_limits_default_and_override(clean_settings):
+    assert cfg.api_result_limits()["search"] == (20, 200)
+    clean_settings.setenv("EPISTEME_API_LIMIT_SEARCH", "5,50")
+    assert cfg.api_result_limits()["search"] == (5, 50)
+    clean_settings.setenv("EPISTEME_API_LIMIT_SEARCH", "10,5")
+    with pytest.raises(ValueError):
+        cfg.api_result_limits()

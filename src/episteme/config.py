@@ -249,6 +249,47 @@ LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
     "openfda_faers": "pending",
 }
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+# SQL lookup API (schema episteme_api): rows a public function returns, per family, as
+# (default, max). Env override per family: EPISTEME_API_LIMIT_<FAMILY>=<default>,<max>.
+# `python -m episteme.reference.api_settings sync` copies the effective values to the
+# table episteme_api_internal.result_limit.
+API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
+    "regulatory": (200, 1000),
+    "label": (200, 2000),
+    "trials": (200, 1000),
+    "faers": (500, 5000),
+    "literature": (50, 500),
+    "graph": (50, 500),
+    "search": (20, 200),
+    "code": (1, 1),
+    "resolve": (10, 50),
+}
+_API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
+
+
+def api_result_limits() -> dict[str, tuple[int, int]]:
+    """``API_RESULT_LIMITS`` with the ``EPISTEME_API_LIMIT_<FAMILY>`` overrides applied.
+    The value is ``<default>,<max>``, integers with 0 < default <= max. A bad value
+    raises ``ValueError`` (a typo must not widen or close a cap)."""
+    out = dict(API_RESULT_LIMITS)
+    for family in out:
+        key = _API_LIMIT_PREFIX + family.upper()
+        raw = _get(key)
+        if raw is None:
+            continue
+        parts = [x.strip() for x in raw.split(",")]
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            default, maximum = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(
+                f"{key} must be '<default>,<max>' (two integers), got {raw!r}"
+            ) from None
+        if not 0 < default <= maximum:
+            raise ValueError(f"{key} needs 0 < default <= max, got {raw!r}")
+        out[family] = (default, maximum)
+    return out
 
 
 def _aact_may_be_empty_tables() -> tuple[str, ...]:

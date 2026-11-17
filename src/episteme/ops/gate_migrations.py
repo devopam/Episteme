@@ -85,6 +85,10 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "column:episteme.article_body.text_override",
         "virtual:episteme.article_body.text",
     ],
+    "0015_api_layer.sql": [
+        "table:episteme_api_internal.source_subset",
+        "table:episteme_api_internal.result_limit",
+    ],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {
