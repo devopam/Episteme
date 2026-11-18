@@ -37,6 +37,7 @@ from ._pbrer_db import (
 
 GRANTS = DB_DIR / "grants" / "0015_api_roles.sql"
 TABLE_GRANTS = DB_DIR / "grants" / "0015_api_tables.sql"
+AACT_GRANTS = DB_DIR / "grants" / "0015_api_aact.sql"
 MIGRATION = MIGRATIONS / "0015_api_layer.sql"
 SCHEMAS = ("episteme_api", "episteme_api_internal")
 _SYSTEM = "zz_apirole"
@@ -47,8 +48,9 @@ _FTS_PART = "article_body_dailymed"
 # non-pg: the grants file against migration 0015
 # ---------------------------------------------------------------------------
 def _grants_text() -> str:
-    """Both grants files: the roles file (superuser) and the tables file (api_settings)."""
-    return GRANTS.read_text(encoding="utf-8") + TABLE_GRANTS.read_text(encoding="utf-8")
+    """The grants files: the roles file (superuser), the tables and AACT files
+    (api_settings; the AACT loader runs only the AACT file)."""
+    return "".join(p.read_text(encoding="utf-8") for p in (GRANTS, TABLE_GRANTS, AACT_GRANTS))
 
 
 def _code(path) -> str:
@@ -145,17 +147,30 @@ def test_app_functions_are_the_python_entry_points_and_the_index_expression():
 def test_grants_file_shape():
     code = _code(GRANTS)
     tables = _code(TABLE_GRANTS)
-    # The roles file is one transaction; the tables file runs inside api_settings' one.
+    aact = _code(AACT_GRANTS)
+    # The roles file is one transaction; the tables and AACT files run inside the
+    # caller's one (api_settings sync, the AACT switch).
     assert code.count("BEGIN;") == 1 and code.count("COMMIT;") == 1
-    assert "BEGIN;" not in tables and "COMMIT;" not in tables
-    for text in (code, tables):
+    for text in (tables, aact):
+        assert "BEGIN;" not in text and "COMMIT;" not in text
+    for text in (code, tables, aact):
         assert not re.search(r"\bPASSWORD\b", text, re.IGNORECASE), "no password in SQL"
         assert not [ln for ln in text.splitlines() if ln.lstrip().startswith("\\")]
-    # The table owner runs the tables file: no role, ownership or function statement.
-    for word in ("CREATE ROLE", "ALTER ROLE", "OWNER TO", "DEFAULT PRIVILEGES", "PUBLIC"):
-        assert word not in tables, word
-    assert "episteme_api_reader" not in tables and "episteme_app" not in tables
+    # The table owner runs the tables and AACT files: no role, ownership or function
+    # statement.
+    for text in (tables, aact):
+        for word in ("CREATE ROLE", "ALTER ROLE", "OWNER TO", "DEFAULT PRIVILEGES", "PUBLIC"):
+            assert word not in text, word
+        assert "episteme_api_reader" not in text and "episteme_app" not in text
     assert "c_read" not in code and "c_aact" not in code
+    # Ruling R21: the AACT switch runs only the AACT file. It reads episteme.reg_release
+    # and grants nothing on an episteme relation, schema or routine; the tables file has
+    # no AACT part.
+    assert "c_aact" in aact and "c_aact" not in tables and "aact_r" not in tables
+    assert set(re.findall(r"\bepisteme\.(\w+)", aact)) == {"reg_release"}
+    assert "GRANT SELECT ON episteme" not in aact and "SCHEMA episteme" not in aact
+    assert "ROUTINE" not in aact and "FUNCTION" not in aact
+    assert "c_read" not in aact and "c_faers_acl" not in aact
     assert (
         "REVOKE ALL ON ALL ROUTINES IN SCHEMA episteme_api, episteme_api_internal FROM PUBLIC"
         in code
@@ -663,6 +678,8 @@ _HIJACK = (
     "CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (pg_temp.f(VALUE))",
     "CREATE DOMAIN pg_temp.date AS pg_catalog.date CHECK (pg_temp.g(VALUE::pg_catalog.text))",
     "CREATE DOMAIN pg_temp.int4 AS pg_catalog.int4 CHECK (pg_temp.g(VALUE::pg_catalog.text))",
+    "CREATE DOMAIN pg_temp.int8 AS pg_catalog.int8 CHECK (pg_temp.g(VALUE::pg_catalog.text))",
+    "CREATE DOMAIN pg_temp.bool AS pg_catalog.bool CHECK (pg_temp.g(VALUE::pg_catalog.text))",
     "CREATE TABLE pg_temp.jsonb (x pg_catalog.int4)",
 )
 

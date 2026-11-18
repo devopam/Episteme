@@ -212,11 +212,25 @@ def test_env_example_names_the_reader_keys():
     assert "\nEPISTEME_API_READER_PASSWORD=" in text
 
 
-def test_owner_grants_apply_the_tables_file():
+def test_owner_grants_apply_the_tables_file_then_the_aact_file():
     conn = _RoleConn(exists=True)
     assert api_settings.apply_owner_grants(conn) is True
-    assert conn.statements[-1] == api_grants.OWNER_GRANTS.read_text(encoding="utf-8")
+    assert conn.statements[1:] == [
+        api_grants.OWNER_GRANTS.read_text(encoding="utf-8"),
+        api_grants.AACT_GRANTS.read_text(encoding="utf-8"),
+    ]
     assert api_grants.OWNER_GRANTS.name == "0015_api_tables.sql"
+    assert api_grants.AACT_GRANTS.name == "0015_api_aact.sql"
+
+
+def test_aact_grants_apply_only_the_aact_file():
+    """The AACT switch's step (ruling R21): the role check and the AACT file only."""
+    conn = _RoleConn(exists=True)
+    assert api_grants.apply_aact_grants(conn) is True
+    assert conn.statements[1:] == [api_grants.AACT_GRANTS.read_text(encoding="utf-8")]
+    missing = _RoleConn(exists=False)
+    assert api_grants.apply_aact_grants(missing) is False
+    assert len(missing.statements) == 1
 
 
 def test_owner_grants_skipped_without_the_role():

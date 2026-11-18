@@ -3,15 +3,17 @@
 ``python -m episteme.reference.api_settings sync`` writes
 ``episteme_api_internal.source_subset`` (from ``config.LOOKUP_SOURCE_SUBSETS``) and
 ``episteme_api_internal.result_limit`` (from ``config.api_result_limits()``) in one
-transaction: delete, then insert. It then applies ``grants/0015_api_tables.sql`` (the
-reads of the API owner role: USAGE on ``episteme``, SELECT on exactly the relations the
-functions read, the latest AACT release schema; a no-op before the grants file created
-the role), and sets the ``statement_timeout`` of the role
-``episteme_api_reader`` (``config.api_reader_statement_timeout_s``), when the role exists:
-a second guard after the row caps (the grants file ``grants/0015_api_roles.sql`` creates
-the role and gives ``episteme_sys_admin`` ADMIN on it). Run it after migration 0015, after
-the grants file, after each AACT load, after a rebuild of a table the functions read and
-after a change to any of these settings. It needs the owner (admin) connection.
+transaction: delete, then insert. It then applies all the owner grants
+(``api_grants.apply_owner_grants``: ``grants/0015_api_tables.sql`` and
+``grants/0015_api_aact.sql``, the reads of the API owner role: USAGE on ``episteme``,
+SELECT on exactly the relations the functions read, the latest AACT release schema; a
+no-op before the grants file created the role), and sets the ``statement_timeout`` of the
+role ``episteme_api_reader`` (``config.api_reader_statement_timeout_s``), when the role
+exists: a second guard after the row caps (the grants file ``grants/0015_api_roles.sql``
+creates the role and gives ``episteme_sys_admin`` ADMIN on it). Run it after migration
+0015, after the grants file, after a rebuild of a table the functions read and after a
+change to any of these settings. An AACT load needs no sync: the loader applies the AACT
+grants itself (rulings R20, R21). It needs the owner (admin) connection.
 """
 
 from __future__ import annotations

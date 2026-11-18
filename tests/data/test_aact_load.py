@@ -587,29 +587,78 @@ def test_coverage_count_runs_after_the_index_and_analyze(monkeypatch):
     assert out["interventions"] == 7 and out["interventions_matched"] == 3
 
 
-def test_switch_grants_the_api_owner_the_new_release(monkeypatch):
-    """The switch applies the SQL lookup API owner grants (api_grants.apply_owner_grants,
-    grants/0015_api_tables.sql) in its transaction, after reg_release names the new
-    release the latest: no manual step after an AACT load (ruling R20)."""
+def _switch_with_grants(monkeypatch, grants) -> list[str]:
+    """Run ``_switch`` on a recording connection; ``grants`` stands in for the AACT grant
+    step. Every other owner-grants entry point fails the test if called."""
     from contextlib import nullcontext
     from types import SimpleNamespace
+
+    from episteme.data.db import api_grants
 
     log: list[str] = []
     monkeypatch.setattr(la.audit_trail, "deferred_mirror", lambda conn: nullcontext())
     monkeypatch.setattr(la.audit_trail, "record", lambda *a, **k: None)
     monkeypatch.setattr(la.audit_trail, "commit", lambda conn: log.append("COMMIT"))
-    monkeypatch.setattr(la.audit_trail, "rollback", lambda conn: None)
-    monkeypatch.setattr(la, "apply_owner_grants", lambda conn: log.append("API GRANTS"))
+    monkeypatch.setattr(la.audit_trail, "rollback", lambda conn: log.append("ROLLBACK"))
+    monkeypatch.setattr(la, "apply_aact_grants", lambda conn: grants(log))
+
+    def full(conn):
+        raise AssertionError("the AACT switch must not run the full owner grants")
+
+    monkeypatch.setattr(api_grants, "apply_owner_grants", full)
     ctx = SimpleNamespace(
         schema="aact_r20261103", release_id="20261103", run_id="r", fp="fp", key="aact/x.zip"
     )
     la._switch(_RecConn(log), ctx, ["studies"], {"rows": 3})
+    return log
+
+
+def test_switch_grants_the_api_owner_the_new_release(monkeypatch):
+    """The switch applies ONLY the AACT part of the API owner grants
+    (api_grants.apply_aact_grants, grants/0015_api_aact.sql) in its transaction, after
+    reg_release names the new release the latest: no manual step after an AACT load
+    (ruling R20), and no grant on an episteme relation or function (ruling R21)."""
+    log = _switch_with_grants(monkeypatch, lambda log: log.append("AACT GRANTS"))
 
     def first(needle: str) -> int:
         return next(i for i, q in enumerate(log) if needle in q)
 
-    assert first("reg_release") < first("API GRANTS") < first("COMMIT")
-    assert log.count("API GRANTS") == 1
+    assert first("reg_release") < first("AACT GRANTS") < first("COMMIT")
+    assert log.count("AACT GRANTS") == 1
+    assert la.__dict__.get("apply_owner_grants") is None
+
+
+def test_switch_names_the_grant_step_on_a_lock_timeout(monkeypatch):
+    """A lock wait in the grant step is not reported as a lock on the aact views or
+    reg_release: the message names the grant step; the switch does not commit."""
+
+    def locked(log):
+        raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+    with pytest.raises(la._Invalid) as info:
+        _switch_with_grants(monkeypatch, locked)
+    message = str(info.value)
+    assert "grant step" in message and "0015_api_aact.sql" in message
+    assert "aact views or reg_release" not in message
+
+
+def test_switch_names_the_grant_step_on_a_concurrent_catalog_update(monkeypatch):
+    """ "tuple concurrently updated" is SQLSTATE XX000 (psycopg InternalError_): mapped to
+    a message that names the grant step. Another internal error is not hidden."""
+    assert psycopg.errors.lookup("XX000") is psycopg.errors.InternalError_
+
+    def concurrent(log):
+        raise psycopg.errors.InternalError_("tuple concurrently updated")
+
+    with pytest.raises(la._Invalid) as info:
+        _switch_with_grants(monkeypatch, concurrent)
+    assert "grant step" in str(info.value) and "concurrently" in str(info.value)
+
+    def other(log):
+        raise psycopg.errors.InternalError_("cache lookup failed for relation 1")
+
+    with pytest.raises(psycopg.errors.InternalError_):
+        _switch_with_grants(monkeypatch, other)
 
 
 @pytest.mark.pg
@@ -645,6 +694,19 @@ def test_release_loads_and_views_switch(db, tmp_path):
             "SELECT has_schema_privilege('episteme_api_owner', 'aact_r20261103', 'USAGE'), "
             "has_table_privilege('episteme_api_owner', 'aact_r20261103.studies', 'SELECT')",
         ) == [(True, True)]
+        # Only the AACT grants ran (ruling R21): the module rebuilt the schema episteme,
+        # and the switch granted the owner nothing on it or on reg_release (direct ACL
+        # entries; the tables file would have added both).
+        assert _all(
+            db,
+            "SELECT "
+            "EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a "
+            "        WHERE n.nspname = 'episteme' "
+            "          AND a.grantee = 'episteme_api_owner'::regrole), "
+            "EXISTS (SELECT 1 FROM aclexplode((SELECT relacl FROM pg_class "
+            "        WHERE oid = 'episteme.reg_release'::regclass)) a "
+            "        WHERE a.grantee = 'episteme_api_owner'::regrole)",
+        ) == [(False, False)]
     db.rollback()
     # Indexes per release schema.
     idx = {
