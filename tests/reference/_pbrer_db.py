@@ -19,6 +19,14 @@ MIGRATIONS = DB_DIR / "migrations"
 TEST_AACT_RELEASE = "19700101"
 TEST_AACT_SCHEMA = f"aact_r{TEST_AACT_RELEASE}"
 KW = {"tenant": "t", "caller": "test"}
+# Migrations applied after schema.sql, in order: the tables and columns the lookups read.
+_MIGRATION_FILES = (
+    "0002_container_and_book_parts.sql",
+    "0010_regulatory_sources.sql",
+    "0011_label_section_ordinal.sql",
+    "0014_article_text_virtual.sql",
+    "0015_api_layer.sql",
+)
 
 
 def build_schema(conn) -> None:
@@ -26,8 +34,12 @@ def build_schema(conn) -> None:
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute((DB_DIR / "extensions.sql").read_text("utf-8"))
         cur.execute((DB_DIR / "schema.sql").read_text("utf-8"))
-        cur.execute((MIGRATIONS / "0002_container_and_book_parts.sql").read_text("utf-8"))
-        cur.execute((MIGRATIONS / "0010_regulatory_sources.sql").read_text("utf-8"))
+        # 0011: label_section.ordinal and product (current_label, label_section_text).
+        # 0014 is a no-op on a schema.sql database (article_body already has
+        # text_override and the virtual text). 0015 is in schema.sql too; applied again
+        # (idempotent) so the API functions match the migration file.
+        for name in _MIGRATION_FILES:
+            cur.execute((MIGRATIONS / name).read_text("utf-8"))
     conn.commit()
 
 
