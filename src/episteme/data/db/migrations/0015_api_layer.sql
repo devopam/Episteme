@@ -98,14 +98,14 @@ CREATE TABLE IF NOT EXISTS episteme_api_internal.result_limit (
 CREATE OR REPLACE FUNCTION episteme_api_internal.norm_name(p text)
 RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$ SELECT lower(normalize(p, NFKC)) $$;
 
 -- Licence class of a source, or 'unlisted'.
 CREATE OR REPLACE FUNCTION episteme_api_internal.licence_for(p_source text)
 RETURNS text
 LANGUAGE sql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT coalesce(
         (SELECT s.subset FROM episteme_api_internal.source_subset s WHERE s.source = p_source),
@@ -117,7 +117,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.limit_for(p_family text)
 RETURNS int
 LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v int;
@@ -162,7 +162,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.cap_claims(
     p_rows episteme_api_internal.claim_row[], p_family text, p_precapped boolean DEFAULT false)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_limit int := episteme_api_internal.limit_for(p_family);
@@ -200,7 +200,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.cap_articles(
     p_precapped boolean DEFAULT false)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_limit int := episteme_api_internal.limit_for(p_family);
@@ -237,7 +237,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.substance_release()
 RETURNS text
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v text;
@@ -270,7 +270,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.resolve_entity(
     p_text text, p_id_type text DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_raw     text := regexp_replace(coalesce(p_text, ''), '^\s+|\s+$', '', 'g');
@@ -362,7 +362,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.substance_family(p_substance_ke
 RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text,
                source text, release_id text, licence text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 #variable_conflict use_column
 DECLARE
@@ -393,7 +393,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.resolve_entity(p_text text, p_id_type text DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.resolve_entity(p_text, p_id_type) AS r),
@@ -405,7 +405,7 @@ CREATE OR REPLACE FUNCTION episteme_api.substance_family(p_substance_key bigint)
 RETURNS TABLE (substance_key bigint, moiety_key bigint, unii text, preferred_name text,
                source text, release_id text, licence text)
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT f.substance_key, f.moiety_key, f.unii, f.preferred_name,
            f.source, f.release_id, f.licence
@@ -422,7 +422,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.note_row(p_text text)
 RETURNS episteme_api_internal.claim_row
 LANGUAGE sql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT ROW('note', NULL, NULL, p_text, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                NULL, NULL, NULL)::episteme_api_internal.claim_row
@@ -431,7 +431,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.missing_row(p_source text)
 RETURNS episteme_api_internal.claim_row
 LANGUAGE sql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT ROW('missing', NULL, NULL, NULL, NULL, NULL, NULL, NULL, p_source, NULL, NULL,
                NULL, NULL, episteme_api_internal.licence_for(p_source))
@@ -448,7 +448,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.json_values(p_doc jsonb, p_path text)
 RETURNS text[]
 LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_vals jsonb[] := ARRAY[p_doc];
@@ -514,7 +514,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.reg_fields(
     p_dataset text,
     OUT status_fields text[], OUT detail_fields text[], OUT status_note boolean)
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT coalesce(v.s, '{}'::text[]), coalesce(v.d, '{}'::text[]),
            p_dataset IS DISTINCT FROM 'ema_article57'
@@ -561,7 +561,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.reg_lookup(
     p_from date, p_to date)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_ds        text;
@@ -700,7 +700,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.approval_status(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.reg_lookup(
         ARRAY['fda_drugsfda', 'ema_medicines', 'ema_article57', 'ema_outside_eu'],
@@ -713,7 +713,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.safety_actions(
     p_substance_key bigint, p_from date, p_to date)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.reg_lookup(
         ARRAY['fda_enforcement', 'ema_referrals', 'ema_dhpc', 'ema_psusa'],
@@ -724,7 +724,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.approval_status(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.approval_status(p_substance_key) AS r),
@@ -735,7 +735,7 @@ CREATE OR REPLACE FUNCTION episteme_api.safety_actions(
     p_substance_key bigint, p_from date, p_to date)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.safety_actions(p_substance_key, p_from, p_to)
@@ -753,7 +753,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.label_source(p_article_id text)
 RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT CASE WHEN starts_with(p_article_id, 'dailymed:') THEN 'dailymed'
                 WHEN starts_with(p_article_id, 'ema_epar:') THEN 'ema_epar' END
@@ -776,7 +776,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.current_label(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_members bigint := 0;
@@ -877,7 +877,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.label_section_text(
     p_article_id text, p_section text)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_src      text := episteme_api_internal.label_source(p_article_id);
@@ -967,7 +967,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.trials(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_keys    bigint[];
@@ -1031,7 +1031,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.current_label(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.current_label(p_substance_key) AS r),
@@ -1041,7 +1041,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.label_section_text(p_article_id text, p_section text)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.label_section_text(p_article_id, p_section)
@@ -1052,7 +1052,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.trials(p_substance_key bigint)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.trials(p_substance_key) AS r),
@@ -1130,7 +1130,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.faers_counts(
     p_substance_key bigint, p_from date, p_to date)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_label   constant text := 'US public spontaneous reports (FAERS)';
@@ -1328,7 +1328,7 @@ CREATE OR REPLACE FUNCTION episteme_api.faers_counts(
     p_substance_key bigint, p_from date, p_to date)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.faers_counts(p_substance_key, p_from, p_to)
@@ -1372,7 +1372,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.literature_by_mesh(
     p_to_year int DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_keys    bigint[];
@@ -1497,7 +1497,7 @@ CREATE OR REPLACE FUNCTION episteme_api.literature_by_mesh(
     p_to_year int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_articles(
         ARRAY(SELECT r FROM episteme_api_internal.literature_by_mesh(
@@ -1512,7 +1512,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.missing_article(
     p_source text, p_licence_source text)
 RETURNS episteme_api_internal.article_row
 LANGUAGE sql STABLE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT ROW('missing', NULL, p_source, NULL, NULL, NULL, NULL, NULL,
                episteme_api_internal.licence_for(p_licence_source), NULL, NULL)
@@ -1574,7 +1574,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.graph_neighbours(
     p_article_id text, p_kind text, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_kind    text := lower(btrim(coalesce(p_kind, '')));
@@ -1837,7 +1837,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.graph_neighbours(p_article_id text, p_kind text)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_articles(
         ARRAY(SELECT r FROM episteme_api_internal.graph_neighbours(
@@ -1859,7 +1859,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api_internal.lookup_code(p_system text, p_code text)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_licence text := episteme_api_internal.licence_for(p_system);
@@ -1898,7 +1898,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.lookup_code(p_system text, p_code text)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_claims(
         ARRAY(SELECT r FROM episteme_api_internal.lookup_code(p_system, p_code) AS r),
@@ -1932,7 +1932,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.fts_doc(
     p_source text, p_title text, p_abstract text, p_body_text text, p_text_override text)
 RETURNS tsvector
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT pg_catalog.to_tsvector('english'::pg_catalog.regconfig,
         coalesce(p_title, '') || ' ' || coalesce(p_abstract, '')
@@ -1966,7 +1966,7 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
     p_query text, p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 -- Never a sequential scan of a partition: the match must go through its index.
 SET enable_seqscan = off
 AS $$
@@ -2107,7 +2107,7 @@ $$;
 CREATE OR REPLACE FUNCTION episteme_api.search_text(p_query text, p_sources text[] DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE sql STABLE SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT * FROM episteme_api_internal.cap_articles(
         ARRAY(SELECT r FROM episteme_api_internal.search_text(

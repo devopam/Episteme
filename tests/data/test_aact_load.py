@@ -587,6 +587,31 @@ def test_coverage_count_runs_after_the_index_and_analyze(monkeypatch):
     assert out["interventions"] == 7 and out["interventions_matched"] == 3
 
 
+def test_switch_grants_the_api_owner_the_new_release(monkeypatch):
+    """The switch applies the SQL lookup API owner grants (api_grants.apply_owner_grants,
+    grants/0015_api_tables.sql) in its transaction, after reg_release names the new
+    release the latest: no manual step after an AACT load (ruling R20)."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    log: list[str] = []
+    monkeypatch.setattr(la.audit_trail, "deferred_mirror", lambda conn: nullcontext())
+    monkeypatch.setattr(la.audit_trail, "record", lambda *a, **k: None)
+    monkeypatch.setattr(la.audit_trail, "commit", lambda conn: log.append("COMMIT"))
+    monkeypatch.setattr(la.audit_trail, "rollback", lambda conn: None)
+    monkeypatch.setattr(la, "apply_owner_grants", lambda conn: log.append("API GRANTS"))
+    ctx = SimpleNamespace(
+        schema="aact_r20261103", release_id="20261103", run_id="r", fp="fp", key="aact/x.zip"
+    )
+    la._switch(_RecConn(log), ctx, ["studies"], {"rows": 3})
+
+    def first(needle: str) -> int:
+        return next(i for i, q in enumerate(log) if needle in q)
+
+    assert first("reg_release") < first("API GRANTS") < first("COMMIT")
+    assert log.count("API GRANTS") == 1
+
+
 @pytest.mark.pg
 def test_release_loads_and_views_switch(db, tmp_path):
     out = _load(db, tmp_path)
@@ -613,6 +638,13 @@ def test_release_loads_and_views_switch(db, tmp_path):
     from episteme.data.regulatory.load_reg import latest_release
 
     assert latest_release(db, "aact") == "20261103"
+    # The SQL lookup API owner role reads the new release (once its grants file has run).
+    if _all(db, "SELECT to_regrole('episteme_api_owner') IS NOT NULL") == [(True,)]:
+        assert _all(
+            db,
+            "SELECT has_schema_privilege('episteme_api_owner', 'aact_r20261103', 'USAGE'), "
+            "has_table_privilege('episteme_api_owner', 'aact_r20261103.studies', 'SELECT')",
+        ) == [(True, True)]
     db.rollback()
     # Indexes per release schema.
     idx = {

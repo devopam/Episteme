@@ -3,13 +3,14 @@
 -- episteme and SELECT on exactly the relations below, plus the release schema of the
 -- latest AACT release.
 --
--- Run by `python -m episteme.reference.api_settings sync` (as episteme_sys_admin, the owner
--- of these tables and schemas; a superuser may run it too). Idempotent; no-op when the
--- role does not exist. No BEGIN/COMMIT: the sync runs it inside its transaction.
--- Run the sync again after each AACT load (the new aact_r<release> schema has no grant
--- until then: trials and graph_neighbours 'trial' fail with "permission denied for schema")
--- and after any rebuild of the schema episteme or of a table below (a new relation has no
--- grant; the functions then fail with "permission denied").
+-- Applied by episteme.data.db.api_grants.apply_owner_grants: `python -m
+-- episteme.reference.api_settings sync` and the AACT loader (load_aact._switch, in the
+-- transaction that makes a release the latest) call it, as episteme_sys_admin, the owner
+-- of these tables and schemas (a superuser may run it too). Idempotent; no-op when the
+-- role does not exist. No BEGIN/COMMIT: it runs inside the caller's transaction.
+-- Run `api_settings sync` again after any other rebuild of the schema episteme or of a
+-- table below (a new relation has no grant; the functions then fail with "permission
+-- denied").
 
 -- ---------------------------------------------------------------------------
 -- USAGE on the schemas the functions name
@@ -25,6 +26,12 @@ BEGIN
     FOREACH s IN ARRAY ARRAY['episteme', 'episteme_api', 'episteme_api_internal'] LOOP
         IF to_regnamespace(s) IS NOT NULL THEN
             EXECUTE format('GRANT USAGE ON SCHEMA %I TO episteme_api_owner', s);
+        END IF;
+    END LOOP;
+    -- The settings tables: read only (licence_for, limit_for run as the owner role).
+    FOREACH s IN ARRAY ARRAY['source_subset', 'result_limit'] LOOP
+        IF to_regclass(format('episteme_api_internal.%I', s)) IS NOT NULL THEN
+            EXECUTE format('GRANT SELECT ON episteme_api_internal.%I TO episteme_api_owner', s);
         END IF;
     END LOOP;
     -- A function a migration recreated is owned by episteme_sys_admin until the roles file
@@ -96,8 +103,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- AACT: the owner reads the release schema aact_r<release_id> of the is_latest 'aact'
 -- release (trials, graph_neighbours 'trial'); older release schemas lose the grants.
--- After an AACT load the new schema has none until this file runs again (api_settings
--- sync): the two functions then fail with "permission denied for schema aact_r<release>".
+-- The AACT loader runs this file when it switches the release (load_aact._switch).
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE

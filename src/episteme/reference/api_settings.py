@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 import psycopg
 from psycopg import sql
 
 from episteme.config import LOOKUP_SOURCE_SUBSETS, ConfigError, api_result_limits, get_settings
 from episteme.data.db import connection as db_connection
+from episteme.data.db.api_grants import apply_owner_grants
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
 
 
@@ -48,19 +48,6 @@ def sync(conn: psycopg.Connection) -> dict[str, int]:
 
 
 READER_ROLE = "episteme_api_reader"
-OWNER_GRANTS = Path(__file__).resolve().parents[1] / "data/db/grants/0015_api_tables.sql"
-
-
-def apply_owner_grants(conn: psycopg.Connection) -> bool:
-    """Apply ``grants/0015_api_tables.sql`` in one transaction (the connected role must own
-    the tables, or be a superuser). Returns whether the owner role exists; without it the
-    file does nothing."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SELECT to_regrole('episteme_api_owner') IS NOT NULL")
-        exists = bool(cur.fetchone()[0])
-        if exists:
-            cur.execute(OWNER_GRANTS.read_text(encoding="utf-8"))
-    return exists
 
 
 def apply_reader_settings(conn: psycopg.Connection, timeout_s: int) -> str | None:

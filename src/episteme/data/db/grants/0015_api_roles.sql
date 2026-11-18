@@ -10,8 +10,11 @@
 -- table owner may run it, no superuser) and sets the reader's statement_timeout
 -- (config EPISTEME_API_READER_STATEMENT_TIMEOUT_S).
 -- Idempotent: run this file again after a migration that adds a function to
--- episteme_api or episteme_api_internal. Run `api_settings sync` again after each AACT
--- load and after any rebuild of a table the functions read.
+-- episteme_api or episteme_api_internal, or that drops and recreates one (the new
+-- function belongs to episteme_sys_admin until then, and the reader cannot call a new
+-- public function). The AACT loader applies the tables file itself when it switches to a
+-- new release (load_aact._switch); run `api_settings sync` again after any other rebuild
+-- of a table the functions read.
 -- Plain SQL, no psql meta-commands. One transaction.
 --
 -- No password here. The operator sets the reader's password to the value of the .env key
@@ -19,20 +22,23 @@
 --
 -- Roles (roles are global to the server; the privileges are per database):
 --   * episteme_api_owner  (NOLOGIN) owns every function of episteme_api and
---     episteme_api_internal (SECURITY DEFINER: the functions run with its privileges)
---     and the settings tables. Its reads: grants/0015_api_tables.sql.
+--     episteme_api_internal (SECURITY DEFINER: the functions run with its privileges).
+--     It may only read the settings tables (episteme_sys_admin owns and writes them):
+--     the definer identity has no write right anywhere. Its reads:
+--     grants/0015_api_tables.sql. Every function sets search_path = pg_catalog, pg_temp
+--     (pg_temp last: a caller's temporary objects never shadow a name in the body).
 --   * episteme_api_reader (LOGIN) CONNECT, USAGE on episteme_api and EXECUTE on its
 --     functions; nothing in episteme, episteme_api_internal or the AACT schemas.
 --   * episteme_sys_admin (the migration role) becomes a member of episteme_api_owner
---     (INHERIT, no SET): re-applying migration 0015 replaces functions it no longer owns,
---     and `api_settings sync` writes the settings tables. It gets ADMIN on
+--     (INHERIT, no SET): re-applying migration 0015 replaces functions it no longer owns.
+--     It owns the settings tables, which `api_settings sync` writes. It gets ADMIN on
 --     episteme_api_reader (no INHERIT, no SET): ALTER ROLE ... SET statement_timeout.
 --   * episteme_app (the pipeline role) keeps EXECUTE on the complete functions the Python
 --     lookups call (reference._api.INTERNAL_FUNCTIONS) and on fts_doc: the expression of
 --     the full-text indexes, evaluated when the pipeline writes article_body.
 
 BEGIN;
-SET LOCAL search_path = pg_catalog;
+SET LOCAL search_path = pg_catalog, pg_temp;
 
 -- ---------------------------------------------------------------------------
 -- Roles
@@ -88,8 +94,20 @@ BEGIN
 END
 $$;
 
-ALTER TABLE episteme_api_internal.source_subset OWNER TO episteme_api_owner;
-ALTER TABLE episteme_api_internal.result_limit OWNER TO episteme_api_owner;
+-- Settings tables: owned and written by episteme_sys_admin (api_settings sync); the
+-- owner role (the identity of every SECURITY DEFINER body) may only read them.
+DO $$
+BEGIN
+    IF to_regrole('episteme_sys_admin') IS NOT NULL THEN
+        ALTER TABLE episteme_api_internal.source_subset OWNER TO episteme_sys_admin;
+        ALTER TABLE episteme_api_internal.result_limit OWNER TO episteme_sys_admin;
+    END IF;
+END
+$$;
+REVOKE ALL ON episteme_api_internal.source_subset, episteme_api_internal.result_limit
+    FROM episteme_api_owner;
+GRANT SELECT ON episteme_api_internal.source_subset, episteme_api_internal.result_limit
+    TO episteme_api_owner;
 REVOKE ALL ON ALL TABLES IN SCHEMA episteme_api, episteme_api_internal FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA episteme_api, episteme_api_internal FROM episteme_api_reader;
 

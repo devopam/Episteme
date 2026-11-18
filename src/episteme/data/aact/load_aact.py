@@ -69,8 +69,9 @@ recorded with the release.
 5. **Switch,** one transaction under ``lock_timeout`` (``EPISTEME_REG_LOCK_TIMEOUT_S``): every
    view in ``aact`` is dropped and one view per table of the release is created (``SELECT``
    granted to ``episteme_app``), ``reg_release`` moves ``is_latest`` to the release
-   (``dataset='aact'``, ``release_id='<YYYYMMDD>'``), and the ``_release`` state row marks the
-   schema finished.
+   (``dataset='aact'``, ``release_id='<YYYYMMDD>'``), the ``_release`` state row marks the
+   schema finished, and the SQL lookup API owner role gets its reads on the new release
+   schema (``api_grants.apply_owner_grants``; nothing before the API grants file ran).
 
 A failed check returns ``status`` ``failed``, records a ``failed`` ``reg_release`` row when the
 release has none, and leaves the previous release serving. The partial release schema stays;
@@ -126,6 +127,7 @@ from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.aact import dictionary as dct
 from episteme.data.checkpoint_markers import in_skipped_dir, input_key
+from episteme.data.db.api_grants import apply_owner_grants
 from episteme.data.regulatory.load_reg import (
     database_name,
     db_marker_name,
@@ -1064,6 +1066,11 @@ def _switch(conn: psycopg.Connection, ctx: _Ctx, tables: Sequence[str], summary:
                             Jsonb({"dictionary_date": dct.DICTIONARY_DATE}),
                         ),
                     )
+                    # The SQL lookup API owner role reads the latest release schema only
+                    # (trials, graph_neighbours): grant it on the new one, revoke it on the
+                    # old ones, in this transaction (grants/0015_api_tables.sql; a no-op
+                    # before the API grants file created the role).
+                    apply_owner_grants(conn)
                 except psycopg.errors.LockNotAvailable as exc:
                     raise _Invalid(
                         f"could not lock the aact views or reg_release within {seconds} s "

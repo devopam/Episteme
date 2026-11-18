@@ -94,6 +94,20 @@ def test_every_function_that_reads_a_table_is_security_definer(path):
     assert [n for n, h in readers if "SECURITY DEFINER" not in h] == []
 
 
+@pytest.mark.parametrize("path", [MIGRATION, DB_DIR / "schema.sql"], ids=["0015", "schema"])
+def test_every_function_sets_search_path_with_pg_temp_last(path):
+    """Without pg_temp in the list PostgreSQL searches it FIRST for relations and types: a
+    caller's temporary domain or table named text/jsonb would run inside a SECURITY
+    DEFINER body (ruling R19). Every function sets search_path, ending with pg_temp."""
+    text = path.read_text(encoding="utf-8")
+    functions = _functions(path)
+    settings = re.findall(r"^SET search_path = (.*)$", text, re.MULTILINE)
+    without = [m.group(2) for m in _FUNCTION.finditer(text) if "SET search_path" not in m.group(2)]
+    assert without == [], "a function without SET search_path"
+    assert len(settings) >= len(functions)
+    assert {v.strip() for v in settings} == {"pg_catalog, pg_temp"}
+
+
 def test_owner_read_list_matches_the_migration():
     """The owner's SELECT list is every episteme relation a function body reads."""
     read = set(re.findall(r"\b(?:FROM|JOIN)\s+episteme\.([a-z_0-9]+)", _migration_code()))
@@ -635,6 +649,101 @@ def test_search_path_game_harmless(api):
         cur.execute(query)
         assert cur.fetchall() == baseline
     reader.rollback()
+
+
+# Temporary objects a reader may create (TEMP is granted to PUBLIC): a function that
+# raises, one with a side effect, domains named like the types the bodies use, and a
+# table named jsonb (its row type is pg_temp.jsonb).
+_HIJACK = (
+    "CREATE FUNCTION pg_temp.f(v pg_catalog.text) RETURNS pg_catalog.bool "
+    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'hijacked'; END $$",
+    "CREATE TABLE pg_temp.hits (v pg_catalog.text)",
+    "CREATE FUNCTION pg_temp.g(v pg_catalog.text) RETURNS pg_catalog.bool "
+    "LANGUAGE plpgsql AS $$ BEGIN INSERT INTO pg_temp.hits VALUES (v); RETURN true; END $$",
+    "CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (pg_temp.f(VALUE))",
+    "CREATE DOMAIN pg_temp.date AS pg_catalog.date CHECK (pg_temp.g(VALUE::pg_catalog.text))",
+    "CREATE DOMAIN pg_temp.int4 AS pg_catalog.int4 CHECK (pg_temp.g(VALUE::pg_catalog.text))",
+    "CREATE TABLE pg_temp.jsonb (x pg_catalog.int4)",
+)
+
+
+@pytest.mark.pg
+def test_temp_object_hijack_is_harmless(api):
+    """R19: with pg_temp LAST in every function's search_path, the reader's temporary
+    domains, functions and tables never run inside a SECURITY DEFINER body. Every public
+    function gives the clean answer, nothing raises 'hijacked', and no side-effect row is
+    written."""
+    clean = {
+        (name, i): _rows(api.admin, query, params)
+        for name, calls in CALLS.items()
+        for i, (query, params) in enumerate(calls)
+    }
+    reader = api.reader()
+    with reader.cursor() as cur:
+        for statement in _HIJACK:
+            cur.execute(statement)
+        for name, calls in CALLS.items():
+            for i, (query, params) in enumerate(calls):
+                # The caller's own casts are qualified: the reader's session resolves
+                # 'text' to its domain, which is the reader's business, not the API's.
+                cur.execute(query.replace("::text[]", "::pg_catalog.text[]"), params)
+                assert cur.fetchall() == clean[(name, i)], (name, params)
+        cur.execute("SELECT pg_catalog.count(*) FROM pg_temp.hits")
+        assert cur.fetchone()[0] == 0
+    reader.rollback()
+
+
+@pytest.mark.pg
+def test_settings_tables_are_read_only_for_the_definer(api):
+    """R19: the settings tables belong to episteme_sys_admin (api_settings sync writes
+    them); the owner role, the identity of every SECURITY DEFINER body, may only read."""
+    rows = _rows(
+        api.admin,
+        "SELECT c.relname, c.relowner::regrole::text, "
+        "has_table_privilege('episteme_api_owner', c.oid, 'SELECT'), "
+        "has_table_privilege('episteme_api_owner', c.oid, "
+        "'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') "
+        "FROM pg_class c WHERE c.oid IN ('episteme_api_internal.source_subset'::regclass, "
+        "'episteme_api_internal.result_limit'::regclass) ORDER BY 1",
+    )
+    assert rows == [
+        ("result_limit", "episteme_sys_admin", True, False),
+        ("source_subset", "episteme_sys_admin", True, False),
+    ]
+    # The sync still writes them, as episteme_sys_admin.
+    assert api_settings.sync(api.admin)["result_limit"] > 0
+
+
+@pytest.mark.pg
+def test_pipeline_role_calls_the_internal_functions_and_writes_indexed_bodies(api):
+    """episteme_app (the pipeline and the Python lookups) executes the 12 complete
+    functions of _api.INTERNAL_FUNCTIONS, and fts_doc when it writes into a partition
+    with a full-text index. Rolled back."""
+    with psycopg.connect(api.su_dsn, autocommit=False) as su:
+        if su.execute("SELECT to_regrole('episteme_app') IS NULL").fetchone()[0]:
+            pytest.skip("role episteme_app does not exist")
+        su.execute("SET ROLE episteme_app")
+        assert set(CALLS) == set(_api.INTERNAL_FUNCTIONS)
+        for name, calls in CALLS.items():
+            query, params = calls[0]
+            rows = su.execute(
+                query.replace("episteme_api.", "episteme_api_internal."), params
+            ).fetchall()
+            assert rows, name
+        su.execute(
+            "INSERT INTO episteme.article_body (article_id, source, title, body_text) "
+            "VALUES ('dailymed:app1', 'dailymed', 'App label', 'written by the pipeline')"
+        )
+        assert (
+            su.execute(
+                "SELECT pg_catalog.count(*) FROM pg_catalog.pg_index i "
+                "WHERE i.indrelid = 'episteme.article_body_dailymed'::regclass "
+                "AND i.indexrelid = %s::regclass",
+                (f"episteme.{fts_index.index_name(_FTS_PART)}",),
+            ).fetchone()[0]
+            == 1
+        )
+        su.rollback()
 
 
 @pytest.mark.pg

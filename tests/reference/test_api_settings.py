@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import episteme.config as cfg
+from episteme.data.db import api_grants
 from episteme.reference import api_settings
 
 _KEYS = [f"EPISTEME_API_LIMIT_{f.upper()}" for f in cfg.API_RESULT_LIMITS]
@@ -214,8 +215,8 @@ def test_env_example_names_the_reader_keys():
 def test_owner_grants_apply_the_tables_file():
     conn = _RoleConn(exists=True)
     assert api_settings.apply_owner_grants(conn) is True
-    assert conn.statements[-1] == api_settings.OWNER_GRANTS.read_text(encoding="utf-8")
-    assert api_settings.OWNER_GRANTS.name == "0015_api_tables.sql"
+    assert conn.statements[-1] == api_grants.OWNER_GRANTS.read_text(encoding="utf-8")
+    assert api_grants.OWNER_GRANTS.name == "0015_api_tables.sql"
 
 
 def test_owner_grants_skipped_without_the_role():
