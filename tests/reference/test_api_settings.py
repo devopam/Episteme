@@ -29,6 +29,7 @@ def test_api_limits_defaults(clean):
         "search": (20, 200),
         "code": (1, 1),
         "resolve": (10, 50),
+        "graph_scan": (20000, 20000),
     }
 
 

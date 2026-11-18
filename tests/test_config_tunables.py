@@ -28,7 +28,6 @@ def clean_settings(tmp_path, monkeypatch):
         "EPISTEME_PMC_BUCKET_IDS",
         "EPISTEME_FAERS_LOCK_TIMEOUT_S",
         "EPISTEME_FAERS_MIN_LIVE_SHARE",
-        "EPISTEME_API_SHARED_MESH_MAX_ARTICLES",
     ):
         monkeypatch.delenv(key, raising=False)
     cfg.get_settings.cache_clear()
@@ -48,13 +47,6 @@ def test_faers_min_live_share_default_and_override(clean_settings):
     clean_settings.setenv("EPISTEME_FAERS_MIN_LIVE_SHARE", "0.5")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().faers_min_live_share == 0.5
-
-
-def test_api_shared_mesh_max_articles_default_and_override(clean_settings):
-    assert cfg.get_settings().api_shared_mesh_max_articles == 100000
-    clean_settings.setenv("EPISTEME_API_SHARED_MESH_MAX_ARTICLES", "250")
-    cfg.get_settings.cache_clear()
-    assert cfg.get_settings().api_shared_mesh_max_articles == 250
 
 
 def test_tunables_default_to_todays_values(clean_settings):

@@ -281,6 +281,11 @@ def test_text_indexes_use_a_prefix_so_no_value_is_too_long():
         "intervention_substance", ["nct_id", "substance_key", "moiety_key", "method"]
     ) == [("nct_id", None), ("substance_key", None), ("moiety_key", None)]
     assert la.index_plan("conditions", ["id", "name"]) == []  # no such columns, no index
+    # graph_neighbours 'trial': the PMID (digits, no free text) is indexed whole.
+    assert la.index_plan("study_references", ["id", "nct_id", "pmid", "citation"]) == [
+        ("nct_id", None),
+        ("pmid", None),
+    ]
     # 500 characters of up to 4 bytes stay under the btree key limit (about 2700 bytes).
     assert la.INDEX_PREFIX_CHARS * 4 <= 2700
     text = la.index_statement("aact_r20261103", "interventions", "name", 500).as_string(None)

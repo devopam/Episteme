@@ -1,6 +1,6 @@
 """graph_neighbours as a SQL function (migration 0015) and its Python wrapper
-``graph.neighbours`` (pg: episteme_test only), and the SQL default of the shared_mesh
-cap against config (non-pg)."""
+``graph.neighbours`` (pg: episteme_test only), and the shared_mesh scan cap as the
+synced family 'graph_scan' (non-pg)."""
 
 from __future__ import annotations
 
@@ -25,18 +25,46 @@ _KINDS_NOTE = "allowed kinds: cites, cited_by, shared_mesh, trial, label"
 # ---------------------------------------------------------------------------
 # non-pg
 # ---------------------------------------------------------------------------
+def test_graph_scan_is_a_synced_family(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("EPISTEME_API_LIMIT_GRAPH_SCAN", raising=False)
+    assert config.API_RESULT_LIMITS["graph_scan"] == (20000, 20000)
+    written: list[tuple] = []
+
+    class Cur:
+        def execute(self, query, params=None):
+            pass
+
+        def executemany(self, query, rows):
+            if "result_limit" in query:
+                written.extend(rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Conn:
+        def transaction(self):
+            return Cur()
+
+        def cursor(self):
+            return Cur()
+
+    api_settings.sync(Conn())
+    assert ("graph_scan", 20000, 20000) in written
+
+
 @pytest.mark.parametrize(
     "path", [MIGRATIONS / "0015_api_layer.sql", DB_DIR / "schema.sql"], ids=["0015", "schema"]
 )
-def test_shared_mesh_sql_default_matches_config(path):
+def test_shared_mesh_cap_read_from_settings(path):
     text = path.read_text(encoding="utf-8")
-    start = text.index("FUNCTION episteme_api_internal.graph_neighbours(")
+    start = text.index("CREATE OR REPLACE FUNCTION episteme_api_internal.graph_neighbours(")
     body = text[start : text.index("FUNCTION episteme_api.graph_neighbours(", start)]
-    defaults = re.findall(r"p_max_descriptor_articles int DEFAULT (\d+)", body)
-    in_body = re.findall(r"coalesce\(p_max_descriptor_articles, (\d+)\)", body)
-    assert defaults and in_body
-    expected = str(config.DEFAULT_API_SHARED_MESH_MAX_ARTICLES)
-    assert set(defaults) | set(in_body) == {expected}
+    assert "limit_for('graph_scan')" in body
+    assert not re.search(r"\b\d{4,}\b", body)  # no hard-coded cap
 
 
 # ---------------------------------------------------------------------------
@@ -71,17 +99,11 @@ def _rows(conn, query, params=()):
         return cur.fetchall()
 
 
-def _internal(conn, article_id, kind, limit=None, cap=None):
-    if cap is None:
-        return _rows(
-            conn,
-            "SELECT * FROM episteme_api_internal.graph_neighbours(%s, %s, %s)",
-            (article_id, kind, limit),
-        )
+def _internal(conn, article_id, kind, limit=None):
     return _rows(
         conn,
-        "SELECT * FROM episteme_api_internal.graph_neighbours(%s, %s, %s, %s)",
-        (article_id, kind, limit, cap),
+        "SELECT * FROM episteme_api_internal.graph_neighbours(%s, %s, %s)",
+        (article_id, kind, limit),
     )
 
 
@@ -126,7 +148,7 @@ def test_cites_matches_graph_builder(db):
     assert "(year unknown)" in second.text  # year 0 is unknown
     assert second.provenance.source_file == "cites/a.xml"  # the smallest of the edge rows
     # Another id of the same PMID, 'pmid:' and a bare PMID give the same neighbours.
-    for alias in ("pmc:PMC100", "pmid:100", "100"):
+    for alias in ("pmc:PMC100", "pmid:100", "100", "PubMed:100", "PMID:100"):
         assert _ids(_internal(db, alias, "cites")) == ["pubmed:200", "pubmed:300"]
     assert _ids(_internal(db, "pubmed:300", "cited_by")) == ["pubmed:100", "pubmed:200"]
     assert {r[6] for r in _internal(db, "pubmed:300", "cited_by")} == {"cited_by"}
@@ -232,12 +254,24 @@ def _labels(conn) -> None:
 
 @pytest.mark.pg
 def test_label_via_chemicals(db):
+    # No chemicals at all, then no label link at all: a missing row each.
+    assert neighbours(db, "pubmed:100", "label", **KW).coverage.missing == ("article_chemicals",)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.article_chemicals (pmid, name) VALUES ('900', 'Metformin')"
+        )
+    db.commit()
+    assert neighbours(db, "pubmed:100", "label", **KW).coverage.missing == ("dailymed",)
     _labels(db)
     res = neighbours(db, "pubmed:100", "label", **KW)
-    # 'Metformin' names substance 1 only: set2 lists only the salt UNII (substance 2)
-    # and is not matched (no moiety-family expansion).
-    assert [c.provenance.record_key for c in res.claims] == ["dailymed:set1", "ema_epar:100"]
-    us, eu = res.claims
+    # 'Metformin' names substance 1; its moiety family holds the salt (substance 2), so
+    # set2, which lists only the salt UNII, is found too.
+    assert [c.provenance.record_key for c in res.claims] == [
+        "dailymed:set1",
+        "dailymed:set2",
+        "ema_epar:100",
+    ]
+    us, _, eu = res.claims
     assert us.provenance.source == "dailymed" and us.provenance.release == "7"
     assert us.provenance.source_file == "dailymed/part-1.parquet"
     assert us.method == "mapped"
@@ -309,12 +343,20 @@ def test_shared_mesh_rare_first(db):
     assert [c.value for c in res.claims] == ["300", "600", "700", "200", "400", "500"]
     assert res.claims[0].confidence == 1.0 and res.claims[0].method == "computed"
     assert "score 0.7" in res.claims[0].text
-    # The cap: D2 is on 5 article_mesh rows, more than 4: it is not used, and a note says so.
-    capped = _internal(db, "pubmed:100", "shared_mesh", cap=4)
+    # The cap (family graph_scan): D2 is on 5 article_mesh rows, more than 4: it is not
+    # used, and a note says so.
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 4, max_limit = 4 "
+            "WHERE family = 'graph_scan'"
+        )
+    db.commit()
+    capped = _internal(db, "pubmed:100", "shared_mesh")
     assert _ids(capped) == ["pubmed:300", "pubmed:600", "pubmed:700"]
     assert _notes(capped) == [
         "1 of 3 major-topic descriptors not used: each is on more than 4 article_mesh rows"
     ]
+    api_settings.sync(db)
     # p_limit keeps the top of the order.
     assert _ids(_internal(db, "pubmed:100", "shared_mesh", limit=2)) == [
         "pubmed:300",

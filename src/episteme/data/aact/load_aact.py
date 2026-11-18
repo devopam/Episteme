@@ -172,12 +172,14 @@ EXTRA_INDEXES: dict[str, tuple[str, ...]] = {
     "browse_conditions": ("mesh_term",),
     "browse_interventions": ("mesh_term",),
     INTERVENTION_SUBSTANCE: ("substance_key", "moiety_key"),
+    # graph_neighbours kind 'trial' (migration 0015) looks references up by PMID.
+    "study_references": ("pmid",),
 }
 # The text columns of EXTRA_INDEXES are indexed on left(col, INDEX_PREFIX_CHARS): at most
 # 4 bytes a character, so 2000 bytes, under the btree key limit (about 2700 bytes).
 INDEX_PREFIX_CHARS = 500
 # Columns that hold no free text: indexed whole.
-_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key", "moiety_key"})
+_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key", "moiety_key", "pmid"})
 # Estimated bytes of one row beyond its text, and of one field (the Python str object).
 _ROW_OVERHEAD = 64
 _FIELD_OVERHEAD = 50

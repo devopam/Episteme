@@ -5,20 +5,21 @@ The query runs in SQL: ``episteme_api_internal.graph_neighbours`` (migration 001
 
 - ``cites`` / ``cited_by``: the citation edges (``article_cites``), ``pubmed:<pmid>``;
 - ``trial``: AACT ``study_references`` rows with the article's PMID, ``nct:<nct_id>``;
-- ``label``: labels whose UNII is the UNII of a substance named (exact normalised name)
-  by one of the article's MeSH chemicals (``article_chemicals``);
+- ``label``: labels whose UNII belongs to the moiety family of a substance named (exact
+  normalised name) by one of the article's MeSH chemicals (``article_chemicals``);
 - ``shared_mesh``: articles that share the article's major-topic MeSH descriptors,
   scored by the sum of ``1 / articles with the descriptor`` (rare descriptors first).
 
 The article is ``pubmed:<pmid>``, ``pmid:<pmid>``, a bare PMID or any article id whose
-``articles`` row has a PMID. An unknown kind or an id without a PMID gives one note.
+``articles`` row has a PMID (the ``pubmed:``/``pmid:`` prefix in any case). An unknown
+kind or an id without a PMID gives one note. The ``shared_mesh`` scan cap is the
+``graph_scan`` family of ``config.API_RESULT_LIMITS`` (``api_settings sync``).
 """
 
 from __future__ import annotations
 
 import psycopg
 
-from episteme.config import get_settings
 from episteme.reference import _api
 from episteme.reference.claims import LookupResult, Method
 
@@ -28,8 +29,8 @@ _BASIS: dict[str, str] = {
     "cites": "citation edge in the article's reference list",
     "cited_by": "citation edge in the citing article's reference list",
     "trial": "AACT study reference with the article's PMID",
-    "label": "label UNII of a substance matched by exact normalised name to a MeSH chemical "
-    "of the article",
+    "label": "label UNII in the moiety family of a substance matched by exact normalised "
+    "name to a MeSH chemical of the article",
     "shared_mesh": "shares major-topic MeSH descriptors with the article; the score in the "
     "text is the sum of 1 / (articles with the descriptor) over them",
 }
@@ -63,7 +64,6 @@ def neighbours(
         article_id,
         kind,
         None if limit is None else max(limit, 0),
-        get_settings().api_shared_mesh_max_articles,
     )
 
     # The shared_mesh score is a sum (it can exceed 1): it goes into the claim text, and

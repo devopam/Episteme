@@ -1800,6 +1800,23 @@ AS $$
         'literature', true)
 $$;
 
+-- A missing article_row: the relation or dataset in `source`, the licence of
+-- p_licence_source.
+CREATE OR REPLACE FUNCTION episteme_api_internal.missing_article(
+    p_source text, p_licence_source text)
+RETURNS episteme_api_internal.article_row
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT ROW('missing', NULL, p_source, NULL, NULL, NULL, NULL, NULL,
+               episteme_api_internal.licence_for(p_licence_source), NULL, NULL)
+           ::episteme_api_internal.article_row
+$$;
+
+-- The first Task 7 draft had a 4th argument (the shared_mesh cap); dropped so that
+-- a 2- or 3-argument call is not ambiguous.
+DROP FUNCTION IF EXISTS episteme_api_internal.graph_neighbours(text, text, int, int);
+
 -- ---------------------------------------------------------------------------
 -- Task 7: graph_neighbours (family 'graph'). One hop from one article, as live joins
 -- (no edge table is built). SQL form of the read part of graph_builder.neighbours.
@@ -1818,17 +1835,19 @@ $$;
 --     'missing' row for 'aact'.
 --   * label     -- the article's article_chemicals names, as name keys (norm_name, inner
 --     white space collapsed: the resolve_entity key), match substance_xref 'name' rows;
---     a label matches when a label_substance.unii is the UNII of a matched substance
---     (that substance only, not its moiety family). Source, release_id and source_file
---     as in current_label; ordered by article_id.
+--     a label matches when a label_substance.unii is the UNII of a member of the moiety
+--     family (substance_family) of a matched substance, as in current_label. Source,
+--     release_id and source_file as in current_label; ordered by article_id. No
+--     article_chemicals row at all: a 'missing' row for 'article_chemicals'; no
+--     label_substance row: a 'missing' row for 'dailymed'.
 --   * shared_mesh -- articles that carry one of the article's major-topic descriptors
 --     (article_mesh.descriptor_ui; the other article's tag may be of any kind). A
---     descriptor is used only when at most p_max_descriptor_articles article_mesh rows
+--     descriptor is used only when at most limit_for('graph_scan') article_mesh rows
 --     carry it (the count stops at that number plus one, so a common descriptor costs
 --     no more than a rare one); the others are named in one note. Score: the sum over
 --     the shared descriptors of 1 / (distinct PMIDs with that descriptor). Ordered by
 --     score descending, then article_id. Rows read: at most the number of the
---     article's major-topic descriptors times p_max_descriptor_articles.
+--     article's major-topic descriptors times limit_for('graph_scan').
 -- relation is the kind; score is 1 except for shared_mesh; title is NULL except for
 -- trial. year: the largest articles.year of the PMID (0 = unknown), or the label's
 -- year. release_id: the is_latest 'pubmed' release for PMIDs.
@@ -1837,28 +1856,16 @@ $$;
 -- row for it. Ordering ties use COLLATE "C" (the databases use a Windows locale).
 -- p_limit (NULL = no limit) keeps a caller from building every hit; the public
 -- wrapper passes limit_for('graph') + 1 and p_precapped true.
--- p_max_descriptor_articles: the default is config.DEFAULT_API_SHARED_MESH_MAX_ARTICLES
--- (a test keeps the two equal); the Python wrapper passes the configured value.
+-- The shared_mesh scan cap is the family 'graph_scan' of result_limit
+-- (config.API_RESULT_LIMITS, written by `api_settings sync`), for every caller.
+-- The PMID prefix ('pubmed:', 'pmid:') is matched without regard to case.
 -- Indexes used: article_cites (src_pmid) and (dst_pmid), article_mesh (pmid) and
 -- (descriptor_ui), article_chemicals (pmid) (bulk group pubmed_graph), articles (pmid)
--- and (id), label_substance (unii), the substance_xref primary key. AACT has no index
--- on study_references.pmid: an operator step (see the drift log).
--- A missing article_row: the relation or dataset in `source`, the licence of
--- p_licence_source.
-CREATE OR REPLACE FUNCTION episteme_api_internal.missing_article(
-    p_source text, p_licence_source text)
-RETURNS episteme_api_internal.article_row
-LANGUAGE sql STABLE
-SET search_path = pg_catalog
-AS $$
-    SELECT ROW('missing', NULL, p_source, NULL, NULL, NULL, NULL, NULL,
-               episteme_api_internal.licence_for(p_licence_source), NULL, NULL)
-           ::episteme_api_internal.article_row
-$$;
-
+-- -- and (id), label_substance (unii), the substance_xref primary key, and AACT
+-- study_references (pmid): load_aact builds it (EXTRA_INDEXES); on a release loaded
+-- before that, the operator creates it once (drift log, 2026-11-17 GraphRAG API layer).
 CREATE OR REPLACE FUNCTION episteme_api_internal.graph_neighbours(
-    p_article_id text, p_kind text, p_limit int DEFAULT NULL,
-    p_max_descriptor_articles int DEFAULT 100000)
+    p_article_id text, p_kind text, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
@@ -1866,7 +1873,7 @@ AS $$
 DECLARE
     v_kind    text := lower(btrim(coalesce(p_kind, '')));
     v_id      text := btrim(coalesce(p_article_id, ''));
-    v_cap     int  := greatest(coalesce(p_max_descriptor_articles, 100000), 1);
+    v_cap     int;
     v_pmid    text;
     v_release text;
     v_licence text;
@@ -1887,8 +1894,8 @@ BEGIN
         RETURN;
     END IF;
 
-    IF v_id ~ '^((pubmed|pmid):)?[0-9]+$' THEN
-        v_pmid := regexp_replace(v_id, '^(pubmed|pmid):', '');
+    IF v_id ~* '^((pubmed|pmid):)?[0-9]+$' THEN
+        v_pmid := regexp_replace(v_id, '^(pubmed|pmid):', '', 'i');
     ELSIF v_id <> '' AND to_regclass('episteme.articles') IS NOT NULL THEN
         SELECT a.pmid INTO v_pmid
           FROM episteme.articles a
@@ -1998,19 +2005,31 @@ BEGIN
             RETURN NEXT episteme_api_internal.missing_article('dailymed', 'dailymed');
             RETURN;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM episteme.article_chemicals) THEN
+            RETURN NEXT episteme_api_internal.missing_article('article_chemicals', 'pubmed');
+            RETURN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM episteme.label_substance) THEN
+            RETURN NEXT episteme_api_internal.missing_article('dailymed', 'dailymed');
+            RETURN;
+        END IF;
         RETURN QUERY
         WITH names AS (
             SELECT DISTINCT btrim(regexp_replace(
                        episteme_api_internal.norm_name(c.name), '\s+', ' ', 'g')) AS k
               FROM episteme.article_chemicals c
              WHERE c.pmid = v_pmid AND c.name IS NOT NULL
-        ), u AS (
-            SELECT DISTINCT s.unii
+        ), k AS (
+            SELECT DISTINCT x.substance_key
               FROM names n
               JOIN episteme.substance_xref x
                 ON x.id_type = 'name' AND x.id_value = n.k
-              JOIN episteme.substance s ON s.substance_key = x.substance_key
-             WHERE n.k <> '' AND coalesce(s.unii, '') <> ''
+             WHERE n.k <> ''
+        ), u AS (
+            SELECT DISTINCT f.unii
+              FROM k
+             CROSS JOIN LATERAL episteme_api_internal.substance_family(k.substance_key) f
+             WHERE coalesce(f.unii, '') <> ''
         ), l AS (
             SELECT DISTINCT ls.article_id
               FROM episteme.label_substance ls
@@ -2040,6 +2059,7 @@ BEGIN
     END IF;
 
     -- shared_mesh
+    v_cap := greatest(episteme_api_internal.limit_for('graph_scan'), 1);
     IF to_regclass('episteme.article_mesh') IS NOT NULL THEN
         SELECT EXISTS (SELECT 1 FROM episteme.article_mesh) INTO v_has;
     END IF;
