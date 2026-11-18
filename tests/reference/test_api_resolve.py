@@ -263,3 +263,35 @@ def test_cap_articles(db):
         ]
     finally:
         api_settings.sync(db)
+
+
+def test_cap_precapped_note_has_no_total(db):
+    """p_precapped true: the caller cut the rows already, so the note names no total."""
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 2 "
+            "WHERE family IN ('literature', 'resolve')"
+        )
+    db.commit()
+    try:
+        arts = (
+            "SELECT kind, note FROM episteme_api_internal.cap_articles(ARRAY("
+            "SELECT ROW('article', 'a' || g, 'pubmed', NULL, NULL, NULL, NULL, NULL, NULL, "
+            "NULL, NULL)::episteme_api_internal.article_row FROM generate_series(1, 3) g), "
+            "'literature'{flag})"
+        )
+        assert _rows(db, arts.format(flag=", true"))[-1] == ("note", "truncated: 2 of more than 2")
+        assert _rows(db, arts.format(flag=""))[-1] == ("note", "truncated: 2 of 3")
+        claims = (
+            "SELECT kind, text FROM episteme_api_internal.cap_claims(ARRAY("
+            "SELECT ROW('claim', g, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+            "NULL, NULL)::episteme_api_internal.claim_row FROM generate_series(1, 3) g), "
+            "'resolve'{flag})"
+        )
+        assert _rows(db, claims.format(flag=", true"))[-1] == (
+            "note",
+            "truncated: 2 of more than 2",
+        )
+        assert _rows(db, claims.format(flag=", false"))[-1] == ("note", "truncated: 2 of 3")
+    finally:
+        api_settings.sync(db)

@@ -150,8 +150,16 @@ $$;
 -- note row 'truncated: <kept> of <total>'. A public function calls it as
 --   SELECT * FROM episteme_api_internal.cap_claims(
 --       ARRAY(SELECT r FROM episteme_api_internal.<f>(<args>) AS r), '<family>')
+-- p_precapped true: the caller already cut the rows (to limit + 1), so the total is
+-- unknown and the note reads 'truncated: <kept> of more than <kept>'.
+-- The first 0015 draft had no p_precapped; the old signature is dropped so that a
+-- call with two arguments is not ambiguous.
+DROP FUNCTION IF EXISTS episteme_api_internal.cap_claims(
+    episteme_api_internal.claim_row[], text);
+DROP FUNCTION IF EXISTS episteme_api_internal.cap_articles(
+    episteme_api_internal.article_row[], text);
 CREATE OR REPLACE FUNCTION episteme_api_internal.cap_claims(
-    p_rows episteme_api_internal.claim_row[], p_family text)
+    p_rows episteme_api_internal.claim_row[], p_family text, p_precapped boolean DEFAULT false)
 RETURNS SETOF episteme_api_internal.claim_row
 LANGUAGE plpgsql STABLE
 SET search_path = pg_catalog
@@ -177,7 +185,9 @@ BEGIN
     END LOOP;
     IF v_total > v_kept THEN
         v_note.kind := 'note';
-        v_note.text := format('truncated: %s of %s', v_kept, v_total);
+        v_note.text := CASE WHEN p_precapped
+                            THEN format('truncated: %s of more than %s', v_kept, v_kept)
+                            ELSE format('truncated: %s of %s', v_kept, v_total) END;
         RETURN NEXT v_note;
     END IF;
 END
@@ -186,7 +196,8 @@ $$;
 -- Public wrapper rule, article rows: the same rule for kind 'article'; the
 -- truncation note is in the `note` column.
 CREATE OR REPLACE FUNCTION episteme_api_internal.cap_articles(
-    p_rows episteme_api_internal.article_row[], p_family text)
+    p_rows episteme_api_internal.article_row[], p_family text,
+    p_precapped boolean DEFAULT false)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE
 SET search_path = pg_catalog
@@ -212,7 +223,9 @@ BEGIN
     END LOOP;
     IF v_total > v_kept THEN
         v_note.kind := 'note';
-        v_note.note := format('truncated: %s of %s', v_kept, v_total);
+        v_note.note := CASE WHEN p_precapped
+                            THEN format('truncated: %s of more than %s', v_kept, v_kept)
+                            ELSE format('truncated: %s of %s', v_kept, v_total) END;
         RETURN NEXT v_note;
     END IF;
 END
@@ -1346,9 +1359,9 @@ $$;
 -- names, comma separated. score is 1.
 -- source_file: the smallest source_file of the matched descriptor rows of the PMID.
 -- p_limit (NULL = no limit) keeps a caller from building every hit. The public
--- wrapper passes limit_for('literature') + 1, so cap_articles still sees one record
--- more than it keeps and writes the truncation note; the total in that note is then
--- at most limit + 1, not the true total.
+-- wrapper passes limit_for('literature') + 1 and p_precapped true, so cap_articles
+-- still sees one record more than it keeps and writes the note 'truncated: <n> of
+-- more than <n>' (the true total is not built).
 -- Index: lower(descriptor_name) on article_mesh serves the name match. It is NOT
 -- created here (article_mesh has ~345M rows): it is in bulk_indexes INDEX_GROUPS
 -- (group pubmed_graph); see the runbook for the production build.
@@ -1490,7 +1503,7 @@ AS $$
         ARRAY(SELECT r FROM episteme_api_internal.literature_by_mesh(
                   p_substance_key, p_topic, p_from_year, p_to_year,
                   episteme_api_internal.limit_for('literature') + 1) AS r),
-        'literature')
+        'literature', true)
 $$;
 
 COMMIT;

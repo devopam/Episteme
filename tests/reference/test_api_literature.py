@@ -285,8 +285,8 @@ def test_public_wrapper_caps_articles(db):
         rows = cur.fetchall()
     db.rollback()
     assert _ids(rows) == ["pubmed:200", "pubmed:500"]
-    assert _notes(rows) == ["truncated: 2 of 3"]
-    # Seven records match; the wrapper builds limit + 1 = 3 of them and still notes the cut.
+    assert _notes(rows) == ["truncated: 2 of more than 2"]
+    # Seven records match; the wrapper builds limit + 1 = 3 and notes the cut, no total.
     with db.cursor() as cur:
         cur.execute(
             "UPDATE episteme_api_internal.result_limit SET default_limit = 2 "
@@ -296,7 +296,7 @@ def test_public_wrapper_caps_articles(db):
         rows = cur.fetchall()
     db.rollback()
     assert _ids(rows) == ["pubmed:200", "pubmed:600"]
-    assert _notes(rows) == ["truncated: 2 of 3"]
+    assert _notes(rows) == ["truncated: 2 of more than 2"]
     # Under the cap: no note.
     with db.cursor() as cur:
         cur.execute("SELECT * FROM episteme_api.literature_by_mesh(3, NULL)")
