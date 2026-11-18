@@ -38,10 +38,11 @@ fingerprint). A bucket whose ``inputs`` equal the fingerprint is skipped (unless
 
 A label whose inner zip is corrupt or has no XML, or whose XML does not parse, is left
 out, listed in the bucket's ``failed_labels`` (or, when the scan failed it, in the run's
-count), given a failed marker keyed on ``label_key`` and counted in
-``_ops/dailymed/failed_inputs.json``. The run goes on. An OUTER zip that cannot be
-opened is different: the labels in it are unknown, and a scan without them would
-retire them. The run stops (``DailymedScanError``) before it writes or removes anything.
+count), given a failed marker keyed on ``label_key``, and counted and named (``{file,
+error}`` in ``failed_files``) in ``_ops/dailymed/failed_inputs.json``. The run goes on.
+An OUTER zip that cannot be opened is different: the labels in it are unknown, and a
+scan without them would retire them. The run stops (``DailymedScanError``) before it
+writes or removes anything.
 
 **Retire.** A bucket is written again whenever its label set changes, so a label that
 is no longer in any zip of the scan leaves its part (the part is loaded again by name,
@@ -810,6 +811,7 @@ def extract_dailymed(
     superseded_total = sum(scan.superseded.values())
     duplicates_total = sum(scan.duplicates.values())
     n_scan_failed = scan.n_failed
+    scan_failed_files = list(scan.failed)
     retired_buckets = withdrawn = 0
     held: dict[str, str] = {}
     if scan.outers:
@@ -874,6 +876,7 @@ def extract_dailymed(
         "duplicate_files": duplicates_total,
         "failed_labels_count": n_scan_failed
         + sum(int(r.get("failed_labels_count") or 0) for r in results),
+        "failed_files": _failed_files(scan_failed_files, held, results),
         "withdrawn_labels": withdrawn,
         "retired_buckets": retired_buckets,
     }
@@ -902,10 +905,37 @@ def extract_dailymed(
     return summary
 
 
+def _failed_files(
+    scan_failed: list[dict[str, str]], held: dict[str, str], results: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """``{file, error}`` per failure, sorted by file: the labels the scan failed, the held
+    buckets, the buckets that failed and the labels a bucket left out. A label is named by
+    its ``label_key`` and a bucket by its ``bucket_key`` (both from ``input_key``, never an
+    absolute path). The scan and each bucket list at most ``_FAILED_LABELS_LISTED`` labels;
+    the count in ``failed_inputs`` stays complete."""
+    out = list(scan_failed)
+    out += [
+        {"file": bucket_key(p), "error": f"bucket not rewritten: {why}"} for p, why in held.items()
+    ]
+    for r in results:
+        if r.get("skipped"):
+            continue
+        if not r.get("ok"):
+            out.append(
+                {"file": str(r.get("source_file") or ""), "error": str(r.get("error") or "")}
+            )
+        out += list(r.get("failed_labels") or [])
+    return sorted(out, key=lambda f: (f["file"], f["error"]))
+
+
 def _write_failed_inputs(processed_dir: Path, res: dict[str, Any]) -> None:
-    """Tell the sample gate how many inputs failed: failed buckets plus failed labels."""
+    """Tell the sample gate how many inputs failed: failed buckets plus failed labels.
+    ``failed_files`` names each failure (``{file, error}``), so a later decision to discard
+    an input can name it (spec 2026-11-17, section 8)."""
     failed = int(res.get("failed") or 0) + int(res.get("failed_labels_count") or 0)
-    bucket_parts.write_failed_inputs(processed_dir, SOURCE, failed)
+    bucket_parts.write_failed_inputs(
+        processed_dir, SOURCE, failed, failed_files=list(res.get("failed_files") or [])
+    )
 
 
 def _main(argv: list[str] | None = None) -> int:

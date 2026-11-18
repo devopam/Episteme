@@ -40,12 +40,14 @@
   - `kind text`: `claim`, `note` or `missing`;
   - `claim_group int`, `alt_rank int` (0 = the claim, >0 = an alternative of that group);
   - `text text`, `value text`, `method text`, `confidence real`, `confidence_basis text`;
+  - **As built (R5):** `confidence` is `double precision`, so `1/n` is exact in Python.
   - `source text`, `release_id text`, `source_file text`, `record_key text`, `jurisdiction text`;
   - `licence text`.
 - **`episteme_api_internal.article_row`** (composite type, Task 1):
   - `kind text`: `article` or `note`;
   - `article_id text`, `source text`, `title text`, `year int`, `score real`, `relation text`;
   - `release_id text`, `licence text`, `note text`.
+  - **As built (R9):** `article_row` ends with `source_file text` (11 columns).
 - **Python mapping** (`episteme.reference._api.rows_to_result(rows) -> LookupResult`, Task 2):
   - `claim` rows become `Claim`/`Provenance`, with alternatives attached by `claim_group`/`alt_rank`;
   - `note` rows become `Coverage.notes`, and `missing` rows become `Coverage.missing`;
@@ -161,6 +163,7 @@
 - Produces:
   - `episteme_api_internal.current_label(p_substance_key bigint) returns setof claim_row` (DailyMed and `ema_epar` labels through `label_substance`);
   - `episteme_api_internal.label_section_text(p_article_id text, p_section text) returns setof claim_row`. `p_section` matches the LOINC code or the case-insensitive title. The value is `substr(text, start_offset + 1, end_offset - start_offset)` from `article_body.text`;
+    - **As built (R6):** the slice is from `article_body.body_text`, not the virtual `text`: the extractors write the offsets against `body_text`.
   - `episteme_api_internal.trials(p_substance_key bigint) returns setof claim_row`. It reads the AACT schema of the latest `aact` release, found through `reg_release`; `format('%I', ...)` builds the schema name in PL/pgSQL. It fills `source_file`;
   - public wrappers (families `label` and `trials`).
 
@@ -266,6 +269,7 @@
 **Interfaces:**
 - Produces:
   - `episteme_api_internal.fts_doc(p_source text, p_title text, p_abstract text, p_text text) returns tsvector`, `IMMUTABLE`. `to_tsvector('english', ...)` covers title + abstract, or the full `p_text` for sources in (`dailymed`, `ema_epar`).
+    - **As built (R3):** `fts_doc(p_source, p_title, p_abstract, p_body_text, p_text_override)` over stored columns (the virtual `text` cannot be indexed); the labels add `body_text`, and `text_override` when it is not NULL or empty. The index expression is `fts_doc(source, title, abstract, body_text, text_override)`. The lock timeout default is 0 with a quiet-database pre-check (R18); the free-space check uses `pg_table_size`; preprints are not covered (their rows are in `article_body_default`).
   - `episteme_api_internal.search_text(p_query text, p_sources text[] default null) returns setof article_row`. It uses `websearch_to_tsquery('english', left(p_query, 1000))`. An empty query, or one of stop words only, gives one `note` row. The rank is `ts_rank_cd`, then `article_id`.
   - The public wrapper (family `search`).
   - The command `python -m episteme.data.db.fts_index build --partition article_body_X [--yes]` and `status`. Partitions allowed: `FTS_PARTITIONS` = pubmed, pmc, openalex, bookshelf, dailymed, ema_epar, plus the preprint partition(s) in `config`. Others are refused (exit 2).

@@ -198,9 +198,9 @@ def select_buckets(
     return [k for k in keys if k in keep]
 
 
-def write_failed_inputs(processed_dir: Path, source: str, failed: int, **extra: int) -> None:
+def write_failed_inputs(processed_dir: Path, source: str, failed: int, **extra: Any) -> None:
     """Tell the sample gate how many inputs failed. ``gate run`` reads the file when its
-    ``run_id`` is the run's own."""
+    ``run_id`` is the run's own. ``extra`` adds keys (counts, or a list of failures)."""
     from episteme.data.article_schema import utc_now_iso
 
     run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")

@@ -1,8 +1,8 @@
 # GraphRAG design: SFT model and deterministic reference lookup (as built)
 
-Status: as built on branch `docs/sft-reference-design`, 2026-11-10. Design source: `superpowers/specs/2026-11-09-sft-and-reference-lookup-design.md` (the spec). Plan: `superpowers/plans/2026-11-09-sft-and-reference-lookup.md`. This document replaces the uploaded draft of `13-graphrag-design.md`. Where the code differs from the spec, this document states the code and marks the difference with **As built**.
+Status: as built on branch `docs/sft-reference-design`, 2026-11-10; the SQL lookup API (section 3.2), MCPg exposure and full-text search as built on branch `docs/graphrag-api-layer`, 2026-11-19 (spec `superpowers/specs/2026-11-17-graphrag-api-layer-design.md`). Design source: `superpowers/specs/2026-11-09-sft-and-reference-lookup-design.md` (the spec). Plan: `superpowers/plans/2026-11-09-sft-and-reference-lookup.md`. This document replaces the uploaded draft of `13-graphrag-design.md`. Where the code differs from the spec, this document states the code and marks the difference with **As built**.
 
-Operator steps: `10-data-sources-runbook.md` section 5.17 (reference documents) and section 6.4 (SFT data and training handoff). Licence classes: `02-data-sources.md` sections 2.2.1, 2.7 and 2.8. Open and deferred items: the drift log in `project-incubation-baseline.md` (entry 2026-11-10).
+Operator steps: `10-data-sources-runbook.md` section 5.17 (reference documents), section 5.19 (SQL lookup API, full-text indexes, reader MCPg instance) and section 6.4 (SFT data and training handoff). Licence classes: `02-data-sources.md` sections 2.2.1, 2.7 and 2.8. Open and deferred items: the drift log in `project-incubation-baseline.md` (entries 2026-11-10 and 2026-11-17).
 
 ## 1. Two parts and one rule
 
@@ -36,10 +36,11 @@ The lookup reuses the tables of migration 0010 and the loaders. It adds no paral
 | Entity resolution | `substance`, `substance_xref` (UNII, synonyms, active moiety) |
 | Releases | `reg_release`; a lookup reads only the `is_latest` release of a dataset |
 | FDA and EMA records | `reg_record`, one partition per dataset and release |
-| Labels | `label_section`, `label_substance` (DailyMed), `articles` |
-| Trials | the `aact` schema (views over the latest release) |
-| Adverse events | `faers_*` tables and the per-quarter signal tables |
-| Literature | `article_mesh`, `articles` |
+| Labels | `label_section`, `label_substance` (DailyMed and the EU labels of `ema_epar`), `articles`, `article_body` |
+| Trials | the latest `aact_r<id>` release schema (the `aact` views point at it) |
+| Adverse events | `faers_*` tables, the per-quarter signal tables and `faers_moiety_quarter_outcome` (seriousness and outcome per moiety and quarter) |
+| Literature | `article_mesh`, `mesh_tree`, `article_cites`, `article_chemicals`, `articles`, and the full-text indexes on `article_body` |
+| Code lists | `code_current` (migration 0013) |
 
 ### 3.1 Lookup functions
 
@@ -59,7 +60,41 @@ All functions are read-only (SELECT only) and take keyword arguments `tenant` an
 
 `PBRER_DATASETS` in `lookups.py` names the datasets of each function; the coverage gaps use these names.
 
-**As built.** The tools run in-process through `episteme.harness.loop.make_call_tool` over one psycopg connection. They are not yet exposed through MCPg (programme project 5).
+**As built (2026-11-19).** Each Python lookup now calls its SQL function in `episteme_api_internal` (section 3.2) and maps the rows to `Claim` and `LookupResult`. The signatures and result shapes did not change. The harness tools still run in-process through `episteme.harness.loop.make_call_tool`. MCPg reaches the same functions through the read-only reader instance (section 3.3).
+
+**Changed on purpose with the SQL functions:** the UNII arm of `resolve_entity` applies only when `id_type` is NULL or `unii`; `release` is filled for resolve, FAERS and literature claims (from `reg_release`), and `source_file` for trials (from the AACT `_load_state`); `faers_counts` adds the seriousness and outcome split and the per-term counts; `literature` expands the topic to its descendant descriptors (`mesh_tree`); `current_label` also returns the EU labels of `ema_epar` (jurisdiction `EU`, record key `<article_id>#<code>#<ordinal>`); `lookup_code` adds the OID of the code system to the claim text. Name normalisation is one SQL function (`norm_name`: NFKC, then `lower`); `lower` differs from Python's `casefold` for a few characters (for example `ß`), an accepted change.
+
+### 3.2 SQL lookup API (`episteme_api`, migration 0015)
+
+Two schemas. `episteme_api` holds the public functions: they call the internal ones, cut the result at the cap of their family and add a `note` row `truncated: <n> of <total>` (or `of more than <n>` when the internal call was already capped). `episteme_api_internal` holds the complete functions (the Python lookups and the PBRER harness use these), the helpers and the two settings tables. Every function is `STABLE`, `SECURITY DEFINER`, owned by `episteme_api_owner`, with `SET search_path = pg_catalog, pg_temp` and schema-qualified bodies. No function writes.
+
+Every row carries its provenance. Claim functions return `claim_row`: `kind` (`claim`, `note` or `missing`), `claim_group`, `alt_rank`, `text`, `value`, `method`, `confidence`, `confidence_basis`, `source`, `release_id`, `source_file`, `record_key`, `jurisdiction`, `licence`. Article functions return `article_row`: `kind`, `article_id`, `source`, `title`, `year`, `score`, `relation`, `release_id`, `licence`, `note`, `source_file`. A `note` row holds a coverage note; a `missing` row names a source that is absent or not loaded. `licence` is the class of `LOOKUP_SOURCE_SUBSETS` (`commercial`, `pending`, `open_metadata`), or `unlisted` for a source not in that list. Rows tagged `pending` are returned with the tag; the SFT gate filters them.
+
+| Function | Returns | Cap family (default, max) | Reads |
+|---|---|---|---|
+| `resolve_entity(p_text text, p_id_type text DEFAULT NULL)` | claims | `resolve` (10, 50) | `substance`, `substance_xref` |
+| `substance_family(p_substance_key bigint)` | `substance_key`, `moiety_key`, `unii`, `preferred_name`, `source`, `release_id`, `licence` | none (one family) | `substance` |
+| `approval_status(p_substance_key bigint)` | claims | `regulatory` (200, 1000) | `reg_record`, `reg_release`: `fda_drugsfda`, `ema_medicines`, `ema_article57`, `ema_outside_eu` |
+| `safety_actions(p_substance_key bigint, p_from date, p_to date)` | claims | `regulatory` | `reg_record`: `fda_enforcement`, `ema_referrals`, `ema_dhpc`, `ema_psusa` |
+| `current_label(p_substance_key bigint)` | claims | `label` (200, 2000) | `label_substance`, `label_section`, `articles` (`dailymed`, `ema_epar`) |
+| `label_section_text(p_article_id text, p_section text)` | claims (the section text as value) | `label` | `label_section`, `article_body.body_text`; `p_section` is a code or a title |
+| `trials(p_substance_key bigint)` | claims | `trials` (200, 1000) | `aact_r<id>.intervention_substance`, `studies`, `_load_state` of the latest release |
+| `faers_counts(p_substance_key bigint, p_from date, p_to date)` | claims | `faers` (500, 5000) | `faers_moiety_quarter`, `faers_quarter_totals`, `faers_moiety_quarter_outcome`, `faers_event_quarter`, `faers_term` |
+| `literature_by_mesh(p_substance_key bigint, p_topic text, p_from_year int DEFAULT NULL, p_to_year int DEFAULT NULL)` | articles | `literature` (50, 500) | `article_mesh`, `mesh_tree`, `articles` |
+| `graph_neighbours(p_article_id text, p_kind text)` | articles | `graph` (50, 500); scan bound `graph_scan` (20000) | `p_kind`: `cites`, `cited_by` (`article_cites`), `shared_mesh` (major-topic descriptors, rarest first), `trial` (AACT `study_references` by PMID), `label` (`article_chemicals` to the moiety family to `label_substance`) |
+| `search_text(p_query text, p_sources text[] DEFAULT NULL)` | articles | `search` (20, 200); scan bound `search_scan` (5000 per partition) | the full-text indexes (section 6.1) |
+| `lookup_code(p_system text, p_code text)` | claims | `code` (1, 1) | `code_current` |
+
+**Settings.** `episteme_api_internal.source_subset` (licence class per source) and `result_limit` (cap per family) are filled from `config.py` by `python -m episteme.reference.api_settings sync`, so `config.py` stays the only source. `graph_scan` and `search_scan` are not row caps: they bound the rows one call reads. The tunables are `EPISTEME_API_LIMIT_<FAMILY>=<default>,<max>`.
+
+**Changes to these functions.** A migration that adds an API function, or drops and recreates one, must be followed by the roles file and `api_settings sync` (runbook section 5.19.4).
+
+### 3.3 Exposure through MCPg
+
+- **Reader instance.** `scripts/mcpg-episteme.sh <db> --reader` connects as `episteme_api_reader`: restricted mode, DDL and ALTER SYSTEM off, no secondary database. The role has USAGE on `episteme_api` and EXECUTE on its functions, and nothing in `episteme`, `episteme_api_internal` or the AACT schemas. Built-in `pg_catalog` functions stay available.
+- **Guards.** The row caps of section 3.2; the scan bounds; a role-level `statement_timeout` (`EPISTEME_API_READER_STATEMENT_TIMEOUT_S`, default 30 s). The reader could raise its own session timeout with `SET`; MCPg's restricted mode is the wall there.
+- **Grants.** `src/episteme/data/db/grants/0015_api_roles.sql` (superuser; roles, ownership, PUBLIC revokes), `0015_api_tables.sql` and `0015_api_aact.sql` (the owner role's reads; `api_settings sync` and the AACT load apply them). The reader password is the `.env` key `EPISTEME_API_READER_PASSWORD`, set by the operator.
+- **Admin instances.** The everyday and admin MCPg instances are unchanged.
 
 ## 4. Versioned rule store
 
@@ -92,11 +127,26 @@ The full agent harness is programme project 6. PBRER v1 needs a minimal one (`sr
 
 ## 6. Literature retrieval without vectors
 
-Exact lookup needs no vectors. PostgreSQL 19beta3 on the build machine has neither pgvector nor pg_search.
+Exact lookup needs no vectors. **Corrected (2026-11-17):** pgvector 0.8.7 is installed on the PostgreSQL 19beta3 build machine; pg_search is not. No vector column or vector index is built yet (section 6.2).
 
-**As built.** `literature(conn, substance_key, topic, ...)` matches a PubMed record when one of its MeSH descriptor names (`article_mesh`) equals a preferred name or synonym of a member of the substance family. `topic`, when given, must also be a descriptor or qualifier name of the same record (for example `adverse effects`). Results are newest first, with record key `pmid:<pmid>`. Full-text search, expansion over `mesh_hierarchy` and citation edges, as the spec describes, are not built yet.
+**As built.** `literature(conn, substance_key, topic, ...)` (SQL function `literature_by_mesh`) matches a PubMed record when one of its MeSH descriptor names (`article_mesh`) equals a preferred name or synonym of a member of the substance family. `topic`, when given, matches the descriptor itself and every descriptor below it in `mesh_tree`, or a qualifier name of the same record (for example `adverse effects`; a topic that is no descriptor gives a note). Only the topic is expanded; the substance side keeps the v1 rule. Results are newest first, with record key `pmid:<pmid>`; `p_from_year` and `p_to_year` filter by year. The lookup needs the operator-built index `article_mesh_lower_name_idx` (runbook section 4.6).
 
-pgvector comes later, when a server build with the extension exists (for example on the NVMe host). It is then used only to resolve free text to a concept, as the programme decides.
+**Citation and other edges.** `graph_neighbours` (section 3.2) goes one hop by live joins: citations both ways, articles that share a major-topic descriptor, trials that cite the PMID, and labels of the substances among the article's MeSH chemicals. No edge table is precomputed; that is decided from the use of this version.
+
+### 6.1 Full-text search
+
+- **Coverage.** Title and abstract for `pubmed`, `pmc`, `openalex` and `bookshelf`; title, abstract and the full stored text for `dailymed` and `ema_epar`. **As built:** `europepmc_preprint` is not covered: its rows are in `article_body_default` with the structured sources, which has no index. `pubchem` and the structured sources are not covered.
+- **Mechanism.** One expression GIN index per `article_body` partition over `episteme_api_internal.fts_doc(source, title, abstract, body_text, text_override)` (`english` configuration). No column stores the vector, so no text is stored twice. The function reads the stored columns, because the virtual `text` (migration 0014) cannot be indexed.
+- **Query.** `search_text` parses with `websearch_to_tsquery` only (input cut at 1000 characters). It searches only partitions with a valid index (the others give a note and a `missing` row), ranks the first `search_scan` matches of each partition with `ts_rank_cd`, and orders by score, then `article_id`.
+- **Build.** One partition at a time, `CREATE INDEX CONCURRENTLY`, smallest first, with a free-space and a quiet-database check (runbook section 5.19.2).
+
+### 6.2 Semantic search: the next spec
+
+Not built. The next spec adds `semantic_search` and a hybrid function to `episteme_api`, with the provenance columns of section 3.2. The embedding pass runs on rented hardware; the caller embeds the query with the same model.
+
+- **Scope measured (2026-11-17).** About 158 million vectors at full scope: titles and abstracts of the literature sources, label sections, and body chunks of PMC and Bookshelf. E: had 1,188 GB free.
+- **Bake-off result (local report `D:/episteme/_bench/vecbench/REPORT.md`, 1M-abstract sample).** TurboQuant with re-ranking reached recall 0.996 to 0.999. pgvector `halfvec` HNSW reached 0.95 to 0.98 and needs about 586 GB at full scope. Binary-quantized HNSW stayed at or below 0.88. No TurboQuant extension builds for PostgreSQL 19, so the TurboQuant result is not usable on this server yet.
+- **Embeddings.** NCBI publishes MedCPT embeddings of PubMed in the public domain. The next spec decides whether to use them for PubMed instead of embedding it again.
 
 ## 7. PBRER v1
 
@@ -166,7 +216,7 @@ Two policy constants have no environment key: `CORPUS_EXCLUDED_SOURCES` and `LOO
 
 - **Training rounds** on rented hardware: a small checked set, a round, a measurement, then the next batch. A round that scores worse never ships.
 - **Full harness** (programme project 6): planner, step limits, MCPg tools.
-- **pgvector** for entry-point resolution only, when a server build has the extension.
+- **Semantic search** (section 6.2): the next spec, from the bake-off result.
 - **Label history store** (programme project 2), so section 4 can report changes, not only the current label.
 - **Regional ICSR rules** (FDA, EU) and an optional XSD step.
 - **Other document types** after PBRER, one at a time: CSR, PLPS, ICF, DSUR, IB, patient narrative, eCRF, GRD. The owner chooses the order.
@@ -177,3 +227,4 @@ Two policy constants have no environment key: `CORPUS_EXCLUDED_SOURCES` and `LOO
 | Version | Date | Notes |
 |---|---|---|
 | v1 | 2026-11-10 | Written from the spec as built (plan Tasks 1 to 13). Replaces the uploaded draft |
+| v2 | 2026-11-19 | SQL lookup API (`episteme_api`, migration 0015) as built, MCPg reader instance, full-text search, pgvector 0.8.7 installed, the semantic-search next spec with the bake-off result |
