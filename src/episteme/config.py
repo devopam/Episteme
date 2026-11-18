@@ -185,6 +185,9 @@ DEFAULT_REPACK_LOCK_TIMEOUT_S = 60
 # timeout. CREATE INDEX CONCURRENTLY waits for older transactions in its last phase; a
 # timeout there throws away the whole build (and leaves an INVALID index).
 DEFAULT_FTS_LOCK_TIMEOUT_S = 0
+# statement_timeout of the SQL lookup API reader role (episteme_api_reader), in seconds;
+# `api_settings sync` sets it on the role. 0 = no timeout. A second guard after the row caps.
+DEFAULT_API_READER_STATEMENT_TIMEOUT_S = 30
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -568,6 +571,11 @@ class Settings:
     repack_lock_timeout_s: int = DEFAULT_REPACK_LOCK_TIMEOUT_S
     # Lock wait of CREATE INDEX CONCURRENTLY in fts_index (EPISTEME_FTS_LOCK_TIMEOUT_S).
     fts_lock_timeout_s: int = DEFAULT_FTS_LOCK_TIMEOUT_S
+    # statement_timeout of episteme_api_reader (EPISTEME_API_READER_STATEMENT_TIMEOUT_S).
+    api_reader_statement_timeout_s: int = DEFAULT_API_READER_STATEMENT_TIMEOUT_S
+    # episteme_api_reader's password (EPISTEME_API_READER_PASSWORD); the operator sets the
+    # role's password to it, and the --reader MCPg profile connects with it.
+    api_reader_password: str = field(default="", repr=False)
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -800,6 +808,10 @@ def get_settings() -> Settings:
         fts_lock_timeout_s=_get_non_negative_int_or_default(
             "EPISTEME_FTS_LOCK_TIMEOUT_S", DEFAULT_FTS_LOCK_TIMEOUT_S
         ),
+        api_reader_statement_timeout_s=_get_non_negative_int_or_default(
+            "EPISTEME_API_READER_STATEMENT_TIMEOUT_S", DEFAULT_API_READER_STATEMENT_TIMEOUT_S
+        ),
+        api_reader_password=_get("EPISTEME_API_READER_PASSWORD", "") or "",
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
         ),

@@ -611,6 +611,30 @@ def test_a_live_signal_table_with_other_privileges_is_refused_before_the_copy(
 
 
 @pytest.mark.pg
+def test_a_rebuild_keeps_the_grants_of_the_live_signal_tables(db):
+    """The new signal tables copy the live grants (generation.copy_access), so a grant on
+    every signal table (the SQL lookup API owner's SELECT) survives a rebuild."""
+    with db.cursor() as cur:
+        for t in fg.SIGNAL_TABLES:
+            cur.execute(f"GRANT SELECT ON episteme.{t} TO PUBLIC")
+    db.commit()
+    try:
+        a = _substance(db, "alpha")
+        _report(db, "1", date(2020, 2, 1), [(_entry(db, a), "suspect", None)])
+        _rebuild(db)
+        with db.cursor() as cur:
+            for t in fg.SIGNAL_TABLES:
+                assert (None, "SELECT", False) in fg._grants(cur, t), t
+        db.rollback()
+    finally:
+        db.rollback()
+        with db.cursor() as cur:
+            for t in fg.SIGNAL_TABLES:
+                cur.execute(f"REVOKE SELECT ON episteme.{t} FROM PUBLIC")
+        db.commit()
+
+
+@pytest.mark.pg
 def test_unbridged_drug_rows_are_counted(db):
     a = _substance(db, "alpha")
     ea = _entry(db, a)

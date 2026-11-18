@@ -80,6 +80,7 @@ from episteme.data.regulatory.faers.generation import (
     _ident,
     _put_state,
     _read_state,
+    copy_access,
     generation_table,
     new_generation_id,
     state_table,
@@ -269,6 +270,7 @@ def _create_tables(conn: psycopg.Connection, token: str) -> None:
                     new=_ident(generation_table(table, token)), live=_ident(table)
                 )
             )
+            copy_access(cur, table, generation_table(table, token))
     conn.commit()
 
 

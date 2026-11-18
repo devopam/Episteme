@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launcher for the MCPg MCP server against the Episteme PG19 database.
-# Referenced by .mcp.json (command: bash, args: [scripts/mcpg-episteme.sh, <primary-db> [--admin]]).
+# Referenced by .mcp.json (command: bash, args: [scripts/mcpg-episteme.sh, <primary-db> [--admin|--reader]]).
 #
 # Why a launcher instead of plain ${VAR} expansion in .mcp.json: the DB
 # password lives only in ./.env (gitignored). This sources ./.env at spawn
@@ -14,6 +14,10 @@
 #                  postgres) so MCPg's alter_system / reload_config tools work.
 #                  Every MCPg tool then runs as the superuser, so keep this
 #                  server disabled in /mcp except while changing server settings.
+#   <db> --reader  SQL lookup API server: connects as episteme_api_reader (password:
+#                  EPISTEME_API_READER_PASSWORD), which may only call the episteme_api
+#                  functions (grants/0015_api_roles.sql). Access mode restricted, DDL
+#                  and ALTER SYSTEM off, no secondary database, whatever ./.env says.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,7 +28,14 @@ if [ -f "$here/.env" ]; then
   set +a
 fi
 
-usage="usage: mcpg-episteme.sh [episteme|episteme_test] [--admin]"
+usage="usage: mcpg-episteme.sh [episteme|episteme_test] [--admin|--reader]"
+has_admin=0; has_reader=0
+for a in "$@"; do
+  case "$a" in --admin) has_admin=1 ;; --reader) has_reader=1 ;; esac
+done
+if [ "$has_admin" = 1 ] && [ "$has_reader" = 1 ]; then
+  echo "mcpg-episteme.sh: --admin and --reader cannot be used together; $usage" >&2; exit 2
+fi
 if [ $# -gt 2 ]; then echo "mcpg-episteme.sh: too many arguments; $usage" >&2; exit 2; fi
 primary="${1:-episteme}"                     # episteme | episteme_test
 mode="${2:-}"
@@ -32,7 +43,7 @@ case "$primary" in
   -*|"") echo "mcpg-episteme.sh: expected a database name first, got '$primary'; $usage" >&2; exit 2 ;;
 esac
 case "$mode" in
-  ""|--admin) ;;
+  ""|--admin|--reader) ;;
   *) echo "mcpg-episteme.sh: unknown option '$mode'; $usage" >&2; exit 2 ;;
 esac
 host="${PGHOST:-localhost}"
@@ -69,6 +80,15 @@ if [ "$mode" = "--admin" ]; then
   export MCPG_ACCESS_MODE=unrestricted         # MCPg registers the ALTER SYSTEM tools only in this mode
   # The server settings docs/10 section 2.4 manages; MCPg's built-in denylist still applies.
   export MCPG_ALTER_SYSTEM_ALLOWLIST="${MCPG_ALTER_SYSTEM_ALLOWLIST:-shared_buffers,max_wal_size,min_wal_size,checkpoint_timeout,wal_compression,maintenance_work_mem,effective_cache_size,max_parallel_maintenance_workers}"
+elif [ "$mode" = "--reader" ]; then
+  pw="${EPISTEME_API_READER_PASSWORD:?EPISTEME_API_READER_PASSWORD not set (put it in ./.env)}"
+  pw_enc="$(urlenc "$pw")"
+  export MCPG_DATABASE_URL="postgresql://episteme_api_reader:${pw_enc}@${host}:${port}/${primary}"
+  unset MCPG_SECONDARY_DATABASE_URLS
+  # Fixed here, after ./.env is read, so no setting there can loosen them.
+  export MCPG_ALLOW_ALTER_SYSTEM=false
+  export MCPG_ACCESS_MODE=restricted
+  export MCPG_ALLOW_DDL=false
 else
   pw="${EPISTEME_SYS_ADMIN_PASSWORD:?EPISTEME_SYS_ADMIN_PASSWORD not set (put it in ./.env)}"
   pw_enc="$(urlenc "$pw")"

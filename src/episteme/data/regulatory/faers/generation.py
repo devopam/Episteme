@@ -271,6 +271,7 @@ def _create_generation(conn: psycopg.Connection, generation: str, inputs_fp: str
                     "PARTITION BY RANGE (receive_year)"
                 ).format(new=_ident(new), parent=_ident(parent))
             )
+            copy_access(cur, parent, new)
             for suffix, bound in _children(cur, parent):
                 values = parse_bound(bound)
                 spec = (
@@ -547,6 +548,67 @@ def _access(cur: psycopg.Cursor, table: str) -> tuple[str, set[str]]:
     )
     owner, acl = cur.fetchone()
     return owner, set(acl or ())
+
+
+# Table privileges that ``copy_access`` may grant or revoke (aclexplode privilege_type).
+_TABLE_PRIVILEGES = frozenset(
+    {"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"}
+)
+
+
+def _grants(cur: psycopg.Cursor, table: str) -> set[tuple[str | None, str, bool]]:
+    """(grantee, privilege, grantable) of ``table`` for every role but its owner; grantee
+    ``None`` is PUBLIC. A NULL ACL is the default one."""
+    cur.execute(
+        "SELECT CASE WHEN a.grantee = 0 THEN NULL ELSE pg_get_userbyid(a.grantee) END, "
+        "a.privilege_type, a.is_grantable "
+        "FROM pg_class c "
+        "CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a "
+        "WHERE c.oid = to_regclass(%s::text) AND a.grantee <> c.relowner",
+        (f"{SCHEMA}.{table}",),
+    )
+    return set(cur.fetchall())
+
+
+def copy_access(cur: psycopg.Cursor, live: str, new: str) -> None:
+    """Give the new table ``new`` the privileges that the live table ``live`` gives to
+    other roles and PUBLIC, and revoke those it has that ``live`` does not. ``CREATE TABLE
+    ... (LIKE ...)`` copies no privilege, and the schema's default privileges cover only
+    ``episteme_app``; a grant made on the live tables later (for example the SQL lookup
+    API owner's SELECT, grants/0015_api_roles.sql) would make ``_check_access`` refuse
+    every new generation. The grants are made by the connected role, which is the table
+    owner (the loader connects as the owner), so the grantor matches a grant that a
+    superuser made on the live table."""
+    live_grants = _grants(cur, live)
+    new_grants = _grants(cur, new)
+    for _, privilege, _ in live_grants | new_grants:
+        if privilege not in _TABLE_PRIVILEGES:
+            raise GenerationError(f"unexpected privilege {privilege!r} on {live} or {new}")
+
+    def role(grantee: str | None) -> sql.Composable:
+        return sql.SQL("PUBLIC") if grantee is None else sql.Identifier(grantee)
+
+    def order(grant: tuple) -> tuple[str, str]:
+        return (grant[0] or "", grant[1])
+
+    revoke = {(g, p) for g, p, _ in new_grants - live_grants}
+    for grantee, privilege in sorted(revoke, key=order):
+        cur.execute(
+            sql.SQL("REVOKE {p} ON {t} FROM {r}").format(
+                p=sql.SQL(privilege), t=_ident(new), r=role(grantee)
+            )
+        )
+    for grantee, privilege, grantable in sorted(live_grants, key=order):
+        if (grantee, privilege, grantable) in new_grants and (grantee, privilege) not in revoke:
+            continue
+        cur.execute(
+            sql.SQL("GRANT {p} ON {t} TO {r}{opt}").format(
+                p=sql.SQL(privilege),
+                t=_ident(new),
+                r=role(grantee),
+                opt=sql.SQL(" WITH GRANT OPTION" if grantable else ""),
+            )
+        )
 
 
 def _check_access(cur: psycopg.Cursor, generation: str) -> None:

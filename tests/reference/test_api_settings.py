@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import episteme.config as cfg
@@ -114,3 +116,96 @@ def test_sync_writes_search_scan(clean):
 
     api_settings.sync(Conn())
     assert ("search_scan", 5000, 5000) in written
+
+
+# ---------------------------------------------------------------------------
+# The reader role's statement_timeout (ruling R17, second guard)
+# ---------------------------------------------------------------------------
+class _RoleConn:
+    """A connection whose role check answers ``exists``; records the statements."""
+
+    def __init__(self, exists: bool):
+        self.exists = exists
+        self.statements: list[str] = []
+
+    def transaction(self):
+        return self._Cm()
+
+    def cursor(self):
+        conn = self
+
+        class Cur:
+            def execute(self, query, params=None):
+                text = query if isinstance(query, str) else query.as_string(None)
+                conn.statements.append(text)
+
+            def fetchone(self):
+                return (conn.exists,)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return Cur()
+
+    class _Cm:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+
+def test_reader_timeout_is_set_on_the_role():
+    conn = _RoleConn(exists=True)
+    assert api_settings.apply_reader_settings(conn, 30) == "30s"
+    alter = [s for s in conn.statements if s.startswith("ALTER ROLE")]
+    assert alter == ["ALTER ROLE \"episteme_api_reader\" SET statement_timeout = '30s'"]
+
+
+def test_reader_timeout_zero_means_no_timeout():
+    conn = _RoleConn(exists=True)
+    assert api_settings.apply_reader_settings(conn, 0) == "0"
+    assert conn.statements[-1] == "ALTER ROLE \"episteme_api_reader\" SET statement_timeout = '0'"
+
+
+def test_reader_timeout_skipped_without_the_role():
+    conn = _RoleConn(exists=False)
+    assert api_settings.apply_reader_settings(conn, 30) is None
+    assert not [s for s in conn.statements if s.startswith("ALTER ROLE")]
+
+
+def test_reader_timeout_rejects_a_negative_value():
+    with pytest.raises(ValueError):
+        api_settings.apply_reader_settings(_RoleConn(exists=True), -1)
+
+
+def test_reader_timeout_config_default_and_override(clean):
+    clean.delenv("EPISTEME_API_READER_STATEMENT_TIMEOUT_S", raising=False)
+    cfg.get_settings.cache_clear()
+    try:
+        assert cfg.get_settings().api_reader_statement_timeout_s == 30
+        clean.setenv("EPISTEME_API_READER_STATEMENT_TIMEOUT_S", "5")
+        cfg.get_settings.cache_clear()
+        assert cfg.get_settings().api_reader_statement_timeout_s == 5
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_reader_password_is_not_in_the_settings_repr(clean):
+    clean.setenv("EPISTEME_API_READER_PASSWORD", "s3cret-value")
+    cfg.get_settings.cache_clear()
+    try:
+        settings = cfg.get_settings()
+        assert settings.api_reader_password == "s3cret-value"
+        assert "s3cret-value" not in repr(settings)
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+def test_env_example_names_the_reader_keys():
+    text = (Path(__file__).resolve().parents[2] / ".env.example").read_text("utf-8")
+    assert "# EPISTEME_API_READER_STATEMENT_TIMEOUT_S=30" in text
+    assert "\nEPISTEME_API_READER_PASSWORD=" in text
