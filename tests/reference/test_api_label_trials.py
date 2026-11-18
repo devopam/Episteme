@@ -1,9 +1,9 @@
-"""current_label, label_section_text and trials as SQL functions (migration 0015),
-against the former Python query path in ``_legacy`` (pg: episteme_test only)."""
+"""current_label, label_section_text and trials as SQL functions (migration 0015), with
+the results the former Python query path gave on these fixtures as fixed expectations
+(pg: episteme_test only)."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 
@@ -13,9 +13,8 @@ from psycopg import sql
 
 from episteme.config import api_result_limits
 from episteme.reference import api_settings, lookups
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
-from . import _legacy as legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, grant_owner
 
 pytestmark = pytest.mark.pg
@@ -121,14 +120,54 @@ def _text_label(conn) -> tuple[tuple[int, int], tuple[int, int]]:
     return s1, s2
 
 
-@pytest.mark.parametrize("key", [1, 2, 3, 999])
-def test_label_parity(db, key):
-    # Empty label tables first: a missing source on both paths.
-    assert_same_fields(lookups.current_label(db, key, **KW), legacy.current_label(db, key, **KW))
+# Fixed expectations: the results the former Python path (pre-0015) gave on these
+# fixtures; the SQL path gave the same (parity run on episteme_test before the legacy
+# copy was deleted).
+_GAP = "change history not determinable"
+
+
+def _section(article: str, loinc: str, title: str, version, year, source_file) -> Claim:
+    return Claim(
+        text=(
+            f"{article} section {loinc} {title}, SPL version {version or 'unknown'}, "
+            f"effective year {year or 'unknown'}"
+        ),
+        value=title,
+        method="fetched",
+        provenance=Provenance("dailymed", version, source_file, f"{article}#{loinc}", "US"),
+        confidence=1.0,
+        confidence_basis="exact UNII match in the label's active ingredients",
+    )
+
+
+_P1 = "dailymed/part-1.parquet"
+_SET1 = (
+    _section("dailymed:set1", "34067-9", "INDICATIONS AND USAGE", "7", 2024, _P1),
+    _section("dailymed:set1", "34084-4", "ADVERSE REACTIONS", "7", 2024, _P1),
+)
+_SET2 = (_section("dailymed:set2", "34084-4", "ADVERSE REACTIONS", None, None, None),)
+_NO_LABELS = LookupResult((), Coverage(matched=0, missing=("dailymed",), notes=(_GAP,)))
+
+
+def _unknown(dataset: str, key: int) -> LookupResult:
+    return LookupResult((), Coverage(0, (dataset,), (f"substance {key} not found",)))
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (1, LookupResult(_SET1, Coverage(matched=2, notes=(_GAP,)))),  # set1 lists the salt
+        (2, LookupResult(_SET1, Coverage(matched=2, notes=(_GAP,)))),
+        (3, LookupResult(_SET2, Coverage(matched=1, notes=(_GAP,)))),  # no articles row
+        (999, _unknown("dailymed", 999)),
+    ],
+)
+def test_label_fixed(db, key, expected):
+    # Empty label tables first: a missing source.
+    empty = _unknown("dailymed", 999) if key == 999 else _NO_LABELS
+    assert lookups.current_label(db, key, **KW) == empty
     _labels(db)
-    old = legacy.current_label(db, key, **KW)
-    new = lookups.current_label(db, key, **KW)
-    assert_same_fields(new, old)
+    assert lookups.current_label(db, key, **KW) == expected
 
 
 def test_label_content_and_eu_label(db):
@@ -270,35 +309,60 @@ def _aact(conn, *, latest: bool, load_state: bool = True) -> None:
     grant_owner(conn)
 
 
-def _without_source_file(res):
-    claims = tuple(
-        dataclasses.replace(c, provenance=dataclasses.replace(c.provenance, source_file=None))
-        for c in res.claims
+def _trial(nct: str, text: str, status) -> Claim:
+    return Claim(
+        text=f"{nct} {text}",
+        value=status,
+        method="fetched",
+        provenance=Provenance("aact", TEST_AACT_RELEASE, _AACT_ZIP, nct, None),
+        confidence=1.0,
+        confidence_basis="intervention name matched to the substance by exact normalised name",
     )
-    return dataclasses.replace(res, claims=claims)
 
 
-@pytest.mark.parametrize("key", [1, 2, 3, 999])
-def test_trials_parity_and_source_file(db, key):
-    # No AACT release at all: missing on both paths.
-    assert_same_fields(lookups.trials(db, key, **KW), legacy.trials(db, key, **KW))
+_NCT_METFORMIN = (
+    _trial(
+        "NCT01",
+        "Metformin in X: status COMPLETED, phase PHASE3, results posted: yes",
+        "COMPLETED",
+    ),
+    _trial(
+        "NCT02",
+        "Metformin salt in Y: status RECRUITING, phase PHASE2, results posted: no",
+        "RECRUITING",
+    ),
+)
+_NCT_ASPIRIN = (
+    _trial(
+        "NCT03", "Aspirin in Z: status COMPLETED, phase PHASE4, results posted: no", "COMPLETED"
+    ),
+    _trial("NCT04", "(no title): status unknown, phase unknown, results posted: no", None),
+)
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (1, LookupResult(_NCT_METFORMIN, Coverage(matched=2))),
+        (2, LookupResult(_NCT_METFORMIN, Coverage(matched=2))),
+        (3, LookupResult(_NCT_ASPIRIN, Coverage(matched=2))),
+        (999, _unknown("aact", 999)),
+    ],
+)
+def test_trials_fixed_and_source_file(db, key, expected):
+    # No AACT release at all: a missing source.
+    empty = _unknown("aact", 999) if key == 999 else LookupResult((), Coverage(0, ("aact",)))
+    assert lookups.trials(db, key, **KW) == empty
     _aact(db, latest=True)
-    old = legacy.trials(db, key, **KW)
-    new = lookups.trials(db, key, **KW)
-    assert_same_fields(_without_source_file(new), old)
-    assert {c.provenance.source_file for c in new.claims} <= {_AACT_ZIP}
-    if key in (1, 2):
-        assert _keys(new) == ["NCT01", "NCT02"]
-        assert {c.provenance.source_file for c in new.claims} == {_AACT_ZIP}
-        assert {c.provenance.release for c in new.claims} == {TEST_AACT_RELEASE}
+    # The former claims, with source_file filled from the release's _load_state row
+    # (the former path gave None).
+    assert lookups.trials(db, key, **KW) == expected
 
 
 def test_trials_not_latest_and_no_load_state(db):
     _aact(db, latest=False)
     res = lookups.trials(db, 1, **KW)
-    assert res.claims == ()
-    assert res.coverage.missing == ("aact",)
-    assert_same_fields(res, legacy.trials(db, 1, **KW))
+    assert res == LookupResult((), Coverage(matched=0, missing=("aact",)))
     db.rollback()
     with db.cursor() as cur:
         cur.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(TEST_AACT_SCHEMA)))

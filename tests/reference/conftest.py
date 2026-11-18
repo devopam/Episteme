@@ -9,8 +9,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from . import _legacy
-from ._pbrer_db import TEST_AACT_SCHEMA, add_substances, build_schema, clear
+from ._pbrer_db import add_substances, build_schema, clear
 
 
 @pytest.fixture(scope="module")
@@ -30,10 +29,9 @@ def ref_schema():
 
 
 @pytest.fixture
-def ref_db(ref_schema, pg_conn, clean_substance, monkeypatch):
-    """A clean schema with three substances. The legacy trials path reads the test AACT
-    schema; the SQL function finds it through the test release."""
-    monkeypatch.setattr(_legacy, "AACT_SCHEMA", TEST_AACT_SCHEMA)
+def ref_db(ref_schema, pg_conn, clean_substance):
+    """A clean schema with three substances. The trials function finds the test AACT
+    schema through the test release."""
     clear(pg_conn)
     add_substances(pg_conn)
     yield pg_conn

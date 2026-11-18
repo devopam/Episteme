@@ -3,15 +3,12 @@ episteme_test only)."""
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from episteme.reference import _api
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 from episteme.reference.codes import lookup_code
 
-from . import _legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS, grant_owner
 
 pytestmark = pytest.mark.pg
@@ -59,21 +56,23 @@ def code_db(ref_schema, pg_conn):
     pg_conn.commit()
 
 
-@pytest.mark.parametrize("code", ["JP", "XX"])
-def test_code_parity(code_db, code):
-    new = lookup_code(code_db, _SYSTEM, code, **KW)
-    old = _legacy.lookup_code(code_db, _SYSTEM, code, **KW)
-    assert len(new.claims) == 1
-    claim = new.claims[0]
-    # The SQL claim is the legacy claim plus the OID inside the version parentheses.
-    assert claim.text.count(f", OID {_OID}): ") == 1
-    old_claims = tuple(
-        dataclasses.replace(c, text=c.text.replace("): ", f", OID {_OID}): ", 1))
-        for c in old.claims
+@pytest.mark.parametrize(
+    ("code", "shown", "status"),
+    [("JP", "Japan", "active"), ("XX", "XX", "unset")],  # XX: empty display, the code shown
+)
+def test_code_fixed(code_db, code, shown, status):
+    """The former Python claim on this fixture, plus the OID inside the version
+    parentheses (ruling R15)."""
+    claim = Claim(
+        text=f"{_SYSTEM} {code} (2, OID {_OID}): {shown}. test notice, kept with the code",
+        value=shown,
+        method="fetched",
+        provenance=Provenance(_SYSTEM, "r2", "fixture", code, None),
+        confidence=1.0,
+        confidence_basis=f"episteme.code_current; status={status}",
     )
-    assert_same_fields(new, dataclasses.replace(old, claims=old_claims))
-    assert "test notice, kept with the code" in claim.text
-    assert claim.provenance.release == "r2"
+    expected = LookupResult(claims=(claim,), coverage=Coverage(matched=1))
+    assert lookup_code(code_db, _SYSTEM, code, **KW) == expected
 
 
 @pytest.mark.parametrize(
@@ -83,11 +82,10 @@ def test_unknown_code_note(code_db, system, code):
     """An unknown code is a note, not a `missing` row: across the API `missing` means a
     source or relation is absent, and the legacy path gave a note."""
     new = lookup_code(code_db, system, code, **KW)
-    old = _legacy.lookup_code(code_db, system, code, **KW)
-    assert_same_fields(new, old)
-    assert new.claims == ()
-    assert new.coverage.matched == 0
-    assert new.coverage.notes == (f"no current code {code!r} in {system}",)
+    # The former Python result: no claim, no missing source, one note.
+    assert new == LookupResult(
+        claims=(), coverage=Coverage(matched=0, notes=(f"no current code {code!r} in {system}",))
+    )
 
 
 def test_public_wrapper_returns_one_claim_row(code_db):

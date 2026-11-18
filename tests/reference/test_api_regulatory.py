@@ -1,5 +1,6 @@
-"""approval_status and safety_actions as SQL functions (migration 0015), against the
-former Python query path in ``_legacy`` (pg: episteme_test only)."""
+"""approval_status and safety_actions as SQL functions (migration 0015), with the results
+the former Python query path gave on these fixtures as fixed expectations (pg:
+episteme_test only)."""
 
 from __future__ import annotations
 
@@ -12,9 +13,8 @@ import pytest
 
 from episteme.config import LOOKUP_SOURCE_SUBSETS
 from episteme.reference import api_settings, lookups
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
-from . import _legacy as legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS, add_release
 
 pytestmark = pytest.mark.pg
@@ -221,11 +221,140 @@ def _keys(res) -> list[str]:
     return [c.provenance.record_key for c in res.claims]
 
 
-@pytest.mark.parametrize("key", [1, 2, 3, 7, 999])
-def test_approval_parity(db, key):
-    old = legacy.approval_status(db, key, **KW)
-    new = lookups.approval_status(db, key, **KW)
-    assert_same_fields(new, old)
+# Fixed expectations: the results the former Python path (pre-0015) gave on this
+# fixture; the SQL path gave the same (parity run on episteme_test before the legacy
+# copy was deleted).
+def _reg(ds: str, key: str, text: str, value: str | None, jurisdiction: str = "US") -> Claim:
+    return Claim(
+        text=text,
+        value=value,
+        method="fetched",
+        provenance=Provenance(ds, "2026-10", f"{ds}/2026-10.json", key, jurisdiction),
+        confidence=1.0,
+        confidence_basis="exact normalised substance name in the latest release",
+    )
+
+
+_NDA0 = _reg(
+    "fda_drugsfda", "NDA-0", "fda_drugsfda NDA-0, sponsor_name: Beta, date: 2001-01-01", None, ""
+)
+_NDA1 = _reg(
+    "fda_drugsfda",
+    "NDA-1",
+    "fda_drugsfda NDA-1, sponsor_name: ACME, brand_name: GLUCOPHAGE; GLUCOPHAGE XR, "
+    "status: Prescription, date: 2001-01-01, jurisdiction: US",
+    "Prescription",
+)
+_NDA2 = _reg(
+    "fda_drugsfda",
+    "NDA-2",
+    "fda_drugsfda NDA-2, status: Discontinued; None, jurisdiction: US",
+    "Discontinued; None",
+)
+_A57 = _reg(
+    "ema_article57",
+    "a57-1",
+    "ema_article57 a57-1, product_name: Glucophage, product_authorisation_country: "
+    "Germany; France, marketing_authorisation_holder: 42, jurisdiction: EU",
+    None,
+    "EU",
+)
+_OUTSIDE = _reg(
+    "ema_outside_eu",
+    "EMEA/H/W/1",
+    "ema_outside_eu EMEA/H/W/1, name_of_medicine: Metfo, status: Positive, date: 2020-06-01, "
+    "jurisdiction: EU",
+    "Positive",
+    "EU",
+)
+_NDA_ASP = _reg("fda_drugsfda", "NDA-ASP", "fda_drugsfda NDA-ASP, jurisdiction: US", None)
+_D_END = _reg(
+    "fda_enforcement", "D-end", "fda_enforcement D-end, date: 2025-03-31, jurisdiction: US", None
+)
+_D_IN = _reg(
+    "fda_enforcement",
+    "D-in",
+    "fda_enforcement D-in, recall_number: D-in, status: Class II, date: 2025-02-01, "
+    "jurisdiction: US",
+    "Class II",
+)
+_D_START = _reg(
+    "fda_enforcement",
+    "D-start",
+    "fda_enforcement D-start, reason_for_recall: NDMA, status: Ongoing, date: 2025-01-01, "
+    "jurisdiction: US",
+    "Ongoing",
+)
+_D_OTHER = _reg(
+    "fda_enforcement",
+    "D-other",
+    "fda_enforcement D-other, date: 2025-02-01, jurisdiction: US",
+    None,
+)
+_DHPC = _reg(
+    "ema_dhpc",
+    "DHPC-1",
+    "ema_dhpc DHPC-1, name_of_medicine: Glucophage, dhpc_type: Safety signal, "
+    "status: Safety signal, date: 2025-03-01, jurisdiction: EU",
+    "Safety signal",
+    "EU",
+)
+_PSUSA = _reg(
+    "ema_psusa",
+    "PSUSA-1",
+    "ema_psusa PSUSA-1, procedure_number: PSUSA/00001/202501, date: 2025-01-15, jurisdiction: EU",
+    None,
+    "EU",
+)
+_FDA_NOTE = "fda_drugsfda: status field not found"
+_UNDATED = "fda_enforcement: 2 records with no date not checked"
+_ENF_NOTE = "fda_enforcement: status field not found"
+_PSUSA_NOTE = "ema_psusa: status field not found"
+_APPROVAL_METFORMIN = LookupResult(
+    (_NDA0, _NDA1, _NDA2, _A57, _OUTSIDE),
+    Coverage(matched=5, missing=("ema_medicines",), notes=(_FDA_NOTE,)),
+)
+_SAFETY_METFORMIN = LookupResult(
+    (_D_END, _D_IN, _D_START, _DHPC, _PSUSA),
+    Coverage(
+        matched=5,
+        missing=("ema_referrals",),
+        notes=(_UNDATED, _ENF_NOTE, _PSUSA_NOTE),
+    ),
+)
+
+
+def _unknown(datasets: tuple[str, ...], key: int) -> LookupResult:
+    return LookupResult((), Coverage(0, datasets, (f"substance {key} not found",)))
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (1, _APPROVAL_METFORMIN),
+        (2, _APPROVAL_METFORMIN),  # the salt: the same moiety family
+        (
+            3,
+            LookupResult(
+                (_NDA_ASP,), Coverage(matched=1, missing=("ema_medicines",), notes=(_FDA_NOTE,))
+            ),
+        ),
+        (
+            7,
+            LookupResult(
+                (),
+                Coverage(
+                    matched=0,
+                    missing=("ema_medicines",),
+                    notes=("substance 7 has no name to match",),
+                ),
+            ),
+        ),
+        (999, _unknown(("fda_drugsfda", "ema_medicines", "ema_article57", "ema_outside_eu"), 999)),
+    ],
+)
+def test_approval_fixed(db, key, expected):
+    assert lookups.approval_status(db, key, **KW) == expected
 
 
 def test_approval_content(db):
@@ -262,20 +391,46 @@ def test_no_name_and_unknown_substance(db):
 
 
 @pytest.mark.parametrize(
-    ("key", "start", "end"),
+    ("key", "start", "end", "expected"),
     [
-        (1, _START, _END),
-        (2, _START, _END),
-        (1, _END, _END),  # one-day interval on the upper edge
-        (1, _END, _START),  # empty interval
-        (3, _START, _END),
-        (999, _START, _END),
+        (1, _START, _END, _SAFETY_METFORMIN),
+        (2, _START, _END, _SAFETY_METFORMIN),
+        # one-day interval on the upper edge
+        (
+            1,
+            _END,
+            _END,
+            LookupResult(
+                (_D_END,),
+                Coverage(matched=1, missing=("ema_referrals",), notes=(_UNDATED, _ENF_NOTE)),
+            ),
+        ),
+        # empty interval: the undated records are still counted
+        (
+            1,
+            _END,
+            _START,
+            LookupResult((), Coverage(matched=0, missing=("ema_referrals",), notes=(_UNDATED,))),
+        ),
+        (
+            3,
+            _START,
+            _END,
+            LookupResult(
+                (_D_OTHER,),
+                Coverage(matched=1, missing=("ema_referrals",), notes=(_ENF_NOTE,)),
+            ),
+        ),
+        (
+            999,
+            _START,
+            _END,
+            _unknown(("fda_enforcement", "ema_referrals", "ema_dhpc", "ema_psusa"), 999),
+        ),
     ],
 )
-def test_safety_parity_interval(db, key, start, end):
-    old = legacy.safety_actions(db, key, start, end, **KW)
-    new = lookups.safety_actions(db, key, start, end, **KW)
-    assert_same_fields(new, old)
+def test_safety_fixed_interval(db, key, start, end, expected):
+    assert lookups.safety_actions(db, key, start, end, **KW) == expected
 
 
 def test_safety_interval_edges(db):
@@ -301,12 +456,22 @@ def test_missing_dataset_row(db):
         cur.execute("UPDATE episteme.reg_release SET is_latest = false WHERE dataset = 'ema_dhpc'")
     db.commit()
     approval = lookups.approval_status(db, 1, **KW)
-    assert_same_fields(approval, legacy.approval_status(db, 1, **KW))
+    assert approval == LookupResult(
+        (_NDA0, _NDA1, _NDA2, _OUTSIDE),
+        Coverage(matched=4, missing=("ema_medicines", "ema_article57"), notes=(_FDA_NOTE,)),
+    )
     assert approval.coverage.missing == ("ema_medicines", "ema_article57")
     assert "a57-1" not in _keys(approval)
     assert {c.provenance.source for c in approval.claims} == {"fda_drugsfda", "ema_outside_eu"}
     safety = lookups.safety_actions(db, 1, _START, _END, **KW)
-    assert_same_fields(safety, legacy.safety_actions(db, 1, _START, _END, **KW))
+    assert safety == LookupResult(
+        (_D_END, _D_IN, _D_START, _PSUSA),
+        Coverage(
+            matched=4,
+            missing=("ema_referrals", "ema_dhpc"),
+            notes=(_UNDATED, _ENF_NOTE, _PSUSA_NOTE),
+        ),
+    )
     assert safety.coverage.missing == ("ema_referrals", "ema_dhpc")
     assert {c.provenance.source for c in safety.claims} == {"fda_enforcement", "ema_psusa"}
     rows = _rows(
@@ -378,36 +543,68 @@ def test_public_regulatory_caps(db):
         api_settings.sync(db)
 
 
+# (status fields, detail fields, "status field not found" note) per dataset, as the
+# former Python path defined them (_STATUS_FIELDS, _DETAIL_FIELDS, _NO_STATUS_FIELD;
+# printed from the legacy copy before it was deleted).
+_REG_FIELDS = {
+    "fda_drugsfda": (
+        ("products.marketing_status",),
+        ("sponsor_name", "products.brand_name"),
+        True,
+    ),
+    "ema_medicines": (
+        ("medicine_status",),
+        ("name_of_medicine", "marketing_authorisation_developer_applicant_holder"),
+        True,
+    ),
+    "ema_article57": (
+        (),
+        ("product_name", "product_authorisation_country", "marketing_authorisation_holder"),
+        False,
+    ),
+    "ema_outside_eu": (("ema_opinion_status",), ("name_of_medicine",), True),
+    "fda_enforcement": (
+        ("classification", "status"),
+        ("recall_number", "reason_for_recall"),
+        True,
+    ),
+    "ema_referrals": (("current_status",), ("referral_name", "reference_number"), True),
+    "ema_dhpc": (("dhpc_type", "regulatory_outcome"), ("name_of_medicine", "dhpc_type"), True),
+    "ema_psusa": (("regulatory_outcome",), ("procedure_number",), True),
+}
+
+
 def test_reg_fields_match_former_python(db):
     datasets = lookups.APPROVAL_DATASETS + lookups.SAFETY_DATASETS
+    assert set(datasets) == set(_REG_FIELDS)
     for ds in datasets:
         ((status, detail, note),) = _rows(
             db, "SELECT * FROM episteme_api_internal.reg_fields(%s)", (ds,)
         )
-        assert tuple(status) == legacy._STATUS_FIELDS.get(ds, ())
-        assert tuple(detail) == legacy._DETAIL_FIELDS.get(ds, ())
-        assert note is (ds not in legacy._NO_STATUS_FIELD)
+        assert (tuple(status), tuple(detail), note) == _REG_FIELDS[ds], ds
 
 
+# The expected values are the output of the former Python ``_get`` on each payload
+# (printed from the legacy copy before it was deleted).
 @pytest.mark.parametrize(
-    ("payload", "path"),
+    ("payload", "path", "expected"),
     [
-        ({"a": " x "}, "a"),
-        ({"a": None}, "a"),
-        ({"a": ["x", "x", " ", "y", None]}, "a"),
-        ({"a": [{"b": "1"}, {"b": None}, "s", {"b": ["2", "1"]}]}, "a.b"),
-        ({"a": {"b": {"c": "deep"}}}, "a.b.c"),
-        ([{"a": "top"}, {"a": "list"}], "a"),
-        ({"a": 42}, "a"),
-        ({"a": [[{"b": "nested"}]]}, "a.b"),
-        ({}, "a.b"),
-        ({"a": ""}, "a"),
+        ({"a": " x "}, "a", ["x"]),
+        ({"a": None}, "a", []),
+        ({"a": ["x", "x", " ", "y", None]}, "a", ["x", "y", "None"]),
+        ({"a": [{"b": "1"}, {"b": None}, "s", {"b": ["2", "1"]}]}, "a.b", ["1", "2"]),
+        ({"a": {"b": {"c": "deep"}}}, "a.b.c", ["deep"]),
+        ([{"a": "top"}, {"a": "list"}], "a", ["top", "list"]),
+        ({"a": 42}, "a", ["42"]),
+        ({"a": [[{"b": "nested"}]]}, "a.b", []),
+        ({}, "a.b", []),
+        ({"a": ""}, "a", []),
     ],
 )
-def test_json_values_matches_former_get(db, payload, path):
+def test_json_values_matches_former_get(db, payload, path, expected):
     ((values,),) = _rows(
         db,
         "SELECT episteme_api_internal.json_values(%s::jsonb, %s)",
         (json.dumps(payload), path),
     )
-    assert values == legacy._get(payload, path)
+    assert values == expected

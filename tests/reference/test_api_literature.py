@@ -1,6 +1,6 @@
-"""literature_by_mesh as a SQL function (migration 0015), against the former Python
-query path in ``_legacy`` (pg: episteme_test only), and the article_row mapping
-(non-pg)."""
+"""literature_by_mesh as a SQL function (migration 0015), with the results the former
+Python query path gave on these fixtures as fixed expectations (pg: episteme_test only),
+and the article_row mapping (non-pg)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ import dataclasses
 import pytest
 
 from episteme.reference import _api, api_settings
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 from episteme.reference.literature import literature
 
-from . import _legacy as legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW
 
 # The topic tree of the fixture. 'Liver Diseases' C06.552 has two children; 'Decoy'
@@ -151,41 +150,85 @@ def _comparable(result):
     return dataclasses.replace(result, claims=tuple(sorted(result.claims, key=lambda c: c.value)))
 
 
+# Fixed expectations: the results the former Python path (pre-0015) gave on this
+# fixture, with the claims sorted by value; the SQL path gave the same (parity run on
+# episteme_test before the legacy copy was deleted).
+def _pmid(pmid: str, year, mesh: str, letter: str, topic: str | None = None) -> Claim:
+    return Claim(
+        text=f"PMID {pmid} ({year or 'year unknown'}): MeSH {mesh}"
+        + (f"; topic {topic}" if topic else ""),
+        value=pmid,
+        method="fetched",
+        provenance=Provenance("pubmed", None, f"pubmed/{letter}.xml", f"pmid:{pmid}", None),
+        confidence=1.0,
+        confidence_basis="exact MeSH descriptor name match",
+    )
+
+
+# Every Metformin record, sorted by PMID (400 has no articles row: year unknown).
+_METFORMIN = tuple(
+    _pmid(p, y, "Metformin", f)
+    for p, y, f in (
+        ("100", 2020, "a"),
+        ("150", 2019, "e"),
+        ("200", 2023, "b"),
+        ("400", None, "d"),
+        ("500", 2021, "f"),
+        ("600", 2022, "g"),
+        ("700", 2022, "h"),
+    )
+)
+
+
+def _found(*claims: Claim) -> LookupResult:
+    return LookupResult(claims, Coverage(matched=len(claims)))
+
+
 @pytest.mark.pg
 @pytest.mark.parametrize(
-    "key,topic",
+    "key,topic,expected",
     [
-        (1, None),
-        (2, None),
-        (3, None),
-        (1, "Chemical and Drug Induced Liver Injury"),  # a topic with no descendants
-        (1, "adverse effects"),  # a qualifier name
-        (1, "Kidney Diseases"),
-        (999, None),
+        (1, None, _found(*_METFORMIN)),
+        (2, None, _found(*_METFORMIN)),  # the salt: the same moiety family
+        (3, None, _found(_pmid("300", 2024, "Aspirin", "c"))),
+        # a topic with no descendants
+        (
+            1,
+            "Chemical and Drug Induced Liver Injury",
+            _found(_pmid("200", 2023, "Metformin", "b", "Chemical and Drug Induced Liver Injury")),
+        ),
+        # a qualifier name
+        (1, "adverse effects", _found(_pmid("200", 2023, "Metformin", "b", "adverse effects"))),
+        (1, "Kidney Diseases", _found(_pmid("600", 2022, "Metformin", "g", "Kidney Diseases"))),
+        (
+            999,
+            None,
+            LookupResult((), Coverage(0, ("article_mesh",), ("substance 999 not found",))),
+        ),
     ],
 )
-def test_literature_parity_without_children(db, key, topic):
-    new = literature(db, key, topic, **KW)
-    old = legacy.literature(db, key, topic, **KW)
+def test_literature_fixed_without_children(db, key, topic, expected):
+    new = _comparable(literature(db, key, topic, **KW))
     if topic == "adverse effects":
         # A qualifier name is no descriptor: the SQL function adds a note.
-        assert_same_fields(_comparable(new).claims, _comparable(old).claims)
-        assert new.coverage.matched == old.coverage.matched
+        assert new.claims == expected.claims
+        assert new.coverage.matched == expected.coverage.matched
         return
-    assert_same_fields(_comparable(new), _comparable(old))
+    assert new == expected
 
 
 @pytest.mark.pg
-def test_parity_with_limit_and_empty_table(db):
+def test_fixed_with_limit_and_empty_table(db):
     new = literature(db, 1, None, limit=1, **KW)  # one year leader: no tie at the cut
-    old = legacy.literature(db, 1, None, limit=1, **KW)
-    assert_same_fields(_comparable(new), _comparable(old))
-    assert new.coverage.notes == ("limited to the 1 newest records",)
+    assert new == LookupResult(
+        (_pmid("200", 2023, "Metformin", "b"),),
+        Coverage(matched=1, notes=("limited to the 1 newest records",)),
+    )
     with db.cursor() as cur:
         cur.execute("TRUNCATE episteme.article_mesh")
     db.commit()
-    assert_same_fields(
-        literature(db, 1, None, **KW), _comparable(legacy.literature(db, 1, None, **KW))
+    assert literature(db, 1, None, **KW) == LookupResult(
+        (), Coverage(matched=0, missing=("article_mesh",))
     )
 
 

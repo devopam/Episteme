@@ -1,6 +1,6 @@
-"""faers_counts as a SQL function (migration 0015), against the former Python query
-path in ``_legacy`` (pg: episteme_test only), and a source check of the FAERS SQL
-(non-pg)."""
+"""faers_counts as a SQL function (migration 0015), with the results the former Python
+query path gave on these fixtures as fixed expectations (pg: episteme_test only), and a
+source check of the FAERS SQL (non-pg)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ import pytest
 
 from episteme.config import api_result_limits
 from episteme.reference import api_settings, lookups
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
-from . import _legacy as legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS, REPO_ROOT
 
 _MIGRATION = MIGRATIONS / "0015_api_layer.sql"
@@ -157,30 +156,61 @@ def _quarter_part(res):
     )
 
 
+# Fixed expectations: the per-quarter claims and notes the former Python path (pre-0015)
+# gave on this fixture; the SQL path gave the same (parity run on episteme_test before
+# the legacy copy was deleted).
+_RULE = "quarters that overlap the interval are counted whole"
+
+
+def _quarter_claim(moiety: int, quarter: str, label: str, suspect, any_role, total) -> Claim:
+    return Claim(
+        text=(
+            f"{label}: {suspect} reports name the substance as suspect, {any_role} in any "
+            f"role, of {total} reports received (US public spontaneous reports (FAERS))"
+        ),
+        value=str(suspect),
+        method="computed",
+        provenance=Provenance(
+            "openfda_faers", None, None, f"faers_moiety_quarter:{moiety}:{quarter}", "US"
+        ),
+        confidence=1.0,
+        confidence_basis="exact count of stored FAERS reports per moiety and quarter",
+    )
+
+
+_Q_METFORMIN = (
+    _quarter_claim(1, "2025-01-01", "2025Q1", 5, 8, 1000),
+    _quarter_claim(1, "2025-04-01", "2025Q2", 6, 9, 1100),
+)
+_Q_ASPIRIN = (_quarter_claim(3, "2025-01-01", "2025Q1", 50, 60, 1000),)
+
+
 @pytest.mark.pg
-@pytest.mark.parametrize("key", [1, 2, 3, 999])
-def test_faers_parity_existing_claims(db, key):
-    # Empty FAERS tables, or an unknown substance: the same result on both paths.
-    new = lookups.faers_counts(db, key, _FROM, _TO, **KW)
-    assert_same_fields(new, legacy.faers_counts(db, key, _FROM, _TO, **KW))
-    _quarters(db)
-    _splits_and_terms(db)
-    old = legacy.faers_counts(db, key, _FROM, _TO, **KW)
+@pytest.mark.parametrize(
+    ("key", "quarter_claims"), [(1, _Q_METFORMIN), (2, _Q_METFORMIN), (3, _Q_ASPIRIN), (999, ())]
+)
+def test_faers_fixed_existing_claims(db, key, quarter_claims):
+    unknown = LookupResult((), Coverage(0, ("faers",), ("substance 999 not found",)))
+    # Empty FAERS tables: a missing source; an unknown substance: a note.
     new = lookups.faers_counts(db, key, _FROM, _TO, **KW)
     if key == 999:
-        assert_same_fields(new, old)
+        assert new == unknown
+    else:
+        assert new == LookupResult((), Coverage(matched=0, missing=("faers",), notes=(_RULE,)))
+    _quarters(db)
+    _splits_and_terms(db)
+    new = lookups.faers_counts(db, key, _FROM, _TO, **KW)
+    if key == 999:
+        assert new == unknown
         return
     # The per-quarter claims are the former ones, first and in the same order; the
     # former notes come first, the new notes after them.
-    assert new.claims[: len(old.claims)] == _quarter_part(new)
-    assert_same_fields(_quarter_part(new), old.claims)
-    assert new.coverage.notes[: len(old.coverage.notes)] == old.coverage.notes
-    assert new.coverage.missing == old.coverage.missing == ()
-    # A quarter with no totals row: same note on both paths.
+    assert new.claims[: len(quarter_claims)] == _quarter_part(new) == quarter_claims
+    assert new.coverage.notes[:1] == (_RULE,)
+    assert new.coverage.missing == ()
+    # A quarter with no totals row: the former notes, then the new ones.
     gaps = lookups.faers_counts(db, key, date(2025, 2, 1), date(2025, 9, 30), **KW)
-    old_gaps = legacy.faers_counts(db, key, date(2025, 2, 1), date(2025, 9, 30), **KW)
-    assert gaps.coverage.notes[: len(old_gaps.coverage.notes)] == old_gaps.coverage.notes
-    assert "no FAERS data for quarters: 2025Q3" in gaps.coverage.notes
+    assert gaps.coverage.notes[:2] == (_RULE, "no FAERS data for quarters: 2025Q3")
 
 
 @pytest.mark.pg

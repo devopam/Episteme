@@ -1,5 +1,6 @@
-"""resolve_entity and substance_family as SQL functions (migration 0015), against the
-former Python query path in ``_legacy`` (pg: episteme_test only)."""
+"""resolve_entity and substance_family as SQL functions (migration 0015), with the
+results the former Python query path gave on these fixtures as fixed expectations (pg:
+episteme_test only)."""
 
 from __future__ import annotations
 
@@ -10,9 +11,8 @@ import pytest
 
 from episteme.config import LOOKUP_SOURCE_SUBSETS
 from episteme.reference import _api, _scope, api_settings, resolve
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
 
-from . import _legacy as legacy
-from ._parity import assert_same_fields
 from ._pbrer_db import KW, MIGRATIONS
 
 pytestmark = pytest.mark.pg
@@ -65,26 +65,65 @@ def _rows(conn, query, params=()):
         return cur.fetchall()
 
 
+_ONE = "exact UNII or normalised name match"
+_EMPTY = LookupResult(claims=(), coverage=Coverage(matched=0, missing=("substance",)))
+
+
+def _claim(key: int, unii: str, name: str, method: str, confidence: float, basis: str, alts=()):
+    return Claim(
+        text=name,
+        value=str(key),
+        method=method,
+        provenance=Provenance("substance", None, None, f"unii:{unii}", None),
+        confidence=confidence,
+        confidence_basis=basis,
+        alternatives=alts,
+    )
+
+
+def _one(key: int, unii: str, name: str) -> LookupResult:
+    return LookupResult((_claim(key, unii, name, "fetched", 1.0, _ONE),), Coverage(matched=1))
+
+
+def _mapped(*subs: tuple[int, str, str]) -> LookupResult:
+    n = len(subs)
+    basis = f"{n} substances share this name"
+    alts = tuple(_claim(*s, "mapped", 1.0 / n, basis) for s in subs[1:])
+    return LookupResult((_claim(*subs[0], "mapped", 1.0 / n, basis, alts),), Coverage(matched=n))
+
+
+_METFORMIN = (1, "UNIIMET01", "Metformin")
+_SALT = (2, "UNIIMET02", "Metformin Hydrochloride")
+_ASPIRIN = (3, "UNIIASP03", "Aspirin")
+
+
+# The results of the former Python path (pre-0015) on this fixture; the SQL path gave
+# the same (parity run on episteme_test before the legacy copy was deleted).
 @pytest.mark.parametrize(
-    ("text", "id_type"),
+    ("text", "id_type", "expected"),
     [
-        ("uniiasp03", None),  # exact UNII
-        (" Aspirin ", None),  # name
-        ("dimethylbiguanide", None),  # synonym
-        ("metformin hydrochloride", None),  # salt name
-        ("no such drug", None),  # unknown name
-        ("   ", None),  # empty
-        ("metformin", None),  # ambiguous: moiety 1, salt 2
-        ("trio", None),  # ambiguous, n = 3: confidence 1/3 exactly as the float
-        ("aspirin", "unii"),  # id_type 'unii' given a name
-        ("UNIIMET01", "unii"),
-        ("metformin", "name"),
+        ("uniiasp03", None, _one(*_ASPIRIN)),  # exact UNII
+        (" Aspirin ", None, _one(*_ASPIRIN)),  # name
+        ("dimethylbiguanide", None, _one(*_METFORMIN)),  # synonym
+        ("metformin hydrochloride", None, _one(*_SALT)),  # salt name
+        ("no such drug", None, _EMPTY),  # unknown name
+        ("   ", None, _EMPTY),  # empty
+        ("metformin", None, _mapped(_METFORMIN, _SALT)),  # ambiguous: moiety 1, salt 2
+        # ambiguous, n = 3: confidence 1/3 exactly as the float
+        (
+            "trio",
+            None,
+            _mapped(
+                (4, "UNIITRI04", "Trio A"), (5, "UNIITRI05", "Trio B"), (6, "UNIITRI06", "Trio C")
+            ),
+        ),
+        ("aspirin", "unii", _EMPTY),  # id_type 'unii' given a name
+        ("UNIIMET01", "unii", _one(*_METFORMIN)),
+        ("metformin", "name", _mapped(_METFORMIN, _SALT)),
     ],
 )
-def test_resolve_parity(db, text, id_type):
-    old = legacy.resolve_entity(db, text, **KW, id_type=id_type)
-    new = resolve.resolve_entity(db, text, **KW, id_type=id_type)
-    assert_same_fields(new, old)
+def test_resolve_fixed(db, text, id_type, expected):
+    assert resolve.resolve_entity(db, text, **KW, id_type=id_type) == expected
 
 
 def test_resolve_one_third_is_exact(db):
@@ -107,8 +146,8 @@ def test_resolve_ambiguous_returns_alternatives(db):
 
 def test_resolve_unii_arm_respects_id_type(db):
     # Changed on purpose (spec 4.3): the substance.unii arm applies only when id_type
-    # is NULL or 'unii'. The former path matched a UNII under any id_type.
-    assert legacy.resolve_entity(db, "UNIIASP03", **KW, id_type="name").claims[0].value == "3"
+    # is NULL or 'unii'. The former path matched a UNII under any id_type (it gave
+    # substance 3 here).
     res = resolve.resolve_entity(db, "UNIIASP03", **KW, id_type="name")
     assert res.claims == ()
     assert res.coverage.missing == ("substance",)
@@ -157,9 +196,23 @@ def test_resolve_release_none_without_release(db):
     assert c.provenance.release is None
 
 
-@pytest.mark.parametrize("key", [1, 2, 3, 4, 99])
-def test_family_matches_scope(db, key):
-    assert_same_fields(_scope.substance_scope(db, key), legacy.substance_scope(db, key))
+_MET_NAMES = ("metformin", "metformin hydrochloride", "dimethylbiguanide")
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (1, _scope.SubstanceScope(1, 1, (1, 2), ("UNIIMET01", "UNIIMET02"), _MET_NAMES)),
+        (2, _scope.SubstanceScope(2, 1, (2, 1), ("UNIIMET01", "UNIIMET02"), _MET_NAMES)),
+        (3, _scope.SubstanceScope(3, 3, (3,), ("UNIIASP03",), ("aspirin",))),
+        (4, _scope.SubstanceScope(4, 4, (4,), ("UNIITRI04",), ("trio a", "trio"))),
+        (99, None),
+    ],
+)
+def test_family_scope_fixed(db, key, expected):
+    """The scope the former Python path gave: the input key first, the family's UNIIs,
+    the preferred names (norm_name form) and then the xref names."""
+    assert _scope.substance_scope(db, key) == expected
 
 
 def test_family_rows(db):
