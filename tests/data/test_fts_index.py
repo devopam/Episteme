@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 
+import psycopg
 import pytest
 
 import episteme.config as cfg
@@ -177,7 +178,7 @@ def test_lock_timeout_default_and_override(monkeypatch, tmp_path):
     monkeypatch.delenv("EPISTEME_FTS_LOCK_TIMEOUT_S", raising=False)
     cfg.get_settings.cache_clear()
     try:
-        assert cfg.get_settings().fts_lock_timeout_s == 60
+        assert cfg.get_settings().fts_lock_timeout_s == 0
         monkeypatch.setenv("EPISTEME_FTS_LOCK_TIMEOUT_S", "7")
         cfg.get_settings.cache_clear()
         assert cfg.get_settings().fts_lock_timeout_s == 7
@@ -186,7 +187,150 @@ def test_lock_timeout_default_and_override(monkeypatch, tmp_path):
 
 
 def test_env_example_names_the_tunable():
-    assert "# EPISTEME_FTS_LOCK_TIMEOUT_S=60" in (REPO_ROOT / ".env.example").read_text("utf-8")
+    assert "# EPISTEME_FTS_LOCK_TIMEOUT_S=0" in (REPO_ROOT / ".env.example").read_text("utf-8")
+
+
+class _StubCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, query, params=None):
+        q = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        self.conn.executed.append(q)
+        if "RESET" in q and self.conn.fail_reset:
+            raise psycopg.OperationalError("connection lost")
+        if "CREATE INDEX" in q and self.conn.fail_build:
+            raise psycopg.errors.QueryCanceled("canceling statement due to user request")
+
+    def fetchall(self):
+        return self.conn.activity
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _StubConn:
+    """Answers pg_stat_activity with ``activity`` and records every statement."""
+
+    def __init__(self, activity, *, fail_build=False, fail_reset=False):
+        self.activity = activity
+        self.executed: list[str] = []
+        self.autocommit = False
+        self.fail_build = fail_build
+        self.fail_reset = fail_reset
+
+    def cursor(self):
+        return _StubCursor(self)
+
+    def rollback(self):
+        pass
+
+
+def _stub_checks(monkeypatch, states=("missing", "valid")):
+    """Every check before the build passes; index_state gives ``states`` in turn."""
+    it = iter(states)
+    monkeypatch.setattr(tool, "validate_partition", lambda conn, p: p)
+    monkeypatch.setattr(
+        tool, "index_state", lambda conn, p: (lambda s: None if s == "missing" else s)(next(it))
+    )
+    monkeypatch.setattr(tool, "relation_size", lambda conn, p: 1)
+
+
+_BUSY = [(4242, "00:12:00", "SELECT count(*) FROM episteme.article_body_pmc")]
+
+
+def test_active_statements_refuse_the_build(monkeypatch):
+    _stub_checks(monkeypatch)
+    conn = _StubConn(_BUSY)
+    with pytest.raises(tool.FtsRefused) as exc:
+        tool.build(conn, "article_body_pmc", yes=True, directory="d", free_bytes_of=lambda d: 9)
+    msg = str(exc.value)
+    assert "pid=4242" in msg and "00:12:00" in msg and "SELECT count(*)" in msg
+    assert "--force" in msg
+    assert not any("CREATE INDEX" in q for q in conn.executed)
+
+
+def test_force_builds_despite_active_statements(monkeypatch):
+    _stub_checks(monkeypatch)
+    conn = _StubConn(_BUSY)
+    logs: list[str] = []
+    out = tool.build(
+        conn,
+        "article_body_pmc",
+        yes=True,
+        force=True,
+        directory="d",
+        free_bytes_of=lambda d: 9,
+        lock_timeout_s=0,
+        log=logs.append,
+    )
+    assert out["built"] is True
+    assert any("CREATE INDEX" in q for q in conn.executed)
+    assert any("pid=4242" in m for m in logs)
+    assert conn.autocommit is False
+
+
+def test_quiet_database_builds_without_force(monkeypatch):
+    _stub_checks(monkeypatch)
+    conn = _StubConn([])
+    out = tool.build(
+        conn,
+        "article_body_pmc",
+        yes=True,
+        directory="d",
+        free_bytes_of=lambda d: 9,
+        lock_timeout_s=0,
+        log=lambda m: None,
+    )
+    assert out["built"] is True
+    assert any("lock_timeout = '0s'" in q for q in conn.executed)
+
+
+def test_failed_reset_does_not_mask_the_build_error(monkeypatch):
+    _stub_checks(monkeypatch)
+    conn = _StubConn([], fail_build=True, fail_reset=True)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        tool.build(
+            conn,
+            "article_body_pmc",
+            yes=True,
+            directory="d",
+            free_bytes_of=lambda d: 9,
+            lock_timeout_s=0,
+            log=lambda m: None,
+        )
+    assert conn.autocommit is False
+
+
+def test_main_passes_force(monkeypatch):
+    seen = {}
+
+    class _C:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _S:
+        fts_lock_timeout_s = 0
+
+    monkeypatch.setattr(tool, "get_settings", lambda: _S())
+    monkeypatch.setattr(tool.db_connection, "admin_dsn_from_settings", lambda: "dsn")
+    monkeypatch.setattr(tool, "pool_kwargs", lambda s: {})
+    monkeypatch.setattr(tool.psycopg, "connect", lambda *a, **k: _C())
+    monkeypatch.setattr(tool, "check_server_version", lambda c: None)
+
+    def fake_build(conn, partition, **kw):
+        seen.update(kw)
+        return {"built": True, "state": "valid"}
+
+    monkeypatch.setattr(tool, "build", fake_build)
+    assert tool.main(["build", "--partition", "article_body_pmc", "--yes", "--force"]) == 0
+    assert seen["force"] is True and seen["yes"] is True
 
 
 # ----------------------------------------------------------------------------- pg
@@ -247,6 +391,7 @@ def test_build_creates_a_valid_index_and_status_reports_it(fts_conn):
         fts_conn,
         "article_body_dailymed",
         yes=True,
+        force=True,
         free_bytes_of=lambda d: 10**15,
         directory="stub",
         lock_timeout_s=5,
@@ -259,6 +404,7 @@ def test_build_creates_a_valid_index_and_status_reports_it(fts_conn):
         fts_conn,
         "article_body_dailymed",
         yes=True,
+        force=True,
         free_bytes_of=lambda d: 10**15,
         directory="stub",
         log=logs.append,
@@ -297,6 +443,7 @@ def test_build_refuses_partition_that_does_not_exist(fts_conn):
             fts_conn,
             "article_body_openalex",
             yes=True,
+            force=True,
             free_bytes_of=lambda d: 10**15,
             directory="stub",
             log=lambda m: None,

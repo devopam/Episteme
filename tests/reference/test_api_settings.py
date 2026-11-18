@@ -30,6 +30,7 @@ def test_api_limits_defaults(clean):
         "code": (1, 1),
         "resolve": (10, 50),
         "graph_scan": (20000, 20000),
+        "search_scan": (5000, 5000),
     }
 
 
@@ -85,3 +86,31 @@ def test_sync_is_one_transaction_with_counts(clean):
     }
     assert calls[0] == ("begin", 0) and calls[-1] == ("end", 0)
     assert [c for c in calls if c[0] == "x"] == [("x", "DELETE"), ("x", "DELETE")]
+
+
+def test_sync_writes_search_scan(clean):
+    written: list[tuple] = []
+
+    class Cur:
+        def execute(self, sql, params=None):
+            pass
+
+        def executemany(self, sql, rows):
+            if "result_limit" in sql:
+                written.extend(rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Conn:
+        def transaction(self):
+            return Cur()
+
+        def cursor(self):
+            return Cur()
+
+    api_settings.sync(Conn())
+    assert ("search_scan", 5000, 5000) in written

@@ -72,6 +72,8 @@ def _body(conn, rows) -> None:
 
 def _search(conn, query, sources=None) -> list[tuple]:
     with conn.cursor() as cur:
+        # websearch_to_tsquery raises a NOTICE for stop-word-only input: keep output clean.
+        cur.execute("SET LOCAL client_min_messages = warning")
         cur.execute("SELECT * FROM episteme_api.search_text(%s, %s::text[])", (query, sources))
         rows = cur.fetchall()
     conn.rollback()
@@ -235,3 +237,40 @@ def test_search_hostile_sources(db):
     notes = _notes(rows)
     assert len(notes) == 1 and notes[0].startswith("not covered by full-text search: ")
     assert len(notes[0]) <= len("not covered by full-text search: ") + 500
+
+
+def test_empty_source_list_is_a_note(db):
+    rows = _search(db, "zymoquartz", [])
+    assert rows == [
+        ("note", None, None, None, None, None, None, None, None, "no sources requested", None)
+    ]
+
+
+def test_scan_cap_ranks_within_the_first_matches(db):
+    """With search_scan lowered to 5, a word on 12 rows is ranked within 5 candidates:
+    one note and at most p_limit rows."""
+    _body(
+        db,
+        [(f"dailymed:s{i:02d}", "dailymed", "label", None, "zymoquartz", None) for i in range(12)],
+    )
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 5, max_limit = 5 "
+            "WHERE family = 'search_scan'"
+        )
+    db.commit()
+    try:
+        internal = _api.call(db, "search_text", "zymoquartz", ["dailymed"], 3)
+        db.rollback()
+        assert len([r for r in internal if r[0] == "article"]) == 3
+        assert [r[9] for r in internal if r[0] == "note"] == [
+            "ranked within the first 5 matches of dailymed"
+        ]
+        public = _search(db, "zymoquartz", ["dailymed"])
+        assert len(_articles(public)) == 5  # all candidates; below the search cap of 20
+        assert "ranked within the first 5 matches of dailymed" in _notes(public)
+        # Ordered by score, then article_id.
+        ids = [r[1] for r in _articles(public)]
+        assert ids == sorted(ids)
+    finally:
+        api_settings.sync(db)

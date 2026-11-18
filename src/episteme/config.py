@@ -81,6 +81,22 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _get_non_negative_int_or_default(name: str, default: int) -> int:
+    """Like ``_get_positive_int_or_default`` but 0 is allowed (for example "no
+    timeout"): a non-integer or a negative value logs a warning and returns ``default``."""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        _LOG.warning("%s must be an integer >= 0, got %r; using %d", name, raw, default)
+        return default
+    return value
+
+
 def _get_positive_int_or_default(name: str, default: int) -> int:
     """Like ``_get_int`` but never raises: a non-integer or a value below 1
     logs a warning and returns ``default`` (a bad worker count must not stop
@@ -165,8 +181,10 @@ DEFAULT_TEXT_NULLOUT_BATCH_ROWS = 50_000
 DEFAULT_TEXT_NULLOUT_BATCH_BLOCKS = 4096
 # Seconds REPACK waits for its table lock before it gives up.
 DEFAULT_REPACK_LOCK_TIMEOUT_S = 60
-# Seconds a full-text index build (fts_index) waits for its table lock before it gives up.
-DEFAULT_FTS_LOCK_TIMEOUT_S = 60
+# Seconds a full-text index build (fts_index) waits for a lock before it gives up; 0 = no
+# timeout. CREATE INDEX CONCURRENTLY waits for older transactions in its last phase; a
+# timeout there throws away the whole build (and leaves an INVALID index).
+DEFAULT_FTS_LOCK_TIMEOUT_S = 0
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -268,6 +286,9 @@ API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
     # Not a row cap: graph_neighbours 'shared_mesh' uses a major-topic descriptor only when
     # at most this many article_mesh rows carry it (bounds the rows one call reads).
     "graph_scan": (20000, 20000),
+    # Not a row cap: search_text ranks only the first this-many index matches per
+    # partition (a common word must not rank millions of rows).
+    "search_scan": (5000, 5000),
 }
 _API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
 
@@ -776,7 +797,7 @@ def get_settings() -> Settings:
         repack_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REPACK_LOCK_TIMEOUT_S", DEFAULT_REPACK_LOCK_TIMEOUT_S
         ),
-        fts_lock_timeout_s=_get_positive_int_or_default(
+        fts_lock_timeout_s=_get_non_negative_int_or_default(
             "EPISTEME_FTS_LOCK_TIMEOUT_S", DEFAULT_FTS_LOCK_TIMEOUT_S
         ),
         text_nullout_batch_rows=_get_positive_int_or_default(

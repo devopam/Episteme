@@ -18,12 +18,15 @@ rows are in ``article_body_default`` with the structured sources, which is not c
 Before a build: the partition must be in the allowlist (else exit 2), a partition of
 ``episteme.article_body`` (pg_inherits) with no INVALID index of that name, and the free
 space on the disk of the index tablespace must be at least 2x the partition's
-``pg_relation_size`` (else exit 1). The free space is read with ``shutil.disk_usage`` on
-the server's directory, so the tool runs on the database host. The directory comes from
-the server (``data_directory`` needs superuser or ``pg_read_all_settings``) or from
-``--data-dir``. ``main()`` connects as the table owner and refuses any server except
-19beta3. The build runs in autocommit with ``lock_timeout`` =
-``EPISTEME_FTS_LOCK_TIMEOUT_S``.
+``pg_table_size`` (main fork + TOAST; else exit 1). The free space is read with
+``shutil.disk_usage`` on the server's directory, so the tool runs on the database host.
+The directory comes from the server (``data_directory`` needs superuser or
+``pg_read_all_settings``) or from ``--data-dir``. ``main()`` connects as the table owner
+and refuses any server except 19beta3. Before the build, other non-idle statements in
+the database (pg_stat_activity, client backends) refuse it (exit 1, listed) unless
+``--force``: CREATE INDEX CONCURRENTLY waits for them in its last phase. The build runs
+in autocommit with ``lock_timeout`` = ``EPISTEME_FTS_LOCK_TIMEOUT_S`` (default 0 = no
+timeout: a timeout in that last wait would throw the whole build away).
 """
 
 from __future__ import annotations
@@ -62,7 +65,7 @@ FTS_PARTITIONS: tuple[str, ...] = (
 FTS_SOURCES: tuple[str, ...] = tuple(p.removeprefix(PARTITION_PREFIX) for p in FTS_PARTITIONS)
 # Sources whose document is the full text, not only title + abstract (fts_doc).
 FULL_TEXT_SOURCES: tuple[str, ...] = ("dailymed", "ema_epar")
-# Free space needed, as a multiple of the partition's pg_relation_size.
+# Free space needed, as a multiple of the partition's pg_table_size.
 FREE_SPACE_FACTOR = 2
 
 
@@ -134,7 +137,7 @@ def index_state(conn: psycopg.Connection, partition: str) -> str | None:
 
 def relation_size(conn: psycopg.Connection, partition: str) -> int:
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_relation_size(%s::regclass)", (f"{SCHEMA}.{partition}",))
+        cur.execute("SELECT pg_table_size(%s::regclass)", (f"{SCHEMA}.{partition}",))
         (size,) = cur.fetchone()
     conn.rollback()
     return int(size)
@@ -168,8 +171,39 @@ def check_free_space(partition: str, *, rel_bytes: int, free_bytes: int, directo
     if free_bytes < need:
         raise FtsSpaceError(
             f"{partition}: {free_bytes} bytes free on {directory}, need at least {need} "
-            f"({FREE_SPACE_FACTOR}x pg_relation_size {rel_bytes}); not built"
+            f"({FREE_SPACE_FACTOR}x pg_table_size {rel_bytes}); not built"
         )
+
+
+def active_statements(conn: psycopg.Connection) -> list[tuple[int, str, str]]:
+    """Other non-idle client statements in this database: (pid, duration, query prefix).
+    'idle in transaction' counts: CREATE INDEX CONCURRENTLY waits for it. A session the
+    role may not see (state NULL) counts too."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pid, coalesce((now() - query_start)::text, '?'),"
+            " left(coalesce(query, ''), 80) FROM pg_stat_activity"
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            " AND backend_type = 'client backend' AND state IS DISTINCT FROM 'idle'"
+            " ORDER BY query_start NULLS LAST, pid"
+        )
+        rows = [(int(r[0]), str(r[1]), str(r[2])) for r in cur.fetchall()]
+    conn.rollback()
+    return rows
+
+
+def check_quiet(conn: psycopg.Connection, partition: str, *, force: bool, log) -> None:
+    rows = active_statements(conn)
+    if not rows:
+        return
+    listing = "; ".join(f"pid={p} duration={d} query={q!r}" for p, d, q in rows)
+    if force:
+        log(f"{partition}: --force: building although {len(rows)} statement(s) run: {listing}")
+        return
+    raise FtsRefused(
+        f"{partition}: {len(rows)} other statement(s) running in this database; CREATE INDEX "
+        f"CONCURRENTLY would wait for them (use --force to build anyway): {listing}"
+    )
 
 
 def build(
@@ -177,6 +211,7 @@ def build(
     partition: str,
     *,
     yes: bool,
+    force: bool = False,
     free_bytes_of: Callable[[str], int] = free_bytes,
     directory: str | None = None,
     lock_timeout_s: int | None = None,
@@ -213,6 +248,7 @@ def build(
     if not yes:
         log(f"{partition}: plan only (add --yes to build): {stmt.as_string(conn)}")
         return {"partition": partition, "built": False, "state": None}
+    check_quiet(conn, partition, force=force, log=log)
     if lock_timeout_s is None:
         lock_timeout_s = get_settings().fts_lock_timeout_s
     started = time.monotonic()
@@ -224,8 +260,14 @@ def build(
             cur.execute(sql.SQL("SET lock_timeout = {}").format(sql.Literal(f"{lock_timeout_s}s")))
             try:
                 cur.execute(stmt)
-            finally:
-                cur.execute("RESET lock_timeout")
+            except BaseException:
+                # The original error wins: a failing RESET must not mask it.
+                try:
+                    cur.execute("RESET lock_timeout")
+                except psycopg.Error:
+                    pass
+                raise
+            cur.execute("RESET lock_timeout")
     finally:
         conn.autocommit = False
     state = index_state(conn, partition)
@@ -277,6 +319,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument(
         "--data-dir", help="the index disk's path for the free-space check (on the DB host)"
     )
+    b.add_argument(
+        "--force", action="store_true", help="build although other statements are running"
+    )
     sub.add_parser("status", help="read-only index state per allowed partition")
     return p
 
@@ -309,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
                 conn,
                 args.partition,
                 yes=args.yes,
+                force=args.force,
                 directory=args.data_dir,
                 lock_timeout_s=settings.fts_lock_timeout_s,
             )

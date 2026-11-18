@@ -2199,6 +2199,7 @@ AS $$
         'code')
 $$;
 
+
 -- ---------------------------------------------------------------------------
 -- Task 9: full-text search (family 'search').
 --
@@ -2217,6 +2218,9 @@ $$;
 -- Covered partitions: pubmed, pmc, openalex, bookshelf, dailymed, ema_epar. The
 -- preprints (europepmc_preprint) are in article_body_default with the structured
 -- sources and are not covered.
+-- Any change to fts_doc (body, signature, text search configuration) changes the
+-- indexed values: drop and rebuild every '<partition>_fts_idx' (fts_index build), or
+-- the indexes return wrong matches.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION episteme_api_internal.fts_doc(
     p_source text, p_title text, p_abstract text, p_body_text text, p_text_override text)
@@ -2238,7 +2242,8 @@ $$;
 --   * An empty query, one of stop words only, or one that cannot be parsed: one note
 --     row. A query with only negated words ('-word') cannot use the index: one note.
 --   * Sources searched: the covered sources (c_covered), or those of p_sources that
---     are covered. Requested sources that are not covered are named in one note. A
+--     are covered. p_sources = '{}': one note 'no sources requested'. Requested
+--     sources that are not covered are named in one note. A
 --     covered source whose partition has no VALID '<partition>_fts_idx' is not
 --     searched (that would read the whole partition): one note names them, plus a
 --     'missing' row per source.
@@ -2246,6 +2251,9 @@ $$;
 --     article_body, source_file from articles (id, source), release_id the is_latest
 --     reg_release of the source's dataset, licence licence_for(source). Ordered by
 --     score descending, then article_id (COLLATE "C"); p_limit (NULL = no limit).
+--   * Bounded work: per source, only the first limit_for('search_scan') index matches
+--     (no ORDER BY: whichever the index returns first) are ranked. When a source
+--     gives that many, a note says 'ranked within the first <N> matches of <source>'.
 -- The match and the rank use the index expression exactly (fts_index.fts_expression,
 -- a test checks the text), so the planner uses the index of each partition.
 CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
@@ -2253,6 +2261,8 @@ CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
+-- Never a sequential scan of a partition: the match must go through its index.
+SET enable_seqscan = off
 AS $$
 DECLARE
     c_covered constant text[] := ARRAY['pubmed', 'pmc', 'openalex', 'bookshelf', 'dailymed', 'ema_epar'];
@@ -2264,6 +2274,10 @@ DECLARE
     v_rel     text;
     v_src     text;
     v_other   text;
+    v_scan    int := episteme_api_internal.limit_for('search_scan');
+    v_n       int;
+    v_part    episteme_api_internal.article_row[];
+    v_cand    episteme_api_internal.article_row[] := ARRAY[]::episteme_api_internal.article_row[];
     v_row     episteme_api_internal.article_row;
 BEGIN
     BEGIN
@@ -2281,6 +2295,13 @@ BEGIN
     IF pg_catalog.querytree(v_q) = 'T' THEN
         v_row.kind := 'note';
         v_row.note := 'query needs at least one word that is not negated';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+
+    IF p_sources IS NOT NULL AND pg_catalog.cardinality(p_sources) = 0 THEN
+        v_row.kind := 'note';
+        v_row.note := 'no sources requested';
         RETURN NEXT v_row;
         RETURN;
     END IF;
@@ -2333,18 +2354,39 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Candidates per source: at most v_scan index matches, then ranked.
+    FOREACH v_src IN ARRAY v_ready LOOP
+        SELECT pg_catalog.count(*)::int,
+               pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
+                   pg_catalog.ts_rank_cd(
+                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override),
+                       v_q)::real,
+                   'search', NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
+          INTO v_n, v_part
+          FROM (SELECT b.article_id, b.source, b.title, b.year, b.abstract, b.body_text,
+                       b.text_override
+                  FROM episteme.article_body b
+                 WHERE b.source = v_src
+                   AND episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override) @@ v_q
+                 LIMIT v_scan) b;
+        IF v_n >= v_scan THEN
+            v_row.kind := 'note';
+            v_row.note := format('ranked within the first %s matches of %s', v_scan, v_src);
+            RETURN NEXT v_row;
+            v_row := NULL;
+        END IF;
+        IF v_n > 0 THEN
+            v_cand := v_cand || v_part;
+        END IF;
+    END LOOP;
+
     RETURN QUERY
     SELECT 'article'::text, h.article_id, h.source, h.title, h.year, h.score,
            'search'::text, v_rels[pg_catalog.array_position(v_ready, h.source)],
            episteme_api_internal.licence_for(h.source), NULL::text, a.source_file
-      FROM (SELECT b.article_id, b.source, b.title, b.year,
-                   pg_catalog.ts_rank_cd(
-                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override),
-                       v_q)::real AS score
-              FROM episteme.article_body b
-             WHERE b.source = ANY (v_ready)
-               AND episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override) @@ v_q
-             ORDER BY score DESC, b.article_id COLLATE "C"
+      FROM (SELECT c.article_id, c.source, c.title, c.year, c.score
+              FROM pg_catalog.unnest(v_cand) AS c
+             ORDER BY c.score DESC, c.article_id COLLATE "C"
              LIMIT p_limit) h
       LEFT JOIN LATERAL (
            SELECT ar.source_file FROM episteme.articles ar
