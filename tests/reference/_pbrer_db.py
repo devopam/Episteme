@@ -13,8 +13,11 @@ from episteme.data.regulatory.load_reg import partition_names
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_DIR = REPO_ROOT / "src/episteme/data/db"
 MIGRATIONS = DB_DIR / "migrations"
-# The AACT schema the tests use instead of the real ``aact`` views.
-TEST_AACT_SCHEMA = "aact_lookup_test"
+# The AACT release the tests load, and its release schema (load_aact.schema_name). The
+# trials function reads ``aact_r<release_id>`` of the latest ``aact`` release. The id is
+# one no real release has: ``clear`` drops this schema.
+TEST_AACT_RELEASE = "19700101"
+TEST_AACT_SCHEMA = f"aact_r{TEST_AACT_RELEASE}"
 KW = {"tenant": "t", "caller": "test"}
 
 

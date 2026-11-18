@@ -20,7 +20,7 @@ from episteme.reference.lookups import (
     trials,
 )
 
-from ._pbrer_db import KW, TEST_AACT_SCHEMA, add_release
+from ._pbrer_db import KW, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, add_release
 
 pytestmark = pytest.mark.pg
 
@@ -220,7 +220,8 @@ def test_empty_aact_schema_is_a_gap_not_an_error(ref_db):
         cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(TEST_AACT_SCHEMA)))
         cur.execute(
             "INSERT INTO episteme.reg_release (dataset, release_id, rows, status, is_latest) "
-            "VALUES ('aact', '20261103', 0, 'loaded', true)"
+            "VALUES ('aact', %s, 0, 'loaded', true)",
+            (TEST_AACT_RELEASE,),
         )
     ref_db.commit()
     res = trials(ref_db, 1, **KW)
@@ -270,8 +271,8 @@ def _aact(conn, *, latest: bool) -> None:
         )
         cur.execute(
             "INSERT INTO episteme.reg_release (dataset, release_id, rows, status, is_latest) "
-            "VALUES ('aact', '20261103', 3, 'loaded', %s)",
-            (latest,),
+            "VALUES ('aact', %s, 3, 'loaded', %s)",
+            (TEST_AACT_RELEASE, latest),
         )
     conn.commit()
 
@@ -284,7 +285,7 @@ def test_trials_report_status_phase_and_results(ref_db):
     assert first.value == "COMPLETED"
     assert "PHASE3" in first.text and "results posted: yes" in first.text
     assert "results posted: no" in second.text
-    assert first.provenance.release == "20261103"
+    assert first.provenance.release == TEST_AACT_RELEASE
     assert res.coverage.missing == ()
 
 

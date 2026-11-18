@@ -19,7 +19,6 @@ from __future__ import annotations
 from datetime import date
 
 import psycopg
-from psycopg import sql
 
 from episteme.reference import _api
 from episteme.reference._scope import (
@@ -39,6 +38,7 @@ __all__ = [
     "approval_status",
     "current_label",
     "faers_counts",
+    "label_section_text",
     "latest_release",
     "relation_exists",
     "safety_actions",
@@ -46,12 +46,9 @@ __all__ = [
     "substance_scope",
     "trials",
 ]
-# The schema of the AACT views of the latest release (load_aact.VIEW_SCHEMA). A module
-# constant so that a test can point it at its own schema.
-AACT_SCHEMA = "aact"
-
-# approval_status and safety_actions run in SQL (migration 0015: reg_lookup, its payload
-# fields in reg_fields). These two tuples name the same datasets in the same order.
+# approval_status, safety_actions, current_label, label_section_text and trials run in
+# SQL (migration 0015). The regulatory pair uses reg_lookup, its payload fields in
+# reg_fields; these two tuples name the same datasets in the same order.
 APPROVAL_DATASETS = ("fda_drugsfda", "ema_medicines", "ema_article57", "ema_outside_eu")
 SAFETY_DATASETS = ("fda_enforcement", "ema_referrals", "ema_dhpc", "ema_psusa")
 # The names that coverage.missing uses, per function.
@@ -64,6 +61,7 @@ PBRER_DATASETS: dict[str, tuple[str, ...]] = {
     "literature": ("article_mesh",),
 }
 
+# The note text of current_label (the SQL function returns the same text).
 LABEL_HISTORY_GAP = "change history not determinable"
 FAERS_LABEL = "US public spontaneous reports (FAERS)"
 FAERS_QUARTER_RULE = "quarters that overlap the interval are counted whole"
@@ -107,66 +105,26 @@ def safety_actions(
     return _api.rows_to_result(_api.call(conn, "safety_actions", int(substance_key), start, end))
 
 
-_LABEL_SQL = """
-SELECT s.article_id, s.loinc_code, s.title, a.book_meta->>'version', NULLIF(a.year, 0),
-       a.source_file
-FROM (SELECT DISTINCT article_id FROM episteme.label_substance WHERE unii = ANY(%(uniis)s)) l
-JOIN episteme.label_section s ON s.article_id = l.article_id
-LEFT JOIN episteme.articles a ON a.source = 'dailymed' AND a.id = l.article_id
-ORDER BY s.article_id, s.start_offset, s.loinc_code
-"""
-
-
 def current_label(
     conn: psycopg.Connection, substance_key: int, *, tenant: str, caller: str
 ) -> LookupResult:
-    """The sections of the current DailyMed labels whose ``label_substance.unii`` is the
-    UNII of a member of the substance's moiety family. The claim value is the section
-    title; the release is the SPL version (``articles.book_meta``). The extract keeps
-    only the newest SPL version per set id, so the change history is always a gap."""
-    scope = substance_scope(conn, substance_key)
-    if scope is None:
-        return _no_substance("current_label", substance_key)
-    notes = (LABEL_HISTORY_GAP,)
-    tables = ("label_section", "label_substance", "articles")
-    if not source_ready(conn, tables, "label_section"):
-        return LookupResult((), Coverage(matched=0, missing=("dailymed",), notes=notes))
-    rows: list[tuple] = []
-    if scope.uniis:
-        with conn.cursor() as cur:
-            cur.execute(_LABEL_SQL, {"uniis": list(scope.uniis)})
-            rows = cur.fetchall()
-    claims = tuple(
-        Claim(
-            text=(
-                f"{article_id} section {loinc} {title or '(no title)'}, SPL version "
-                f"{version or 'unknown'}, effective year {year or 'unknown'}"
-            ),
-            value=title,
-            method="fetched",
-            provenance=Provenance(
-                source="dailymed",
-                release=version,
-                source_file=source_file,
-                record_key=f"{article_id}#{loinc}",
-                jurisdiction="US",
-            ),
-            confidence=1.0,
-            confidence_basis="exact UNII match in the label's active ingredients",
-        )
-        for article_id, loinc, title, version, year, source_file in rows
-    )
-    return LookupResult(claims, Coverage(matched=len(claims), notes=notes))
+    """The sections of the current labels (DailyMed and the EU labels of ``ema_epar``)
+    whose ``label_substance.unii`` is the UNII of a member of the substance's moiety
+    family. The claim value is the section title; the release is the SPL version
+    (``articles.book_meta``). The extract keeps only the newest version per label, so
+    the change history is always a gap. Runs the SQL function
+    ``episteme_api_internal.current_label`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "current_label", int(substance_key)))
 
 
-_TRIALS_SQL = """
-SELECT st.nct_id, st.brief_title, st.overall_status, st.phase,
-       st.results_first_posted_date IS NOT NULL
-FROM (SELECT DISTINCT nct_id FROM {s}.intervention_substance
-      WHERE substance_key = ANY(%(keys)s)) i
-JOIN {s}.studies st ON st.nct_id = i.nct_id
-ORDER BY st.nct_id
-"""
+def label_section_text(
+    conn: psycopg.Connection, article_id: str, section: str, *, tenant: str, caller: str
+) -> LookupResult:
+    """The text of one section of one label: ``section`` is the LOINC code or the
+    section title (case-insensitive). One claim per matching section; the value is the
+    slice of the stored body text. Runs the SQL function
+    ``episteme_api_internal.label_section_text`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "label_section_text", article_id, section))
 
 
 def trials(
@@ -174,33 +132,10 @@ def trials(
 ) -> LookupResult:
     """AACT studies with an intervention matched to a member of the substance's moiety
     family (``intervention_substance.substance_key``), with status, phase and whether results
-    are posted (``studies.results_first_posted_date``)."""
-    scope = substance_scope(conn, substance_key)
-    if scope is None:
-        return _no_substance("trials", substance_key)
-    release = latest_release(conn, "aact")
-    views = ("intervention_substance", "studies")
-    if release is None or not all(relation_exists(conn, f"{AACT_SCHEMA}.{v}") for v in views):
-        return LookupResult((), Coverage(matched=0, missing=("aact",)))
-    query = sql.SQL(_TRIALS_SQL).format(s=sql.Identifier(AACT_SCHEMA))
-    with conn.cursor() as cur:
-        cur.execute(query, {"keys": list(scope.keys)})
-        rows = cur.fetchall()
-    claims = tuple(
-        Claim(
-            text=(
-                f"{nct} {title or '(no title)'}: status {status or 'unknown'}, phase "
-                f"{phase or 'unknown'}, results posted: {'yes' if results else 'no'}"
-            ),
-            value=status,
-            method="fetched",
-            provenance=Provenance("aact", release, None, nct, None),
-            confidence=1.0,
-            confidence_basis="intervention name matched to the substance by exact normalised name",
-        )
-        for nct, title, status, phase, results in rows
-    )
-    return LookupResult(claims, Coverage(matched=len(claims)))
+    are posted (``studies.results_first_posted_date``). The tables are read from the
+    schema of the latest ``aact`` release (``aact_r<release_id>``). Runs the SQL function
+    ``episteme_api_internal.trials`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "trials", int(substance_key)))
 
 
 # Quarters that overlap the interval and have no faers_quarter_totals row (not loaded).

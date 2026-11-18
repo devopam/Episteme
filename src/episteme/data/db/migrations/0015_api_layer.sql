@@ -715,4 +715,320 @@ AS $$
         'regulatory')
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Task 4: current_label, label_section_text (family 'label') and trials (family
+-- 'trials'). SQL form of the former lookups.current_label and lookups.trials.
+-- ---------------------------------------------------------------------------
+
+-- The label source of an article id: 'dailymed' or 'ema_epar' by the id prefix
+-- (extract_dailymed and extract_epar write '<source>:<id>'), NULL for another id.
+CREATE OR REPLACE FUNCTION episteme_api_internal.label_source(p_article_id text)
+RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT CASE WHEN starts_with(p_article_id, 'dailymed:') THEN 'dailymed'
+                WHEN starts_with(p_article_id, 'ema_epar:') THEN 'ema_epar' END
+$$;
+
+-- The sections of the current labels (DailyMed and the EU labels of ema_epar) whose
+-- label_substance.unii is the UNII of a member of the substance's moiety family.
+--   * No substance tables, or an unknown substance: the note 'substance <key> not
+--     found' and a 'missing' row for 'dailymed'.
+--   * label_section, label_substance or articles does not exist, or label_section
+--     holds no row: a 'missing' row for 'dailymed'.
+--   * Claims: one per section, ordered by article_id, start_offset, loinc_code. The
+--     value is the section title. The source is the article-id prefix (label_source;
+--     'dailymed' for another id). release_id: the SPL version (book_meta 'version')
+--     for DailyMed, the document's last update date (book_meta 'last_updated_date')
+--     for ema_epar. record_key '<article_id>#<loinc_code>', plus '#<ordinal>' when the
+--     section has an ordinal (ema_epar: one row per section per product).
+--   * Every answer except the unknown substance ends with the note 'change history
+--     not determinable': the extract keeps only the newest version of each label.
+CREATE OR REPLACE FUNCTION episteme_api_internal.current_label(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_members bigint := 0;
+    v_uniis   text[];
+    v_ready   boolean;
+BEGIN
+    IF to_regclass('episteme.substance') IS NOT NULL
+       AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
+        SELECT count(*), array_agg(f.unii ORDER BY f.substance_key)
+                         FILTER (WHERE coalesce(f.unii, '') <> '')
+          INTO v_members, v_uniis
+          FROM episteme_api_internal.substance_family(p_substance_key) AS f;
+    END IF;
+    IF v_members = 0 THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('substance %s not found', p_substance_key));
+        RETURN NEXT episteme_api_internal.missing_row('dailymed');
+        RETURN;
+    END IF;
+    v_ready := to_regclass('episteme.label_section') IS NOT NULL
+               AND to_regclass('episteme.label_substance') IS NOT NULL
+               AND to_regclass('episteme.articles') IS NOT NULL;
+    IF v_ready THEN
+        v_ready := EXISTS (SELECT 1 FROM episteme.label_section);
+    END IF;
+    IF NOT v_ready THEN
+        RETURN NEXT episteme_api_internal.missing_row('dailymed');
+    ELSIF coalesce(cardinality(v_uniis), 0) > 0 THEN
+        RETURN QUERY
+        WITH l AS (
+            SELECT DISTINCT ls.article_id
+              FROM episteme.label_substance ls
+             WHERE ls.unii = ANY (v_uniis)
+        ), s AS (
+            SELECT sec.article_id, sec.loinc_code, sec.title, sec.start_offset,
+                   sec.ordinal,
+                   coalesce(episteme_api_internal.label_source(sec.article_id),
+                            'dailymed') AS src,
+                   coalesce(ad.book_meta, ae.book_meta) AS meta,
+                   nullif(coalesce(ad.year, ae.year), 0) AS yr,
+                   coalesce(ad.source_file, ae.source_file) AS sf
+              FROM l
+              JOIN episteme.label_section sec ON sec.article_id = l.article_id
+              LEFT JOIN episteme.articles ad
+                     ON ad.source = 'dailymed' AND ad.id = l.article_id
+              LEFT JOIN episteme.articles ae
+                     ON ae.source = 'ema_epar' AND ae.id = l.article_id
+        ), k AS (
+            SELECT s.*,
+                   CASE WHEN s.src = 'ema_epar' THEN s.meta ->> 'last_updated_date'
+                        ELSE s.meta ->> 'version' END AS rel,
+                   (row_number() OVER (
+                        ORDER BY s.article_id, s.start_offset, s.loinc_code,
+                                 s.ordinal, s.title))::int AS grp
+              FROM s
+        )
+        SELECT 'claim'::text,
+               k.grp,
+               0,
+               k.article_id || ' section ' || k.loinc_code || ' '
+                   || coalesce(nullif(k.title, ''), '(no title)')
+                   || CASE WHEN k.src = 'ema_epar' THEN ', EPAR document updated '
+                           ELSE ', SPL version ' END
+                   || coalesce(nullif(k.rel, ''), 'unknown')
+                   || ', effective year ' || coalesce(k.yr::text, 'unknown'),
+               k.title,
+               'fetched'::text,
+               1.0::double precision,
+               'exact UNII match in the label''s active ingredients'::text,
+               k.src,
+               k.rel,
+               k.sf,
+               k.article_id || '#' || k.loinc_code || coalesce('#' || k.ordinal::text, ''),
+               CASE WHEN k.src = 'ema_epar' THEN 'EU' ELSE 'US' END,
+               episteme_api_internal.licence_for(k.src)
+          FROM k
+         ORDER BY k.grp;
+    END IF;
+    RETURN NEXT episteme_api_internal.note_row('change history not determinable');
+END
+$$;
+
+-- The text of one section of one label: p_section is the LOINC code (DailyMed, or
+-- 'smpc:<n>' for an EU section) or the section title, case-insensitive. One claim
+-- per matching section, ordered by start_offset, loinc_code, ordinal. The value is
+-- substr(body_text, start_offset + 1, end_offset - start_offset): the producers
+-- (spl.py, smpc.py) store the offsets into the stored article_body.body_text, not
+-- into the virtual article_body.text (that one starts with the title).
+--   * label_section, articles or article_body does not exist: a 'missing' row for
+--     the label source.
+--   * An id that is not a label id, or a label with no section row: the note
+--     'label <id> not found'.
+--   * No section matches: the note 'label <id> has no section <p_section>'.
+--   * No article_body row: the note 'label <id> has no stored text'.
+-- Provenance as in current_label. The source is a SQL literal in the article and
+-- article_body queries, so that the plan prunes to one partition.
+CREATE OR REPLACE FUNCTION episteme_api_internal.label_section_text(
+    p_article_id text, p_section text)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_src      text := episteme_api_internal.label_source(p_article_id);
+    v_sec      text := regexp_replace(coalesce(p_section, ''), '^\s+|\s+$', '', 'g');
+    v_body     text;
+    v_has_body boolean;
+    v_meta     jsonb;
+    v_year     int;
+    v_sf       text;
+    v_rel      text;
+    v_group    int := 0;
+    r          record;
+    v_row      episteme_api_internal.claim_row;
+BEGIN
+    IF to_regclass('episteme.label_section') IS NULL
+       OR to_regclass('episteme.articles') IS NULL
+       OR to_regclass('episteme.article_body') IS NULL THEN
+        RETURN NEXT episteme_api_internal.missing_row(coalesce(v_src, 'dailymed'));
+        RETURN;
+    END IF;
+    IF v_src IS NULL OR NOT EXISTS (
+            SELECT 1 FROM episteme.label_section s WHERE s.article_id = p_article_id) THEN
+        RETURN NEXT episteme_api_internal.note_row(format('label %s not found', p_article_id));
+        RETURN;
+    END IF;
+    IF NOT EXISTS (
+            SELECT 1 FROM episteme.label_section s
+             WHERE s.article_id = p_article_id
+               AND (s.loinc_code = v_sec OR lower(s.title) = lower(v_sec))) THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('label %s has no section %s', p_article_id, v_sec));
+        RETURN;
+    END IF;
+    EXECUTE format(
+        'SELECT b.body_text, true FROM episteme.article_body b '
+        'WHERE b.source = %L AND b.article_id = $1', v_src)
+       INTO v_body, v_has_body USING p_article_id;
+    IF v_has_body IS NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('label %s has no stored text', p_article_id));
+        RETURN;
+    END IF;
+    EXECUTE format(
+        'SELECT a.book_meta, nullif(a.year, 0), a.source_file FROM episteme.articles a '
+        'WHERE a.source = %L AND a.id = $1 LIMIT 1', v_src)
+       INTO v_meta, v_year, v_sf USING p_article_id;
+    v_rel := CASE WHEN v_src = 'ema_epar' THEN v_meta ->> 'last_updated_date'
+                  ELSE v_meta ->> 'version' END;
+    FOR r IN
+        SELECT s.loinc_code, s.title, s.start_offset, s.end_offset, s.ordinal
+          FROM episteme.label_section s
+         WHERE s.article_id = p_article_id
+           AND (s.loinc_code = v_sec OR lower(s.title) = lower(v_sec))
+         ORDER BY s.start_offset, s.loinc_code, s.ordinal, s.title
+    LOOP
+        v_group := v_group + 1;
+        v_row := ROW(
+            'claim', v_group, 0,
+            format('%s section %s %s, characters %s to %s', p_article_id, r.loinc_code,
+                   coalesce(nullif(r.title, ''), '(no title)'),
+                   r.start_offset, r.end_offset),
+            substr(v_body, r.start_offset + 1, r.end_offset - r.start_offset),
+            'fetched', 1.0::double precision,
+            'section offsets stored with the label text',
+            v_src, v_rel, v_sf,
+            p_article_id || '#' || r.loinc_code || coalesce('#' || r.ordinal::text, ''),
+            CASE WHEN v_src = 'ema_epar' THEN 'EU' ELSE 'US' END,
+            episteme_api_internal.licence_for(v_src));
+        RETURN NEXT v_row;
+    END LOOP;
+END
+$$;
+
+-- AACT studies with an intervention matched to a member of the substance's moiety
+-- family (intervention_substance.substance_key), with status, phase and whether
+-- results are posted (studies.results_first_posted_date).
+--   * No substance tables, or an unknown substance: the note 'substance <key> not
+--     found' and a 'missing' row for 'aact'.
+--   * The tables are read from the release schema 'aact_r<release_id>'
+--     (load_aact.schema_name) of the is_latest 'aact' release in reg_release; the
+--     'aact' view schema points at the same tables. No is_latest release, a release
+--     id that is not YYYYMMDD, or a schema without studies or intervention_substance:
+--     a 'missing' row for 'aact' (no fallback to an older release).
+--   * source_file: the zip's input_key from <schema>._load_state, row '_release'
+--     (load_aact._switch); NULL when that table or row does not exist.
+--   * Claims ordered by nct_id; record_key is the nct_id.
+CREATE OR REPLACE FUNCTION episteme_api_internal.trials(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_keys    bigint[];
+    v_release text;
+    v_schema  text;
+    v_sf      text;
+BEGIN
+    IF to_regclass('episteme.substance') IS NOT NULL
+       AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
+        SELECT array_agg(f.substance_key ORDER BY f.substance_key) INTO v_keys
+          FROM episteme_api_internal.substance_family(p_substance_key) AS f;
+    END IF;
+    IF v_keys IS NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('substance %s not found', p_substance_key));
+        RETURN NEXT episteme_api_internal.missing_row('aact');
+        RETURN;
+    END IF;
+    IF to_regclass('episteme.reg_release') IS NOT NULL THEN
+        SELECT rr.release_id INTO v_release
+          FROM episteme.reg_release rr
+         WHERE rr.dataset = 'aact' AND rr.is_latest;
+    END IF;
+    IF v_release IS NULL OR v_release !~ '^[0-9]{8}$' THEN
+        RETURN NEXT episteme_api_internal.missing_row('aact');
+        RETURN;
+    END IF;
+    v_schema := 'aact_r' || v_release;
+    IF to_regclass(format('%I.%I', v_schema, 'studies')) IS NULL
+       OR to_regclass(format('%I.%I', v_schema, 'intervention_substance')) IS NULL THEN
+        RETURN NEXT episteme_api_internal.missing_row('aact');
+        RETURN;
+    END IF;
+    IF to_regclass(format('%I.%I', v_schema, '_load_state')) IS NOT NULL THEN
+        EXECUTE format('SELECT st.source_file FROM %I._load_state st '
+                       'WHERE st.table_name = %L', v_schema, '_release')
+           INTO v_sf;
+    END IF;
+    RETURN QUERY EXECUTE format(
+        'SELECT ''claim''::text, '
+        '       (row_number() OVER (ORDER BY st.nct_id))::int, 0, '
+        '       st.nct_id || '' '' || coalesce(nullif(st.brief_title, ''''), ''(no title)'') '
+        '         || '': status '' || coalesce(nullif(st.overall_status, ''''), ''unknown'') '
+        '         || '', phase '' || coalesce(nullif(st.phase, ''''), ''unknown'') '
+        '         || '', results posted: '' '
+        '         || CASE WHEN st.results_first_posted_date IS NOT NULL '
+        '                 THEN ''yes'' ELSE ''no'' END, '
+        '       st.overall_status::text, ''fetched''::text, 1.0::double precision, '
+        '       ''intervention name matched to the substance by exact normalised name''::text, '
+        '       ''aact''::text, $2, $3, st.nct_id::text, NULL::text, $4 '
+        '  FROM (SELECT DISTINCT i.nct_id FROM %I.intervention_substance i '
+        '         WHERE i.substance_key = ANY ($1)) i '
+        '  JOIN %I.studies st ON st.nct_id = i.nct_id '
+        ' ORDER BY st.nct_id',
+        v_schema, v_schema)
+        USING v_keys, v_release, v_sf, episteme_api_internal.licence_for('aact');
+END
+$$;
+
+-- Public, capped functions (families 'label' and 'trials').
+CREATE OR REPLACE FUNCTION episteme_api.current_label(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.current_label(p_substance_key) AS r),
+        'label')
+$$;
+
+CREATE OR REPLACE FUNCTION episteme_api.label_section_text(p_article_id text, p_section text)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.label_section_text(p_article_id, p_section)
+              AS r),
+        'label')
+$$;
+
+CREATE OR REPLACE FUNCTION episteme_api.trials(p_substance_key bigint)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.trials(p_substance_key) AS r),
+        'trials')
+$$;
+
 COMMIT;
