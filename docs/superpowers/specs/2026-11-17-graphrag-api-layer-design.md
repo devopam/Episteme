@@ -192,7 +192,7 @@ The 6 labels that failed identity extraction on 2026-11-10 (`setId is missing or
 - **The next spec starts with a bake-off on a 1M-abstract sample:**
   - candidates: pgvector `halfvec` HNSW, binary HNSW plus re-ranking, and `pg_turboquant` at 2 and 4 bits (if the extension builds on PostgreSQL 19beta3 on Windows; licence checked);
   - measures: recall against exact search, size, build time and latency.
-  - **As built (bake-off result, local report):** TurboQuant with re-ranking gave recall 0.996 to 0.999; pgvector `halfvec` HNSW 0.95 to 0.98 and about 586 GB at full scope; binary HNSW at most 0.88. No TurboQuant extension builds for PostgreSQL 19. NCBI publishes MedCPT PubMed embeddings in the public domain. pgvector 0.8.7 is installed. The next spec starts from these results (`docs/13-graphrag-design.md` section 6.2).
+  - **As built (bake-off result, local report):** TurboQuant with re-ranking gave recall 0.996 to 0.999; pgvector `halfvec` HNSW 0.95 to 0.98 and about 586 GB at full scope; binary HNSW at most 0.88. No TurboQuant extension is available for PostgreSQL 19. NCBI publishes MedCPT PubMed embeddings in the public domain. pgvector 0.8.7 is installed. The next spec starts from these results (`docs/13-graphrag-design.md` section 6.2).
 - **Fixed parts:**
   - The embedding pass runs on rented hardware.
   - The query is embedded by the caller with the same model.

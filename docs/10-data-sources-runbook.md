@@ -1850,7 +1850,12 @@ The reference lookups are SQL functions in the schema `episteme_api` (migration 
 
 Confirm `server_version` is `19beta3` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. Tee every long run to `D:/episteme/_runlogs/<name>.log`.
 
-1. **Migration 0015.** Apply it with the section 2.3 loop, or alone with the same command and `for f in 0015_api_layer; do`. Use `PGDATABASE=episteme_test` first, then `PGDATABASE=episteme`. Run no FAERS load at the same time.
+1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+```
+
 2. **Roles file, as superuser.** It needs `POSTGRES_SUPERUSER` and `POSTGRES_SUPERUSER_PASSWORD` (names only). Run it while no load runs and no FAERS generation is unfinished: it rewrites catalog ACL rows, and the tables of an unfinished generation would miss the new grant.
 
 ```bash
@@ -1867,7 +1872,7 @@ PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.reference.api_settings 
 Expect `api_settings sync: <n> sources, 11 limits` and `episteme_api_reader statement_timeout = 30s`. A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
 
 4. **Reader password.** The operator sets it by hand in psql as the superuser, with `\password episteme_api_reader`, and types the value of the `.env` key `EPISTEME_API_READER_PASSWORD`. The roles are cluster-wide, so do this once. The value never goes into a file, a command line or a log.
-5. **FAERS outcome table** (section 5.12). Sample first, then the forced load on each database:
+5. **FAERS outcome table** (section 5.12). The forced load builds a whole new FAERS generation (every zip, the de-duplication, the indexes and the signals), not only the signal tables: it is the heaviest job of this rollout. Run it alone. Sample first, then the forced load on each database:
 
 ```bash
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --sample
