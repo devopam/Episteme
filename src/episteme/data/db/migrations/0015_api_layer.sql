@@ -1850,7 +1850,8 @@ $$;
 -- Task 8: lookup_code (family 'code'). One code of the current release of a
 -- reference list, from the view episteme.code_current (migration 0013). Same claim
 -- as the former Python path: text '<system> <code> (<version or release>): <display>.
--- <licence notice>', value the display (the code when the display is empty), method
+-- <licence notice>' (', OID <oid>' follows the version inside the parentheses when the
+-- system has an OID), value the display (the code when the display is empty), method
 -- 'fetched', confidence 1, record_key the code. A code with no current row gives one
 -- note (no claim). A database without migration 0013 gives one 'missing' row.
 -- The licence column is licence_for(<system>).
@@ -1870,7 +1871,8 @@ BEGIN
         RETURN NEXT episteme_api_internal.missing_row(p_system);
         RETURN;
     END IF;
-    SELECT c.release_id, c.version, c.licence_notice, c.display, c.status, c.source_file
+    SELECT c.release_id, c.version, c.oid, c.licence_notice, c.display, c.status,
+           c.source_file
       INTO r
       FROM episteme.code_current c
      WHERE c.system_key = p_system AND c.code = p_code
@@ -1883,7 +1885,7 @@ BEGIN
     v_shown := coalesce(nullif(r.display, ''), p_code);
     v_row := ROW('claim', 1, 0,
                  p_system || ' ' || p_code || ' (' || coalesce(nullif(r.version, ''), r.release_id)
-                     || '): ' || v_shown || '. ' || r.licence_notice,
+                     || coalesce(', OID ' || r.oid, '') || '): ' || v_shown || '. ' || r.licence_notice,
                  v_shown, 'fetched', 1.0::double precision,
                  'episteme.code_current; status=' || coalesce(nullif(r.status, ''), 'unset'),
                  p_system, r.release_id, r.source_file, p_code, NULL, v_licence
