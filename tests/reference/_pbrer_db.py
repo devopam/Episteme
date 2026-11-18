@@ -23,6 +23,7 @@ KW = {"tenant": "t", "caller": "test"}
 # (0015 also creates faers_moiety_quarter_outcome, after the 0010 FAERS tables).
 _MIGRATION_FILES = (
     "0002_container_and_book_parts.sql",
+    "0006_pubmed_graph.sql",
     "0010_regulatory_sources.sql",
     "0011_label_section_ordinal.sql",
     "0014_article_text_virtual.sql",
@@ -35,6 +36,7 @@ def build_schema(conn) -> None:
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute((DB_DIR / "extensions.sql").read_text("utf-8"))
         cur.execute((DB_DIR / "schema.sql").read_text("utf-8"))
+        # 0006: article_chemicals and mesh_tree (graph_neighbours, literature_by_mesh).
         # 0011: label_section.ordinal and product (current_label, label_section_text).
         # 0014 is a no-op on a schema.sql database (article_body already has
         # text_override and the virtual text). 0015 is in schema.sql too; applied again
@@ -59,7 +61,8 @@ def clear(conn) -> None:
             "episteme.faers_moiety_quarter, episteme.faers_quarter_totals, "
             "episteme.faers_moiety_quarter_outcome, episteme.faers_event_quarter, "
             "episteme.faers_term, "
-            "episteme.article_mesh, episteme.articles, "
+            "episteme.article_mesh, episteme.article_cites, episteme.article_chemicals, "
+            "episteme.articles, "
             "episteme.substance_xref, episteme.substance RESTART IDENTITY"
         )
         cur.execute(

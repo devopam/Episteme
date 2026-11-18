@@ -221,6 +221,12 @@ DEFAULT_LITE_BATCH_SIZE = 2000
 DEFAULT_LITE_COMMIT_BATCHES = 50
 # OpenAlex serialize: a progress line every N files (EPISTEME_OPENALEX_PROGRESS_EVERY).
 DEFAULT_OPENALEX_PROGRESS_EVERY = 25
+# SQL lookup API, graph_neighbours kind 'shared_mesh': a major-topic descriptor of the
+# article is used only when at most this many article_mesh rows carry it; a more common
+# descriptor is skipped (its 1/count weight is negligible). Bounds the rows one call reads
+# (EPISTEME_API_SHARED_MESH_MAX_ARTICLES). The public SQL function uses the same value as
+# its SQL default (migration 0015); a test keeps the two equal.
+DEFAULT_API_SHARED_MESH_MAX_ARTICLES = 100000
 # Sources that never enter the training corpus, whatever their licence subset. The owner's
 # design splits the data: publications train the model; regulatory reference data (labels,
 # EPARs) is looked up, not trained on (docs/superpowers/specs/2026-10-28-end-consumer-
@@ -581,6 +587,7 @@ class Settings:
     lite_batch_size: int = DEFAULT_LITE_BATCH_SIZE
     lite_commit_batches: int = DEFAULT_LITE_COMMIT_BATCHES
     openalex_progress_every: int = DEFAULT_OPENALEX_PROGRESS_EVERY
+    api_shared_mesh_max_articles: int = DEFAULT_API_SHARED_MESH_MAX_ARTICLES
     sample_min_substances: int = DEFAULT_SAMPLE_MIN_SUBSTANCES
     # Sources left out of corpus materialisation (CORPUS_EXCLUDED_SOURCES).
     corpus_excluded_sources: tuple[str, ...] = CORPUS_EXCLUDED_SOURCES
@@ -840,6 +847,9 @@ def get_settings() -> Settings:
         ),
         openalex_progress_every=_get_positive_int_or_default(
             "EPISTEME_OPENALEX_PROGRESS_EVERY", DEFAULT_OPENALEX_PROGRESS_EVERY
+        ),
+        api_shared_mesh_max_articles=_get_positive_int_or_default(
+            "EPISTEME_API_SHARED_MESH_MAX_ARTICLES", DEFAULT_API_SHARED_MESH_MAX_ARTICLES
         ),
         lite_commit_batches=_get_positive_int_or_default(
             "EPISTEME_LITE_COMMIT_BATCHES", DEFAULT_LITE_COMMIT_BATCHES
