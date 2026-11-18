@@ -58,6 +58,17 @@ def test_faers_texts_match_the_sql():
         lookups.FAERS_SPLIT_GAP,
     ):
         assert f"'{text}'" in body, text
+    # The outcome claims state FDA's seriousness (faers_report.serious) and the outcome
+    # apart; no text calls a report "not serious" from its outcome.
+    for phrase in (
+        "classed serious by the reporter",
+        "classed non-serious by the reporter",
+        "seriousness not stated",
+        "outcome none stated",
+    ):
+        assert f"'{phrase}'" in body, phrase
+    assert "not serious" not in body
+    assert "o.serious " not in body
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +123,11 @@ def _splits_and_terms(conn) -> dict[str, int]:
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO episteme.faers_moiety_quarter_outcome "
-            "(substance_key, quarter, serious, outcome, reports) VALUES "
-            "(1, '2025-01-01', false, 'none', 2), (1, '2025-01-01', true, 'HO', 3), "
-            "(1, '2025-01-01', true, 'DE', 1), (1, '2025-04-01', true, 'OT', 6), "
-            "(1, '2024-10-01', true, 'HO', 3), (3, '2025-01-01', true, 'DE', 50)"
+            "(substance_key, quarter, seriousness, outcome, reports) VALUES "
+            "(1, '2025-01-01', 'non_serious', 'none', 2), (1, '2025-01-01', 'serious', 'HO', 3), "
+            "(1, '2025-01-01', 'serious', 'DE', 1), (1, '2025-04-01', 'serious', 'OT', 6), "
+            "(1, '2025-01-01', 'serious', 'none', 1), (1, '2025-01-01', 'unknown', 'none', 1), "
+            "(1, '2024-10-01', 'serious', 'HO', 3), (3, '2025-01-01', 'serious', 'DE', 50)"
         )
         terms = {}
         for term in ("Nausea", "NAUSEA", "Lactic acidosis"):
@@ -188,21 +200,35 @@ def test_faers_split_claims_present(db):
     assert keys == [
         "faers_moiety_quarter:1:2025-01-01",
         "faers_moiety_quarter:1:2025-04-01",
-        "faers_moiety_quarter_outcome:1:2025-01-01:DE",
-        "faers_moiety_quarter_outcome:1:2025-01-01:HO",
-        "faers_moiety_quarter_outcome:1:2025-01-01:none",
-        "faers_moiety_quarter_outcome:1:2025-04-01:OT",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:DE",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:HO",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:none",
+        "faers_moiety_quarter_outcome:1:2025-01-01:non_serious:none",
+        "faers_moiety_quarter_outcome:1:2025-01-01:unknown:none",
+        "faers_moiety_quarter_outcome:1:2025-04-01:serious:OT",
         f"faers_event_quarter:1:{terms['Lactic acidosis']}:2025-01-01:2025-04-01",
         f"faers_event_quarter:1:{terms['Nausea']}:2025-01-01:2025-04-01",
     ]
     by_key = {c.provenance.record_key: c for c in res.claims}
-    ho = by_key["faers_moiety_quarter_outcome:1:2025-01-01:HO"]
+    ho = by_key["faers_moiety_quarter_outcome:1:2025-01-01:serious:HO"]
     assert ho.value == "3" and ho.method == "computed"
-    assert ho.text.startswith("2025Q1: 3 reports ")
-    assert "outcome HO (hospitalisation), serious" in ho.text
-    assert ho.text.endswith(f"({lookups.FAERS_LABEL})")
-    none = by_key["faers_moiety_quarter_outcome:1:2025-01-01:none"]
-    assert none.value == "2" and "not serious" in none.text
+    assert ho.text == (
+        "2025Q1: 3 reports name the substance as suspect, classed serious by the reporter, "
+        f"outcome HO (hospitalisation) ({lookups.FAERS_LABEL})"
+    )
+    # FDA's seriousness and the outcome are stated apart: a serious report with no
+    # outcome flag is never called non-serious.
+    texts = {
+        s: by_key[f"faers_moiety_quarter_outcome:1:2025-01-01:{s}:none"].text
+        for s in ("serious", "non_serious", "unknown")
+    }
+    assert texts["serious"].startswith(
+        "2025Q1: 1 reports name the substance as suspect, classed serious by the reporter, "
+        "outcome none stated"
+    )
+    assert "classed non-serious by the reporter, outcome none stated" in texts["non_serious"]
+    assert "seriousness not stated, outcome none stated" in texts["unknown"]
+    assert all("not serious" not in t for t in texts.values())
     # Terms: summed over the quarters of the interval, quoted as stored.
     nausea = by_key[f"faers_event_quarter:1:{terms['Nausea']}:2025-01-01:2025-04-01"]
     assert nausea.value == "3"
@@ -215,7 +241,7 @@ def test_faers_split_claims_present(db):
         assert c.provenance.release == "faers-2025q4"
         assert c.provenance.jurisdiction == "US"
         assert c.confidence == 1.0
-    assert res.coverage.matched == 8
+    assert res.coverage.matched == 10
     assert lookups.FAERS_OUTCOME_NOTE in res.coverage.notes
     assert "per report" in lookups.FAERS_OUTCOME_NOTE
     assert lookups.FAERS_TERM_NOTE in res.coverage.notes

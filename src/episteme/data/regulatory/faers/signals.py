@@ -29,13 +29,14 @@ with no usable date is counted (``reports_no_date``) and left out.
 * ``faers_moiety_quarter`` and ``faers_term_quarter``: the margins of a PRR or ROR, reports per
   moiety and reports per case-folded term. With ``faers_quarter_totals.reports_listed`` and
   ``reports_with_reaction``, a statistic can choose its universe.
-* ``faers_moiety_quarter_outcome``: reports that name the moiety as suspect, per quarter and
-  outcome code. The codes come from the seriousness flags of the report (``_OUTCOME_CODES``);
-  a report with no true flag has ``none``. A report with several codes counts once per code.
-  ``serious`` is true for every code except ``none``. openFDA has no flag for ``RI`` (required
-  intervention), so that code never occurs. ``faers_reaction.outcome`` (the reaction's own
-  outcome, 1 to 6) is not used. FAERS stores the suspect role undivided (primary and
-  secondary suspect are both ``suspect``).
+* ``faers_moiety_quarter_outcome``: reports that name the moiety as suspect, per quarter,
+  seriousness and outcome code. ``seriousness`` is the report's own ``serious`` field
+  (``serious``, ``non_serious``, ``unknown`` for NULL). The codes come from the seriousness
+  flags of the report (``_OUTCOME_CODES``); a report with no true flag has ``none``, whatever
+  its seriousness. A report with several codes counts once per code. openFDA has no flag for
+  ``RI`` (required intervention), so that code never occurs. ``faers_reaction.outcome`` (the
+  reaction's own outcome, 1 to 6) is not used. FAERS stores the suspect role undivided (primary
+  and secondary suspect are both ``suspect``).
 
 **Bounds.** One transaction per year partition. Reports get an integer id in a temporary
 table, and each report's moieties are one array, so pairs come from ``unnest`` with no join and
@@ -100,7 +101,7 @@ _PRIMARY_KEYS = {
     "faers_batch_quarter": ("substance_key", "batch_norm", "quarter"),
     "faers_moiety_quarter": ("substance_key", "quarter"),
     "faers_term_quarter": ("term_id", "quarter"),
-    "faers_moiety_quarter_outcome": ("substance_key", "quarter", "serious", "outcome"),
+    "faers_moiety_quarter_outcome": ("substance_key", "quarter", "seriousness", "outcome"),
 }
 # Outcome code (the FAERS OUTC codes) of each seriousness flag of faers_report, in code
 # order. A report with no true flag has the code 'none'.
@@ -336,7 +337,9 @@ def _build_partition(
             "CREATE TEMP TABLE _sig_report ON COMMIT DROP AS "
             "SELECT row_number() OVER () AS rid, safetyreportid, "
             "date_trunc('quarter', receive_date::timestamp)::date AS quarter, "
-            "{outcomes} AS outcomes "
+            "{outcomes} AS outcomes, "
+            "CASE serious WHEN true THEN 'serious' WHEN false THEN 'non_serious' "
+            "ELSE 'unknown' END AS seriousness "
             "FROM {r} WHERE receive_date IS NOT NULL"
         ).format(r=leaves["faers_report"], outcomes=_OUTCOME_ARRAY)
     )
@@ -402,8 +405,8 @@ def _build_partition(
     # Reports, not reactions: _sig_moiety has one row per report and moiety.
     cur.execute(
         sql.SQL(
-            "INSERT INTO {t} (substance_key, quarter, serious, outcome, reports) "
-            "SELECT m.moiety, m.quarter, o.code <> 'none', o.code, count(*) "
+            "INSERT INTO {t} (substance_key, quarter, seriousness, outcome, reports) "
+            "SELECT m.moiety, m.quarter, r.seriousness, o.code, count(*) "
             "FROM _sig_moiety m JOIN _sig_report r USING (rid) "
             "CROSS JOIN LATERAL unnest(CASE WHEN cardinality(r.outcomes) = 0 "
             "THEN ARRAY['none']::text[] ELSE r.outcomes END) AS o(code) "

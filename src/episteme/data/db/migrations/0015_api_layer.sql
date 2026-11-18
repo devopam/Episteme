@@ -1041,23 +1041,39 @@ $$;
 -- A FAERS signal table: signals.rebuild_signals builds it with the others, and it
 -- swaps with the FAERS generation. Reports, not reactions, that name the moiety
 -- (substance_key holds a moiety key) as suspect, per quarter and outcome code.
+-- seriousness: FDA's classification of the report (faers_report.serious): true is
+-- 'serious', false 'non_serious', NULL 'unknown'. It is independent of the outcome:
+-- a report can be serious with no outcome flag.
 -- outcome: DE, LT, HO, DS, CA, OT from the seriousness flags of faers_report, or
 -- 'none' when no flag is true. RI is a FAERS code that openFDA has no flag for, so
--- it does not occur. A report with several codes counts once per code. serious is
--- true for every code except 'none'.
+-- it does not occur. A report with several codes counts once per code.
 -- This table is in the migration only, not in schema.sql: it belongs with the FAERS
 -- tables of migration 0010, which schema.sql does not hold.
+-- The first 0015 draft had a boolean column `serious` (true for every code except
+-- 'none'). The table holds derived rows only (the signal build fills it), so a
+-- table of that shape is dropped and created again; the next signal build fills it.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute a
+         WHERE a.attrelid = to_regclass('episteme.faers_moiety_quarter_outcome')
+           AND a.attname = 'serious' AND NOT a.attisdropped) THEN
+        DROP TABLE episteme.faers_moiety_quarter_outcome;
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS episteme.faers_moiety_quarter_outcome (
-    substance_key bigint  NOT NULL,
-    quarter       date    NOT NULL,
-    serious       boolean NOT NULL,
-    outcome       text    NOT NULL,
-    reports       bigint  NOT NULL,
-    PRIMARY KEY (substance_key, quarter, serious, outcome),
+    substance_key bigint NOT NULL,
+    quarter       date   NOT NULL,
+    seriousness   text   NOT NULL,
+    outcome       text   NOT NULL,
+    reports       bigint NOT NULL,
+    PRIMARY KEY (substance_key, quarter, seriousness, outcome),
     CONSTRAINT faers_moiety_quarter_outcome_code_check
         CHECK (outcome IN ('DE', 'LT', 'HO', 'DS', 'CA', 'RI', 'OT', 'none')),
-    CONSTRAINT faers_moiety_quarter_outcome_serious_check
-        CHECK (serious = (outcome <> 'none'))
+    CONSTRAINT faers_moiety_quarter_outcome_seriousness_check
+        CHECK (seriousness IN ('serious', 'non_serious', 'unknown'))
 );
 
 -- FAERS reports of a substance's moiety, for the quarters that overlap
@@ -1065,7 +1081,9 @@ CREATE TABLE IF NOT EXISTS episteme.faers_moiety_quarter_outcome (
 --   * per quarter (faers_moiety_quarter): reports with the moiety as suspect (the
 --     value), in any role, and all reports received in the quarter;
 --   * the outcome split per quarter (faers_moiety_quarter_outcome), in code order
---     DE, LT, HO, DS, CA, RI, OT, none;
+--     DE, LT, HO, DS, CA, RI, OT, none, then seriousness serious, non_serious,
+--     unknown. The text states FDA's seriousness and the outcome apart: a report
+--     classed serious can have no outcome flag;
 --   * per reaction term (faers_event_quarter, faers_term): reports with the moiety
 --     as suspect (the value) and in any role, summed over the quarters (a report
 --     has one quarter, so the sum counts each report once); ordered by the suspect
@@ -1173,31 +1191,38 @@ BEGIN
                    ORDER BY o.quarter,
                             array_position(
                                 ARRAY['DE', 'LT', 'HO', 'DS', 'CA', 'RI', 'OT', 'none'],
-                                o.outcome)))::int,
+                                o.outcome),
+                            array_position(
+                                ARRAY['serious', 'non_serious', 'unknown'],
+                                o.seriousness)))::int,
                0,
-               format('%s: %s reports name the substance as suspect with outcome %s (%s), '
-                      '%s (%s)',
-                      to_char(o.quarter::timestamp, 'YYYY"Q"Q'), o.reports, o.outcome,
+               format('%s: %s reports name the substance as suspect, %s, %s (%s)',
+                      to_char(o.quarter::timestamp, 'YYYY"Q"Q'), o.reports,
+                      CASE o.seriousness
+                           WHEN 'serious' THEN 'classed serious by the reporter'
+                           WHEN 'non_serious' THEN 'classed non-serious by the reporter'
+                           ELSE 'seriousness not stated' END,
                       CASE o.outcome
-                           WHEN 'DE' THEN 'death'
-                           WHEN 'LT' THEN 'life-threatening'
-                           WHEN 'HO' THEN 'hospitalisation'
-                           WHEN 'DS' THEN 'disability'
-                           WHEN 'CA' THEN 'congenital anomaly'
-                           WHEN 'RI' THEN 'required intervention'
-                           WHEN 'OT' THEN 'other serious outcome'
-                           ELSE 'no serious outcome stated' END,
-                      CASE WHEN o.serious THEN 'serious' ELSE 'not serious' END,
+                           WHEN 'DE' THEN 'outcome DE (death)'
+                           WHEN 'LT' THEN 'outcome LT (life-threatening)'
+                           WHEN 'HO' THEN 'outcome HO (hospitalisation)'
+                           WHEN 'DS' THEN 'outcome DS (disability)'
+                           WHEN 'CA' THEN 'outcome CA (congenital anomaly)'
+                           WHEN 'RI' THEN 'outcome RI (required intervention)'
+                           WHEN 'OT' THEN 'outcome OT (other serious outcome)'
+                           ELSE 'outcome none stated' END,
                       v_label),
                o.reports::text,
                'computed'::text,
                1.0::double precision,
-               'exact count of stored FAERS reports per moiety, quarter and outcome'::text,
+               ('exact count of stored FAERS reports per moiety, quarter, seriousness '
+                'and outcome')::text,
                'openfda_faers'::text,
                v_release,
                NULL::text,
-               format('faers_moiety_quarter_outcome:%s:%s:%s', v_moiety,
-                      to_char(o.quarter::timestamp, 'YYYY-MM-DD'), o.outcome),
+               format('faers_moiety_quarter_outcome:%s:%s:%s:%s', v_moiety,
+                      to_char(o.quarter::timestamp, 'YYYY-MM-DD'), o.seriousness,
+                      o.outcome),
                'US'::text,
                v_licence
           FROM episteme.faers_moiety_quarter_outcome o

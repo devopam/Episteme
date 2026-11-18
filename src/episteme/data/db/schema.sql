@@ -1375,7 +1375,9 @@ $$;
 --   * per quarter (faers_moiety_quarter): reports with the moiety as suspect (the
 --     value), in any role, and all reports received in the quarter;
 --   * the outcome split per quarter (faers_moiety_quarter_outcome), in code order
---     DE, LT, HO, DS, CA, RI, OT, none;
+--     DE, LT, HO, DS, CA, RI, OT, none, then seriousness serious, non_serious,
+--     unknown. The text states FDA's seriousness and the outcome apart: a report
+--     classed serious can have no outcome flag;
 --   * per reaction term (faers_event_quarter, faers_term): reports with the moiety
 --     as suspect (the value) and in any role, summed over the quarters (a report
 --     has one quarter, so the sum counts each report once); ordered by the suspect
@@ -1483,31 +1485,38 @@ BEGIN
                    ORDER BY o.quarter,
                             array_position(
                                 ARRAY['DE', 'LT', 'HO', 'DS', 'CA', 'RI', 'OT', 'none'],
-                                o.outcome)))::int,
+                                o.outcome),
+                            array_position(
+                                ARRAY['serious', 'non_serious', 'unknown'],
+                                o.seriousness)))::int,
                0,
-               format('%s: %s reports name the substance as suspect with outcome %s (%s), '
-                      '%s (%s)',
-                      to_char(o.quarter::timestamp, 'YYYY"Q"Q'), o.reports, o.outcome,
+               format('%s: %s reports name the substance as suspect, %s, %s (%s)',
+                      to_char(o.quarter::timestamp, 'YYYY"Q"Q'), o.reports,
+                      CASE o.seriousness
+                           WHEN 'serious' THEN 'classed serious by the reporter'
+                           WHEN 'non_serious' THEN 'classed non-serious by the reporter'
+                           ELSE 'seriousness not stated' END,
                       CASE o.outcome
-                           WHEN 'DE' THEN 'death'
-                           WHEN 'LT' THEN 'life-threatening'
-                           WHEN 'HO' THEN 'hospitalisation'
-                           WHEN 'DS' THEN 'disability'
-                           WHEN 'CA' THEN 'congenital anomaly'
-                           WHEN 'RI' THEN 'required intervention'
-                           WHEN 'OT' THEN 'other serious outcome'
-                           ELSE 'no serious outcome stated' END,
-                      CASE WHEN o.serious THEN 'serious' ELSE 'not serious' END,
+                           WHEN 'DE' THEN 'outcome DE (death)'
+                           WHEN 'LT' THEN 'outcome LT (life-threatening)'
+                           WHEN 'HO' THEN 'outcome HO (hospitalisation)'
+                           WHEN 'DS' THEN 'outcome DS (disability)'
+                           WHEN 'CA' THEN 'outcome CA (congenital anomaly)'
+                           WHEN 'RI' THEN 'outcome RI (required intervention)'
+                           WHEN 'OT' THEN 'outcome OT (other serious outcome)'
+                           ELSE 'outcome none stated' END,
                       v_label),
                o.reports::text,
                'computed'::text,
                1.0::double precision,
-               'exact count of stored FAERS reports per moiety, quarter and outcome'::text,
+               ('exact count of stored FAERS reports per moiety, quarter, seriousness '
+                'and outcome')::text,
                'openfda_faers'::text,
                v_release,
                NULL::text,
-               format('faers_moiety_quarter_outcome:%s:%s:%s', v_moiety,
-                      to_char(o.quarter::timestamp, 'YYYY-MM-DD'), o.outcome),
+               format('faers_moiety_quarter_outcome:%s:%s:%s:%s', v_moiety,
+                      to_char(o.quarter::timestamp, 'YYYY-MM-DD'), o.seriousness,
+                      o.outcome),
                'US'::text,
                v_licence
           FROM episteme.faers_moiety_quarter_outcome o

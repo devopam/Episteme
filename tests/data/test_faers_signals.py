@@ -199,10 +199,11 @@ def _entry(conn, *keys):
     return entry
 
 
-def _report(conn, report_id, day, drugs=(), terms=(), gen="", serious=()):
+def _report(conn, report_id, day, drugs=(), terms=(), gen="", serious=(), classed=None):
     """One report. ``drugs``: ``(entry, role, batch_norm)``. ``terms``: term ids. ``gen``: the
     suffix of a generation's tables, such as ``_gccc``. ``serious``: the seriousness flags
-    that are true, by column (``serious_death``, ...)."""
+    that are true, by column (``serious_death``, ...); each also sets ``serious``.
+    ``classed``: the report's own ``serious`` field, when no flag sets it (NULL by default)."""
     year = day.year if day else None
     with conn.cursor() as cur:
         cur.execute(
@@ -210,6 +211,13 @@ def _report(conn, report_id, day, drugs=(), terms=(), gen="", serious=()):
             "source_file) VALUES (%s, %s, %s, 'f')",
             (report_id, year, day),
         )
+        if classed is not None:
+            cur.execute(
+                sql.SQL("UPDATE {t} SET serious = %s WHERE safetyreportid = %s").format(
+                    t=sql.Identifier("episteme", f"faers_report{gen}")
+                ),
+                (classed, report_id),
+            )
         for flag in serious:
             cur.execute(
                 sql.SQL(
@@ -331,8 +339,9 @@ def test_suspect_and_any_role_counts_differ_as_expected(db):
 def _outcomes(conn):
     return _all(
         conn,
-        "SELECT substance_key, quarter, serious, outcome, reports "
-        'FROM episteme.faers_moiety_quarter_outcome ORDER BY 1, 2, outcome COLLATE "C"',
+        "SELECT substance_key, quarter, seriousness, outcome, reports "
+        "FROM episteme.faers_moiety_quarter_outcome "
+        'ORDER BY 1, 2, outcome COLLATE "C", seriousness COLLATE "C"',
     )
 
 
@@ -352,8 +361,9 @@ def test_outcome_table_counts_reports_once(db):
         serious=("serious_hospitalization",),
     )
     _rebuild(db)
-    assert _outcomes(db) == [(a, Q1_2020, True, "HO", 1)]
-    # Two outcomes: once per code. No outcome: 'none', not serious.
+    assert _outcomes(db) == [(a, Q1_2020, "serious", "HO", 1)]
+    # Two outcomes: once per code. No outcome flag: 'none', in the bucket of the report's
+    # own serious field: NULL is 'unknown', true 'serious', false 'non_serious'.
     _report(
         db,
         "2",
@@ -364,15 +374,19 @@ def test_outcome_table_counts_reports_once(db):
     )
     _report(db, "3", date(2020, 2, 1), [(ea, "suspect", None)], [t1])
     _report(db, "4", date(2020, 5, 1), [(ea, "suspect", None)], serious=("serious_death",))
+    _report(db, "5", date(2020, 2, 1), [(ea, "suspect", None)], classed=True)
+    _report(db, "6", date(2020, 2, 1), [(ea, "suspect", None)], classed=False)
     out = _rebuild(db)
     assert _outcomes(db) == [
-        (a, Q1_2020, True, "DE", 1),
-        (a, Q1_2020, True, "HO", 1),
-        (a, Q1_2020, True, "OT", 1),
-        (a, Q1_2020, False, "none", 1),
-        (a, Q2_2020, True, "DE", 1),
+        (a, Q1_2020, "serious", "DE", 1),
+        (a, Q1_2020, "serious", "HO", 1),
+        (a, Q1_2020, "serious", "OT", 1),
+        (a, Q1_2020, "non_serious", "none", 1),
+        (a, Q1_2020, "serious", "none", 1),
+        (a, Q1_2020, "unknown", "none", 1),
+        (a, Q2_2020, "serious", "DE", 1),
     ]
-    assert out["reports"] == 4
+    assert out["reports"] == 6
     assert set(sg._OUTCOME_CODES.values()) <= {"DE", "LT", "HO", "DS", "CA", "RI", "OT"}
 
 
@@ -397,7 +411,10 @@ def test_outcome_suspect_only(db):
         serious=("serious_life_threatening",),
     )
     _rebuild(db)
-    assert _outcomes(db) == [(a, Q1_2020, True, "DE", 1), (b, Q1_2020, True, "LT", 1)]
+    assert _outcomes(db) == [
+        (a, Q1_2020, "serious", "DE", 1),
+        (b, Q1_2020, "serious", "LT", 1),
+    ]
 
 
 @pytest.mark.pg

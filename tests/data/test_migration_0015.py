@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from episteme.config import LOOKUP_SOURCE_SUBSETS, api_result_limits
@@ -150,3 +151,46 @@ def test_0015_upgrades_the_first_draft_shapes(pg_conn):
             (f"{schema}.substance_family(bigint)",),
         )
         assert result.endswith("source text, release_id text, licence text)")
+
+
+def test_0015_replaces_the_boolean_outcome_table(pg_conn):
+    """A database with the first 0015 draft of faers_moiety_quarter_outcome (a boolean
+    ``serious`` column) gets the ``seriousness`` text column when 0015 is applied again.
+    The table holds derived rows only, so the old one is dropped."""
+    _apply(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute("DROP TABLE episteme.faers_moiety_quarter_outcome")
+        cur.execute(
+            "CREATE TABLE episteme.faers_moiety_quarter_outcome (substance_key bigint NOT NULL, "
+            "quarter date NOT NULL, serious boolean NOT NULL, outcome text NOT NULL, "
+            "reports bigint NOT NULL, PRIMARY KEY (substance_key, quarter, serious, outcome))"
+        )
+        cur.execute(
+            "INSERT INTO episteme.faers_moiety_quarter_outcome "
+            "VALUES (1, '2020-01-01', false, 'none', 1)"
+        )
+    pg_conn.commit()
+    _apply(pg_conn)
+    _apply(pg_conn)  # idempotent on the new shape
+    columns = _one(
+        pg_conn,
+        "SELECT array_agg(a.attname::text ORDER BY a.attnum) FROM pg_attribute a "
+        "WHERE a.attrelid = 'episteme.faers_moiety_quarter_outcome'::regclass "
+        "AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    assert columns == ["substance_key", "quarter", "seriousness", "outcome", "reports"]
+    assert _one(pg_conn, "SELECT count(*) FROM episteme.faers_moiety_quarter_outcome") == 0
+    with pg_conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute(
+                "INSERT INTO episteme.faers_moiety_quarter_outcome "
+                "VALUES (1, '2020-01-01', 'not serious', 'none', 1)"
+            )
+    pg_conn.rollback()
+    with pg_conn.cursor() as cur:
+        # A serious report with no outcome flag is a valid row.
+        cur.execute(
+            "INSERT INTO episteme.faers_moiety_quarter_outcome "
+            "VALUES (1, '2020-01-01', 'serious', 'none', 1)"
+        )
+    pg_conn.rollback()
