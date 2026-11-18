@@ -39,6 +39,7 @@ SIGNAL_TABLES = (
     "faers_batch_quarter",
     "faers_moiety_quarter",
     "faers_term_quarter",
+    "faers_moiety_quarter_outcome",
 )
 GENERATION_RE = r"g[0-9a-f]{10}"
 _PARENT_RE = "(?:" + "|".join(PARENTS) + ")"

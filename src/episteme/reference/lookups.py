@@ -29,7 +29,7 @@ from episteme.reference._scope import (
     source_ready,
     substance_scope,
 )
-from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+from episteme.reference.claims import LookupResult
 
 __all__ = [
     "PBRER_DATASETS",
@@ -46,9 +46,9 @@ __all__ = [
     "substance_scope",
     "trials",
 ]
-# approval_status, safety_actions, current_label, label_section_text and trials run in
-# SQL (migration 0015). The regulatory pair uses reg_lookup, its payload fields in
-# reg_fields; these two tuples name the same datasets in the same order.
+# approval_status, safety_actions, current_label, label_section_text, trials and
+# faers_counts run in SQL (migration 0015). The regulatory pair uses reg_lookup, its
+# payload fields in reg_fields; these two tuples name the same datasets in the same order.
 APPROVAL_DATASETS = ("fda_drugsfda", "ema_medicines", "ema_article57", "ema_outside_eu")
 SAFETY_DATASETS = ("fda_enforcement", "ema_referrals", "ema_dhpc", "ema_psusa")
 # The names that coverage.missing uses, per function.
@@ -63,19 +63,15 @@ PBRER_DATASETS: dict[str, tuple[str, ...]] = {
 
 # The note text of current_label (the SQL function returns the same text).
 LABEL_HISTORY_GAP = "change history not determinable"
+# The FAERS label and notes (the SQL function faers_counts returns the same text).
 FAERS_LABEL = "US public spontaneous reports (FAERS)"
 FAERS_QUARTER_RULE = "quarters that overlap the interval are counted whole"
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-def _no_substance(function: str, substance_key: int) -> LookupResult:
-    note = f"substance {substance_key} not found"
-    return LookupResult(
-        claims=(),
-        coverage=Coverage(matched=0, missing=PBRER_DATASETS[function], notes=(note,)),
-    )
+FAERS_OUTCOME_NOTE = "outcome is per report: a report with several outcomes counts once per outcome"
+FAERS_TERM_NOTE = (
+    "reaction terms are quoted as FDA publishes them (MedDRA preferred terms), "
+    "with no term grouping"
+)
+FAERS_SPLIT_GAP = "no FAERS outcome split: faers_moiety_quarter_outcome holds no row"
 
 
 # ---------------------------------------------------------------------------
@@ -138,30 +134,6 @@ def trials(
     return _api.rows_to_result(_api.call(conn, "trials", int(substance_key)))
 
 
-# Quarters that overlap the interval and have no faers_quarter_totals row (not loaded).
-_FAERS_GAPS_SQL = """
-SELECT q::date FROM generate_series(
-  date_trunc('quarter', %(start)s::date::timestamp), %(end)s::date::timestamp,
-  interval '3 months') AS q
-WHERE NOT EXISTS (SELECT 1 FROM episteme.faers_quarter_totals t WHERE t.quarter = q::date)
-ORDER BY 1
-"""
-
-
-def _quarter_label(quarter: date) -> str:
-    return f"{quarter.year}Q{(quarter.month - 1) // 3 + 1}"
-
-
-_FAERS_SQL = """
-SELECT m.quarter, m.reports_suspect, m.reports_any, t.reports
-FROM episteme.faers_moiety_quarter m
-LEFT JOIN episteme.faers_quarter_totals t ON t.quarter = m.quarter
-WHERE m.substance_key = %(moiety)s
-  AND m.quarter >= date_trunc('quarter', %(start)s::date)::date AND m.quarter <= %(end)s
-ORDER BY m.quarter
-"""
-
-
 def faers_counts(
     conn: psycopg.Connection,
     substance_key: int,
@@ -171,45 +143,9 @@ def faers_counts(
     tenant: str,
     caller: str,
 ) -> LookupResult:
-    """FAERS reports per quarter for the substance's moiety: as suspect, in any role, and
-    all reports received in the quarter. Quarters that overlap ``[start, end]`` count
-    whole. Public US data, never the MAH's own case counts."""
-    scope = substance_scope(conn, substance_key)
-    if scope is None:
-        return _no_substance("faers_counts", substance_key)
-    notes = (FAERS_QUARTER_RULE,)
-    tables = ("faers_moiety_quarter", "faers_quarter_totals")
-    if not source_ready(conn, tables, "faers_quarter_totals"):
-        return LookupResult((), Coverage(matched=0, missing=("faers",), notes=notes))
-    with conn.cursor() as cur:
-        params = {"moiety": scope.moiety_key, "start": start, "end": end}
-        cur.execute(_FAERS_SQL, params)
-        rows = cur.fetchall()
-        cur.execute(_FAERS_GAPS_SQL, params)
-        gaps = [_quarter_label(r[0]) for r in cur.fetchall()]
-    if gaps:
-        notes += (f"no FAERS data for quarters: {', '.join(gaps)}",)
-    claims = []
-    for quarter, suspect, any_role, total in rows:
-        label = _quarter_label(quarter)
-        of_total = f"of {total} reports received" if total is not None else "total not available"
-        claims.append(
-            Claim(
-                text=(
-                    f"{label}: {suspect} reports name the substance as suspect, {any_role} "
-                    f"in any role, {of_total} ({FAERS_LABEL})"
-                ),
-                value=str(suspect),
-                method="computed",
-                provenance=Provenance(
-                    source="openfda_faers",
-                    release=None,
-                    source_file=None,
-                    record_key=f"faers_moiety_quarter:{scope.moiety_key}:{quarter.isoformat()}",
-                    jurisdiction="US",
-                ),
-                confidence=1.0,
-                confidence_basis="exact count of stored FAERS reports per moiety and quarter",
-            )
-        )
-    return LookupResult(tuple(claims), Coverage(matched=len(claims), notes=notes))
+    """FAERS reports for the substance's moiety, for the quarters that overlap
+    ``[start, end]`` (counted whole): per quarter (as suspect, in any role, and all
+    reports received), the outcome split per quarter, and per reaction term as FDA
+    publishes it. Public US data, never the MAH's own case counts. Runs the SQL
+    function ``episteme_api_internal.faers_counts`` (migration 0015)."""
+    return _api.rows_to_result(_api.call(conn, "faers_counts", int(substance_key), start, end))

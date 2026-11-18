@@ -88,6 +88,7 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
     "0015_api_layer.sql": [
         "table:episteme_api_internal.source_subset",
         "table:episteme_api_internal.result_limit",
+        "table:episteme.faers_moiety_quarter_outcome",
     ],
 }
 

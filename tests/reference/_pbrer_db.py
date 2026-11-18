@@ -19,7 +19,8 @@ MIGRATIONS = DB_DIR / "migrations"
 TEST_AACT_RELEASE = "19700101"
 TEST_AACT_SCHEMA = f"aact_r{TEST_AACT_RELEASE}"
 KW = {"tenant": "t", "caller": "test"}
-# Migrations applied after schema.sql, in order: the tables and columns the lookups read.
+# Migrations applied after schema.sql, in order: the tables and columns the lookups read
+# (0015 also creates faers_moiety_quarter_outcome, after the 0010 FAERS tables).
 _MIGRATION_FILES = (
     "0002_container_and_book_parts.sql",
     "0010_regulatory_sources.sql",
@@ -56,6 +57,8 @@ def clear(conn) -> None:
         cur.execute(
             "TRUNCATE episteme.reg_release, episteme.label_section, episteme.label_substance, "
             "episteme.faers_moiety_quarter, episteme.faers_quarter_totals, "
+            "episteme.faers_moiety_quarter_outcome, episteme.faers_event_quarter, "
+            "episteme.faers_term, "
             "episteme.article_mesh, episteme.articles, "
             "episteme.substance_xref, episteme.substance RESTART IDENTITY"
         )

@@ -1359,6 +1359,240 @@ AS $$
         'trials')
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Task 5: the FAERS seriousness/outcome table and faers_counts (family 'faers').
+-- SQL form of the former lookups.faers_counts, with the outcome split and the
+-- counts per reaction term. Reaction terms are quoted as faers_term stores them
+-- (the preferred term as FDA publishes it); no MedDRA coding or hierarchy.
+-- ---------------------------------------------------------------------------
+
+-- The FAERS outcome table (faers_moiety_quarter_outcome) is in migration 0015
+-- only: it belongs with the FAERS tables of migration 0010, which this file does
+-- not hold.
+
+-- FAERS reports of a substance's moiety, for the quarters that overlap
+-- [p_from, p_to] (counted whole). Three groups of claims, in this order:
+--   * per quarter (faers_moiety_quarter): reports with the moiety as suspect (the
+--     value), in any role, and all reports received in the quarter;
+--   * the outcome split per quarter (faers_moiety_quarter_outcome), in code order
+--     DE, LT, HO, DS, CA, RI, OT, none;
+--   * per reaction term (faers_event_quarter, faers_term): reports with the moiety
+--     as suspect (the value) and in any role, summed over the quarters (a report
+--     has one quarter, so the sum counts each report once); ordered by the suspect
+--     count descending, then the any-role count descending, then the term.
+-- Notes: the quarter rule, then 'no FAERS data for quarters: ...' (quarters with no
+-- faers_quarter_totals row), then the outcome note and the term note, then a note
+-- when the outcome table holds no row (not built yet).
+--   * No substance tables, or an unknown substance: the note 'substance <key> not
+--     found' and a 'missing' row for 'faers'.
+--   * faers_moiety_quarter or faers_quarter_totals does not exist, or the totals
+--     hold no row: the quarter rule and a 'missing' row for 'faers'.
+-- Provenance: source 'openfda_faers'; release_id the is_latest reg_release row of
+-- dataset 'openfda_faers' (NULL when there is none); jurisdiction 'US'; licence
+-- licence_for('openfda_faers'), on the 'missing' row too.
+CREATE OR REPLACE FUNCTION episteme_api_internal.faers_counts(
+    p_substance_key bigint, p_from date, p_to date)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_label   constant text := 'US public spontaneous reports (FAERS)';
+    v_rule    constant text := 'quarters that overlap the interval are counted whole';
+    v_moiety  bigint;
+    v_release text;
+    v_licence text := episteme_api_internal.licence_for('openfda_faers');
+    v_missing episteme_api_internal.claim_row;
+    v_q_from  date := date_trunc('quarter', p_from::timestamp)::date;
+    v_q_to    date := date_trunc('quarter', p_to::timestamp)::date;
+    v_gaps    text;
+    v_groups  int := 0;
+    v_n       int;
+    v_split   boolean := false;
+BEGIN
+    v_missing := episteme_api_internal.missing_row('faers');
+    v_missing.licence := v_licence;
+    IF to_regclass('episteme.substance') IS NOT NULL
+       AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
+        SELECT f.moiety_key INTO v_moiety
+          FROM episteme_api_internal.substance_family(p_substance_key) AS f
+         LIMIT 1;
+    END IF;
+    IF v_moiety IS NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('substance %s not found', p_substance_key));
+        RETURN NEXT v_missing;
+        RETURN;
+    END IF;
+    -- Nested IFs: a relation is read only after its to_regclass check.
+    IF to_regclass('episteme.faers_moiety_quarter') IS NULL
+       OR to_regclass('episteme.faers_quarter_totals') IS NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(v_rule);
+        RETURN NEXT v_missing;
+        RETURN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM episteme.faers_quarter_totals) THEN
+        RETURN NEXT episteme_api_internal.note_row(v_rule);
+        RETURN NEXT v_missing;
+        RETURN;
+    END IF;
+    IF to_regclass('episteme.reg_release') IS NOT NULL THEN
+        SELECT rr.release_id INTO v_release
+          FROM episteme.reg_release rr
+         WHERE rr.dataset = 'openfda_faers' AND rr.is_latest;
+    END IF;
+
+    -- Per quarter: the former claims, with the same text.
+    RETURN QUERY
+    SELECT 'claim'::text,
+           (row_number() OVER (ORDER BY m.quarter))::int,
+           0,
+           format('%s: %s reports name the substance as suspect, %s in any role, %s (%s)',
+                  to_char(m.quarter::timestamp, 'YYYY"Q"Q'), m.reports_suspect, m.reports_any,
+                  CASE WHEN t.reports IS NOT NULL
+                       THEN format('of %s reports received', t.reports)
+                       ELSE 'total not available' END,
+                  v_label),
+           m.reports_suspect::text,
+           'computed'::text,
+           1.0::double precision,
+           'exact count of stored FAERS reports per moiety and quarter'::text,
+           'openfda_faers'::text,
+           v_release,
+           NULL::text,
+           format('faers_moiety_quarter:%s:%s', v_moiety,
+                  to_char(m.quarter::timestamp, 'YYYY-MM-DD')),
+           'US'::text,
+           v_licence
+      FROM episteme.faers_moiety_quarter m
+      LEFT JOIN episteme.faers_quarter_totals t ON t.quarter = m.quarter
+     WHERE m.substance_key = v_moiety
+       AND m.quarter >= v_q_from AND m.quarter <= p_to
+     ORDER BY m.quarter;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    v_groups := v_groups + v_n;
+
+    -- The outcome split per quarter.
+    IF to_regclass('episteme.faers_moiety_quarter_outcome') IS NOT NULL THEN
+        v_split := EXISTS (SELECT 1 FROM episteme.faers_moiety_quarter_outcome);
+    END IF;
+    IF v_split THEN
+        RETURN QUERY
+        SELECT 'claim'::text,
+               v_groups + (row_number() OVER (
+                   ORDER BY o.quarter,
+                            array_position(
+                                ARRAY['DE', 'LT', 'HO', 'DS', 'CA', 'RI', 'OT', 'none'],
+                                o.outcome)))::int,
+               0,
+               format('%s: %s reports name the substance as suspect with outcome %s (%s), '
+                      '%s (%s)',
+                      to_char(o.quarter::timestamp, 'YYYY"Q"Q'), o.reports, o.outcome,
+                      CASE o.outcome
+                           WHEN 'DE' THEN 'death'
+                           WHEN 'LT' THEN 'life-threatening'
+                           WHEN 'HO' THEN 'hospitalisation'
+                           WHEN 'DS' THEN 'disability'
+                           WHEN 'CA' THEN 'congenital anomaly'
+                           WHEN 'RI' THEN 'required intervention'
+                           WHEN 'OT' THEN 'other serious outcome'
+                           ELSE 'no serious outcome stated' END,
+                      CASE WHEN o.serious THEN 'serious' ELSE 'not serious' END,
+                      v_label),
+               o.reports::text,
+               'computed'::text,
+               1.0::double precision,
+               'exact count of stored FAERS reports per moiety, quarter and outcome'::text,
+               'openfda_faers'::text,
+               v_release,
+               NULL::text,
+               format('faers_moiety_quarter_outcome:%s:%s:%s', v_moiety,
+                      to_char(o.quarter::timestamp, 'YYYY-MM-DD'), o.outcome),
+               'US'::text,
+               v_licence
+          FROM episteme.faers_moiety_quarter_outcome o
+         WHERE o.substance_key = v_moiety
+           AND o.quarter >= v_q_from AND o.quarter <= p_to
+         ORDER BY 2;
+        GET DIAGNOSTICS v_n = ROW_COUNT;
+        v_groups := v_groups + v_n;
+    END IF;
+
+    -- Per reaction term, as stored (faers_event_quarter holds the lowest term_id of
+    -- a case-folded term).
+    IF to_regclass('episteme.faers_event_quarter') IS NOT NULL
+       AND to_regclass('episteme.faers_term') IS NOT NULL THEN
+        RETURN QUERY
+        WITH per_term AS (
+            SELECT e.term_id,
+                   sum(e.reports_suspect) AS suspect,
+                   sum(e.reports_any) AS any_role
+              FROM episteme.faers_event_quarter e
+             WHERE e.substance_key = v_moiety
+               AND e.quarter >= v_q_from AND e.quarter <= p_to
+             GROUP BY e.term_id
+        )
+        SELECT 'claim'::text,
+               v_groups + (row_number() OVER (
+                   ORDER BY p.suspect DESC, p.any_role DESC, ft.term, p.term_id))::int,
+               0,
+               format('%s: %s reports name the substance as suspect, %s in any role, '
+                      '%s to %s (%s)',
+                      ft.term, p.suspect, p.any_role,
+                      to_char(v_q_from::timestamp, 'YYYY"Q"Q'),
+                      to_char(v_q_to::timestamp, 'YYYY"Q"Q'), v_label),
+               p.suspect::text,
+               'computed'::text,
+               1.0::double precision,
+               ('exact count of stored FAERS reports per moiety and reaction term, '
+                'summed over the quarters')::text,
+               'openfda_faers'::text,
+               v_release,
+               NULL::text,
+               format('faers_event_quarter:%s:%s:%s:%s', v_moiety, p.term_id,
+                      to_char(v_q_from::timestamp, 'YYYY-MM-DD'),
+                      to_char(v_q_to::timestamp, 'YYYY-MM-DD')),
+               'US'::text,
+               v_licence
+          FROM per_term p
+          JOIN episteme.faers_term ft ON ft.term_id = p.term_id
+         ORDER BY 2;
+    END IF;
+
+    RETURN NEXT episteme_api_internal.note_row(v_rule);
+    SELECT string_agg(to_char(q, 'YYYY"Q"Q'), ', ' ORDER BY q) INTO v_gaps
+      FROM generate_series(date_trunc('quarter', p_from::timestamp), p_to::timestamp,
+                           interval '3 months') AS q
+     WHERE NOT EXISTS (SELECT 1 FROM episteme.faers_quarter_totals t
+                        WHERE t.quarter = q::date);
+    IF v_gaps IS NOT NULL THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            format('no FAERS data for quarters: %s', v_gaps));
+    END IF;
+    RETURN NEXT episteme_api_internal.note_row(
+        'outcome is per report: a report with several outcomes counts once per outcome');
+    RETURN NEXT episteme_api_internal.note_row(
+        'reaction terms are quoted as FDA publishes them (MedDRA preferred terms), with no term grouping');
+    IF NOT v_split THEN
+        RETURN NEXT episteme_api_internal.note_row(
+            'no FAERS outcome split: faers_moiety_quarter_outcome holds no row');
+    END IF;
+END
+$$;
+
+-- Public, capped function (family 'faers').
+CREATE OR REPLACE FUNCTION episteme_api.faers_counts(
+    p_substance_key bigint, p_from date, p_to date)
+RETURNS SETOF episteme_api_internal.claim_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_claims(
+        ARRAY(SELECT r FROM episteme_api_internal.faers_counts(p_substance_key, p_from, p_to)
+              AS r),
+        'faers')
+$$;
+
 -- -----------------------------------------------------------------------------
 -- Ownership + grants
 --   Ownership follows from running this file as episteme_sys_admin. The runtime
