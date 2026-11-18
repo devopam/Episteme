@@ -101,8 +101,7 @@ $$;
 DO $$
 BEGIN
     IF to_regrole('episteme_sys_admin') IS NULL THEN
-        RAISE EXCEPTION 'role episteme_sys_admin does not exist: the settings tables '
-                        'need it as owner (create it before this file)';
+        RAISE EXCEPTION 'role episteme_sys_admin does not exist: the settings tables need it as owner';
     END IF;
     ALTER TABLE episteme_api_internal.source_subset OWNER TO episteme_sys_admin;
     ALTER TABLE episteme_api_internal.result_limit OWNER TO episteme_sys_admin;
