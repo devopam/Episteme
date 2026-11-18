@@ -236,7 +236,7 @@ $$;
 -- release_id of every substance row (resolve_entity, substance_family).
 CREATE OR REPLACE FUNCTION episteme_api_internal.substance_release()
 RETURNS text
-LANGUAGE plpgsql STABLE
+LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
 AS $$
 DECLARE

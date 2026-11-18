@@ -27,6 +27,14 @@ BEGIN
             EXECUTE format('GRANT USAGE ON SCHEMA %I TO episteme_api_owner', s);
         END IF;
     END LOOP;
+    -- A function a migration recreated is owned by episteme_sys_admin until the roles file
+    -- runs again; the owner role calls it from the functions it owns (the default
+    -- privileges of the roles file cover new ones; this repairs older ones).
+    FOREACH s IN ARRAY ARRAY['episteme_api', 'episteme_api_internal'] LOOP
+        IF to_regnamespace(s) IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON ALL ROUTINES IN SCHEMA %I TO episteme_api_owner', s);
+        END IF;
+    END LOOP;
 END
 $$;
 

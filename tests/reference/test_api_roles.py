@@ -69,6 +69,31 @@ def _migration_code() -> str:
     )
 
 
+_FUNCTION = re.compile(
+    r"CREATE OR REPLACE FUNCTION (episteme_api(?:_internal)?\.\w+)\((.*?)\$\$(.*?)\$\$;", re.S
+)
+
+
+def _functions(path) -> list[tuple[str, str, str]]:
+    """(name, header, body without comments) of each function in a SQL file."""
+    out = []
+    for m in _FUNCTION.finditer(path.read_text(encoding="utf-8")):
+        body = "\n".join(ln.split("--", 1)[0] for ln in m.group(3).splitlines())
+        out.append((m.group(1), m.group(2), body))
+    return out
+
+
+@pytest.mark.parametrize("path", [MIGRATION, DB_DIR / "schema.sql"], ids=["0015", "schema"])
+def test_every_function_that_reads_a_table_is_security_definer(path):
+    """A function that reads an episteme table runs as its owner (SECURITY DEFINER), so no
+    caller (the reader, episteme_app, another API function) needs a table grant."""
+    functions = _functions(path)
+    assert len(functions) > 30
+    readers = [(n, h) for n, h, b in functions if re.search(r"\bepisteme\.[a-z]", b)]
+    assert readers
+    assert [n for n, h in readers if "SECURITY DEFINER" not in h] == []
+
+
 def test_owner_read_list_matches_the_migration():
     """The owner's SELECT list is every episteme relation a function body reads."""
     read = set(re.findall(r"\b(?:FROM|JOIN)\s+episteme\.([a-z_0-9]+)", _migration_code()))
@@ -113,8 +138,9 @@ def test_grants_file_shape():
         assert not re.search(r"\bPASSWORD\b", text, re.IGNORECASE), "no password in SQL"
         assert not [ln for ln in text.splitlines() if ln.lstrip().startswith("\\")]
     # The table owner runs the tables file: no role, ownership or function statement.
-    for word in ("CREATE ROLE", "ALTER ROLE", "OWNER TO", "ROUTINE", "DEFAULT PRIVILEGES"):
+    for word in ("CREATE ROLE", "ALTER ROLE", "OWNER TO", "DEFAULT PRIVILEGES", "PUBLIC"):
         assert word not in tables, word
+    assert "episteme_api_reader" not in tables and "episteme_app" not in tables
     assert "c_read" not in code and "c_aact" not in code
     assert (
         "REVOKE ALL ON ALL ROUTINES IN SCHEMA episteme_api, episteme_api_internal FROM PUBLIC"
@@ -609,6 +635,49 @@ def test_search_path_game_harmless(api):
         cur.execute(query)
         assert cur.fetchall() == baseline
     reader.rollback()
+
+
+@pytest.mark.pg
+def test_internal_functions_are_safe_to_call(api):
+    """In the database: every API function that reads an episteme table is SECURITY
+    DEFINER, and the owner role can execute every API function (it calls the helpers as
+    itself)."""
+    rows = _rows(
+        api.admin,
+        "SELECT p.oid::regprocedure::text, p.prosecdef, "
+        r"p.prosrc ~ '\mepisteme\.[a-z]', "
+        "has_function_privilege('episteme_api_owner', p.oid, 'EXECUTE') "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname IN ('episteme_api', 'episteme_api_internal')",
+    )
+    assert rows
+    assert [sig for sig, definer, reads, _ in rows if reads and not definer] == []
+    assert [sig for sig, _, _, owner_exec in rows if not owner_exec] == []
+
+
+@pytest.mark.pg
+def test_a_helper_recreated_by_a_migration_stays_callable(api):
+    """A migration that drops and creates a helper leaves it owned by episteme_sys_admin
+    until the grants file runs again. The default privileges let the owner role call it,
+    so the functions it owns keep working (round-2 failure: "permission denied for
+    function substance_family"). Rolled back."""
+    create = next(
+        m.group(0)
+        for m in _FUNCTION.finditer(MIGRATION.read_text(encoding="utf-8"))
+        if m.group(1) == "episteme_api_internal.substance_family"
+    )
+    conn = api.admin
+    with conn.cursor() as cur:
+        cur.execute("DROP FUNCTION episteme_api_internal.substance_family(bigint)")
+        cur.execute(create)
+        cur.execute(
+            "SELECT proowner::regrole::text FROM pg_proc "
+            "WHERE oid = 'episteme_api_internal.substance_family(bigint)'::regprocedure"
+        )
+        assert cur.fetchone()[0] != "episteme_api_owner"
+        cur.execute("SELECT kind FROM episteme_api.trials(1)")
+        assert "claim" in {r[0] for r in cur.fetchall()}
+    conn.rollback()
 
 
 @pytest.mark.pg

@@ -103,12 +103,21 @@ GRANT EXECUTE ON ALL ROUTINES IN SCHEMA episteme_api TO episteme_api_reader;
 -- privileges, so this is the global default of the roles that create functions (the
 -- migrations run as episteme_sys_admin; no other schema holds a function of theirs).
 -- A new episteme_api function needs this file again before the reader can call it.
+-- Every function that reads an episteme table is SECURITY DEFINER (a test checks it), so
+-- no caller needs a grant on the tables.
 ALTER DEFAULT PRIVILEGES FOR ROLE episteme_api_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 DO $$
 BEGIN
     IF to_regrole('episteme_sys_admin') IS NOT NULL THEN
         ALTER DEFAULT PRIVILEGES FOR ROLE episteme_sys_admin
             REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+        -- A function that a migration (re)creates is owned by episteme_sys_admin until
+        -- this file runs again; the owner role must still be able to call it, because
+        -- the SECURITY DEFINER functions it owns call their helpers as it (a recreated
+        -- substance_family gave "permission denied for function substance_family").
+        ALTER DEFAULT PRIVILEGES FOR ROLE episteme_sys_admin
+            IN SCHEMA episteme_api, episteme_api_internal
+            GRANT EXECUTE ON FUNCTIONS TO episteme_api_owner;
     END IF;
 END
 $$;
