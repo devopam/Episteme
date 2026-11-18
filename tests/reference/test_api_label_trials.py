@@ -16,7 +16,7 @@ from episteme.reference import api_settings, lookups
 
 from . import _legacy as legacy
 from ._parity import assert_same_fields
-from ._pbrer_db import KW, MIGRATIONS, TEST_AACT_RELEASE, TEST_AACT_SCHEMA
+from ._pbrer_db import KW, MIGRATIONS, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, grant_owner
 
 pytestmark = pytest.mark.pg
 
@@ -267,6 +267,7 @@ def _aact(conn, *, latest: bool, load_state: bool = True) -> None:
             (TEST_AACT_RELEASE, latest),
         )
     conn.commit()
+    grant_owner(conn)
 
 
 def _without_source_file(res):

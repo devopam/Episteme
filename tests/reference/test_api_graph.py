@@ -16,7 +16,14 @@ from episteme.data import graph_builder
 from episteme.reference import api_settings
 from episteme.reference.graph import neighbours
 
-from ._pbrer_db import DB_DIR, KW, MIGRATIONS, TEST_AACT_RELEASE, TEST_AACT_SCHEMA
+from ._pbrer_db import (
+    DB_DIR,
+    KW,
+    MIGRATIONS,
+    TEST_AACT_RELEASE,
+    TEST_AACT_SCHEMA,
+    grant_owner,
+)
 
 _AACT_ZIP = f"aact/{TEST_AACT_RELEASE}_export_ctgov.zip"
 _KINDS_NOTE = "allowed kinds: cites, cited_by, shared_mesh, trial, label"
@@ -199,6 +206,7 @@ def _aact(conn) -> None:
             (TEST_AACT_RELEASE,),
         )
     conn.commit()
+    grant_owner(conn)
 
 
 @pytest.mark.pg

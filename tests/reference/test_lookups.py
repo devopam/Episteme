@@ -20,7 +20,7 @@ from episteme.reference.lookups import (
     trials,
 )
 
-from ._pbrer_db import KW, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, add_release
+from ._pbrer_db import KW, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, add_release, grant_owner
 
 pytestmark = pytest.mark.pg
 
@@ -224,6 +224,7 @@ def test_empty_aact_schema_is_a_gap_not_an_error(ref_db):
             (TEST_AACT_RELEASE,),
         )
     ref_db.commit()
+    grant_owner(ref_db)
     res = trials(ref_db, 1, **KW)
     assert res.claims == ()
     assert res.coverage.missing == ("aact",)
@@ -275,6 +276,7 @@ def _aact(conn, *, latest: bool) -> None:
             (TEST_AACT_RELEASE, latest),
         )
     conn.commit()
+    grant_owner(conn)
 
 
 def test_trials_report_status_phase_and_results(ref_db):

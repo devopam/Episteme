@@ -12,7 +12,7 @@ from episteme.reference.codes import lookup_code
 
 from . import _legacy
 from ._parity import assert_same_fields
-from ._pbrer_db import KW, MIGRATIONS
+from ._pbrer_db import KW, MIGRATIONS, grant_owner
 
 pytestmark = pytest.mark.pg
 
@@ -27,6 +27,9 @@ def code_db(ref_schema, pg_conn):
     with pg_conn.cursor() as cur:
         cur.execute((MIGRATIONS / "0013_reference_codes.sql").read_text("utf-8"))
         cur.execute((MIGRATIONS / "0015_api_layer.sql").read_text("utf-8"))
+    pg_conn.commit()
+    grant_owner(pg_conn)  # code_current is new when 0013 was not applied before
+    with pg_conn.cursor() as cur:
         cur.execute("DELETE FROM episteme.code WHERE system_key = %s", (_SYSTEM,))
         cur.execute("DELETE FROM episteme.code_system WHERE system_key = %s", (_SYSTEM,))
         for rel, latest in (("r1", False), ("r2", True)):

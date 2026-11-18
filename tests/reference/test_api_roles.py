@@ -26,9 +26,17 @@ from episteme.data.db import fts_index
 from episteme.data.regulatory.faers.generation import PARENTS, SIGNAL_TABLES
 from episteme.reference import _api, api_settings
 
-from ._pbrer_db import DB_DIR, MIGRATIONS, TEST_AACT_RELEASE, TEST_AACT_SCHEMA, add_release
+from ._pbrer_db import (
+    DB_DIR,
+    MIGRATIONS,
+    TEST_AACT_RELEASE,
+    TEST_AACT_SCHEMA,
+    add_release,
+    grant_owner,
+)
 
 GRANTS = DB_DIR / "grants" / "0015_api_roles.sql"
+TABLE_GRANTS = DB_DIR / "grants" / "0015_api_tables.sql"
 MIGRATION = MIGRATIONS / "0015_api_layer.sql"
 SCHEMAS = ("episteme_api", "episteme_api_internal")
 _SYSTEM = "zz_apirole"
@@ -39,7 +47,13 @@ _FTS_PART = "article_body_dailymed"
 # non-pg: the grants file against migration 0015
 # ---------------------------------------------------------------------------
 def _grants_text() -> str:
-    return GRANTS.read_text(encoding="utf-8")
+    """Both grants files: the roles file (superuser) and the tables file (api_settings)."""
+    return GRANTS.read_text(encoding="utf-8") + TABLE_GRANTS.read_text(encoding="utf-8")
+
+
+def _code(path) -> str:
+    """A SQL file without its -- comments."""
+    return "\n".join(ln.split("--", 1)[0] for ln in path.read_text(encoding="utf-8").splitlines())
 
 
 def _array(name: str) -> set[str]:
@@ -90,11 +104,18 @@ def test_app_functions_are_the_python_entry_points_and_the_index_expression():
 
 
 def test_grants_file_shape():
-    text = _grants_text()
-    code = "\n".join(line.split("--", 1)[0] for line in text.splitlines())
+    code = _code(GRANTS)
+    tables = _code(TABLE_GRANTS)
+    # The roles file is one transaction; the tables file runs inside api_settings' one.
     assert code.count("BEGIN;") == 1 and code.count("COMMIT;") == 1
-    assert not re.search(r"\bPASSWORD\b", code, re.IGNORECASE), "no password in SQL"
-    assert not [ln for ln in code.splitlines() if ln.lstrip().startswith("\\")]
+    assert "BEGIN;" not in tables and "COMMIT;" not in tables
+    for text in (code, tables):
+        assert not re.search(r"\bPASSWORD\b", text, re.IGNORECASE), "no password in SQL"
+        assert not [ln for ln in text.splitlines() if ln.lstrip().startswith("\\")]
+    # The table owner runs the tables file: no role, ownership or function statement.
+    for word in ("CREATE ROLE", "ALTER ROLE", "OWNER TO", "ROUTINE", "DEFAULT PRIVILEGES"):
+        assert word not in tables, word
+    assert "c_read" not in code and "c_aact" not in code
     assert (
         "REVOKE ALL ON ALL ROUTINES IN SCHEMA episteme_api, episteme_api_internal FROM PUBLIC"
         in code
@@ -391,6 +412,7 @@ def api(fts, ref_db):
     _seed(ref_db)
     su_dsn = _su_dsn()
     _apply_grants(su_dsn)
+    grant_owner(ref_db)  # the tables file, as `api_settings sync` applies it
     role = f"episteme_api_reader_t_{secrets.token_hex(4)}"
     password = secrets.token_urlsafe(24)
     with psycopg.connect(su_dsn, autocommit=True) as su:

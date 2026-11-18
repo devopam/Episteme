@@ -10,6 +10,7 @@ import pytest
 from episteme.config import get_settings
 from episteme.data.refmeta.load import load_release
 from episteme.data.refmeta.model import CodeRelease, CodeRow
+from episteme.reference import api_settings
 from episteme.reference.codes import lookup_code
 
 pytestmark = pytest.mark.pg
@@ -55,6 +56,10 @@ def test_load_replace_view_and_lookup(pg_conn, monkeypatch, tmp_path):
     monkeypatch.setenv("EPISTEME_ACTOR", "pytest")
     get_settings.cache_clear()
     _apply(pg_conn)
+    # Once the API grants file has run, lookup_code runs as episteme_api_owner: a
+    # code_current view created by this test needs the owner's grant.
+    api_settings.apply_owner_grants(pg_conn)
+    pg_conn.commit()
     with pg_conn.cursor() as cur:
         cur.execute("DELETE FROM episteme.code WHERE system_key = %s", (_SYSTEM,))
         cur.execute("DELETE FROM episteme.code_system WHERE system_key = %s", (_SYSTEM,))

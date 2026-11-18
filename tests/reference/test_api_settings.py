@@ -209,3 +209,16 @@ def test_env_example_names_the_reader_keys():
     text = (Path(__file__).resolve().parents[2] / ".env.example").read_text("utf-8")
     assert "# EPISTEME_API_READER_STATEMENT_TIMEOUT_S=30" in text
     assert "\nEPISTEME_API_READER_PASSWORD=" in text
+
+
+def test_owner_grants_apply_the_tables_file():
+    conn = _RoleConn(exists=True)
+    assert api_settings.apply_owner_grants(conn) is True
+    assert conn.statements[-1] == api_settings.OWNER_GRANTS.read_text(encoding="utf-8")
+    assert api_settings.OWNER_GRANTS.name == "0015_api_tables.sql"
+
+
+def test_owner_grants_skipped_without_the_role():
+    conn = _RoleConn(exists=False)
+    assert api_settings.apply_owner_grants(conn) is False
+    assert len(conn.statements) == 1  # only the role check

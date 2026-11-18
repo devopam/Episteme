@@ -9,6 +9,7 @@ from pathlib import Path
 from psycopg import sql
 
 from episteme.data.regulatory.load_reg import partition_names
+from episteme.reference import api_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_DIR = REPO_ROOT / "src/episteme/data/db"
@@ -43,6 +44,17 @@ def build_schema(conn) -> None:
         # (idempotent) so the API functions match the migration file.
         for name in _MIGRATION_FILES:
             cur.execute((MIGRATIONS / name).read_text("utf-8"))
+    conn.commit()
+    grant_owner(conn)
+
+
+def grant_owner(conn) -> None:
+    """The API owner role's reads (grants/0015_api_tables.sql, as ``api_settings sync``
+    applies them). Once the grants file has run on the database, the functions run as
+    episteme_api_owner, and a table or AACT schema created afterwards (a schema rebuild, a
+    test AACT release) needs this, or the functions fail with "permission denied". A
+    no-op when the role does not exist."""
+    api_settings.apply_owner_grants(conn)
     conn.commit()
 
 
