@@ -141,7 +141,8 @@ def test_faers_acl_list_is_faers_report_and_the_signal_tables():
 
 
 def test_app_functions_are_the_python_entry_points_and_the_index_expression():
-    assert _array("c_app") == set(_api.INTERNAL_FUNCTIONS) | {"fts_doc"}
+    # norm_name: the EU label links (episteme.data.ema.epar_links) match names with it.
+    assert _array("c_app") == set(_api.INTERNAL_FUNCTIONS) | {"fts_doc", "norm_name"}
 
 
 def test_grants_file_shape():

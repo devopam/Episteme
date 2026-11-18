@@ -144,14 +144,15 @@ END
 $$;
 
 -- The pipeline role: the complete functions of reference._api.INTERNAL_FUNCTIONS (the
--- Python lookups) and fts_doc (index expression). Nothing else of the API.
+-- Python lookups), fts_doc (index expression) and norm_name (the EU label links of
+-- episteme.data.ema.epar_links match names with it). Nothing else of the API.
 DO $$
 DECLARE
     c_app constant text[] := ARRAY[
         'resolve_entity', 'substance_family', 'approval_status', 'safety_actions',
         'current_label', 'label_section_text', 'trials', 'faers_counts',
         'literature_by_mesh', 'graph_neighbours', 'search_text', 'lookup_code',
-        'fts_doc'];
+        'fts_doc', 'norm_name'];
     r record;
 BEGIN
     IF to_regrole('episteme_app') IS NULL THEN
