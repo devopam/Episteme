@@ -41,6 +41,7 @@ def _row(**kw):
         release_id="2025",
         licence="open_metadata",
         note=None,
+        source_file="pubmed/x.xml",
     )
     base.update(kw)
     return tuple(base[c] for c in _api.ARTICLE_COLUMNS)
@@ -62,6 +63,7 @@ def test_article_rows_map_to_claims_notes_and_missing():
     assert first.provenance.record_key == "pmid:7"
     assert first.provenance.source == "pubmed"
     assert first.provenance.release == "2025"
+    assert first.provenance.source_file == "pubmed/x.xml"
     assert first.method == "fetched" and first.confidence_basis == "basis"
     assert res.claims[1].confidence == 0.5
     assert res.coverage.matched == 2
@@ -144,14 +146,9 @@ def _call(conn, key, topic, from_year=None, to_year=None, limit=None):
 
 
 def _comparable(result):
-    """The result with every provenance.source_file None (the SQL row has no file) and
-    the claims sorted by value: the legacy path orders equal years by PMID descending,
-    the SQL function by article_id ascending."""
-    claims = tuple(
-        dataclasses.replace(c, provenance=dataclasses.replace(c.provenance, source_file=None))
-        for c in result.claims
-    )
-    return dataclasses.replace(result, claims=tuple(sorted(claims, key=lambda c: c.value)))
+    """The result with the claims sorted by value: the legacy path orders equal years
+    by PMID descending, the SQL function by article_id ascending."""
+    return dataclasses.replace(result, claims=tuple(sorted(result.claims, key=lambda c: c.value)))
 
 
 @pytest.mark.pg
@@ -269,6 +266,7 @@ def test_gaps_and_release(db):
     assert art[1] == "pubmed:200" and art[2] == "pubmed"
     assert art[3] is None and art[4] == 2023 and art[5] == 1.0
     assert art[6] == "Metformin" and art[7] == "pm-2025" and art[8] == "open_metadata"
+    assert art[10] == "pubmed/b.xml"
     assert literature(db, 1, None, limit=1, **KW).claims[0].provenance.release == "pm-2025"
 
 
@@ -288,3 +286,19 @@ def test_public_wrapper_caps_articles(db):
     db.rollback()
     assert _ids(rows) == ["pubmed:200", "pubmed:500"]
     assert _notes(rows) == ["truncated: 2 of 3"]
+    # Seven records match; the wrapper builds limit + 1 = 3 of them and still notes the cut.
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 2 "
+            "WHERE family = 'literature'"
+        )
+        cur.execute("SELECT * FROM episteme_api.literature_by_mesh(1, NULL)")
+        rows = cur.fetchall()
+    db.rollback()
+    assert _ids(rows) == ["pubmed:200", "pubmed:600"]
+    assert _notes(rows) == ["truncated: 2 of 3"]
+    # Under the cap: no note.
+    with db.cursor() as cur:
+        cur.execute("SELECT * FROM episteme_api.literature_by_mesh(3, NULL)")
+        rows = cur.fetchall()
+    assert _ids(rows) == ["pubmed:300"] and _notes(rows) == []

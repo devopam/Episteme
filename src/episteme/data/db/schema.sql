@@ -372,8 +372,23 @@ BEGIN
             relation    text,
             release_id  text,
             licence     text,
-            note        text
+            note        text,
+            source_file text
         );
+    END IF;
+END
+$$;
+
+-- article_row had no source_file in the first 0015 draft; a database with that shape
+-- gets the attribute (no table column uses this type, so ALTER is safe).
+DO $$
+BEGIN
+    IF to_regtype('episteme_api_internal.article_row') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid = 'episteme_api_internal.article_row'::regclass
+              AND a.attname = 'source_file' AND NOT a.attisdropped) THEN
+        ALTER TYPE episteme_api_internal.article_row ADD ATTRIBUTE source_file text;
     END IF;
 END
 $$;
@@ -1622,15 +1637,17 @@ $$;
 -- records with an unknown year. Order: year descending (unknown last), then
 -- article_id. article_id is 'pubmed:<pmid>'. release_id: the is_latest reg_release row
 -- of dataset 'pubmed', NULL when there is none. relation: the matched descriptor
--- names, comma separated. score is 1. The article_row has no file column, so the
--- source_file of the former claim is not returned.
--- p_limit (NULL = no limit) keeps the Python caller from fetching every record; the
--- public wrapper caps with cap_articles instead.
+-- names, comma separated. score is 1.
+-- source_file: the smallest source_file of the matched descriptor rows of the PMID.
+-- p_limit (NULL = no limit) keeps a caller from building every hit. The public
+-- wrapper passes limit_for('literature') + 1, so cap_articles still sees one record
+-- more than it keeps and writes the truncation note; the total in that note is then
+-- at most limit + 1, not the true total.
+-- Index: lower(descriptor_name) on article_mesh serves the name match. It is NOT
+-- created here (article_mesh has ~345M rows): it is in bulk_indexes INDEX_GROUPS
+-- (group pubmed_graph); see the runbook for the production build.
 -- No substance: a note row and a missing row for 'article_mesh'; no article_mesh,
 -- articles or article_mesh row: the missing row only.
-CREATE INDEX IF NOT EXISTS article_mesh_lower_name_idx
-    ON episteme.article_mesh (lower(descriptor_name));
-
 CREATE OR REPLACE FUNCTION episteme_api_internal.literature_by_mesh(
     p_substance_key bigint, p_topic text, p_from_year int DEFAULT NULL,
     p_to_year int DEFAULT NULL, p_limit int DEFAULT NULL)
@@ -1707,8 +1724,9 @@ BEGIN
                   FROM episteme.mesh_tree p
                  CROSS JOIN LATERAL (
                        SELECT t.descriptor_ui FROM episteme.mesh_tree t
-                        WHERE t.tree_number >= p.tree_number
-                          AND t.tree_number < p.tree_number || '/') d
+                        WHERE t.tree_number = p.tree_number
+                           OR (t.tree_number ~>=~ (p.tree_number || '.')
+                               AND t.tree_number ~<~ (p.tree_number || '/'))) d
                  WHERE p.descriptor_ui = v_ui;
                 v_uis := array_append(coalesce(v_uis, ARRAY[]::text[]), v_ui);
             END IF;
@@ -1736,14 +1754,15 @@ BEGIN
     )
     SELECT 'article'::text, 'pubmed:' || h.pmid, 'pubmed'::text, NULL::text, y.year,
            1.0::real, array_to_string(d.descriptors, ', '), v_release, v_licence,
-           NULL::text
+           NULL::text, d.source_file
       FROM hits h
       LEFT JOIN LATERAL (
            SELECT NULLIF(max(a.year), 0) AS year
              FROM episteme.articles a WHERE a.pmid = h.pmid) y ON true
       CROSS JOIN LATERAL (
            SELECT array_agg(DISTINCT m2.descriptor_name ORDER BY m2.descriptor_name)
-                      AS descriptors
+                      AS descriptors,
+                  min(m2.source_file) AS source_file
              FROM episteme.article_mesh m2
             WHERE m2.pmid = h.pmid AND lower(m2.descriptor_name) = ANY (v_names)) d
      WHERE (p_from_year IS NULL OR y.year >= p_from_year)
@@ -1763,7 +1782,8 @@ SET search_path = pg_catalog
 AS $$
     SELECT * FROM episteme_api_internal.cap_articles(
         ARRAY(SELECT r FROM episteme_api_internal.literature_by_mesh(
-                  p_substance_key, p_topic, p_from_year, p_to_year) AS r),
+                  p_substance_key, p_topic, p_from_year, p_to_year,
+                  episteme_api_internal.limit_for('literature') + 1) AS r),
         'literature')
 $$;
 

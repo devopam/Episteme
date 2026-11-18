@@ -145,5 +145,5 @@ def test_groups_cover_the_spec_indexes_and_never_source_file():
 
     assert tuple(n for _, n in INDEX_GROUPS["articles"]) == COVERED_INDEXES
     names = [n for _, n in INDEX_GROUPS["pubmed_graph"]]
-    assert len(names) == 14
+    assert len(names) == 15
     assert not any(n.endswith("_source_file_idx") for n in names)

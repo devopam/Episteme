@@ -55,6 +55,7 @@ ARTICLE_COLUMNS: tuple[str, ...] = (
     "release_id",
     "licence",
     "note",
+    "source_file",
 )
 
 # Column order of episteme_api_internal.claim_row.
@@ -186,7 +187,7 @@ def article_rows_to_result(
                     provenance=Provenance(
                         source=row["source"],
                         release=row["release_id"],
-                        source_file=None,
+                        source_file=row["source_file"],
                         record_key=f"{prefix}:{local_id}",
                         jurisdiction=None,
                     ),

@@ -13,8 +13,8 @@ note and the qualifier match only.
 
 Newest first: by the publication year in ``articles`` (any source that carries the
 PMID), then by id. Each claim cites ``pmid:<pmid>``; its release is the latest
-``pubmed`` release when ``reg_release`` has one. The claim has no ``source_file``: the
-SQL row type does not carry it.
+``pubmed`` release when ``reg_release`` has one; its ``source_file`` is the smallest
+file of the matched descriptor rows.
 """
 
 from __future__ import annotations

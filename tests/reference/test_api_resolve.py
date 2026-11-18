@@ -249,7 +249,7 @@ def test_cap_articles(db):
         rows = _rows(
             db,
             "SELECT kind, article_id, note FROM episteme_api_internal.cap_articles(ARRAY("
-            "SELECT ROW(v.k, v.id, 'pubmed', NULL, NULL, NULL, NULL, NULL, NULL, v.n)"
+            "SELECT ROW(v.k, v.id, 'pubmed', NULL, NULL, NULL, NULL, NULL, NULL, v.n, NULL)"
             "::episteme_api_internal.article_row "
             "FROM (VALUES (1, 'article', 'a1', NULL), (2, 'note', NULL, 'gap'), "
             "(3, 'article', 'a2', NULL), (4, 'article', 'a3', NULL)) AS v(o, k, id, n) "
