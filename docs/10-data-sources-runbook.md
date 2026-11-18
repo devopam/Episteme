@@ -1510,7 +1510,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 - **Held buckets.** A known document whose file is missing holds its bucket: it is not written again and its row is not dropped. So does a known document that had a row and changed, when its new file cannot be read: the bucket keeps its parts and its marker, is listed in `held_buckets`, and the next run tries again.
 - **Size cap at download.** A PDF over `EPISTEME_EPAR_MAX_BYTES` is stopped as soon as its declared length or the stream passes the cap. The partial file is deleted, the document gets a failed marker (`over_limit`), it is not retried, and the other documents go on.
 - **SmPC sections.** The extract reads the numbered headings of Annex I (the SmPC) of each `product-information` document, with the start of Annex II as the end of Annex I, and writes them to `label_section` through the label sidecar of the part. One row per section per product; a PDF with several SmPCs gives one row per section per product, with `ordinal` and `product` set. The code is the LOINC code of the DailyMed subject where one exists (for example 4.1 is `34067-9`), else `smpc:<number>`. A document where no heading is found gets no section rows and is counted. The section rule version is in the fingerprint of `product-information` documents only, so a rule change re-extracts them and no other type. See section 5.16 for the counts.
-- **Offline subset (no download).** `--offline-subset` extracts only the PDFs already on disk (35 of the 20,342 documents the feed lists on 2026-11-17: 23 product information, 9 assessment reports, 3 RMP summaries). No EMA request is made. The flag changes no guard: an absent PDF is counted as `not_downloaded`, as without the flag. It only records `"offline_subset": {"present": n, "listed": m}` in the run marker and the summary. The dispatcher does not forward the flag, so run the wrapper itself (`bash scripts/data/ema/extract_ema_epar.sh --offline-subset`, section 5.19). Expect about 20,300 `not_downloaded` failed markers and a `failed_inputs` count of the same size: the gate's `max_failed_inputs` rule refuses such a run, so the following `ema_epar load` needs a gate decision by the owner (section 5.19).
+- **Offline subset (no download).** `--offline-subset` extracts only the PDFs already on disk (35 of the 20,342 documents the feed lists on 2026-11-17: 23 product information, 9 assessment reports, 3 RMP summaries). No EMA request is made. The flag changes no guard: an absent PDF is counted as `not_downloaded`, as without the flag. It only records `"offline_subset": {"present": n, "listed": m}` in the run marker and the summary. The dispatcher does not forward the flag, so run the wrapper itself (`bash scripts/data/ema/extract_ema_epar.sh --offline-subset`, section 5.19). Expect about 20,300 `not_downloaded` failed markers and a `failed_inputs` count of the same size. The absent documents form no bucket, and the extract exits 0. The gate does not read this count: `max_failed_inputs` is checked on the `--sample` run, whose slice lists only documents with a PDF on disk, and a full run is gated by that valid pass.
 - **EU label links.** `load_ema_epar.sh` runs the load, then the retire step, then the link step `python -m episteme.data.ema.epar_links`. A shard load replaces the `label_substance` rows of its articles, so the links run after every load. A `product-information` document links when its `ema_medicines` record is `Human` and each `;` part of the active substance matches exactly one substance with a UNII (exact normalised match on `substance_xref` names, method `ema_name_exact`; no fuzzy match). Veterinary products are loaded as text and never linked. The link report is `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json` (`label_documents`, `linked_documents`, `unlinked_by_reason`). The method is in the report and in the `load_commit` audit row; `label_substance` has no method column. The step runs as `episteme_app` and needs EXECUTE on `episteme_api_internal.norm_name`: apply the roles file (section 5.19) before the first link step.
 - **Generated EU medicine records.** `bash scripts/data/ema/build_ema_medicine_records.sh` writes one `ema_epar` article per EU medicine (about 2,754) from the loaded `ema_medicines` and `ema_epar_documents` releases: name, active substance, INN, ATC, therapeutic area, indication, status and dates, and the list of its EPAR documents. Article id `ema_medicine:<product number>`. The parts are `ema_epar_medicines__partNNNNN` (one bucket); the run marker `<processed>/_ops/ema_epar/runs/medicine_records_<run_id>.json` names both feed releases. A re-run with the same releases writes nothing (`--force` writes again). Load the parts with `ema_epar load`. The EPAR extract does not touch these parts, and they do not retire the PDF articles. Same licence as the EPAR rows; not in the training corpus (`corpus_excluded_sources`).
 - **Gate.** `ema_epar` is gated for `extract` and `load` (section 4.9).
@@ -1848,7 +1848,7 @@ The reference lookups are SQL functions in the schema `episteme_api` (migration 
 
 #### 5.19.1 Rollout (in this order; one heavy job at a time)
 
-Confirm `server_version` is `19beta3` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. Tee every long run to `D:/episteme/_runlogs/<name>.log`.
+Confirm `server_version` is `19beta3` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. **Every gated stage needs a new `--sample` pass after this merge:** `config.py` changed, so every code hash changed (section 4.9). Tee every long run to `D:/episteme/_runlogs/<name>.log`.
 
 1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
 
@@ -1880,14 +1880,16 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --
 ```
 
    Then the same forced load with `PGDATABASE=episteme`. A generation left unfinished before 0015 cannot resume; the forced load starts a new one.
-6. **EPAR offline subset, then the link step** (section 5.10). The extract runs through its wrapper (the dispatcher does not forward `--offline-subset`):
+6. **EPAR offline subset, then the link step** (section 5.10). First the gate's sample pass (the sample load needs the sample staging of the sample extract; the slice holds only documents with a PDF on disk). Then the extract through its wrapper (the dispatcher does not forward `--offline-subset`), then the full load. The wrapper needs `EPISTEME_ACTOR` (section 1.2), as the dispatcher does:
 
 ```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar extract --sample
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load --sample
 PGDATABASE=episteme_test bash scripts/data/ema/extract_ema_epar.sh --offline-subset
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 ```
 
-   The load wrapper runs the link step. Check the link report `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json`: expect `label_documents` 23 and `linked_documents` 21 (the spec sample of 2026-11-17; its two misses were vaccines). The extract counts about 20,300 `not_downloaded` documents as failed inputs, so the `max_failed_inputs` rule of the gate can refuse this run. If the gate refuses the load, ask the owner: the documented override is `--skip-gate --reason "<why>"` (audited).
+   The load wrapper runs the link step. Check the link report `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json`: expect `label_documents` 23 and `linked_documents` 21 (the spec sample of 2026-11-17; its two misses were vaccines). The extract writes about 20,300 `not_downloaded` failed markers; they do not stop the gated load (section 5.10).
 7. **Generated EU medicine records** (section 5.10). They need the `ema` feeds loaded in the same database:
 
 ```bash
@@ -1895,7 +1897,7 @@ PGDATABASE=episteme_test bash scripts/data/ema/build_ema_medicine_records.sh
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 ```
 
-   The second load also runs the link step again, with the same result.
+   The second load goes through the gated stage on the step 6 pass (the code and rules are unchanged); if the gate reports no valid pass, run `ema_epar load --sample` again first. It also runs the link step again, with the same result.
 8. **AACT `study_references (pmid)` index, once.** Loads from now on build it. On the current release, as `episteme_sys_admin` with no `aact` load running: `CREATE INDEX ON aact_r<id>.study_references (pmid);` (`<id>` is the `release_id` of the `is_latest` `aact` row of `reg_release`).
 9. **`article_mesh_lower_name_idx`, once.** The literature lookup needs it. Build it as section 4.6 says (no graph load running; it blocks writes to `article_mesh`).
 10. **Full-text indexes** (below), one partition at a time, smallest first.
