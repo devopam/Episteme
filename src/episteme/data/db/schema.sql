@@ -1602,6 +1602,171 @@ AS $$
         'faers')
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Task 6: literature_by_mesh (family 'literature'). SQL form of the former
+-- literature.literature, with topic expansion.
+--
+-- Substance side (as before): a PubMed record matches when one of its MeSH
+-- descriptors has a lower()-name equal to the norm_name of a preferred name of the
+-- substance's moiety family, or to a 'name' xref of a family member.
+-- Topic side: p_topic (trimmed, lower case) names a descriptor by
+-- lower(descriptor_name). The descriptor is expanded to itself and every descriptor
+-- below it in mesh_tree (tree numbers that start with one of its tree numbers plus
+-- '.'). A record then needs one descriptor of that set, or one qualifier named like
+-- the topic (the v1 behaviour, for example 'adverse effects'). A topic that names no
+-- descriptor gives a note row and the qualifier match only. Without mesh_tree the set
+-- is the descriptor alone.
+-- The descriptor_ui of a name is read from one article_mesh row (LIMIT 1): a name
+-- belongs to one descriptor.
+-- Year: the largest articles.year of the PMID (0 = unknown); a year bound drops
+-- records with an unknown year. Order: year descending (unknown last), then
+-- article_id. article_id is 'pubmed:<pmid>'. release_id: the is_latest reg_release row
+-- of dataset 'pubmed', NULL when there is none. relation: the matched descriptor
+-- names, comma separated. score is 1. The article_row has no file column, so the
+-- source_file of the former claim is not returned.
+-- p_limit (NULL = no limit) keeps the Python caller from fetching every record; the
+-- public wrapper caps with cap_articles instead.
+-- No substance: a note row and a missing row for 'article_mesh'; no article_mesh,
+-- articles or article_mesh row: the missing row only.
+CREATE INDEX IF NOT EXISTS article_mesh_lower_name_idx
+    ON episteme.article_mesh (lower(descriptor_name));
+
+CREATE OR REPLACE FUNCTION episteme_api_internal.literature_by_mesh(
+    p_substance_key bigint, p_topic text, p_from_year int DEFAULT NULL,
+    p_to_year int DEFAULT NULL, p_limit int DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    v_keys    bigint[];
+    v_names   text[];
+    v_topic   text := lower(btrim(coalesce(p_topic, '')));
+    v_ui      text;
+    v_uis     text[] := ARRAY[]::text[];
+    v_release text;
+    v_licence text := episteme_api_internal.licence_for('pubmed');
+    v_row     episteme_api_internal.article_row;
+    v_has     boolean;
+BEGIN
+    IF to_regclass('episteme.substance') IS NOT NULL
+       AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
+        SELECT array_agg(f.substance_key ORDER BY f.substance_key) INTO v_keys
+          FROM episteme_api_internal.substance_family(p_substance_key) AS f;
+    END IF;
+    IF v_keys IS NULL THEN
+        v_row.kind := 'note';
+        v_row.note := format('substance %s not found', p_substance_key);
+        RETURN NEXT v_row;
+        v_row := NULL;
+        v_row.kind := 'missing';
+        v_row.source := 'article_mesh';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    IF to_regclass('episteme.article_mesh') IS NOT NULL
+       AND to_regclass('episteme.articles') IS NOT NULL THEN
+        SELECT EXISTS (SELECT 1 FROM episteme.article_mesh) INTO v_has;
+    END IF;
+    IF NOT coalesce(v_has, false) THEN
+        v_row.kind := 'missing';
+        v_row.source := 'article_mesh';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+
+    SELECT array_agg(DISTINCT s.n) INTO v_names
+      FROM (SELECT episteme_api_internal.norm_name(f.preferred_name) AS n
+              FROM episteme_api_internal.substance_family(p_substance_key) AS f
+             WHERE f.preferred_name IS NOT NULL
+            UNION
+            SELECT x.id_value
+              FROM episteme.substance_xref x
+             WHERE x.substance_key = ANY (v_keys) AND x.id_type = 'name') s
+     WHERE s.n IS NOT NULL AND s.n <> '';
+    IF v_names IS NULL OR coalesce(p_limit, 1) <= 0 THEN
+        RETURN;
+    END IF;
+
+    IF v_topic <> '' THEN
+        SELECT m.descriptor_ui INTO v_ui
+          FROM episteme.article_mesh m
+         WHERE lower(m.descriptor_name) = v_topic AND m.descriptor_ui IS NOT NULL
+         LIMIT 1;
+        IF v_ui IS NULL THEN
+            v_row.kind := 'note';
+            v_row.note := format(
+                'topic %s is not a MeSH descriptor name in the indexed records; '
+                'matched on qualifier names only', btrim(p_topic));
+            RETURN NEXT v_row;
+            v_row := NULL;
+        ELSE
+            v_uis := ARRAY[v_ui];
+            IF to_regclass('episteme.mesh_tree') IS NOT NULL THEN
+                SELECT array_agg(DISTINCT d.descriptor_ui) INTO v_uis
+                  FROM episteme.mesh_tree p
+                 CROSS JOIN LATERAL (
+                       SELECT t.descriptor_ui FROM episteme.mesh_tree t
+                        WHERE t.tree_number >= p.tree_number
+                          AND t.tree_number < p.tree_number || '/') d
+                 WHERE p.descriptor_ui = v_ui;
+                v_uis := array_append(coalesce(v_uis, ARRAY[]::text[]), v_ui);
+            END IF;
+        END IF;
+    END IF;
+
+    IF to_regclass('episteme.reg_release') IS NOT NULL THEN
+        SELECT rr.release_id INTO v_release
+          FROM episteme.reg_release rr
+         WHERE rr.dataset = 'pubmed' AND rr.is_latest;
+    END IF;
+
+    RETURN QUERY
+    WITH hits AS (
+        SELECT DISTINCT m.pmid
+          FROM episteme.article_mesh m
+         WHERE lower(m.descriptor_name) = ANY (v_names)
+           AND (v_topic = ''
+                OR EXISTS (
+                    SELECT 1 FROM episteme.article_mesh t
+                     WHERE t.pmid = m.pmid
+                       AND (t.descriptor_ui = ANY (v_uis)
+                            OR EXISTS (SELECT 1 FROM unnest(t.qualifiers) q
+                                        WHERE lower(q) = v_topic))))
+    )
+    SELECT 'article'::text, 'pubmed:' || h.pmid, 'pubmed'::text, NULL::text, y.year,
+           1.0::real, array_to_string(d.descriptors, ', '), v_release, v_licence,
+           NULL::text
+      FROM hits h
+      LEFT JOIN LATERAL (
+           SELECT NULLIF(max(a.year), 0) AS year
+             FROM episteme.articles a WHERE a.pmid = h.pmid) y ON true
+      CROSS JOIN LATERAL (
+           SELECT array_agg(DISTINCT m2.descriptor_name ORDER BY m2.descriptor_name)
+                      AS descriptors
+             FROM episteme.article_mesh m2
+            WHERE m2.pmid = h.pmid AND lower(m2.descriptor_name) = ANY (v_names)) d
+     WHERE (p_from_year IS NULL OR y.year >= p_from_year)
+       AND (p_to_year IS NULL OR y.year <= p_to_year)
+     ORDER BY y.year DESC NULLS LAST, 'pubmed:' || h.pmid
+     LIMIT p_limit;
+END
+$$;
+
+-- Public, capped function (family 'literature').
+CREATE OR REPLACE FUNCTION episteme_api.literature_by_mesh(
+    p_substance_key bigint, p_topic text, p_from_year int DEFAULT NULL,
+    p_to_year int DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_articles(
+        ARRAY(SELECT r FROM episteme_api_internal.literature_by_mesh(
+                  p_substance_key, p_topic, p_from_year, p_to_year) AS r),
+        'literature')
+$$;
+
 -- -----------------------------------------------------------------------------
 -- Ownership + grants
 --   Ownership follows from running this file as episteme_sys_admin. The runtime
