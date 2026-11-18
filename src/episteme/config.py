@@ -165,6 +165,8 @@ DEFAULT_TEXT_NULLOUT_BATCH_ROWS = 50_000
 DEFAULT_TEXT_NULLOUT_BATCH_BLOCKS = 4096
 # Seconds REPACK waits for its table lock before it gives up.
 DEFAULT_REPACK_LOCK_TIMEOUT_S = 60
+# Seconds a full-text index build (fts_index) waits for its table lock before it gives up.
+DEFAULT_FTS_LOCK_TIMEOUT_S = 60
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -543,6 +545,8 @@ class Settings:
     # Blocks per step of nullout --order physical (EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS).
     text_nullout_batch_blocks: int = DEFAULT_TEXT_NULLOUT_BATCH_BLOCKS
     repack_lock_timeout_s: int = DEFAULT_REPACK_LOCK_TIMEOUT_S
+    # Lock wait of CREATE INDEX CONCURRENTLY in fts_index (EPISTEME_FTS_LOCK_TIMEOUT_S).
+    fts_lock_timeout_s: int = DEFAULT_FTS_LOCK_TIMEOUT_S
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -771,6 +775,9 @@ def get_settings() -> Settings:
         ),
         repack_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REPACK_LOCK_TIMEOUT_S", DEFAULT_REPACK_LOCK_TIMEOUT_S
+        ),
+        fts_lock_timeout_s=_get_positive_int_or_default(
+            "EPISTEME_FTS_LOCK_TIMEOUT_S", DEFAULT_FTS_LOCK_TIMEOUT_S
         ),
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS

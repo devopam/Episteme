@@ -1905,4 +1905,172 @@ AS $$
         'code')
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Task 9: full-text search (family 'search').
+--
+-- fts_doc is the document of one article_body row, as an 'english' tsvector:
+--   * dailymed and ema_epar (the labels): title, abstract, body_text, and
+--     text_override when it is set (not NULL and not '');
+--   * every other source: title and abstract.
+-- article_body.text is a VIRTUAL column (migration 0014) and cannot be indexed, so
+-- the function reads the stored columns. No tsvector is stored (spec section 5).
+--
+-- The GIN expression indexes '<partition>_fts_idx' on
+--   episteme_api_internal.fts_doc(source, title, abstract, body_text, text_override)
+-- are NOT created here (openalex 93.5M rows, pubmed 40M): they are an operator step,
+-- one partition at a time, CREATE INDEX CONCURRENTLY
+-- (`python -m episteme.data.db.fts_index build --partition article_body_X --yes`).
+-- Covered partitions: pubmed, pmc, openalex, bookshelf, dailymed, ema_epar. The
+-- preprints (europepmc_preprint) are in article_body_default with the structured
+-- sources and are not covered.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION episteme_api_internal.fts_doc(
+    p_source text, p_title text, p_abstract text, p_body_text text, p_text_override text)
+RETURNS tsvector
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT pg_catalog.to_tsvector('english'::pg_catalog.regconfig,
+        coalesce(p_title, '') || ' ' || coalesce(p_abstract, '')
+        || CASE WHEN p_source IN ('dailymed', 'ema_epar')
+                THEN ' ' || coalesce(p_body_text, '')
+                     || CASE WHEN coalesce(p_text_override, '') <> ''
+                             THEN ' ' || p_text_override ELSE '' END
+                ELSE '' END)
+$$;
+
+-- search_text: articles whose fts_doc matches websearch_to_tsquery('english',
+-- left(p_query, 1000)). Raw to_tsquery input is never used.
+--   * An empty query, one of stop words only, or one that cannot be parsed: one note
+--     row. A query with only negated words ('-word') cannot use the index: one note.
+--   * Sources searched: the covered sources (c_covered), or those of p_sources that
+--     are covered. Requested sources that are not covered are named in one note. A
+--     covered source whose partition has no VALID '<partition>_fts_idx' is not
+--     searched (that would read the whole partition): one note names them, plus a
+--     'missing' row per source.
+--   * Rows: kind 'article', score ts_rank_cd, relation 'search', title and year from
+--     article_body, source_file from articles (id, source), release_id the is_latest
+--     reg_release of the source's dataset, licence licence_for(source). Ordered by
+--     score descending, then article_id (COLLATE "C"); p_limit (NULL = no limit).
+-- The match and the rank use the index expression exactly (fts_index.fts_expression,
+-- a test checks the text), so the planner uses the index of each partition.
+CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
+    p_query text, p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    c_covered constant text[] := ARRAY['pubmed', 'pmc', 'openalex', 'bookshelf', 'dailymed', 'ema_epar'];
+    v_q       tsquery;
+    v_want    text[];
+    v_ready   text[] := ARRAY[]::text[];
+    v_unbuilt text[] := ARRAY[]::text[];
+    v_rels    text[] := ARRAY[]::text[];
+    v_rel     text;
+    v_src     text;
+    v_other   text;
+    v_row     episteme_api_internal.article_row;
+BEGIN
+    BEGIN
+        v_q := pg_catalog.websearch_to_tsquery(
+            'english'::pg_catalog.regconfig, pg_catalog.left(coalesce(p_query, ''), 1000));
+    EXCEPTION WHEN syntax_error OR program_limit_exceeded THEN
+        v_q := NULL;
+    END;
+    IF v_q IS NULL OR pg_catalog.numnode(v_q) = 0 THEN
+        v_row.kind := 'note';
+        v_row.note := 'query has no searchable words (empty, stop words only, or not parsed)';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    IF pg_catalog.querytree(v_q) = 'T' THEN
+        v_row.kind := 'note';
+        v_row.note := 'query needs at least one word that is not negated';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+
+    v_want := ARRAY(SELECT u.s FROM pg_catalog.unnest(c_covered) WITH ORDINALITY AS u(s, n)
+                     WHERE p_sources IS NULL OR u.s = ANY (p_sources)
+                     ORDER BY u.n);
+    IF p_sources IS NOT NULL THEN
+        SELECT pg_catalog.string_agg(d.s, ', ' ORDER BY d.s COLLATE "C") INTO v_other
+          FROM (SELECT DISTINCT x.s FROM pg_catalog.unnest(p_sources) AS x(s)
+                 WHERE x.s IS NOT NULL AND NOT (x.s = ANY (c_covered))) d;
+        IF v_other IS NOT NULL THEN
+            v_row.kind := 'note';
+            v_row.note := 'not covered by full-text search: ' || pg_catalog.left(v_other, 500);
+            RETURN NEXT v_row;
+            v_row := NULL;
+        END IF;
+    END IF;
+
+    FOREACH v_src IN ARRAY v_want LOOP
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_index i
+                    WHERE i.indexrelid = pg_catalog.to_regclass(
+                              'episteme.article_body_' || v_src || '_fts_idx')
+                      AND i.indrelid = pg_catalog.to_regclass('episteme.article_body_' || v_src)
+                      AND i.indisvalid) THEN
+            v_rel := NULL;
+            IF pg_catalog.to_regclass('episteme.reg_release') IS NOT NULL THEN
+                SELECT rr.release_id INTO v_rel
+                  FROM episteme.reg_release rr
+                 WHERE rr.dataset = v_src AND rr.is_latest
+                 LIMIT 1;
+            END IF;
+            v_ready := v_ready || v_src;
+            v_rels := v_rels || v_rel;
+        ELSE
+            v_unbuilt := v_unbuilt || v_src;
+        END IF;
+    END LOOP;
+    IF pg_catalog.cardinality(v_unbuilt) > 0 THEN
+        v_row.kind := 'note';
+        v_row.note := 'full-text index not built, not searched: '
+                      || pg_catalog.array_to_string(v_unbuilt, ', ');
+        RETURN NEXT v_row;
+        v_row := NULL;
+        FOREACH v_src IN ARRAY v_unbuilt LOOP
+            RETURN NEXT episteme_api_internal.missing_article(v_src, v_src);
+        END LOOP;
+    END IF;
+    IF pg_catalog.cardinality(v_ready) = 0 OR coalesce(p_limit, 1) <= 0 THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT 'article'::text, h.article_id, h.source, h.title, h.year, h.score,
+           'search'::text, v_rels[pg_catalog.array_position(v_ready, h.source)],
+           episteme_api_internal.licence_for(h.source), NULL::text, a.source_file
+      FROM (SELECT b.article_id, b.source, b.title, b.year,
+                   pg_catalog.ts_rank_cd(
+                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override),
+                       v_q)::real AS score
+              FROM episteme.article_body b
+             WHERE b.source = ANY (v_ready)
+               AND episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override) @@ v_q
+             ORDER BY score DESC, b.article_id COLLATE "C"
+             LIMIT p_limit) h
+      LEFT JOIN LATERAL (
+           SELECT ar.source_file FROM episteme.articles ar
+            WHERE ar.id = h.article_id AND ar.source = h.source
+            ORDER BY ar.source_file COLLATE "C"
+            LIMIT 1) a ON true
+     ORDER BY h.score DESC, h.article_id COLLATE "C";
+END
+$$;
+
+-- Public, capped function (family 'search').
+CREATE OR REPLACE FUNCTION episteme_api.search_text(p_query text, p_sources text[] DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT * FROM episteme_api_internal.cap_articles(
+        ARRAY(SELECT r FROM episteme_api_internal.search_text(
+                  p_query, p_sources, episteme_api_internal.limit_for('search') + 1) AS r),
+        'search', true)
+$$;
+
 COMMIT;
