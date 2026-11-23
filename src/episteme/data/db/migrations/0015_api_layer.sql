@@ -1394,10 +1394,7 @@ BEGIN
         v_row.kind := 'note';
         v_row.note := format('substance %s not found', p_substance_key);
         RETURN NEXT v_row;
-        v_row := NULL;
-        v_row.kind := 'missing';
-        v_row.source := 'article_mesh';
-        RETURN NEXT v_row;
+        RETURN NEXT episteme_api_internal.missing_article('article_mesh', 'pubmed');
         RETURN;
     END IF;
     IF to_regclass('episteme.article_mesh') IS NOT NULL
@@ -1405,9 +1402,7 @@ BEGIN
         SELECT EXISTS (SELECT 1 FROM episteme.article_mesh) INTO v_has;
     END IF;
     IF NOT coalesce(v_has, false) THEN
-        v_row.kind := 'missing';
-        v_row.source := 'article_mesh';
-        RETURN NEXT v_row;
+        RETURN NEXT episteme_api_internal.missing_article('article_mesh', 'pubmed');
         RETURN;
     END IF;
 
@@ -1567,7 +1562,7 @@ DROP FUNCTION IF EXISTS episteme_api_internal.graph_neighbours(text, text, int, 
 -- The PMID prefix ('pubmed:', 'pmid:') is matched without regard to case.
 -- Indexes used: article_cites (src_pmid) and (dst_pmid), article_mesh (pmid) and
 -- (descriptor_ui), article_chemicals (pmid) (bulk group pubmed_graph), articles (pmid)
--- -- and (id), label_substance (unii), the substance_xref primary key, and AACT
+-- and (id), label_substance (unii), the substance_xref primary key, and AACT
 -- study_references (pmid): load_aact builds it (EXTRA_INDEXES); on a release loaded
 -- before that, the operator creates it once (drift log, 2026-11-17 GraphRAG API layer).
 CREATE OR REPLACE FUNCTION episteme_api_internal.graph_neighbours(

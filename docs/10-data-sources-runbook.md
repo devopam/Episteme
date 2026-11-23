@@ -1900,8 +1900,8 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
    The second load goes through the gated stage on the step 6 pass (the code and rules are unchanged); if the gate reports no valid pass, run `ema_epar load --sample` again first. It also runs the link step again, with the same result.
 8. **AACT `study_references (pmid)` index, once.** Loads from now on build it. On the current release, as `episteme_sys_admin` with no `aact` load running: `CREATE INDEX ON aact_r<id>.study_references (pmid);` (`<id>` is the `release_id` of the `is_latest` `aact` row of `reg_release`).
 9. **`article_mesh_lower_name_idx`, once.** The literature lookup needs it. Build it as section 4.6 says (no graph load running; it blocks writes to `article_mesh`).
-10. **Full-text indexes** (below), one partition at a time, smallest first.
-11. **Reader MCPg instance** (below), set up by the owner. Smoke test: one call of every `episteme_api` function through it.
+10. **Full-text indexes** (below), one partition at a time, smallest first. Build a partition's `_fts_idx` only after its 0014 null-out and REPACK (section 2.3.1); see the rule under "Order" below.
+11. **Reader MCPg instance** (below), set up by the owner. Before it goes live, do two checks and record the results in the drift log. (a) Run `EXPLAIN (ANALYZE, BUFFERS)` of `graph_neighbours(<pmid>, 'shared_mesh')` for 3 to 5 production PMIDs and record the timings. (b) Through the reader MCPg instance, try `SET statement_timeout = 0` and record whether restricted mode refuses it. Then smoke test: one call of every `episteme_api` function through it.
 
 #### 5.19.2 Full-text index builds
 
@@ -1913,7 +1913,7 @@ PGDATABASE=episteme_test bash scripts/data/db/fts_index.sh build --partition art
 PGDATABASE=episteme_test bash scripts/data/db/fts_index.sh build --partition article_body_ema_epar --yes --data-dir E:/pgdata
 ```
 
-- **Order.** `article_body_ema_epar`, `article_body_dailymed`, `article_body_bookshelf`, `article_body_pmc`, `article_body_pubmed`, `article_body_openalex`. `dailymed` is the sample of a label build: a label whose text gives a `tsvector` over 1 MB fails the whole build (`string is too long for tsvector`) and leaves an INVALID index.
+- **Order.** `article_body_ema_epar`, `article_body_dailymed`, `article_body_bookshelf`, `article_body_pmc`, `article_body_pubmed`, `article_body_openalex`. Build a partition's `_fts_idx` only after its 0014 null-out and REPACK (section 2.3.1). Done for dailymed, pmc, pubmed and openalex on 2026-11-17 (drift log). A later null-out or REPACK of an indexed partition rebuilds its GIN index under ACCESS EXCLUSIVE, so do it before the FTS build. `dailymed` is the sample of a label build: a label whose text gives a `tsvector` over 1 MB fails the whole build (`string is too long for tsvector`) and leaves an INVALID index.
 - **Without `--yes`** the tool checks and prints the plan and builds nothing.
 - **Free space.** The tool refuses (exit 1) when the index disk has less than 2 x the partition's `pg_table_size` free. It needs the data directory: give `--data-dir E:/pgdata` when the role cannot read `data_directory`.
 - **Quiet database.** The build is `CREATE INDEX CONCURRENTLY` with no lock timeout (`EPISTEME_FTS_LOCK_TIMEOUT_S`, default 0), so a multi-hour build cannot fail in its last wait. Before it starts, the tool refuses (exit 1) when other statements are active in the database, and lists them. Run no long statement during a big build. `--force` builds anyway (it then waits for those statements).
@@ -1937,6 +1937,7 @@ The existing instances are unchanged. Through the reader, call `episteme_api.<fu
 - **After an AACT load:** nothing (section 5.16).
 - **After any other rebuild of a table the functions read, or a change of `LOOKUP_SOURCE_SUBSETS`, an `EPISTEME_API_LIMIT_<FAMILY>` key or `EPISTEME_API_READER_STATEMENT_TIMEOUT_S`:** `api_settings sync`.
 - **After the pg tests on `episteme_test`:** the tests rebuild the schema and re-grant the owner's reads themselves; run `api_settings sync` before you use `episteme_test` through the reader.
+- **New functions for the pipeline:** the roles file revokes EXECUTE from PUBLIC on every function `episteme_sys_admin` creates (default privileges, all schemas). A future function for the pipeline needs an explicit `GRANT EXECUTE`.
 - **Never** apply the roles file during a load or while a FAERS generation is unfinished.
 
 ---

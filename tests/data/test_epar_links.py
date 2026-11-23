@@ -192,7 +192,7 @@ _MEDICINES = [
 
 
 @pytest.fixture
-def db(_schema, pg_conn, monkeypatch, tmp_path):
+def db(_schema, pg_conn, clean_substance, monkeypatch, tmp_path):
     from psycopg import sql as _sql
 
     monkeypatch.setenv("EPISTEME_ACTOR", "test")

@@ -230,6 +230,9 @@ def test_fixed_with_limit_and_empty_table(db):
     assert literature(db, 1, None, **KW) == LookupResult(
         (), Coverage(matched=0, missing=("article_mesh",))
     )
+    empty = _call(db, 1, None)  # the missing row carries the pubmed licence
+    assert [r[0] for r in empty] == ["missing"]
+    assert all(r[8] is not None for r in empty)
 
 
 @pytest.mark.pg
@@ -296,6 +299,7 @@ def test_gaps_and_release(db):
         ("missing", None, "article_mesh"),
     ]
     assert gone[0][9] == "substance 999 not found"
+    assert all(r[8] is not None for r in gone if r[0] == "missing")
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO episteme.reg_release (dataset, release_id, rows, status, is_latest) "
