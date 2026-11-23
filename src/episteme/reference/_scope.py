@@ -5,6 +5,8 @@ Family scope: the input's moiety ``M = COALESCE(moiety_key, substance_key)``, an
 substance whose own ``COALESCE(moiety_key, substance_key)`` is ``M`` (the moiety, its
 salts and esters). Every PBRER lookup uses this one scope, so all sections of a draft
 cover the same substances; the FAERS signal tables count the same family as one moiety.
+The family members come from the SQL function ``episteme_api_internal.substance_family``
+(migration 0015).
 """
 
 from __future__ import annotations
@@ -15,19 +17,12 @@ import psycopg
 from psycopg import sql
 
 from episteme.data.regulatory.normalize import norm_name
+from episteme.reference import _api
 
 SCHEMA = "episteme"
 # xref id types that hold a normalised name. ema_name / aact_name rows repeat values of
 # name rows (resolve_names adds them only on an exact match), so name is enough.
 NAME_ID_TYPES = ("name",)
-
-# COALESCE(moiety_key, substance_key) = M, written so that substance_moiety_key_idx and
-# the primary key can serve it.
-_FAMILY_SQL = """
-SELECT substance_key, unii, preferred_name FROM episteme.substance
-WHERE moiety_key = %(m)s OR (moiety_key IS NULL AND substance_key = %(m)s)
-ORDER BY substance_key
-"""
 
 
 @dataclass(frozen=True)
@@ -84,19 +79,15 @@ def substance_scope(conn: psycopg.Connection, substance_key: int) -> SubstanceSc
         and relation_exists(conn, f"{SCHEMA}.substance_xref")
     ):
         return None
+    rows = _api.call(conn, "substance_family", int(substance_key))
+    if not rows:
+        return None
+    moiety = int(rows[0][1])
+    # Columns: substance_key, moiety_key, unii, preferred_name, source, release_id,
+    # licence. The scope keeps the first four; the provenance is for SQL callers.
+    family = [(row[0], row[2], row[3]) for row in rows]
+    keys = tuple(dict.fromkeys([int(substance_key)] + [int(k) for k, _, _ in family]))
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COALESCE(moiety_key, substance_key) FROM episteme.substance "
-            "WHERE substance_key = %s",
-            (substance_key,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        moiety = int(row[0])
-        cur.execute(_FAMILY_SQL, {"m": moiety})
-        family = cur.fetchall()
-        keys = tuple(dict.fromkeys([int(substance_key)] + [int(k) for k, _, _ in family]))
         cur.execute(
             "SELECT DISTINCT id_value FROM episteme.substance_xref "
             "WHERE substance_key = ANY(%s) AND id_type = ANY(%s) ORDER BY id_value",

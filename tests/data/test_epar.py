@@ -747,6 +747,80 @@ def test_a_listed_document_never_downloaded_is_counted_not_held(raw, out):
     assert res["held_buckets"] == []
 
 
+def _run_manifest(out: Path) -> dict:
+    (path,) = (out / "_ops" / "ema_epar" / "runs").glob("run_*.json")
+    return json.loads(path.read_text("utf-8"))
+
+
+def test_offline_subset_marker(raw, out):
+    """Five listed documents, two PDFs on disk. Today's code already runs on such a feed
+    without a guard refusal (the guards read the feed, never the files), so the flag only
+    records the subset size in the run marker and the summary."""
+    _feed(raw, [doc(i) for i in range(1, 6)])
+    _pdf(raw, 1)
+    _pdf(raw, 4)
+    res = ex.extract_epar(raw, out, offline_subset=True)
+    assert res["rows"] == 2 and res["not_downloaded"] == 3
+    assert res["failed_by_reason"] == {"not_downloaded": 3} and res["held_buckets"] == []
+    assert res["offline_subset"] == {"present": 2, "listed": 5}
+    manifest = _run_manifest(out)
+    assert manifest["totals"]["offline_subset"] == {"present": 2, "listed": 5}
+    assert manifest["config"]["offline_subset"] is True
+    # The absent documents count as not_downloaded, each with a failed marker on its key.
+    assert failed_marker_path(out, "ema_epar", "epar__2.pdf").is_file()
+
+
+def test_offline_subset_absent_without_the_flag(raw, out):
+    """Without the flag the same run completes too, and its summary has no subset key."""
+    _feed(raw, [doc(i) for i in range(1, 6)])
+    _pdf(raw, 1)
+    _pdf(raw, 4)
+    res = ex.extract_epar(raw, out)
+    assert res["rows"] == 2 and res["not_downloaded"] == 3
+    assert "offline_subset" not in res
+    manifest = _run_manifest(out)
+    assert "offline_subset" not in manifest["totals"]
+    assert manifest["config"]["offline_subset"] is False
+
+
+def test_offline_subset_guards_unchanged_for_full(raw, out):
+    """The flag changes no guard: a short feed and a large withdrawn share still refuse."""
+    _feed(raw, [doc(1)], total=5)
+    _pdf(raw, 1)
+    with pytest.raises(ex.EparGuardError, match="1 rows but meta.total_records = 5"):
+        ex.extract_epar(raw, out, offline_subset=True)
+    assert not (out / "staging").exists()
+    _setup(raw, range(1, 11))
+    assert ex.extract_epar(raw, out, offline_subset=True)["rows"] == 10
+    _feed(raw, [doc(i) for i in range(1, 8)])
+    with pytest.raises(ex.EparGuardError, match="3 of 10 known documents"):
+        ex.extract_epar(raw, out, offline_subset=True)
+
+
+def test_offline_subset_cli_flag(raw, out, monkeypatch):
+    seen: dict = {}
+
+    def fake(raw_dir, processed_dir, **kw):
+        seen.update(kw)
+        return {
+            "inputs": 1,
+            "ok": 1,
+            "failed": 0,
+            "rows": 1,
+            "failed_docs_count": 0,
+            "failed_by_reason": {},
+        }
+
+    monkeypatch.setattr(ex, "extract_epar", fake)
+    monkeypatch.setattr(ex, "_write_failed_inputs", lambda *a, **k: None)
+    _feed(raw, [doc(1)])
+    assert ex._main(["--raw-dir", str(raw), "--processed-dir", str(out), "--offline-subset"]) == 0
+    assert seen["offline_subset"] is True
+    seen.clear()
+    ex._main(["--raw-dir", str(raw), "--processed-dir", str(out)])
+    assert seen["offline_subset"] is False
+
+
 def test_too_many_withdrawn_documents_refuse_and_the_override_works(raw, out, monkeypatch):
     _setup(raw, range(1, 11))
     # No earlier state: no limit.

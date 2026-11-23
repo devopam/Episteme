@@ -1,56 +1,30 @@
 """Literature for a substance, from MeSH indexing. Read-only; no vectors, no text scan.
 
+The query runs in SQL: ``episteme_api_internal.literature_by_mesh`` (migration 0015).
 A PubMed record matches when one of its MeSH descriptors (``article_mesh``) has a name
-equal to a preferred name or synonym of a member of the substance's moiety family (the
-names of ``_scope.substance_scope``). The descriptor name is compared with SQL
-``lower()``; the substance names are ``casefold`` forms. The two differ only outside
-ASCII (for example ``ß``), where a match can be missed.
+equal to a preferred name or synonym of a member of the substance's moiety family. The
+descriptor name is compared with SQL ``lower()``.
 
-``topic``, when given, must also be on the record: a descriptor name or a qualifier name
-(case-insensitive) of the same PMID, for example ``adverse effects``.
+``topic``, when given, names a MeSH descriptor (case-insensitive). The topic is
+expanded to that descriptor and every descriptor below it in the MeSH tree
+(``mesh_tree``); the record must carry one of them, or a qualifier with the topic's
+name (for example ``adverse effects``). A topic that is no descriptor name gives a
+note and the qualifier match only.
 
-Newest first: by the publication year in ``articles`` (any source that carries the PMID),
-then by PMID. ``article_mesh.descriptor_name`` has no index, so a call reads the whole
-table; ``articles`` is read by its ``pmid`` index only.
+Newest first: by the publication year in ``articles`` (any source that carries the
+PMID), then by id. Each claim cites ``pmid:<pmid>``; its release is the latest
+``pubmed`` release when ``reg_release`` has one; its ``source_file`` is the smallest
+file of the matched descriptor rows.
 """
 
 from __future__ import annotations
 
 import psycopg
 
-from episteme.reference._scope import source_ready, substance_scope
-from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+from episteme.reference import _api
+from episteme.reference.claims import Coverage, LookupResult
 
 DATASETS = ("article_mesh",)
-
-_TOPIC = """
-  AND EXISTS (
-    SELECT 1 FROM episteme.article_mesh t
-    WHERE t.pmid = m.pmid
-      AND (lower(t.descriptor_name) = %(topic)s
-           OR EXISTS (SELECT 1 FROM unnest(t.qualifiers) q WHERE lower(q) = %(topic)s)))
-"""
-
-_SQL = """
-WITH hits AS (
-  SELECT DISTINCT m.pmid FROM episteme.article_mesh m
-  WHERE lower(m.descriptor_name) = ANY(%(names)s)
-  {topic}
-)
-SELECT h.pmid, y.year, d.descriptors, d.source_file
-FROM hits h
-LEFT JOIN LATERAL (
-  SELECT NULLIF(max(a.year), 0) AS year FROM episteme.articles a WHERE a.pmid = h.pmid
-) y ON true
-CROSS JOIN LATERAL (
-  SELECT array_agg(DISTINCT m.descriptor_name ORDER BY m.descriptor_name) AS descriptors,
-         min(m.source_file) AS source_file
-  FROM episteme.article_mesh m
-  WHERE m.pmid = h.pmid AND lower(m.descriptor_name) = ANY(%(names)s)
-) d
-ORDER BY y.year DESC NULLS LAST, length(h.pmid) DESC, h.pmid DESC
-LIMIT %(limit)s
-"""
 
 
 def literature(
@@ -65,38 +39,21 @@ def literature(
     """Up to ``limit`` PubMed records indexed with the substance as a MeSH descriptor,
     newest first. Each claim cites ``pmid:<pmid>``. ``tenant`` and ``caller`` are
     accepted for a stable signature; v1 does not use them."""
-    scope = substance_scope(conn, substance_key)
-    if scope is None:
-        note = f"substance {substance_key} not found"
-        return LookupResult((), Coverage(matched=0, missing=DATASETS, notes=(note,)))
-    if not source_ready(conn, ("article_mesh", "articles"), "article_mesh"):
-        return LookupResult((), Coverage(matched=0, missing=DATASETS))
-    if not scope.names or limit <= 0:
-        return LookupResult((), Coverage(matched=0))
-    topic_key = (topic or "").strip().lower()
-    params = {"names": list(scope.names), "topic": topic_key, "limit": limit}
-    with conn.cursor() as cur:
-        cur.execute(_SQL.format(topic=_TOPIC if topic_key else ""), params)
-        rows = cur.fetchall()
-    claims = tuple(
-        Claim(
-            text=(
-                f"PMID {pmid} ({year or 'year unknown'}): MeSH {', '.join(descriptors or [])}"
-                + (f"; topic {topic.strip()}" if topic_key else "")
-            ),
-            value=pmid,
-            method="fetched",
-            provenance=Provenance(
-                source="pubmed",
-                release=None,
-                source_file=source_file,
-                record_key=f"pmid:{pmid}",
-                jurisdiction=None,
-            ),
-            confidence=1.0,
-            confidence_basis="exact MeSH descriptor name match",
+    topic_text = (topic or "").strip()
+    limit = max(limit, 0)
+    rows = _api.call(conn, "literature_by_mesh", int(substance_key), topic_text, None, None, limit)
+
+    def describe(row: dict) -> str:
+        return (
+            f"PMID {row['article_id'].partition(':')[2]} ({row['year'] or 'year unknown'}): "
+            f"MeSH {row['relation'] or ''}" + (f"; topic {topic_text}" if topic_text else "")
         )
-        for pmid, year, descriptors, source_file in rows
+
+    result = _api.article_rows_to_result(
+        rows, describe=describe, confidence_basis="exact MeSH descriptor name match"
     )
-    notes = (f"limited to the {limit} newest records",) if len(claims) == limit else ()
-    return LookupResult(claims, Coverage(matched=len(claims), notes=notes))
+    if limit and len(result.claims) == limit:
+        notes = (*result.coverage.notes, f"limited to the {limit} newest records")
+        coverage = Coverage(result.coverage.matched, result.coverage.missing, notes)
+        return LookupResult(result.claims, coverage)
+    return result

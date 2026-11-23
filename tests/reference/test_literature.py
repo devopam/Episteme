@@ -42,6 +42,7 @@ def test_literature_cites_pmids(mesh):
     assert c.method == "fetched"
     assert c.provenance.source == "pubmed"
     assert c.provenance.source_file == "pubmed/b.xml"
+    assert c.provenance.record_key == "pmid:200"
     assert "2023" in c.text and "Metformin" in c.text
     assert res.coverage.matched == 3
     assert res.coverage.missing == ()

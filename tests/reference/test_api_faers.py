@@ -1,0 +1,330 @@
+"""faers_counts as a SQL function (migration 0015), with the results the former Python
+query path gave on these fixtures as fixed expectations (pg: episteme_test only), and a
+source check of the FAERS SQL (non-pg)."""
+
+from __future__ import annotations
+
+import os
+import re
+from datetime import date
+
+import psycopg
+import pytest
+
+from episteme.config import api_result_limits
+from episteme.reference import api_settings, lookups
+from episteme.reference.claims import Claim, Coverage, LookupResult, Provenance
+
+from ._pbrer_db import KW, MIGRATIONS, REPO_ROOT
+
+_MIGRATION = MIGRATIONS / "0015_api_layer.sql"
+_SIGNALS = REPO_ROOT / "src/episteme/data/regulatory/faers/signals.py"
+_FROM, _TO = date(2025, 2, 15), date(2025, 6, 30)  # overlaps 2025Q1 and 2025Q2
+
+
+# ---------------------------------------------------------------------------
+# non-pg
+# ---------------------------------------------------------------------------
+def _faers_function_sql() -> str:
+    text = _MIGRATION.read_text(encoding="utf-8")
+    start = text.find("CREATE OR REPLACE FUNCTION episteme_api_internal.faers_counts(")
+    assert start >= 0, "migration 0015 has no episteme_api_internal.faers_counts"
+    body_start = text.index("$$", start)
+    body_end = text.index("$$;", body_start + 2)
+    return text[start : body_end + 3]
+
+
+def test_no_meddra_hierarchy_used():
+    """No MedDRA hierarchy level (SOC, HLGT, HLT, LLT) is read: the terms are quoted as
+    FAERS stores them (owner decision)."""
+    level = re.compile(r"\b(?:soc|hlgt|hlt|llt)(?:_\w+)?\b", re.IGNORECASE)
+    for name, text in (
+        ("faers_counts", _faers_function_sql()),
+        ("signals.py", _SIGNALS.read_text(encoding="utf-8")),
+    ):
+        assert not level.findall(text), f"{name} names a MedDRA hierarchy level"
+    assert "episteme.faers_term" in _faers_function_sql()
+
+
+def test_faers_texts_match_the_sql():
+    """The label and notes that lookups exports are the ones the SQL function returns."""
+    body = _faers_function_sql()
+    for text in (
+        lookups.FAERS_LABEL,
+        lookups.FAERS_QUARTER_RULE,
+        lookups.FAERS_OUTCOME_NOTE,
+        lookups.FAERS_TERM_NOTE,
+        lookups.FAERS_SPLIT_GAP,
+    ):
+        assert f"'{text}'" in body, text
+    # The outcome claims state FDA's seriousness (faers_report.serious) and the outcome
+    # apart; no text calls a report "not serious" from its outcome.
+    for phrase in (
+        "classed serious by the reporter",
+        "classed non-serious by the reporter",
+        "seriousness not stated",
+        "outcome none stated",
+    ):
+        assert f"'{phrase}'" in body, phrase
+    assert "not serious" not in body
+    assert "o.serious " not in body
+
+
+# ---------------------------------------------------------------------------
+# pg
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def api_schema(ref_schema):
+    """Apply migration 0015 on top of the module schema (it is idempotent)."""
+    conn = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=False)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_MIGRATION.read_text(encoding="utf-8"))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def db(api_schema, ref_db, clean_substance):
+    """The ref_db substances (1 metformin, 2 its salt, 3 aspirin) and the API settings
+    from config."""
+    api_settings.sync(ref_db)
+    yield ref_db
+    ref_db.rollback()
+
+
+def _rows(conn, query, params=()):
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchall()
+
+
+def _quarters(conn) -> None:
+    """The quarter fixture of test_lookups: moiety 1 in 2024Q4..2025Q2, aspirin in 2025Q1;
+    totals for 2025Q1 and 2025Q2 only."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.faers_moiety_quarter "
+            "(substance_key, quarter, reports_suspect, reports_any) VALUES "
+            "(1, '2024-10-01', 3, 4), (1, '2025-01-01', 5, 8), (1, '2025-04-01', 6, 9), "
+            "(3, '2025-01-01', 50, 60)"
+        )
+        cur.execute(
+            "INSERT INTO episteme.faers_quarter_totals (quarter, reports) VALUES "
+            "('2025-01-01', 1000), ('2025-04-01', 1100)"
+        )
+    conn.commit()
+
+
+def _splits_and_terms(conn) -> dict[str, int]:
+    """Outcome rows and event rows of moiety 1. Returns the term ids by term."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.faers_moiety_quarter_outcome "
+            "(substance_key, quarter, seriousness, outcome, reports) VALUES "
+            "(1, '2025-01-01', 'non_serious', 'none', 2), (1, '2025-01-01', 'serious', 'HO', 3), "
+            "(1, '2025-01-01', 'serious', 'DE', 1), (1, '2025-04-01', 'serious', 'OT', 6), "
+            "(1, '2025-01-01', 'serious', 'none', 1), (1, '2025-01-01', 'unknown', 'none', 1), "
+            "(1, '2024-10-01', 'serious', 'HO', 3), (3, '2025-01-01', 'serious', 'DE', 50)"
+        )
+        terms = {}
+        for term in ("Nausea", "NAUSEA", "Lactic acidosis"):
+            cur.execute(
+                "INSERT INTO episteme.faers_term (term, term_norm) VALUES (%s, lower(%s)) "
+                "RETURNING term_id",
+                (term, term),
+            )
+            terms[term] = cur.fetchone()[0]
+        # The event table holds the lowest id of a case-folded term (signals.py).
+        cur.execute(
+            "INSERT INTO episteme.faers_event_quarter "
+            "(substance_key, term_id, quarter, reports_suspect, reports_any) VALUES "
+            "(1, %(n)s, '2025-01-01', 2, 3), (1, %(n)s, '2025-04-01', 1, 1), "
+            "(1, %(la)s, '2025-04-01', 4, 4), (1, %(la)s, '2024-10-01', 9, 9), "
+            "(3, %(n)s, '2025-01-01', 7, 7)",
+            {"n": terms["Nausea"], "la": terms["Lactic acidosis"]},
+        )
+    conn.commit()
+    return terms
+
+
+def _quarter_part(res):
+    """The claims of the former per-quarter path."""
+    return tuple(
+        c for c in res.claims if c.provenance.record_key.startswith("faers_moiety_quarter:")
+    )
+
+
+# Fixed expectations: the per-quarter claims and notes the former Python path (pre-0015)
+# gave on this fixture; the SQL path gave the same (parity run on episteme_test before
+# the legacy copy was deleted).
+_RULE = "quarters that overlap the interval are counted whole"
+
+
+def _quarter_claim(moiety: int, quarter: str, label: str, suspect, any_role, total) -> Claim:
+    return Claim(
+        text=(
+            f"{label}: {suspect} reports name the substance as suspect, {any_role} in any "
+            f"role, of {total} reports received (US public spontaneous reports (FAERS))"
+        ),
+        value=str(suspect),
+        method="computed",
+        provenance=Provenance(
+            "openfda_faers", None, None, f"faers_moiety_quarter:{moiety}:{quarter}", "US"
+        ),
+        confidence=1.0,
+        confidence_basis="exact count of stored FAERS reports per moiety and quarter",
+    )
+
+
+_Q_METFORMIN = (
+    _quarter_claim(1, "2025-01-01", "2025Q1", 5, 8, 1000),
+    _quarter_claim(1, "2025-04-01", "2025Q2", 6, 9, 1100),
+)
+_Q_ASPIRIN = (_quarter_claim(3, "2025-01-01", "2025Q1", 50, 60, 1000),)
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize(
+    ("key", "quarter_claims"), [(1, _Q_METFORMIN), (2, _Q_METFORMIN), (3, _Q_ASPIRIN), (999, ())]
+)
+def test_faers_fixed_existing_claims(db, key, quarter_claims):
+    unknown = LookupResult((), Coverage(0, ("faers",), ("substance 999 not found",)))
+    # Empty FAERS tables: a missing source; an unknown substance: a note.
+    new = lookups.faers_counts(db, key, _FROM, _TO, **KW)
+    if key == 999:
+        assert new == unknown
+    else:
+        assert new == LookupResult((), Coverage(matched=0, missing=("faers",), notes=(_RULE,)))
+    _quarters(db)
+    _splits_and_terms(db)
+    new = lookups.faers_counts(db, key, _FROM, _TO, **KW)
+    if key == 999:
+        assert new == unknown
+        return
+    # The per-quarter claims are the former ones, first and in the same order; the
+    # former notes come first, the new notes after them.
+    assert new.claims[: len(quarter_claims)] == _quarter_part(new) == quarter_claims
+    assert new.coverage.notes[:1] == (_RULE,)
+    assert new.coverage.missing == ()
+    # A quarter with no totals row: the former notes, then the new ones.
+    gaps = lookups.faers_counts(db, key, date(2025, 2, 1), date(2025, 9, 30), **KW)
+    assert gaps.coverage.notes[:2] == (_RULE, "no FAERS data for quarters: 2025Q3")
+
+
+@pytest.mark.pg
+def test_faers_split_claims_present(db):
+    _quarters(db)
+    terms = _splits_and_terms(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.reg_release (dataset, release_id, rows, status, is_latest) "
+            "VALUES ('openfda_faers', 'faers-old', 1, 'loaded', false), "
+            "('openfda_faers', 'faers-2025q4', 1, 'loaded', true)"
+        )
+    db.commit()
+    res = lookups.faers_counts(db, 2, _FROM, _TO, **KW)  # the salt: its moiety, key 1
+    keys = [c.provenance.record_key for c in res.claims]
+    # Quarter claims, then the outcome split in code order, then the terms by count.
+    assert keys == [
+        "faers_moiety_quarter:1:2025-01-01",
+        "faers_moiety_quarter:1:2025-04-01",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:DE",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:HO",
+        "faers_moiety_quarter_outcome:1:2025-01-01:serious:none",
+        "faers_moiety_quarter_outcome:1:2025-01-01:non_serious:none",
+        "faers_moiety_quarter_outcome:1:2025-01-01:unknown:none",
+        "faers_moiety_quarter_outcome:1:2025-04-01:serious:OT",
+        f"faers_event_quarter:1:{terms['Lactic acidosis']}:2025-01-01:2025-04-01",
+        f"faers_event_quarter:1:{terms['Nausea']}:2025-01-01:2025-04-01",
+    ]
+    by_key = {c.provenance.record_key: c for c in res.claims}
+    ho = by_key["faers_moiety_quarter_outcome:1:2025-01-01:serious:HO"]
+    assert ho.value == "3" and ho.method == "computed"
+    assert ho.text == (
+        "2025Q1: 3 reports name the substance as suspect, classed serious by the reporter, "
+        f"outcome HO (hospitalisation) ({lookups.FAERS_LABEL})"
+    )
+    # FDA's seriousness and the outcome are stated apart: a serious report with no
+    # outcome flag is never called non-serious.
+    texts = {
+        s: by_key[f"faers_moiety_quarter_outcome:1:2025-01-01:{s}:none"].text
+        for s in ("serious", "non_serious", "unknown")
+    }
+    assert texts["serious"].startswith(
+        "2025Q1: 1 reports name the substance as suspect, classed serious by the reporter, "
+        "outcome none stated"
+    )
+    assert "classed non-serious by the reporter, outcome none stated" in texts["non_serious"]
+    assert "seriousness not stated, outcome none stated" in texts["unknown"]
+    assert all("not serious" not in t for t in texts.values())
+    # Terms: summed over the quarters of the interval, quoted as stored.
+    nausea = by_key[f"faers_event_quarter:1:{terms['Nausea']}:2025-01-01:2025-04-01"]
+    assert nausea.value == "3"
+    assert nausea.text.startswith("Nausea: 3 reports ")
+    assert "4 in any role, 2025Q1 to 2025Q2" in nausea.text
+    lactic = by_key[f"faers_event_quarter:1:{terms['Lactic acidosis']}:2025-01-01:2025-04-01"]
+    assert lactic.value == "4"  # 2024Q4 is outside the interval
+    for c in res.claims:
+        assert c.provenance.source == "openfda_faers"
+        assert c.provenance.release == "faers-2025q4"
+        assert c.provenance.jurisdiction == "US"
+        assert c.confidence == 1.0
+    assert res.coverage.matched == 10
+    assert lookups.FAERS_OUTCOME_NOTE in res.coverage.notes
+    assert "per report" in lookups.FAERS_OUTCOME_NOTE
+    assert lookups.FAERS_TERM_NOTE in res.coverage.notes
+    # Every row carries the licence of the FAERS subset.
+    raw = _rows(
+        db,
+        "SELECT kind, licence FROM episteme_api_internal.faers_counts(%s, %s, %s)",
+        (2, _FROM, _TO),
+    )
+    assert {lic for kind, lic in raw if kind == "claim"} == {"pending"}
+
+
+@pytest.mark.pg
+def test_faers_split_not_built_is_noted(db):
+    _quarters(db)
+    res = lookups.faers_counts(db, 1, _FROM, _TO, **KW)
+    assert [c.value for c in res.claims] == ["5", "6"]
+    assert lookups.FAERS_SPLIT_GAP in res.coverage.notes
+    assert res.coverage.missing == ()
+
+
+@pytest.mark.pg
+def test_faers_missing_row_has_the_faers_licence(db):
+    rows = _rows(
+        db,
+        "SELECT kind, source, licence FROM episteme_api_internal.faers_counts(%s, %s, %s)",
+        (1, _FROM, _TO),
+    )
+    assert ("missing", "faers", "pending") in rows
+
+
+@pytest.mark.pg
+def test_public_faers_counts_caps(db):
+    limit = api_result_limits()["faers"][0]
+    _quarters(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.faers_term (term, term_norm) "
+            "SELECT 'Term ' || i, 'term ' || i FROM generate_series(1, %s) AS i",
+            (limit + 10,),
+        )
+        cur.execute(
+            "INSERT INTO episteme.faers_event_quarter "
+            "(substance_key, term_id, quarter, reports_suspect, reports_any) "
+            "SELECT 1, term_id, '2025-01-01', 1, 1 FROM episteme.faers_term"
+        )
+    db.commit()
+    internal = _rows(
+        db, "SELECT * FROM episteme_api_internal.faers_counts(1, %s, %s)", (_FROM, _TO)
+    )
+    public = _rows(db, "SELECT * FROM episteme_api.faers_counts(1, %s, %s)", (_FROM, _TO))
+    internal_claims = [r for r in internal if r[0] == "claim"]
+    total = len(internal_claims)
+    assert total == limit + 12  # two quarter claims and the terms
+    assert [r for r in public if r[0] == "claim"] == internal_claims[:limit]
+    assert public[-1][3] == f"truncated: {limit} of {total}"

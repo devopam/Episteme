@@ -1,6 +1,7 @@
 """scripts/mcpg-episteme.sh: the everyday server connects as episteme_sys_admin
 with ALTER SYSTEM off; `--admin` connects as the superuser with ALTER SYSTEM on
-and an allowlist. Passwords are percent-encoded in the URL and never printed.
+and an allowlist; `--reader` connects as episteme_api_reader, restricted, DDL off.
+Passwords are percent-encoded in the URL and never printed.
 
 The script is copied into a temp repo (no .env there) and a fake `mcpg` on PATH
 prints the variables it would have received.
@@ -18,7 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 FAKE_MCPG = r"""#!/usr/bin/env bash
 for v in MCPG_DATABASE_URL MCPG_SECONDARY_DATABASE_URLS MCPG_ALLOW_ALTER_SYSTEM \
-         MCPG_ALTER_SYSTEM_ALLOWLIST MCPG_ACCESS_MODE MCPG_TRANSPORT; do
+         MCPG_ALTER_SYSTEM_ALLOWLIST MCPG_ACCESS_MODE MCPG_ALLOW_DDL MCPG_TRANSPORT; do
     echo "$v=${!v-<unset>}"
 done
 """
@@ -153,6 +154,8 @@ def test_admin_without_superuser_password_fails_without_printing_secrets(tmp_pat
         ["--admin"],
         ["episteme", "--admin", "extra"],
         ["episteme", "", "--admin"],
+        ["episteme", "--reader", "extra"],
+        ["--reader"],
     ],
 )
 def test_bad_arguments_never_start_mcpg(tmp_path, args):
@@ -163,5 +166,76 @@ def test_bad_arguments_never_start_mcpg(tmp_path, args):
         {"EPISTEME_SYS_ADMIN_PASSWORD": "pw", "POSTGRES_SUPERUSER_PASSWORD": "pw"},
     )
     assert r.returncode == 2
+    assert "usage: mcpg-episteme.sh" in r.stderr
+    assert "MCPG_DATABASE_URL" not in r.stdout
+
+
+def test_launcher_reader_profile_env(tmp_path):
+    """--reader: the SQL lookup API role, restricted, DDL and ALTER SYSTEM off, no
+    secondary database. Values that .env or the shell set cannot loosen them."""
+    r = _run(
+        tmp_path,
+        ["episteme", "--reader"],
+        {
+            "EPISTEME_API_READER_PASSWORD": SECRET,
+            "EPISTEME_SYS_ADMIN_PASSWORD": "sys-admin-pw",
+            "MCPG_ACCESS_MODE": "unrestricted",
+            "MCPG_ALLOW_DDL": "true",
+            "MCPG_ALLOW_ALTER_SYSTEM": "true",
+            **INHERITED,
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    v = _vars(r.stdout)
+    assert (
+        v["MCPG_DATABASE_URL"]
+        == f"postgresql://episteme_api_reader:{ENCODED}@localhost:5433/episteme"
+    )
+    assert v["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
+    assert v["MCPG_ACCESS_MODE"] == "restricted"
+    assert v["MCPG_ALLOW_DDL"] == "false"
+    assert v["MCPG_ALLOW_ALTER_SYSTEM"] == "false"
+    assert v["MCPG_TRANSPORT"] == "stdio"
+    assert "sys-admin-pw" not in r.stdout + r.stderr
+
+
+def test_launcher_reader_on_episteme_test(tmp_path):
+    r = _run(tmp_path, ["episteme_test", "--reader"], {"EPISTEME_API_READER_PASSWORD": "pw"})
+    assert r.returncode == 0, r.stderr
+    v = _vars(r.stdout)
+    assert (
+        v["MCPG_DATABASE_URL"] == "postgresql://episteme_api_reader:pw@localhost:5433/episteme_test"
+    )
+    assert v["MCPG_SECONDARY_DATABASE_URLS"] == "<unset>"
+
+
+def test_launcher_reader_without_password_fails_without_printing_secrets(tmp_path):
+    r = _run(tmp_path, ["episteme", "--reader"], {"EPISTEME_SYS_ADMIN_PASSWORD": SECRET})
+    assert r.returncode != 0
+    assert "EPISTEME_API_READER_PASSWORD not set" in r.stderr
+    assert "MCPG_DATABASE_URL" not in r.stdout
+    assert SECRET not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["episteme", "--admin", "--reader"],
+        ["episteme", "--reader", "--admin"],
+        ["--admin", "--reader"],
+    ],
+)
+def test_launcher_rejects_admin_and_reader(tmp_path, args):
+    r = _run(
+        tmp_path,
+        args,
+        {
+            "EPISTEME_SYS_ADMIN_PASSWORD": "pw",
+            "POSTGRES_SUPERUSER_PASSWORD": "pw",
+            "EPISTEME_API_READER_PASSWORD": "pw",
+        },
+    )
+    assert r.returncode == 2
+    assert "--admin and --reader cannot be used together" in r.stderr
     assert "usage: mcpg-episteme.sh" in r.stderr
     assert "MCPG_DATABASE_URL" not in r.stdout

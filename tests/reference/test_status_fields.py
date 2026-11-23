@@ -1,29 +1,11 @@
-"""EMA status keys as found in the loaded 2026-11 releases (checked 2026-11-10)."""
+"""Argument conversion of the harness. The payload status fields of the regulatory
+claims (EMA keys as found in the loaded 2026-11 releases, checked 2026-11-10) are now
+in the SQL function ``episteme_api_internal.reg_fields`` (migration 0015); their tests
+are in ``test_api_regulatory.py`` (pg)."""
 
 from datetime import date
 
 from episteme.harness.loop import _convert
-from episteme.reference.lookups import _NO_STATUS_FIELD, _reg_claim
-
-
-def _row(payload):
-    return ("K1", "EU", date(2026, 1, 2), payload, "f.json")
-
-
-def test_outside_eu_reads_ema_opinion_status():
-    claim = _reg_claim("ema_outside_eu", "2026-11", _row({"ema_opinion_status": "Positive"}))
-    assert claim.value == "Positive"
-
-
-def test_dhpc_status_is_the_dhpc_type():
-    payload = {"dhpc_type": "Safety signal", "regulatory_outcome": "Variation"}
-    assert _reg_claim("ema_dhpc", "2026-11", _row(payload)).value == "Safety signal"
-
-
-def test_article57_has_no_status_field_by_design():
-    assert "ema_article57" in _NO_STATUS_FIELD
-    claim = _reg_claim("ema_article57", "2026-11", _row({"product_name": "X"}))
-    assert claim.value is None
 
 
 def test_convert_accepts_iso_strings_and_dates():

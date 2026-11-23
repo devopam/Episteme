@@ -9,13 +9,27 @@ from pathlib import Path
 from psycopg import sql
 
 from episteme.data.regulatory.load_reg import partition_names
+from episteme.reference import api_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_DIR = REPO_ROOT / "src/episteme/data/db"
 MIGRATIONS = DB_DIR / "migrations"
-# The AACT schema the tests use instead of the real ``aact`` views.
-TEST_AACT_SCHEMA = "aact_lookup_test"
+# The AACT release the tests load, and its release schema (load_aact.schema_name). The
+# trials function reads ``aact_r<release_id>`` of the latest ``aact`` release. The id is
+# one no real release has: ``clear`` drops this schema.
+TEST_AACT_RELEASE = "19700101"
+TEST_AACT_SCHEMA = f"aact_r{TEST_AACT_RELEASE}"
 KW = {"tenant": "t", "caller": "test"}
+# Migrations applied after schema.sql, in order: the tables and columns the lookups read
+# (0015 also creates faers_moiety_quarter_outcome, after the 0010 FAERS tables).
+_MIGRATION_FILES = (
+    "0002_container_and_book_parts.sql",
+    "0006_pubmed_graph.sql",
+    "0010_regulatory_sources.sql",
+    "0011_label_section_ordinal.sql",
+    "0014_article_text_virtual.sql",
+    "0015_api_layer.sql",
+)
 
 
 def build_schema(conn) -> None:
@@ -23,8 +37,24 @@ def build_schema(conn) -> None:
         cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
         cur.execute((DB_DIR / "extensions.sql").read_text("utf-8"))
         cur.execute((DB_DIR / "schema.sql").read_text("utf-8"))
-        cur.execute((MIGRATIONS / "0002_container_and_book_parts.sql").read_text("utf-8"))
-        cur.execute((MIGRATIONS / "0010_regulatory_sources.sql").read_text("utf-8"))
+        # 0006: article_chemicals and mesh_tree (graph_neighbours, literature_by_mesh).
+        # 0011: label_section.ordinal and product (current_label, label_section_text).
+        # 0014 is a no-op on a schema.sql database (article_body already has
+        # text_override and the virtual text). 0015 is in schema.sql too; applied again
+        # (idempotent) so the API functions match the migration file.
+        for name in _MIGRATION_FILES:
+            cur.execute((MIGRATIONS / name).read_text("utf-8"))
+    conn.commit()
+    grant_owner(conn)
+
+
+def grant_owner(conn) -> None:
+    """The API owner role's reads (grants/0015_api_tables.sql, as ``api_settings sync``
+    applies them). Once the grants file has run on the database, the functions run as
+    episteme_api_owner, and a table or AACT schema created afterwards (a schema rebuild, a
+    test AACT release) needs this, or the functions fail with "permission denied". A
+    no-op when the role does not exist."""
+    api_settings.apply_owner_grants(conn)
     conn.commit()
 
 
@@ -41,7 +71,10 @@ def clear(conn) -> None:
         cur.execute(
             "TRUNCATE episteme.reg_release, episteme.label_section, episteme.label_substance, "
             "episteme.faers_moiety_quarter, episteme.faers_quarter_totals, "
-            "episteme.article_mesh, episteme.articles, "
+            "episteme.faers_moiety_quarter_outcome, episteme.faers_event_quarter, "
+            "episteme.faers_term, "
+            "episteme.article_mesh, episteme.article_cites, episteme.article_chemicals, "
+            "episteme.articles, "
             "episteme.substance_xref, episteme.substance RESTART IDENTITY"
         )
         cur.execute(

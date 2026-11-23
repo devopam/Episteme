@@ -546,7 +546,12 @@ def _schema():
             cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
             cur.execute((REPO_ROOT / "src/episteme/data/db/extensions.sql").read_text("utf-8"))
             cur.execute((REPO_ROOT / "src/episteme/data/db/schema.sql").read_text("utf-8"))
-            for name in ("0002_container_and_book_parts.sql", "0010_regulatory_sources.sql"):
+            # 0015: faers_moiety_quarter_outcome, a signal table that the swap renames.
+            for name in (
+                "0002_container_and_book_parts.sql",
+                "0010_regulatory_sources.sql",
+                "0015_api_layer.sql",
+            ):
                 cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         conn.commit()
     finally:
@@ -705,6 +710,8 @@ def _access(conn):
 
 @pytest.mark.pg
 def test_a_new_parent_with_other_privileges_is_refused_before_the_copy(db, tmp_path, monkeypatch):
+    # The new parents copy the live grants (copy_access); the live signal tables then
+    # differ from faers_report, which is refused before the COPY.
     raw = tmp_path / "raw"
     with db.cursor() as cur:
         cur.execute("GRANT SELECT ON episteme.faers_report TO PUBLIC")
@@ -717,6 +724,51 @@ def test_a_new_parent_with_other_privileges_is_refused_before_the_copy(db, tmp_p
         db.rollback()
         with db.cursor() as cur:
             cur.execute("REVOKE SELECT ON episteme.faers_report FROM PUBLIC")
+        db.commit()
+
+
+@pytest.mark.pg
+def test_copy_access_gives_the_new_table_the_live_grants(db):
+    """LIKE copies no grant: the new table gets the live table's grants (PUBLIC and other
+    roles) and loses those the live table does not give, so _check_tables sees equal
+    access."""
+    with db.cursor() as cur:
+        cur.execute("CREATE TABLE episteme._acl_live (x int)")
+        cur.execute("CREATE TABLE episteme._acl_new (x int)")
+        cur.execute("GRANT SELECT ON episteme._acl_live TO PUBLIC")
+        cur.execute("GRANT UPDATE ON episteme._acl_new TO PUBLIC")
+        assert fg._access(cur, "_acl_new") != fg._access(cur, "_acl_live")
+        fg.copy_access(cur, "_acl_live", "_acl_new")
+        assert fg._access(cur, "_acl_new") == fg._access(cur, "_acl_live")
+        assert fg._grants(cur, "_acl_new") == fg._grants(cur, "_acl_live")
+        assert (None, "SELECT", False) in fg._grants(cur, "_acl_new")
+        assert not any(p == "UPDATE" and g is None for g, p, _ in fg._grants(cur, "_acl_new"))
+    db.rollback()
+
+
+@pytest.mark.pg
+def test_a_grant_on_every_compared_table_survives_a_swap(db, tmp_path):
+    """A grant on faers_report and every signal table (the SQL lookup API owner's SELECT,
+    grants/0015_api_roles.sql) does not stop a load: the new tables copy it."""
+    raw = tmp_path / "raw"
+    tables = ("faers_report", *fg.SIGNAL_TABLES)
+    with db.cursor() as cur:
+        for t in tables:
+            cur.execute(f"GRANT SELECT ON episteme.{t} TO PUBLIC")
+    db.commit()
+    try:
+        before = _access(db)
+        out = _run(db, tmp_path, [_zip(raw, "2020q1", [_report("1")])])
+        assert out["status"] == "swapped"
+        assert _access(db) == before
+        with db.cursor() as cur:
+            for t in tables:
+                assert (None, "SELECT", False) in fg._grants(cur, t), t
+    finally:
+        db.rollback()
+        with db.cursor() as cur:
+            for t in tables:
+                cur.execute(f"REVOKE SELECT ON episteme.{t} FROM PUBLIC")
         db.commit()
 
 

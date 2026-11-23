@@ -116,7 +116,7 @@ EXTRA_HASH_MODULES: dict[tuple[str, str], tuple[str, ...]] = {
     ("pubchem", "load"): ("episteme.data.pubchem.retire",),
     ("pmc", "load"): ("episteme.data.pmc.retire",),
     ("dailymed", "load"): ("episteme.data.dailymed.retire",),
-    ("ema_epar", "load"): ("episteme.data.ema.retire",),
+    ("ema_epar", "load"): ("episteme.data.ema.retire", "episteme.data.ema.epar_links"),
     ("europepmc_preprint", "load"): ("episteme.data.europepmc.preprints.retire",),
 }
 

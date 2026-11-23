@@ -57,8 +57,16 @@ holds as many rows as its ``meta.total_records``, and the share of the previousl
 documents that this feed no longer holds does not exceed ``Settings.epar_max_withdrawn_share``
 (``EPISTEME_EPAR_MAX_WITHDRAWN_SHARE``, default 0.1; with no earlier state there is no limit).
 
+**Offline subset** (``--offline-subset``, ``offline_subset=True``): a run on the PDFs that
+are already on disk, with no download (for example 35 of the 20,342 listed documents). The
+guards above do not read the files on disk, so such a run is not refused without the flag
+either: the absent documents count as ``not_downloaded``, as in any run. The flag changes no
+guard. It only records the subset size in lineage: the summary and the run marker get
+``"offline_subset": {"present": <documents with a PDF on disk>, "listed": <documents the
+feed lists>}``, and the run marker's config gets ``"offline_subset": true``.
+
 Importable core: ``extract_epar(raw_dir, processed_dir, *, max_files=0, force=False,
-workers=1, ...) -> dict``. ``main()`` is the thin CLI wrapper.
+workers=1, ..., offline_subset=False) -> dict``. ``main()`` is the thin CLI wrapper.
 """
 
 from __future__ import annotations
@@ -692,6 +700,7 @@ def extract_epar(
     skip_reason: str | None = None,
     force_reason: str | None = None,
     types: tuple[str, ...] | None = None,
+    offline_subset: bool = False,
 ) -> dict:
     """Importable core: read the feed and PDFs under ``raw_dir`` and extract them by bucket
     into staging parts + ops markers under ``processed_dir``.
@@ -701,7 +710,9 @@ def extract_epar(
     "withdrawn_docs", "retired_buckets", "failed_docs_count", "failed_by_reason",
     "documents_with_sections", "documents_without_sections", "documents_no_text",
     "not_downloaded",
-    "refused_rows", "duplicate_ids"}``. ``force_reason`` with ``force`` overrides the guards.
+    "refused_rows", "duplicate_ids"}``, plus ``"offline_subset": {"present", "listed"}`` when
+    ``offline_subset`` is set (it changes no guard; module docstring). ``force_reason`` with
+    ``force`` overrides the guards.
     Raises ``EparScanError`` when the feed is missing or lists no wanted document,
     ``EparGuardError`` when a guard refuses."""
     raw_dir = Path(raw_dir)
@@ -865,6 +876,11 @@ def extract_epar(
         + int(feed_stats.get("refused_id", 0)),
         "duplicate_ids": int(feed_stats.get("duplicate_ids", 0)),
     }
+    if offline_subset:
+        summary["offline_subset"] = {
+            "present": sum(1 for e in entries if e["size"] is not None),
+            "listed": len(docs),
+        }
 
     run_id = get_settings().run_id or utc_now_iso().replace(":", "").replace("-", "")
     with contextlib.suppress(Exception):  # the manifest is best-effort
@@ -878,6 +894,7 @@ def extract_epar(
                 "workers": workers,
                 "force": force,
                 "bucket_ids": width,
+                "offline_subset": bool(offline_subset),
                 # feeds.toml is data, outside the code hash: its values go into the record.
                 "feeds": feeds_record(SOURCE),
             },
@@ -927,6 +944,14 @@ def _main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--force", action="store_true")
     p.add_argument("--verbose", action="store_true", help="print ok/skip/FAIL per bucket to stderr")
+    p.add_argument(
+        "--offline-subset",
+        action="store_true",
+        help=(
+            "a run on the PDFs already on disk (no download): records the subset size "
+            "(present/listed) in the run marker; the guards are unchanged"
+        ),
+    )
     add_skip_args(p)
     args = p.parse_args(argv)
     check_skip_args(p, args)
@@ -957,6 +982,7 @@ def _main(argv: list[str] | None = None) -> int:
             skip_units=args.skip_unit,
             skip_reason=args.reason,
             force_reason=args.reason,
+            offline_subset=args.offline_subset,
         )
     except EparScanError as e:
         print(f"ERROR: {e}", file=sys.stderr)

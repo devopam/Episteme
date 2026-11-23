@@ -69,8 +69,11 @@ recorded with the release.
 5. **Switch,** one transaction under ``lock_timeout`` (``EPISTEME_REG_LOCK_TIMEOUT_S``): every
    view in ``aact`` is dropped and one view per table of the release is created (``SELECT``
    granted to ``episteme_app``), ``reg_release`` moves ``is_latest`` to the release
-   (``dataset='aact'``, ``release_id='<YYYYMMDD>'``), and the ``_release`` state row marks the
-   schema finished.
+   (``dataset='aact'``, ``release_id='<YYYYMMDD>'``), the ``_release`` state row marks the
+   schema finished, and the SQL lookup API owner role gets its reads on the new release
+   schema (``api_grants.apply_aact_grants``: only the AACT grants file, no ``episteme``
+   relation or function; nothing before the API grants file ran). A failure of that
+   step fails the switch with a message that names it.
 
 A failed check returns ``status`` ``failed``, records a ``failed`` ``reg_release`` row when the
 release has none, and leaves the previous release serving. The partial release schema stays;
@@ -126,6 +129,7 @@ from episteme.config import get_settings
 from episteme.data import checkpoint_markers
 from episteme.data.aact import dictionary as dct
 from episteme.data.checkpoint_markers import in_skipped_dir, input_key
+from episteme.data.db.api_grants import apply_aact_grants
 from episteme.data.regulatory.load_reg import (
     database_name,
     db_marker_name,
@@ -172,12 +176,14 @@ EXTRA_INDEXES: dict[str, tuple[str, ...]] = {
     "browse_conditions": ("mesh_term",),
     "browse_interventions": ("mesh_term",),
     INTERVENTION_SUBSTANCE: ("substance_key", "moiety_key"),
+    # graph_neighbours kind 'trial' (migration 0015) looks references up by PMID.
+    "study_references": ("pmid",),
 }
 # The text columns of EXTRA_INDEXES are indexed on left(col, INDEX_PREFIX_CHARS): at most
 # 4 bytes a character, so 2000 bytes, under the btree key limit (about 2700 bytes).
 INDEX_PREFIX_CHARS = 500
 # Columns that hold no free text: indexed whole.
-_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key", "moiety_key"})
+_WHOLE_INDEX_COLUMNS = frozenset({"nct_id", "substance_key", "moiety_key", "pmid"})
 # Estimated bytes of one row beyond its text, and of one field (the Python str object).
 _ROW_OVERHEAD = 64
 _FIELD_OVERHEAD = 50
@@ -1062,6 +1068,12 @@ def _switch(conn: psycopg.Connection, ctx: _Ctx, tables: Sequence[str], summary:
                             Jsonb({"dictionary_date": dct.DICTIONARY_DATE}),
                         ),
                     )
+                    # The SQL lookup API owner role reads the latest release schema only
+                    # (trials, graph_neighbours): grant it on the new one, revoke it on the
+                    # old ones, in this transaction. Only the AACT grants
+                    # (grants/0015_api_aact.sql, ruling R21); a no-op before the API grants
+                    # file created the role.
+                    _grant_api_owner(conn, seconds)
                 except psycopg.errors.LockNotAvailable as exc:
                     raise _Invalid(
                         f"could not lock the aact views or reg_release within {seconds} s "
@@ -1081,6 +1093,29 @@ def _switch(conn: psycopg.Connection, ctx: _Ctx, tables: Sequence[str], summary:
     except BaseException:
         audit_trail.rollback(conn)
         raise
+
+
+def _grant_api_owner(conn: psycopg.Connection, seconds: int | float) -> None:
+    """The switch's API grant step (``api_grants.apply_aact_grants``). A lock wait past
+    ``lock_timeout``, a deadlock or a concurrent catalog update of the release schemas
+    fails the switch with a message that names this step; the old release keeps serving."""
+    step = "the SQL lookup API owner grant step (grants/0015_api_aact.sql)"
+    try:
+        apply_aact_grants(conn)
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected) as exc:
+        raise _Invalid(
+            f"{step} failed: no lock on the aact release schemas within {seconds} s "
+            f"(EPISTEME_REG_LOCK_TIMEOUT_S) or a deadlock: {str(exc).strip()}"
+        ) from exc
+    except psycopg.errors.InternalError_ as exc:
+        # "tuple concurrently updated" (SQLSTATE XX000): another session changed the
+        # same catalog row (a GRANT or REVOKE on an aact_r* schema) at the same time.
+        if "tuple concurrently updated" not in str(exc):
+            raise
+        raise _Invalid(
+            f"{step} failed: another session changed the privileges of an aact release "
+            "schema at the same time (tuple concurrently updated); run the load again"
+        ) from exc
 
 
 def _record_failed(conn: psycopg.Connection, release_id: str) -> None:

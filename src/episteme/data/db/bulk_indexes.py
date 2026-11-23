@@ -1,7 +1,8 @@
 """Bulk-load mode: drop a named group of secondary indexes before a large load
 and rebuild them after. Group ``articles`` (default) is the six secondary
-indexes of ``episteme.articles``; ``pubmed_graph`` is the 14 secondary indexes
-of the PubMed graph tables (migration 0006).
+indexes of ``episteme.articles``; ``pubmed_graph`` is the 15 secondary indexes
+of the PubMed graph tables (migration 0006, plus ``article_mesh_lower_name_idx`` of
+the literature lookup, which no migration creates: see the runbook).
 
     python -m episteme.data.db.bulk_indexes drop|rebuild|status [--group G]
 
@@ -62,6 +63,7 @@ INDEX_GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     "pubmed_graph": (
         ("article_mesh", "article_mesh_pmid_idx"),
         ("article_mesh", "article_mesh_descriptor_ui_idx"),
+        ("article_mesh", "article_mesh_lower_name_idx"),
         ("article_cites", "article_cites_src_pmid_idx"),
         ("article_cites", "article_cites_dst_pmid_idx"),
         ("article_comments", "article_comments_pmid_idx"),

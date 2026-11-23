@@ -236,3 +236,33 @@ def test_text_nullout_batch_blocks_default_and_override(clean_settings):
     clean_settings.setenv("EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS", "9")
     cfg.get_settings.cache_clear()
     assert cfg.get_settings().text_nullout_batch_blocks == 9
+
+
+def test_api_result_limits_default_and_override(clean_settings):
+    assert cfg.api_result_limits()["search"] == (20, 200)
+    clean_settings.setenv("EPISTEME_API_LIMIT_SEARCH", "5,50")
+    assert cfg.api_result_limits()["search"] == (5, 50)
+    clean_settings.setenv("EPISTEME_API_LIMIT_SEARCH", "10,5")
+    with pytest.raises(ValueError):
+        cfg.api_result_limits()
+
+
+def test_fts_lock_timeout_default_none_and_override(clean_settings):
+    """0 = no lock_timeout (a CONCURRENTLY build must not die in its last wait)."""
+    clean_settings.delenv("EPISTEME_FTS_LOCK_TIMEOUT_S", raising=False)
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().fts_lock_timeout_s == 0
+    clean_settings.setenv("EPISTEME_FTS_LOCK_TIMEOUT_S", "30")
+    cfg.get_settings.cache_clear()
+    assert cfg.get_settings().fts_lock_timeout_s == 30
+    for bad in ("-1", "x"):
+        clean_settings.setenv("EPISTEME_FTS_LOCK_TIMEOUT_S", bad)
+        cfg.get_settings.cache_clear()
+        assert cfg.get_settings().fts_lock_timeout_s == 0
+
+
+def test_search_scan_is_a_result_limit_family(clean_settings):
+    clean_settings.delenv("EPISTEME_API_LIMIT_SEARCH_SCAN", raising=False)
+    assert cfg.api_result_limits()["search_scan"] == (5000, 5000)
+    clean_settings.setenv("EPISTEME_API_LIMIT_SEARCH_SCAN", "100,100")
+    assert cfg.api_result_limits()["search_scan"] == (100, 100)

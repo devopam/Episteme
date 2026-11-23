@@ -2,7 +2,9 @@
 # Episteme extract wrapper: EMA EPAR PDFs (raw/ema/epar) -> episteme.articles staging parts.
 # Thin shell over `python -m episteme.data.ema.extract_epar`. run_pipeline.sh forwards
 # --max-files N, --force --reason R (overrides the feed and withdrawal guards, audited) and
-# --skip-unit NAME --reason R.
+# --skip-unit NAME --reason R. --offline-subset runs on the PDFs already on disk (no
+# download): the absent documents count as not_downloaded, the guards are unchanged, and the
+# run marker records "offline_subset": {"present": n, "listed": m}.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh

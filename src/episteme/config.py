@@ -81,6 +81,22 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _get_non_negative_int_or_default(name: str, default: int) -> int:
+    """Like ``_get_positive_int_or_default`` but 0 is allowed (for example "no
+    timeout"): a non-integer or a negative value logs a warning and returns ``default``."""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        _LOG.warning("%s must be an integer >= 0, got %r; using %d", name, raw, default)
+        return default
+    return value
+
+
 def _get_positive_int_or_default(name: str, default: int) -> int:
     """Like ``_get_int`` but never raises: a non-integer or a value below 1
     logs a warning and returns ``default`` (a bad worker count must not stop
@@ -165,6 +181,13 @@ DEFAULT_TEXT_NULLOUT_BATCH_ROWS = 50_000
 DEFAULT_TEXT_NULLOUT_BATCH_BLOCKS = 4096
 # Seconds REPACK waits for its table lock before it gives up.
 DEFAULT_REPACK_LOCK_TIMEOUT_S = 60
+# Seconds a full-text index build (fts_index) waits for a lock before it gives up; 0 = no
+# timeout. CREATE INDEX CONCURRENTLY waits for older transactions in its last phase; a
+# timeout there throws away the whole build (and leaves an INVALID index).
+DEFAULT_FTS_LOCK_TIMEOUT_S = 0
+# statement_timeout of the SQL lookup API reader role (episteme_api_reader), in seconds;
+# `api_settings sync` sets it on the role. 0 = no timeout. A second guard after the row caps.
+DEFAULT_API_READER_STATEMENT_TIMEOUT_S = 30
 # Ids in flight per submit batch of the PMC download.
 DEFAULT_PMC_SUBMIT_BATCH = 2_000
 # SFT slice: rows per read batch, and rows per output part.
@@ -249,6 +272,53 @@ LOOKUP_SOURCE_SUBSETS: dict[str, str] = {
     "openfda_faers": "pending",
 }
 _SLICE_CAP_PREFIX = "EPISTEME_SLICE_MAX_BYTES_"
+# SQL lookup API (schema episteme_api): rows a public function returns, per family, as
+# (default, max). Env override per family: EPISTEME_API_LIMIT_<FAMILY>=<default>,<max>.
+# `python -m episteme.reference.api_settings sync` copies the effective values to the
+# table episteme_api_internal.result_limit.
+API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
+    "regulatory": (200, 1000),
+    "label": (200, 2000),
+    "trials": (200, 1000),
+    "faers": (500, 5000),
+    "literature": (50, 500),
+    "graph": (50, 500),
+    "search": (20, 200),
+    "code": (1, 1),
+    "resolve": (10, 50),
+    # Not a row cap: graph_neighbours 'shared_mesh' uses a major-topic descriptor only when
+    # at most this many article_mesh rows carry it (bounds the rows one call reads).
+    "graph_scan": (20000, 20000),
+    # Not a row cap: search_text ranks only the first this-many index matches per
+    # partition (a common word must not rank millions of rows).
+    "search_scan": (5000, 5000),
+}
+_API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
+
+
+def api_result_limits() -> dict[str, tuple[int, int]]:
+    """``API_RESULT_LIMITS`` with the ``EPISTEME_API_LIMIT_<FAMILY>`` overrides applied.
+    The value is ``<default>,<max>``, integers with 0 < default <= max. A bad value
+    raises ``ValueError`` (a typo must not widen or close a cap)."""
+    out = dict(API_RESULT_LIMITS)
+    for family in out:
+        key = _API_LIMIT_PREFIX + family.upper()
+        raw = _get(key)
+        if raw is None:
+            continue
+        parts = [x.strip() for x in raw.split(",")]
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            default, maximum = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(
+                f"{key} must be '<default>,<max>' (two integers), got {raw!r}"
+            ) from None
+        if not 0 < default <= maximum:
+            raise ValueError(f"{key} needs 0 < default <= max, got {raw!r}")
+        out[family] = (default, maximum)
+    return out
 
 
 def _aact_may_be_empty_tables() -> tuple[str, ...]:
@@ -499,6 +569,13 @@ class Settings:
     # Blocks per step of nullout --order physical (EPISTEME_TEXT_NULLOUT_BATCH_BLOCKS).
     text_nullout_batch_blocks: int = DEFAULT_TEXT_NULLOUT_BATCH_BLOCKS
     repack_lock_timeout_s: int = DEFAULT_REPACK_LOCK_TIMEOUT_S
+    # Lock wait of CREATE INDEX CONCURRENTLY in fts_index (EPISTEME_FTS_LOCK_TIMEOUT_S).
+    fts_lock_timeout_s: int = DEFAULT_FTS_LOCK_TIMEOUT_S
+    # statement_timeout of episteme_api_reader (EPISTEME_API_READER_STATEMENT_TIMEOUT_S).
+    api_reader_statement_timeout_s: int = DEFAULT_API_READER_STATEMENT_TIMEOUT_S
+    # episteme_api_reader's password (EPISTEME_API_READER_PASSWORD); the operator sets the
+    # role's password to it, and the --reader MCPg profile connects with it.
+    api_reader_password: str = field(default="", repr=False)
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -728,6 +805,13 @@ def get_settings() -> Settings:
         repack_lock_timeout_s=_get_positive_int_or_default(
             "EPISTEME_REPACK_LOCK_TIMEOUT_S", DEFAULT_REPACK_LOCK_TIMEOUT_S
         ),
+        fts_lock_timeout_s=_get_non_negative_int_or_default(
+            "EPISTEME_FTS_LOCK_TIMEOUT_S", DEFAULT_FTS_LOCK_TIMEOUT_S
+        ),
+        api_reader_statement_timeout_s=_get_non_negative_int_or_default(
+            "EPISTEME_API_READER_STATEMENT_TIMEOUT_S", DEFAULT_API_READER_STATEMENT_TIMEOUT_S
+        ),
+        api_reader_password=_get("EPISTEME_API_READER_PASSWORD", "") or "",
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
         ),

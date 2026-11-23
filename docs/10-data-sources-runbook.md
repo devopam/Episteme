@@ -113,6 +113,8 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `EPISTEME_DB_PASSWORD` | Password `init_database.sh` sets for `episteme_app`. |
 | `EPISTEME_SYS_ADMIN_PASSWORD` | Password of `episteme_sys_admin`, the DDL role used by `db/*.sh` and the migration commands below. |
 | `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh`, for `tune_postgres.sh apply`, and for the MCPg admin server (operator only; see section 2). |
+| `EPISTEME_API_READER_PASSWORD` | Password of `episteme_api_reader`, the login role of the read-only MCPg instance (section 5.19). The operator sets the role's password to this value; no file holds it. |
+| `EPISTEME_API_READER_STATEMENT_TIMEOUT_S`, `EPISTEME_API_LIMIT_<FAMILY>`, `EPISTEME_FTS_LOCK_TIMEOUT_S` | Optional tunables of the SQL lookup API (section 5.19): the reader's `statement_timeout` (default 30 s, 0 = none), the row cap per function family (`<default>,<max>`), and the lock timeout of a full-text index build (default 0 = none). `api_settings sync` copies the first two into the database. |
 | `MCPG_ALTER_SYSTEM_ALLOWLIST` | Optional. Comma-separated settings the MCPg admin server may change (default: the section 2.4 settings plus `max_parallel_maintenance_workers`). `scripts/mcpg-episteme.sh` sets `MCPG_ALLOW_ALTER_SYSTEM` itself: on for `--admin`, off otherwise. |
 | `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
@@ -180,7 +182,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0010 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0015 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -200,11 +202,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0012_openalex_partitions.sql` | `openalex` LIST partitions `articles_openalex` and `article_body_openalex` (no year split); `_lineage.dedup_counts` (jsonb); expression indexes `articles_pubmed_doi_lower_idx` and `articles_pmc_doi_lower_idx` on `lower(doi)` of the `pubmed` and `pmc` partitions | Required before any `openalex` load: the load skips works that `pubmed` or `pmc` already hold and refuses to start without these objects (section 5.2, OpenAlex load). Two transactions, each with `lock_timeout = '60s'`. **Precondition:** no `openalex` row in `articles_default` / `article_body_default`; the file stops with `migration 0012: episteme.articles_default holds openalex rows` otherwise, so on a loaded database purge first (audited `DELETE ... WHERE source = 'openalex'`, then remove the purged shards' load markers and `episteme._lineage` rows, as for 0009). Apply with **no load, graph, enrich or query job running**. Transaction 1 creates the partitions: it scans `articles_default` and `article_body_default` (~15 GB) in full under ACCESS EXCLUSIVE, so every read and write of `articles` and `article_body` waits until it commits. Transaction 2 builds the two indexes (`maintenance_work_mem = '1GB'`, set in the file): it reads every `pubmed` and `pmc` row (~38 million on the E: NVMe disk: minutes to a few tens of minutes) and blocks writes to those partitions, not reads. The sample gate checks its markers before every `--sample load`, so apply it to `episteme_test` first |
 | `0013_reference_codes.sql` | `episteme.code_system`, `episteme.code` and the view `episteme.code_current` (one current release per code system; a non-empty licence notice is required) | Required before `refmeta load` (section 5.18). Idempotent, one transaction, `lock_timeout = '60s'`. It does not lock `articles`. Apply it to `episteme_test` before the first test load |
 | `0014_article_text_virtual.sql` | `article_body.text` becomes the stored column `text_override`; a new VIRTUAL column `text` reads the override or the join of `title`, `abstract` and `body_text` | Metadata only: no table rewrite, it takes seconds. It holds ACCESS EXCLUSIVE on `article_body` for a short time: apply it with no load running. Run `precheck --all` first (section 2.3.1). Idempotent, one transaction, `lock_timeout = '60s'` |
+| `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0014, apply those thirteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0015, apply those fourteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t|t|t|t`; the fourth column is 0004's `articles_id_idx`, the fifth is 0005's table, the sixth is 0011's `label_section.ordinal` the seventh is 0012's `articles_openalex` and the eighth is 0014's virtual `article_body.text`):
@@ -237,7 +240,7 @@ Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULL
 
 After 0014, `precheck` is for information only.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0014 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0015 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -453,9 +456,10 @@ Index groups (`episteme.data.db.bulk_indexes.INDEX_GROUPS`):
 | Group | Used by | Indexes dropped (on every partition) |
 |---|---|---|
 | `articles` | `<source> load --bulk` (the default group) | `articles_pmid_idx`, `articles_pmcid_idx`, `articles_doi_idx`, `articles_mesh_gin`, `articles_authors_gin`, `articles_publication_types_gin` |
-| `pubmed_graph` | `<source> graph --bulk` | the 14 secondary indexes of `article_mesh`, `article_cites`, `article_comments`, `article_chemicals`, `article_keywords`, `article_authors` and `article_facets` (two each: the pmid or src_pmid index plus one lookup index) |
+| `pubmed_graph` | `<source> graph --bulk` | the 15 secondary indexes of `article_mesh`, `article_cites`, `article_comments`, `article_chemicals`, `article_keywords`, `article_authors` and `article_facets` (two each: the pmid or src_pmid index plus one lookup index; `article_mesh` has a third, `article_mesh_lower_name_idx`, see below) |
 
 - **Never `openalex load --bulk`.** The `openalex` load skips works that `pubmed` or `pmc` hold by probing `articles_pmid_idx`, `articles_pmcid_idx` and the `lower(doi)` indexes of migration 0012. `run_pipeline.sh openalex load --bulk` exits 2 before any index drop, and the loader refuses a shard while any of these indexes is missing (section 5.2, OpenAlex load).
+- **`article_mesh_lower_name_idx` is built by hand, once.** No migration creates it (`article_mesh` is partitioned and holds about 345 million rows; a plain `CREATE INDEX` in a migration transaction blocks writes for hours). The literature lookup (`literature_by_mesh`, migration 0015) needs it, and `graph --bulk` needs it to exist (`drop` stops with `covered index(es) of group 'pubmed_graph' not found` otherwise). Build it once as `episteme_sys_admin`, with no graph load running: `CREATE INDEX article_mesh_lower_name_idx ON episteme.article_mesh USING btree (lower(descriptor_name));`. `rebuild` runs the same statement for this index (saved definition `CREATE INDEX ... ON ONLY ...` turned into `ON`); it has no `CONCURRENTLY`, so it blocks writes to `article_mesh` while it runs. After that, `--bulk` drops and re-creates it with the other `pubmed_graph` indexes.
 - **`graph --bulk` maps every source to `pubmed_graph`.** It is meant for `pubmed` (and `pmc`, which also writes `article_mesh` and `article_cites`). `mesh graph --bulk` would only waste an index rebuild.
 - **Kept:** every `<table>_source_file_idx` (the per-file deletes use them), `articles_id_idx` and `articles_retrieved_at_brin`.
 - **While the stage runs**, lookups on the affected tables are slow. Run nothing else against them.
@@ -1459,6 +1463,8 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh dailymed load
 - **Old update zips.** An update zip that stays on disk keeps a label that a new full release dropped. When a full release is replaced, delete the older update zips (older than the new release) before the extract.
 - **Retire.** A label that is in no zip of the scan leaves its part. The load wrapper then runs the retire step, only after a good load: it deletes the rows of the retired parts and their label rows, with an audit row. The guards above sit in the extract, before any part is removed.
 - **Failed labels.** A label with a corrupt inner zip or XML is left out, listed in its bucket and counted in `failed_inputs`. The run goes on. A corrupt OUTER zip stops the run before it writes.
+- **Failure names.** `<processed>/_ops/dailymed/failed_inputs.json` holds the count (`failed_inputs`, which the gate reads) and `failed_files`: one `{file, error}` per failure, sorted by file. A label is named by its input key (`<outer zip>__<member path>`), a held or failed bucket by its bucket key (`dailymed_bXX`). Never an absolute path. The scan and each bucket list at most 100 labels; the count stays complete.
+- **Accepted failures: 6 rejected setIds.** The full extract of 2026-11-10 rejected 6 labels with `setId is missing or not a UUID`. The owner decided (2026-11-17) to discard them. They were never loaded, so no row is deleted. Do not retry them and do not fix them by hand. A later run lists them by name in `failed_files`; they are expected there.
 - **Gate.** `dailymed` is gated for `extract` and `load` (section 4.9).
 
 ### 5.9 EMA feeds (`ema`)
@@ -1504,6 +1510,9 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 - **Held buckets.** A known document whose file is missing holds its bucket: it is not written again and its row is not dropped. So does a known document that had a row and changed, when its new file cannot be read: the bucket keeps its parts and its marker, is listed in `held_buckets`, and the next run tries again.
 - **Size cap at download.** A PDF over `EPISTEME_EPAR_MAX_BYTES` is stopped as soon as its declared length or the stream passes the cap. The partial file is deleted, the document gets a failed marker (`over_limit`), it is not retried, and the other documents go on.
 - **SmPC sections.** The extract reads the numbered headings of Annex I (the SmPC) of each `product-information` document, with the start of Annex II as the end of Annex I, and writes them to `label_section` through the label sidecar of the part. One row per section per product; a PDF with several SmPCs gives one row per section per product, with `ordinal` and `product` set. The code is the LOINC code of the DailyMed subject where one exists (for example 4.1 is `34067-9`), else `smpc:<number>`. A document where no heading is found gets no section rows and is counted. The section rule version is in the fingerprint of `product-information` documents only, so a rule change re-extracts them and no other type. See section 5.16 for the counts.
+- **Offline subset (no download).** `--offline-subset` extracts only the PDFs already on disk (35 of the 20,342 documents the feed lists on 2026-11-17: 23 product information, 9 assessment reports, 3 RMP summaries). No EMA request is made. The flag changes no guard: an absent PDF is counted as `not_downloaded`, as without the flag. It only records `"offline_subset": {"present": n, "listed": m}` in the run marker and the summary. The dispatcher does not forward the flag, so run the wrapper itself (`bash scripts/data/ema/extract_ema_epar.sh --offline-subset`, section 5.19). Expect about 20,300 `not_downloaded` failed markers and a `failed_inputs` count of the same size. The absent documents form no bucket, and the extract exits 0. The gate does not read this count: `max_failed_inputs` is checked on the `--sample` run, whose slice lists only documents with a PDF on disk, and a full run is gated by that valid pass.
+- **EU label links.** `load_ema_epar.sh` runs the load, then the retire step, then the link step `python -m episteme.data.ema.epar_links`. A shard load replaces the `label_substance` rows of its articles, so the links run after every load. A `product-information` document links when its `ema_medicines` record is `Human` and each `;` part of the active substance matches exactly one substance with a UNII (exact normalised match on `substance_xref` names, method `ema_name_exact`; no fuzzy match). Veterinary products are loaded as text and never linked. The link report is `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json` (`label_documents`, `linked_documents`, `unlinked_by_reason`). The method is in the report and in the `load_commit` audit row; `label_substance` has no method column. The step runs as `episteme_app` and needs EXECUTE on `episteme_api_internal.norm_name`: apply the roles file (section 5.19) before the first link step.
+- **Generated EU medicine records.** `bash scripts/data/ema/build_ema_medicine_records.sh` writes one `ema_epar` article per EU medicine (about 2,754) from the loaded `ema_medicines` and `ema_epar_documents` releases: name, active substance, INN, ATC, therapeutic area, indication, status and dates, and the list of its EPAR documents. Article id `ema_medicine:<product number>`. The parts are `ema_epar_medicines__partNNNNN` (one bucket); the run marker `<processed>/_ops/ema_epar/runs/medicine_records_<run_id>.json` names both feed releases. A re-run with the same releases writes nothing (`--force` writes again). Load the parts with `ema_epar load`. The EPAR extract does not touch these parts, and they do not retire the PDF articles. Same licence as the EPAR rows; not in the training corpus (`corpus_excluded_sources`).
 - **Gate.** `ema_epar` is gated for `extract` and `load` (section 4.9).
 
 ### 5.11 openFDA reference feeds (`openfda`) and the FDA substance data
@@ -1557,6 +1566,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --
 - **Empty signals never swap in.** The load refuses to start when `episteme.substance` is empty in the target database, and refuses the swap when the bridge tied no drug row of the generation to a substance or `faers_pair_quarter` would have no row. To recover after loading the substance data, run `openfda_faers load --force --reason "<why>"`: it starts a new generation and bridges every entry again. The refusal message names this step. A sample run does not skip these checks. `--allow-partial --reason` passes them (one `force_override` audit row each).
 - **Pair cap and batch size.** `EPISTEME_FAERS_PAIR_DRUG_CAP` leaves out of the pair counts the reports that list more moieties than the cap (they are counted in `reports_over_pair_cap`). `EPISTEME_FAERS_BRIDGE_BATCH_ROWS` sets the entries per transaction of the bridge.
 - **Memory and temp use.** The de-duplication across years and the signal build sort large sets. The sample slice therefore holds the largest year whole (section 4.9), and its report records the client peak memory and the database temp bytes of the run (the server memory of the build is bounded by `work_mem` and is not measured).
+- **Seriousness and outcome table (migration 0015).** The signal build also fills `faers_moiety_quarter_outcome`: reports (not reactions) per moiety, quarter, FDA seriousness (`serious`, `non_serious`, `unknown`, from `faers_report.serious`) and outcome code (from the `serious_*` flags; `none` when no flag is set). Only the suspect role counts (openFDA does not split primary and secondary suspect). The table is empty until the next signal build, and `faers_counts` says so in a note. Rebuild it once after 0015 (section 5.19): `--sample` first, then a forced load, which starts a new generation. A generation left unfinished before 0015 has no outcome table, and its resume fails (`signal tables missing`): start it again with `--force --reason "<why>"`. Apply the roles file and `api_settings sync` only while no FAERS generation is unfinished.
 - **Gate.** `openfda_faers` is gated for `load` (section 4.9). A sample run (`db_target` secondary) skips the whole-issue checks, because its slice is partial on purpose.
 
 ### 5.13 `reg_record`: loading, latest and plans
@@ -1646,7 +1656,8 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh aact load
 - **Row checks.** `studies` must hold as many rows as distinct `nct_id`. A table with no row fails the load. Per table, the share of rows whose `nct_id` is not in `studies` (an orphan) must be at most `EPISTEME_AACT_MAX_ORPHAN_SHARE`. AACT has known orphans, so the default is 0.05, not 0. A breach keeps the previous release and fails the run. A table without an `nct_id` column (`search_terms`) has no orphan count; the load summary lists it in `missing_nct_id`. The tables `mesh_headings`, `mesh_terms` and `study_searches` are not in the zip: the load reports them and does not fail. Our NLM MeSH covers the first two. Any other table of the dictionary that is missing from the zip fails the load before a table loads.
 - **Dictionary.** The package holds a copy of the AACT data dictionary. A column only in the file is loaded and reported. A column only in the dictionary is reported. A deprecated column is loaded. None of these fails the load.
 - **Interventions to moieties.** The distinct names of `interventions.name` and `intervention_other_names.name` go through `resolve_names` (source `aact`): an exact normalised match, no fuzzy match. `intervention_substance` holds the matches: `substance_key` (the matched substance) and `moiety_key` (its active moiety, `substance.moiety_key`, or the substance itself when that is NULL). Join `moiety_key` to the first key column of the FAERS signal tables (`substance_key` there holds the moiety key) to put trial and FAERS data side by side. The load reports the unmatched names and the share of interventions with a match. State both as a gap in coverage. Load the FDA substance data (section 5.11) first: without it every intervention is unmatched.
-- **Indexes.** Each table has an index on `nct_id`. The name and term columns have indexes on `left(col, 500)`, so one long value cannot stop an index. A query must compare `left(name, 500)` to use them.
+- **Indexes.** Each table has an index on `nct_id`. The name and term columns have indexes on `left(col, 500)`, so one long value cannot stop an index. A query must compare `left(name, 500)` to use them. `study_references` also has an index on `pmid` (the `trial` kind of `graph_neighbours`). Loads from 2026-11-17 build it; on a release loaded before, create it once (section 5.19).
+- **API grants.** The view switch also grants the SQL lookup API owner role (`episteme_api_owner`) USAGE and SELECT on the new `aact_r<id>` schema and revokes them on the older ones (`grants/0015_api_aact.sql`). No manual step follows an AACT load. A failure of this step is named in the error and keeps the old release serving.
 - **Trial adverse events next to FAERS.** `reported_events` holds an event term and the participants affected and at risk per arm. State a trial rate with its denominator, and say that a FAERS report count is another kind of evidence.
 - **Switch to a release.** Put the zip of the release under `<raw>/aact/` and run `aact load`. The load takes the newest release zip. To load a named zip, pass `--zip` to the dispatcher. It forwards the flag to `aact load` only and refuses it for any other source or stage and with `--sample`. The gate pass check applies as for any full run:
 
@@ -1824,6 +1835,111 @@ The flag `--system <name>` (repeatable) limits `refmeta download` and `refmeta l
 - **Load.** One transaction per list: delete that release, insert it, and mark it current. An empty notice or a release with no codes is refused. A second run of the same release into the same database is skipped: the load marker holds the target database, the input (`input_key`) and a digest of the content, so a load into `episteme_test` does not make the production load skip, and a changed file in the same release folder loads again. `--force --reason "<why>"` reloads it. The current release of a list is its newest folder by modification time (the folder names are content hashes): do not copy an older release folder in after a newer one. A list with no files is skipped. A file that is present but invalid fails the run. Every release needs a non-empty `NOTICE.txt` or `CONDITIONS.txt` beside it; the downloads write it.
 - **Lookup.** MCPg reads `episteme.code_current`. Name one system and one code, and keep the version and the licence notice with the answer. Do not dump a whole list. `lookup_code` in `src/episteme/reference/codes.py` returns the same claim shape as the other lookups. The ICSR checker still reads its JSON rule file. No PBRER tool was added.
 
+### 5.19 SQL lookup API (`episteme_api`) and the read-only MCPg instance
+
+The reference lookups are SQL functions in the schema `episteme_api` (migration 0015). A second MCPg instance connects as `episteme_api_reader` and can call only these functions. The Python lookups in `src/episteme/reference/` call the internal functions in `episteme_api_internal`, so MCPg and the harness give the same answers. Design: `docs/superpowers/specs/2026-11-17-graphrag-api-layer-design.md`; the function table is in `docs/13-graphrag-design.md` section 3.
+
+**Roles.** `episteme_api_owner` (NOLOGIN) owns the functions (SECURITY DEFINER) and has SELECT on exactly the relations they read. `episteme_api_reader` (LOGIN) has USAGE on `episteme_api` and EXECUTE on its functions, and nothing in `episteme`. `episteme_app` keeps EXECUTE on the internal functions that the pipeline and the Python lookups call. The settings tables `source_subset` and `result_limit` stay owned by `episteme_sys_admin`; the owner role only reads them.
+
+**Three grants files** (`src/episteme/data/db/grants/`):
+
+- `0015_api_roles.sql`: superuser, one transaction. Roles, memberships, function ownership, PUBLIC revokes, the reader and app grants, default privileges. No password.
+- `0015_api_tables.sql` and `0015_api_aact.sql`: the owner role's reads. `api_settings sync` applies both. The AACT load applies the AACT file itself (section 5.16).
+
+#### 5.19.1 Rollout (in this order; one heavy job at a time)
+
+Confirm `server_version` is `19beta3` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. **Every gated stage needs a new `--sample` pass after this merge:** `config.py` changed, so every code hash changed (section 4.9). Tee every long run to `D:/episteme/_runlogs/<name>.log`.
+
+1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+```
+
+2. **Roles file, as superuser.** It needs `POSTGRES_SUPERUSER` and `POSTGRES_SUPERUSER_PASSWORD` (names only). Run it while no load runs and no FAERS generation is unfinished: it rewrites catalog ACL rows, and the tables of an unfinished generation would miss the new grant.
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U "${POSTGRES_SUPERUSER:-postgres}" -d "$PGDATABASE" -f src/episteme/data/db/grants/0015_api_roles.sql && echo roles-applied'
+```
+
+3. **Settings sync.** It writes `source_subset` (from `LOOKUP_SOURCE_SUBSETS`) and `result_limit` (from `EPISTEME_API_LIMIT_<FAMILY>` or the defaults), applies the owner role's reads (tables file, then AACT file) and sets the reader's `statement_timeout`. It connects as `episteme_sys_admin`.
+
+```bash
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.reference.api_settings sync
+PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.reference.api_settings sync
+```
+
+Expect `api_settings sync: <n> sources, 11 limits` and `episteme_api_reader statement_timeout = 30s`. A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
+
+4. **Reader password.** The operator sets it by hand in psql as the superuser, with `\password episteme_api_reader`, and types the value of the `.env` key `EPISTEME_API_READER_PASSWORD`. The roles are cluster-wide, so do this once. The value never goes into a file, a command line or a log.
+5. **FAERS outcome table** (section 5.12). The forced load builds a whole new FAERS generation (every zip, the de-duplication, the indexes and the signals), not only the signal tables: it is the heaviest job of this rollout. Run it alone. Sample first, then the forced load on each database:
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --sample
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh openfda_faers load --force --reason "build faers_moiety_quarter_outcome after migration 0015"
+```
+
+   Then the same forced load with `PGDATABASE=episteme`. A generation left unfinished before 0015 cannot resume; the forced load starts a new one.
+6. **EPAR offline subset, then the link step** (section 5.10). First the gate's sample pass (the sample load needs the sample staging of the sample extract; the slice holds only documents with a PDF on disk). Then the extract through its wrapper (the dispatcher does not forward `--offline-subset`), then the full load. The wrapper needs `EPISTEME_ACTOR` (section 1.2), as the dispatcher does:
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar extract --sample
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load --sample
+PGDATABASE=episteme_test bash scripts/data/ema/extract_ema_epar.sh --offline-subset
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
+```
+
+   The load wrapper runs the link step. Check the link report `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json`: expect `label_documents` 23 and `linked_documents` 21 (the spec sample of 2026-11-17; its two misses were vaccines). The extract writes about 20,300 `not_downloaded` failed markers; they do not stop the gated load (section 5.10).
+7. **Generated EU medicine records** (section 5.10). They need the `ema` feeds loaded in the same database:
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/ema/build_ema_medicine_records.sh
+PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
+```
+
+   The second load goes through the gated stage on the step 6 pass (the code and rules are unchanged); if the gate reports no valid pass, run `ema_epar load --sample` again first. It also runs the link step again, with the same result.
+8. **AACT `study_references (pmid)` index, once.** Loads from now on build it. On the current release, as `episteme_sys_admin` with no `aact` load running: `CREATE INDEX ON aact_r<id>.study_references (pmid);` (`<id>` is the `release_id` of the `is_latest` `aact` row of `reg_release`).
+9. **`article_mesh_lower_name_idx`, once.** The literature lookup needs it. Build it as section 4.6 says (no graph load running; it blocks writes to `article_mesh`).
+10. **Full-text indexes** (below), one partition at a time, smallest first. Build a partition's `_fts_idx` only after its 0014 null-out and REPACK (section 2.3.1); see the rule under "Order" below.
+11. **Reader MCPg instance** (below), set up by the owner. Before it goes live, do two checks and record the results in the drift log. (a) Run `EXPLAIN (ANALYZE, BUFFERS)` of `graph_neighbours(<pmid>, 'shared_mesh')` for 3 to 5 production PMIDs and record the timings. (b) Through the reader MCPg instance, try `SET statement_timeout = 0` and record whether restricted mode refuses it. Then smoke test: one call of every `episteme_api` function through it.
+
+#### 5.19.2 Full-text index builds
+
+`search_text` searches only the partitions that have a valid `<partition>_fts_idx`; the others get a note and a `missing` row. The index is an expression GIN index over `episteme_api_internal.fts_doc(source, title, abstract, body_text, text_override)`: title and abstract, plus the full stored text for `dailymed` and `ema_epar`. No column stores the vector. `europepmc_preprint` rows live in `article_body_default` and are not indexed.
+
+```bash
+PGDATABASE=episteme_test bash scripts/data/db/fts_index.sh status
+PGDATABASE=episteme_test bash scripts/data/db/fts_index.sh build --partition article_body_ema_epar
+PGDATABASE=episteme_test bash scripts/data/db/fts_index.sh build --partition article_body_ema_epar --yes --data-dir E:/pgdata
+```
+
+- **Order.** `article_body_ema_epar`, `article_body_dailymed`, `article_body_bookshelf`, `article_body_pmc`, `article_body_pubmed`, `article_body_openalex`. Build a partition's `_fts_idx` only after its 0014 null-out and REPACK (section 2.3.1). Done for dailymed, pmc, pubmed and openalex on 2026-11-17 (drift log). A later null-out or REPACK of an indexed partition rebuilds its GIN index under ACCESS EXCLUSIVE, so do it before the FTS build. `dailymed` is the sample of a label build: a label whose text gives a `tsvector` over 1 MB fails the whole build (`string is too long for tsvector`) and leaves an INVALID index.
+- **Without `--yes`** the tool checks and prints the plan and builds nothing.
+- **Free space.** The tool refuses (exit 1) when the index disk has less than 2 x the partition's `pg_table_size` free. It needs the data directory: give `--data-dir E:/pgdata` when the role cannot read `data_directory`.
+- **Quiet database.** The build is `CREATE INDEX CONCURRENTLY` with no lock timeout (`EPISTEME_FTS_LOCK_TIMEOUT_S`, default 0), so a multi-hour build cannot fail in its last wait. Before it starts, the tool refuses (exit 1) when other statements are active in the database, and lists them. Run no long statement during a big build. `--force` builds anyway (it then waits for those statements).
+- **INVALID index.** A failed concurrent build leaves an INVALID index. The tool refuses it and names the fix: `DROP INDEX CONCURRENTLY episteme.<partition>_fts_idx;`, then build again.
+- **After a label index exists.** A load of a label whose text gives a `tsvector` over 1 MB fails at INSERT. A change of `fts_doc` needs every `_fts_idx` dropped and built again.
+- **Cost of common words.** `search_text` ranks only the first `search_scan` matches of each partition (default 5000) and adds the note `ranked within the first <N> matches of <source>`. The reader's `statement_timeout` is the second guard.
+
+#### 5.19.3 Reader MCPg instance
+
+`bash scripts/mcpg-episteme.sh episteme --reader` starts MCPg as `episteme_api_reader` with the password from `EPISTEME_API_READER_PASSWORD`. It forces `MCPG_ACCESS_MODE=restricted`, DDL off, ALTER SYSTEM off and no secondary database, whatever `.env` says. `--admin` and `--reader` together exit 2. Example entry (in `.mcp.json`, or in the user config):
+
+```json
+"mcpg-reader": { "command": "bash", "args": ["scripts/mcpg-episteme.sh", "episteme", "--reader"], "env": {} }
+```
+
+The existing instances are unchanged. Through the reader, call `episteme_api.<function>(...)` with `run_select`; every row carries `source`, `release_id` and `licence`. A `note` row explains a gap or a cut (`truncated: <n> of <total>`); a `missing` row names a source that is absent or not loaded.
+
+#### 5.19.4 Upkeep
+
+- **After a migration that adds an API function, or drops and recreates one:** apply the roles file again as superuser (step 2), then `api_settings sync`. `CREATE OR REPLACE` keeps owners and grants; a drop and create loses them.
+- **After an AACT load:** nothing (section 5.16).
+- **After any other rebuild of a table the functions read, or a change of `LOOKUP_SOURCE_SUBSETS`, an `EPISTEME_API_LIMIT_<FAMILY>` key or `EPISTEME_API_READER_STATEMENT_TIMEOUT_S`:** `api_settings sync`.
+- **After the pg tests on `episteme_test`:** the tests rebuild the schema and re-grant the owner's reads themselves; run `api_settings sync` before you use `episteme_test` through the reader.
+- **New functions for the pipeline:** the roles file revokes EXECUTE from PUBLIC on every function `episteme_sys_admin` creates (default privileges, all schemas). A future function for the pipeline needs an explicit `GRANT EXECUTE`.
+- **Never** apply the roles file during a load or while a FAERS generation is unfinished.
+
 ---
 
 ## 8. Ops cadence
@@ -1862,3 +1978,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v4 | 2026-11-10 | Section 6.4: SFT data and training handoff (Stage A slice, Stage B batches, copy to the GPU host, GGUF export, benchmark runner); ICH licence confirmed by the owner in section 5.17 |
 | v5 | 2026-11-15 | Section 5.18: reference code lists (`refmeta`); migration 0013 |
 | v6 | 2026-11-16 | Section 2.3.1: article text as a virtual column; migration 0014, precheck, null-out and REPACK |
+| v7 | 2026-11-19 | Section 5.19: SQL lookup API (migration 0015, grants files, `api_settings sync`, rollout order, full-text index builds, reader MCPg instance, upkeep); EPAR offline subset, EU label links and medicine records (5.10); FAERS outcome table (5.12); AACT `study_references (pmid)` index and API grants (5.16); DailyMed failure names and the 6 accepted failures (5.8); new keys in 1.2 |

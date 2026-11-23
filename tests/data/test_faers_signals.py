@@ -15,6 +15,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict
 
 from episteme.data.regulatory import load_reg
@@ -97,7 +98,12 @@ def _schema():
             cur.execute("DROP SCHEMA IF EXISTS episteme CASCADE")
             cur.execute((REPO_ROOT / "src/episteme/data/db/extensions.sql").read_text("utf-8"))
             cur.execute((REPO_ROOT / "src/episteme/data/db/schema.sql").read_text("utf-8"))
-            for name in ("0002_container_and_book_parts.sql", "0010_regulatory_sources.sql"):
+            # 0015: faers_moiety_quarter_outcome (with the 0010 FAERS tables, after them).
+            for name in (
+                "0002_container_and_book_parts.sql",
+                "0010_regulatory_sources.sql",
+                "0015_api_layer.sql",
+            ):
                 cur.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         conn.commit()
     finally:
@@ -193,9 +199,11 @@ def _entry(conn, *keys):
     return entry
 
 
-def _report(conn, report_id, day, drugs=(), terms=(), gen=""):
+def _report(conn, report_id, day, drugs=(), terms=(), gen="", serious=(), classed=None):
     """One report. ``drugs``: ``(entry, role, batch_norm)``. ``terms``: term ids. ``gen``: the
-    suffix of a generation's tables, such as ``_gccc``."""
+    suffix of a generation's tables, such as ``_gccc``. ``serious``: the seriousness flags
+    that are true, by column (``serious_death``, ...); each also sets ``serious``.
+    ``classed``: the report's own ``serious`` field, when no flag sets it (NULL by default)."""
     year = day.year if day else None
     with conn.cursor() as cur:
         cur.execute(
@@ -203,6 +211,22 @@ def _report(conn, report_id, day, drugs=(), terms=(), gen=""):
             "source_file) VALUES (%s, %s, %s, 'f')",
             (report_id, year, day),
         )
+        if classed is not None:
+            cur.execute(
+                sql.SQL("UPDATE {t} SET serious = %s WHERE safetyreportid = %s").format(
+                    t=sql.Identifier("episteme", f"faers_report{gen}")
+                ),
+                (classed, report_id),
+            )
+        for flag in serious:
+            cur.execute(
+                sql.SQL(
+                    "UPDATE {t} SET serious = true, {f} = true WHERE safetyreportid = %s"
+                ).format(
+                    t=sql.Identifier("episteme", f"faers_report{gen}"), f=sql.Identifier(flag)
+                ),
+                (report_id,),
+            )
         for seq, (entry, role, batch) in enumerate(drugs, start=1):
             cur.execute(
                 f"INSERT INTO episteme.faers_drug{gen} (safetyreportid, seq, receive_year, role, "
@@ -310,6 +334,87 @@ def test_suspect_and_any_role_counts_differ_as_expected(db):
         db, "SELECT substance_key, reports_suspect, reports_any FROM episteme.faers_event_quarter"
     )
     assert {r[0]: (r[1], r[2]) for r in rows} == {a: (1, 1), b: (0, 1), c: (0, 1)}
+
+
+def _outcomes(conn):
+    return _all(
+        conn,
+        "SELECT substance_key, quarter, seriousness, outcome, reports "
+        "FROM episteme.faers_moiety_quarter_outcome "
+        'ORDER BY 1, 2, outcome COLLATE "C", seriousness COLLATE "C"',
+    )
+
+
+@pytest.mark.pg
+def test_outcome_table_counts_reports_once(db):
+    a = _substance(db, "alpha")
+    salt = _substance(db, "alpha hydrochloride", moiety=a)
+    ea, e_salt = _entry(db, a), _entry(db, salt)
+    t1, t2 = _term(db, "Nausea"), _term(db, "Vomiting")
+    # One report, two reactions, salt and base, one outcome: counted once.
+    _report(
+        db,
+        "1",
+        date(2020, 2, 1),
+        [(ea, "suspect", None), (e_salt, "suspect", None)],
+        [t1, t2],
+        serious=("serious_hospitalization",),
+    )
+    _rebuild(db)
+    assert _outcomes(db) == [(a, Q1_2020, "serious", "HO", 1)]
+    # Two outcomes: once per code. No outcome flag: 'none', in the bucket of the report's
+    # own serious field: NULL is 'unknown', true 'serious', false 'non_serious'.
+    _report(
+        db,
+        "2",
+        date(2020, 2, 1),
+        [(ea, "suspect", None)],
+        [t1],
+        serious=("serious_death", "serious_other"),
+    )
+    _report(db, "3", date(2020, 2, 1), [(ea, "suspect", None)], [t1])
+    _report(db, "4", date(2020, 5, 1), [(ea, "suspect", None)], serious=("serious_death",))
+    _report(db, "5", date(2020, 2, 1), [(ea, "suspect", None)], classed=True)
+    _report(db, "6", date(2020, 2, 1), [(ea, "suspect", None)], classed=False)
+    out = _rebuild(db)
+    assert _outcomes(db) == [
+        (a, Q1_2020, "serious", "DE", 1),
+        (a, Q1_2020, "serious", "HO", 1),
+        (a, Q1_2020, "serious", "OT", 1),
+        (a, Q1_2020, "non_serious", "none", 1),
+        (a, Q1_2020, "serious", "none", 1),
+        (a, Q1_2020, "unknown", "none", 1),
+        (a, Q2_2020, "serious", "DE", 1),
+    ]
+    assert out["reports"] == 6
+    assert set(sg._OUTCOME_CODES.values()) <= {"DE", "LT", "HO", "DS", "CA", "RI", "OT"}
+
+
+@pytest.mark.pg
+def test_outcome_suspect_only(db):
+    a, b, c = _substance(db, "alpha"), _substance(db, "beta"), _substance(db, "gamma")
+    ea, eb, ec = _entry(db, a), _entry(db, b), _entry(db, c)
+    # a suspect; b concomitant; c interacting: only the suspect moiety counts.
+    _report(
+        db,
+        "1",
+        date(2020, 2, 1),
+        [(ea, "suspect", None), (eb, "concomitant", None), (ec, "interacting", None)],
+        serious=("serious_death",),
+    )
+    # b suspect in one report and concomitant in another: the suspect one counts.
+    _report(
+        db,
+        "2",
+        date(2020, 2, 1),
+        [(eb, "suspect", None), (ea, "concomitant", None)],
+        serious=("serious_life_threatening",),
+    )
+    _rebuild(db)
+    assert _outcomes(db) == [
+        (a, Q1_2020, "serious", "DE", 1),
+        (b, Q1_2020, "serious", "LT", 1),
+    ]
 
 
 @pytest.mark.pg
@@ -502,6 +607,30 @@ def test_a_live_signal_table_with_other_privileges_is_refused_before_the_copy(
         db.rollback()
         with db.cursor() as cur:
             cur.execute("REVOKE SELECT ON episteme.faers_pair_quarter FROM PUBLIC")
+        db.commit()
+
+
+@pytest.mark.pg
+def test_a_rebuild_keeps_the_grants_of_the_live_signal_tables(db):
+    """The new signal tables copy the live grants (generation.copy_access), so a grant on
+    every signal table (the SQL lookup API owner's SELECT) survives a rebuild."""
+    with db.cursor() as cur:
+        for t in fg.SIGNAL_TABLES:
+            cur.execute(f"GRANT SELECT ON episteme.{t} TO PUBLIC")
+    db.commit()
+    try:
+        a = _substance(db, "alpha")
+        _report(db, "1", date(2020, 2, 1), [(_entry(db, a), "suspect", None)])
+        _rebuild(db)
+        with db.cursor() as cur:
+            for t in fg.SIGNAL_TABLES:
+                assert (None, "SELECT", False) in fg._grants(cur, t), t
+        db.rollback()
+    finally:
+        db.rollback()
+        with db.cursor() as cur:
+            for t in fg.SIGNAL_TABLES:
+                cur.execute(f"REVOKE SELECT ON episteme.{t} FROM PUBLIC")
         db.commit()
 
 
