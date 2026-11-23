@@ -678,7 +678,7 @@ DO $$
 BEGIN
     IF to_regprocedure('episteme_api_internal.substance_family(bigint)') IS NOT NULL
        AND pg_get_function_result(
-               'episteme_api_internal.substance_family(bigint)'::regprocedure)
+               to_regprocedure('episteme_api_internal.substance_family(bigint)'))
            NOT LIKE '%licence text%' THEN
         DROP FUNCTION IF EXISTS episteme_api.substance_family(bigint);
         DROP FUNCTION episteme_api_internal.substance_family(bigint);
