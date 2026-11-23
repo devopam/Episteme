@@ -53,6 +53,21 @@ def test_0015_is_idempotent(pg_conn):
     assert _one(pg_conn, "SELECT to_regnamespace('episteme_api')") is not None
 
 
+def test_0015_applies_where_substance_family_never_existed(pg_conn):
+    """A database that never had a draft 0015 (production) has no substance_family:
+    the upgrade guard must not cast the missing name to regprocedure."""
+    _apply(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute("DROP FUNCTION IF EXISTS episteme_api.substance_family(bigint)")
+        cur.execute(
+            "DROP FUNCTION IF EXISTS episteme_api_internal.substance_family(bigint) CASCADE"
+        )
+    pg_conn.commit()
+    _apply(pg_conn)
+    sig = "episteme_api_internal.substance_family(bigint)"
+    assert _one(pg_conn, f"SELECT to_regprocedure('{sig}')") is not None
+
+
 def test_claim_row_has_the_shared_columns(pg_conn):
     _apply(pg_conn)
     with pg_conn.cursor() as cur:
