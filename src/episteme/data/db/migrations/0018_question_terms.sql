@@ -462,7 +462,9 @@ $$;
 --     concept, in term_norm order; a term that gives a query already in the OR is
 --     dropped. One note 'terms used: <UI> <name>; query: <tsquery text>'. A descriptor
 --     whose terms are all stop words gives the note 'no searchable words in the terms of
---     <UI>' and is not searched.
+--     <UI>' and is not searched. websearch_to_tsquery reads operator words in a MeSH
+--     term (a standalone "or", a leading "-", quotes): they change the sub-query of that
+--     term. This is inherent to websearch_to_tsquery and accepted.
 --   * Per descriptor and searched source (descriptors outer, sources in c_covered
 --     order): the candidates are the first limit_for('search_scan') matches by
 --     article_id (COLLATE "C": the primary key cannot give that order, so the planner
@@ -470,7 +472,8 @@ $$;
 --     rank input rule of 0016). A full candidate set gives the note 'capped: first <n>
 --     matches by article_id of <source> for <UI>'.
 --   * One row per article: the first descriptor in input order that found it is the
---     relation, and its rank is the score; the other descriptors are named in the note
+--     relation, and its rank under that descriptor is the score (scores are not
+--     comparable across descriptors); the other descriptors are named in the note
 --     'also found by: <UI>, <UI>'. release_id, licence and source_file as search_text.
 --     Ordered by score descending, then article_id (COLLATE "C"); p_limit (NULL = no
 --     limit).
@@ -478,7 +481,9 @@ $$;
 --     checked before each descriptor and source step. When it is spent, no article row
 --     and no capped note is returned: only the source notes, the terms used notes and
 --     one note 'not run: time budget of <n> ms spent before <UI> / <source> finished;
---     search with fewer terms'.
+--     search with fewer terms'. The budget only stops a new step from starting: when
+--     the last step finishes after the deadline, the result is complete and
+--     repeatable, so it is returned.
 --   * work_mem is raised as search_text for the candidate scans and set back before
 --     every return after the change.
 CREATE OR REPLACE FUNCTION episteme_api_internal.search_terms(
