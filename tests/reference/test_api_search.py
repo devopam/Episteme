@@ -313,10 +313,10 @@ def test_label_rank_uses_leading_text_match_uses_all(db):
         api_settings.sync(db)
 
 
-def test_rank_uses_first_chars_for_every_source(db):
-    """0017: every source ranks on the first search_rank_chars characters of body_text and
+def test_rank_uses_first_chars_for_labels(db):
+    """The label sources rank on the first search_rank_chars characters of body_text and
     text_override. A word after that point still matches (the index sees all), score 0.
-    pmc and bookshelf do not index body_text, so their title/abstract (not cut) decide."""
+    Other sources pass the raw columns (fts_doc ignores them): see the non-label test."""
     early = "zymoquartz " + "filler " * 40
     late = "filler " * 40 + "zymoquartz"
     _body(

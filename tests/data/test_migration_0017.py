@@ -113,8 +113,10 @@ def test_search_text_0017_body():
     body = _functions(_MIGRATION)["episteme_api_internal.search_text"]
     assert "limit_for('search_work_mem_mb')" in body
     assert "set_config('work_mem', v_old_wm, true)" in body
-    assert "CASE WHEN v_src IN" not in body  # the rank input is short for every source
+    # Short rank input for the labels only; other sources pass the raw columns (no detoast).
+    assert "CASE WHEN v_src IN ('dailymed', 'ema_epar')" in body
     assert "pg_catalog.left(b.body_text, v_rank_chars)" in body
+    assert "b.abstract, b.body_text, b.text_override)" in body
     assert "'partial: time budget of %s ms spent; not searched: %s'" in body
     assert "statement_timestamp()" in body and "limit_for('time_budget_ms')" in body
     # Every RETURN after the work_mem change comes after the restore.

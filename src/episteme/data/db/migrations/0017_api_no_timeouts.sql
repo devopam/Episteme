@@ -488,12 +488,14 @@ $$;
 --     gives that many, a note says 'ranked within the first <N> matches of <source>'.
 -- The match uses the index expression exactly (fts_index.fts_expression, a test checks
 -- the text), so the planner uses the index of each partition.
--- Rank input (0016, spec decision 6; 0017 for every source): the rank reads only the
--- first limit_for('search_rank_chars') characters of body_text and of text_override,
--- so a long text is not detoasted whole for each candidate. A row whose query word is
--- only after that point still matches, with score 0. Contract change in 0017: scores
--- of long texts move (the limit is 2000 characters, was 10000, and now applies to
--- every source).
+-- Rank input (0016, spec decision 6): for the label sources (dailymed, ema_epar) the
+-- rank reads only the first limit_for('search_rank_chars') characters of body_text and
+-- of text_override, so a long label is not detoasted whole for each candidate. A label
+-- whose query word is only after that point still matches, with score 0. Every other
+-- source ranks on the full fts_doc, as in 0015: fts_doc reads body_text and
+-- text_override only for the label sources, so the raw columns are passed and not
+-- detoasted. Contract change in 0017: scores of long labels move (the limit is 2000
+-- characters, was 10000).
 -- Exact bitmap (0017): work_mem is raised to limit_for('search_work_mem_mb') MB for the
 -- candidate scans, so a bitmap heap scan for a common word stays exact (not lossy
 -- per page); the old value is set back before every return after the change.
@@ -622,9 +624,12 @@ BEGIN
         SELECT pg_catalog.count(*)::int,
                pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
                    pg_catalog.ts_rank_cd(
-                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
-                           pg_catalog.left(b.body_text, v_rank_chars),
-                           pg_catalog.left(b.text_override, v_rank_chars)),
+                       CASE WHEN v_src IN ('dailymed', 'ema_epar')
+                            THEN episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
+                                     pg_catalog.left(b.body_text, v_rank_chars),
+                                     pg_catalog.left(b.text_override, v_rank_chars))
+                            ELSE episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override)
+                       END,
                        v_q)::real,
                    'search', NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
           INTO v_n, v_part
