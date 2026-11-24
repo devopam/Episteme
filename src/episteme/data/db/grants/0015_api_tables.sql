@@ -69,7 +69,7 @@ DECLARE
         'article_body', 'article_chemicals', 'article_cites', 'article_mesh', 'articles',
         'code_current', 'faers_event_quarter', 'faers_moiety_quarter',
         'faers_moiety_quarter_outcome', 'faers_quarter_totals', 'faers_term',
-        'label_section', 'label_substance', 'mesh_tree', 'reg_record', 'reg_release',
+        'label_section', 'label_substance', 'mesh_qualifier', 'mesh_tree', 'reg_record', 'reg_release',
         'substance', 'substance_xref'];
     c_faers_acl constant text[] := ARRAY[
         'faers_report', 'faers_pair_quarter', 'faers_event_quarter', 'faers_quarter_totals',

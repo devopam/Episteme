@@ -298,7 +298,19 @@ API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
     # Not a row cap: search_text ranks a label (dailymed, ema_epar) on the title, the
     # abstract and the first this-many characters of the label text (the match is the
     # whole text).
-    "search_rank_chars": (10000, 10000),
+    "search_rank_chars": (2000, 2000),
+    # Not a row cap: literature_by_mesh reads the article_mesh rows of a topic's
+    # descriptor set exactly only when at most this many rows carry them; a larger set
+    # is probed per year window instead.
+    "literature_topic_scan": (3000000, 3000000),
+    # Not a row cap: the qualifier check of literature_by_mesh handles this many
+    # candidate PMIDs per chunk and tests the deadline between chunks.
+    "literature_topic_chunk": (500, 500),
+    # Not a row cap: the time (milliseconds) a lookup function may spend before it
+    # returns the rows found so far with a "partial:" note.
+    "time_budget_ms": (20000, 20000),
+    # Not a row cap: work_mem (megabytes) that search_text sets for its own call.
+    "search_work_mem_mb": (256, 256),
 }
 _API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
 

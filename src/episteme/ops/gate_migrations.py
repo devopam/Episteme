@@ -93,6 +93,7 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme.faers_moiety_quarter_outcome",
     ],
     "0016_api_perf.sql": ["function:episteme_api_internal.year_windows(int, int, int, int)"],
+    "0017_api_no_timeouts.sql": ["table:episteme.mesh_qualifier"],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {

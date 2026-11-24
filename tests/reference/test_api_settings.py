@@ -35,7 +35,11 @@ def test_api_limits_defaults(clean):
         "graph_scan": (20000, 20000),
         "search_scan": (5000, 5000),
         "literature_window": (5, 5),
-        "search_rank_chars": (10000, 10000),
+        "search_rank_chars": (2000, 2000),
+        "literature_topic_scan": (3000000, 3000000),
+        "literature_topic_chunk": (500, 500),
+        "time_budget_ms": (20000, 20000),
+        "search_work_mem_mb": (256, 256),
     }
 
 

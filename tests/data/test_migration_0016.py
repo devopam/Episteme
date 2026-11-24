@@ -62,8 +62,10 @@ def test_0016_seeded_limits_equal_config():
         for m in re.finditer(r"\('(\w+)',\s*(\d+),\s*(\d+)\)", block.group(1))
     }
     assert set(seeded) == {"literature_window", "search_rank_chars"}
+    # 0017 lowers search_rank_chars to 2000; 0016 seeds the earlier value.
+    expected = {**config.API_RESULT_LIMITS, "search_rank_chars": (10000, 10000)}
     for family, values in seeded.items():
-        assert values == config.API_RESULT_LIMITS[family], family
+        assert values == expected[family], family
 
 
 def test_0016_functions_set_search_path_and_definer():
