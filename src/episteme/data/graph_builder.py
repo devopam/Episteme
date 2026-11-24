@@ -716,15 +716,22 @@ def build(
                     (ui, term, term_norm(term), kind, pref, cui, rel, release, src_file)
                     for ui, term, kind, pref, cui, rel in _parse_mesh_terms(xml_path)
                 ]
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM episteme.mesh_term")
-                    with cur.copy(
-                        "COPY episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
-                        "is_preferred, concept_ui, concept_relation, mesh_release, "
-                        "source_file) FROM STDIN"
-                    ) as cp:
-                        for r in term_rows:
-                            cp.write_row(r)
+                if not term_rows:
+                    print(
+                        f"WARNING: graph_builder mesh phase: {xml_path} gave no MeSH terms; "
+                        "mesh_term left unchanged",
+                        file=sys.stderr,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM episteme.mesh_term")
+                        with cur.copy(
+                            "COPY episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
+                            "is_preferred, concept_ui, concept_relation, mesh_release, "
+                            "source_file) FROM STDIN"
+                        ) as cp:
+                            for r in term_rows:
+                                cp.write_row(r)
 
             audit_trail.record(
                 "graph_commit",

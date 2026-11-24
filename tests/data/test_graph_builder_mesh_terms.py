@@ -178,3 +178,61 @@ def test_build_warns_when_raw_file_is_missing(pg_conn, tmp_path, capsys):
         f"WARNING: graph_builder mesh phase: raw file for desc2026.xml not found under {raw}; "
         "set EPISTEME_RAW_ROOT"
     ) in capsys.readouterr().err
+
+
+def test_parse_mesh_terms_relations(tmp_path):
+    xml = (
+        "<DescriptorRecordSet><DescriptorRecord><DescriptorUI>D000001</DescriptorUI>"
+        "<DescriptorName><String>Alpha</String></DescriptorName><ConceptList>"
+        '<Concept PreferredConceptYN="Y"><ConceptUI>M1</ConceptUI><ConceptRelationList>'
+        '<ConceptRelation RelationName="BRD"><Concept1UI>M1</Concept1UI>'
+        "<Concept2UI>M2</Concept2UI></ConceptRelation>"
+        '<ConceptRelation RelationName="REL"><Concept1UI>M1</Concept1UI>'
+        "<Concept2UI>M3</Concept2UI></ConceptRelation></ConceptRelationList>"
+        f"<TermList>{_term('T1', 'Alpha')}</TermList></Concept>"
+        f'<Concept PreferredConceptYN="N"><ConceptUI>M2</ConceptUI><TermList>{_term("T2", "Beta")}'
+        "</TermList></Concept>"
+        f'<Concept PreferredConceptYN="N"><ConceptUI>M3</ConceptUI><TermList>{_term("T3", "Gamma")}'
+        "</TermList></Concept>"
+        f'<Concept PreferredConceptYN="N"><ConceptUI>M4</ConceptUI><TermList>{_term("T4", "Delta")}'
+        "</TermList></Concept>"
+        "</ConceptList></DescriptorRecord></DescriptorRecordSet>"
+    )
+    path = tmp_path / "desc2026.xml"
+    path.write_text(xml, encoding="utf-8")
+    rows = {t: rel for _ui, t, _k, _p, _c, rel in _parse_mesh_terms(path)}
+    assert rows == {"Alpha": None, "Beta": "BRD", "Gamma": "REL", "Delta": None}
+
+
+@pytest.mark.pg
+def test_build_keeps_mesh_term_when_parse_gives_no_terms(pg_conn, tmp_path, capsys, monkeypatch):
+    from episteme.data import graph_builder
+    from episteme.data.graph_builder import build
+
+    from ._graph_schema import setup_graph_schema
+
+    setup_graph_schema(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(MIGRATION_0017.read_text(encoding="utf-8"))
+        cur.execute(MIGRATION_0018.read_text(encoding="utf-8"))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "desc2026.xml").write_text(_XML, encoding="utf-8")
+    _seed(pg_conn, ["desc2026.xml"])
+    build(pg_conn, source="mesh", raw_dir=raw, run_id="k1")
+    pg_conn.commit()
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.mesh_term")
+        before = cur.fetchone()[0]
+    assert before == len(_EXPECTED)
+    capsys.readouterr()
+
+    monkeypatch.setattr(graph_builder, "_parse_mesh_terms", lambda _p: [])
+    res = build(pg_conn, source="mesh", raw_dir=raw, run_id="k2")
+    pg_conn.commit()
+    assert res["mesh_term"] == 0
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM episteme.mesh_term")
+        assert cur.fetchone()[0] == before
+    err = capsys.readouterr().err
+    assert "gave no MeSH terms; mesh_term left unchanged" in err
