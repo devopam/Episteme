@@ -16,7 +16,7 @@ When ``mesh_qualifier`` is missing or empty, every topic can be a qualifier name
 
 The function has a time budget (result limit family ``time_budget_ms``). When it is
 spent, the function returns the records found so far and one note that starts with
-``partial: time budget of <n> ms spent;`` and names the years not searched.
+``partial: time budget of <n> ms spent;`` and names the years not fully searched.
 
 Newest first: by the publication year of the PMID's ``pubmed`` row in ``articles``
 (other sources, such as a Europe PMC manuscript with its deposit year, do not count),

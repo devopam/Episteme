@@ -465,7 +465,7 @@ def test_windows_cut_ties_and_year_zero(db):
 # 0017: topic kinds (descriptor, qualifier, both, neither), the descriptor set, the
 # time budget
 # ---------------------------------------------------------------------------
-_NEITHER = "topic No Such Thing is not a MeSH descriptor or qualifier name"
+_NEITHER = "topic No Such Thing is not a MeSH descriptor or qualifier name in the indexed records"
 _QUALIFIER_ONLY = (
     "topic adverse effects is not a MeSH descriptor name in the indexed records; "
     "matched on qualifier names only"
@@ -592,7 +592,7 @@ def test_budget_spent_gives_partial_note(db, topic):
     partial = [n for n in _notes(rows) if n.startswith("partial:")]
     assert len(partial) == 1, _notes(rows)
     assert partial[0].startswith("partial: time budget of 1 ms spent; ")
-    assert partial[0].endswith(" not searched")
+    assert partial[0].endswith((" not fully searched", " not searched"))
     ids = _ids(rows)
     assert len(ids) == len(set(ids))
     kinds = [r[0] for r in rows]

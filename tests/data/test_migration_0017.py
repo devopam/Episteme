@@ -101,12 +101,22 @@ def test_0017_functions_set_search_path_and_definer():
 
 def test_literature_by_mesh_0017_note_texts_and_deadline():
     body = _functions(_MIGRATION)["episteme_api_internal.literature_by_mesh"]
-    assert "'topic %s is not a MeSH descriptor or qualifier name'" in body
+    assert "'topic %s is not a MeSH descriptor or qualifier name in the indexed records'" in body
     assert "'partial: time budget of %s ms spent; %s'" in body
-    assert "'years from %s down not searched'" in body
+    assert "'years from %s down not fully searched'" in body
     assert "'records with an unknown year not searched'" in body
     assert "statement_timestamp() + make_interval(secs => v_budget / 1000.0)" in body
     assert "limit_for('time_budget_ms')" in body
+
+
+def test_literature_functions_0017_force_custom_plans():
+    funcs = _functions(_MIGRATION)
+    for name in (
+        "episteme_api_internal.literature_by_mesh",
+        "episteme_api_internal.literature_topic_keep",
+    ):
+        header = funcs[name].split("$$", 1)[0]
+        assert "SET plan_cache_mode = force_custom_plan" in header, name
 
 
 def test_search_text_0017_body():

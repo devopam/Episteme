@@ -204,7 +204,7 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0014_article_text_virtual.sql` | `article_body.text` becomes the stored column `text_override`; a new VIRTUAL column `text` reads the override or the join of `title`, `abstract` and `body_text` | Metadata only: no table rewrite, it takes seconds. It holds ACCESS EXCLUSIVE on `article_body` for a short time: apply it with no load running. Run `precheck --all` first (section 2.3.1). Idempotent, one transaction, `lock_timeout = '60s'` |
 | `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
 | `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the helper function `episteme_api_internal.year_windows` and seeds the result limits `literature_window` and `search_rank_chars` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions no longer fail before it, because 0016 seeds the two new families (`literature_window` 5, `search_rank_chars` 10000). The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
-| `0017_api_no_timeouts.sql` | Second performance follow-up of the SQL lookup API: no call may pass the reader timeout. Replaces `episteme_api_internal.literature_by_mesh` and `search_text`; adds the helper `literature_topic_keep`; creates the table `episteme.mesh_qualifier` (the MeSH qualifier names); seeds the result limits `literature_topic_scan`, `literature_topic_chunk`, `time_budget_ms` and `search_work_mem_mb`; sets `search_rank_chars` to 2000 where the row still holds the 0016 seed | Idempotent, one transaction. Light. Apply it to `episteme_test`, then to `episteme`. Run `python -m episteme.reference.api_settings sync` at once after it, on each database. Until the sync runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner. Then run `run_pipeline.sh mesh graph` on `episteme` to fill `mesh_qualifier` (section 5.19.1, step 13) |
+| `0017_api_no_timeouts.sql` | Second performance follow-up of the SQL lookup API: no call may pass the reader timeout. Replaces `episteme_api_internal.literature_by_mesh` and `search_text`; adds the helper `literature_topic_keep`; creates the table `episteme.mesh_qualifier` (the MeSH qualifier names); seeds the result limits `literature_topic_scan`, `literature_topic_chunk`, `time_budget_ms` and `search_work_mem_mb`; sets `search_rank_chars` to 2000 where the row still holds the 0016 seed | Idempotent, one transaction. Light. Apply it to `episteme_test`, then to `episteme`. Run the roles file as superuser after it (section 5.19.1, step 13.2): no other step re-runs it, and the new helper `literature_topic_keep` stays owned by `episteme_sys_admin` until it runs. Then run `python -m episteme.reference.api_settings sync` at once, on each database. Until the sync runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner. Then run `run_pipeline.sh mesh graph` on `episteme` to fill `mesh_qualifier` (section 5.19.1, step 13.4) |
 
 Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0017, apply those sixteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
@@ -1921,22 +1921,45 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
        Pass: each call takes less than 10 s. Report every time. Report a miss with its time.
     6. Run `VACUUM (ANALYZE) episteme.article_mesh`. Then run `EXPLAIN (ANALYZE, BUFFERS)` for one literature window probe and for the `shared_mesh` hit step. Confirm an Index Only Scan with Heap Fetches near 0.
 
-13. **Migration 0017 (no timeouts).** Do one action at a time, first on `episteme_test`, then on `episteme`. Run no graph load at the same time. Spec: `docs/superpowers/specs/2026-11-24-api-no-timeouts-design.md`.
+13. **Migration 0017 (no timeouts).** Do one action at a time. Run no graph load at the same time. Steps 1 to 3 go first on `episteme_test`, then on `episteme`. `episteme.mesh_qualifier` is filled only on `episteme` (steps 4 to 8): `episteme_test` gets its rows from the tests. Spec: `docs/superpowers/specs/2026-11-24-api-no-timeouts-design.md`.
     1. Apply 0017 as `episteme_sys_admin`, the same way as step 1, with `for f in 0017_api_no_timeouts`, on `episteme_test`, then on `episteme`.
-    2. Run `api_settings sync` (step 3) on `episteme_test`, then on `episteme`. Do this at once. Until it runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner, and the sync applies the grants. Expect `17 limits`.
-    3. Run `PGDATABASE=episteme bash scripts/data/run_pipeline.sh mesh graph`. It fills `episteme.mesh_qualifier` from the MeSH descriptor file (desc2026).
-    4. Check the table: `SELECT count(*) FROM episteme.mesh_qualifier;` Expect 76 for desc2026. While the table is empty, every topic counts as a possible qualifier name (the 0016 behaviour).
-    5. Run `EXPLAIN (ANALYZE, BUFFERS)` of the fenced topic-set read, through the reader MCPg instance. Expect an Index Only Scan on `article_mesh_descriptor_ui_idx` and a Hash Join with the hits.
-    6. Run the acceptance check through the reader MCPg instance (`scripts/mcpg-episteme.sh episteme --reader`), on a fresh connection. Use substances not used in prototyping. Make these calls and record the time of each one:
+    2. Run the roles file as superuser (the command of step 2 of this section) on `episteme_test`, then on `episteme`. Do it after step 1 and before the sync. No other step re-runs the roles file. Until it runs, the new helper `episteme_api_internal.literature_topic_keep` stays owned by `episteme_sys_admin`, and the roles file moves it to `episteme_api_owner`.
+    3. Run `api_settings sync` (step 3 of this section) on `episteme_test`, then on `episteme`. Do this at once. Until it runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner, and the sync applies the grants. Expect `17 limits`.
+    4. Run `PGDATABASE=episteme bash scripts/data/run_pipeline.sh mesh graph`. It fills `episteme.mesh_qualifier` from the MeSH descriptor file (desc2026).
+    5. Run `ANALYZE episteme.mesh_qualifier` right after the fill.
+    6. Check the table: `SELECT count(*) FROM episteme.mesh_qualifier;` Expect 76 for desc2026. While the table is empty, every topic counts as a possible qualifier name (the 0016 behaviour).
+    7. Check the plan of the fenced topic-set read. The reader has no `USAGE` on schema `episteme`, so do not use the reader MCPg instance. Run it as `episteme_sys_admin` on `episteme`, through the admin MCPg instance or the psycopg path of this runbook. The functions force custom plans (`SET plan_cache_mode = force_custom_plan`), so a custom plan run by hand is representative. This example uses warfarin (substance 37523, hits from the descriptor `warfarin`) and the topic `Neoplasms` (descriptor `D009369`). The descriptor set comes from `mesh_tree`, as in the function:
+
+        ```sql
+        EXPLAIN (ANALYZE, BUFFERS)
+        SELECT count(*)
+          FROM (SELECT m.pmid
+                  FROM episteme.article_mesh m
+                 WHERE m.descriptor_ui = ANY (ARRAY(
+                       SELECT t.descriptor_ui
+                         FROM episteme.mesh_tree p
+                         JOIN episteme.mesh_tree t
+                           ON t.tree_number = p.tree_number
+                           OR (t.tree_number ~>=~ (p.tree_number || '.')
+                               AND t.tree_number ~<~ (p.tree_number || '/'))
+                        WHERE p.descriptor_ui = 'D009369'))
+                 LIMIT 3000001) d
+          JOIN (SELECT DISTINCT m.pmid
+                  FROM episteme.article_mesh m
+                 WHERE lower(m.descriptor_name) = 'warfarin') h
+            ON h.pmid = d.pmid;
+        ```
+
+        Pass: the plan shows an Index Only Scan on `article_mesh_descriptor_ui_idx` under a Hash Join, with Heap Fetches near 0. A Bitmap Heap Scan, a Seq Scan or a Nested Loop over `article_mesh` is a miss: report it.
+    8. Run the acceptance check through the reader MCPg instance (`scripts/mcpg-episteme.sh episteme --reader`), on a fresh connection. Use substances not used in prototyping. Make these calls and record the time of each one:
         - `literature_by_mesh` for warfarin (37523) with a rare descriptor topic.
         - `literature_by_mesh` for atorvastatin (67435) with the topic `Neoplasms`.
         - `literature_by_mesh` for warfarin with the rare qualifier `supply & distribution`.
         - `literature_by_mesh` with one topic that is neither a descriptor name nor a qualifier name. Expect one note row and no article rows.
         - `search_text('liver')` and `search_text('patients')` with the default sources.
-        - The list of step 12, point 5.
+        - The list of step 12.5.
 
        Pass: each call takes less than 10 s. Hard limit: no timeout. A call that returns a `partial:` note is reported with its time.
-    7. Run `ANALYZE episteme.mesh_qualifier` after the fill.
 
 #### 5.19.2 Full-text index builds
 
@@ -2042,4 +2065,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v6 | 2026-11-16 | Section 2.3.1: article text as a virtual column; migration 0014, precheck, null-out and REPACK |
 | v7 | 2026-11-19 | Section 5.19: SQL lookup API (migration 0015, grants files, `api_settings sync`, rollout order, full-text index builds, reader MCPg instance, upkeep); EPAR offline subset, EU label links and medicine records (5.10); FAERS outcome table (5.12); AACT `study_references (pmid)` index and API grants (5.16); DailyMed failure names and the 6 accepted failures (5.8); new keys in 1.2 |
 | v8 | 2026-11-24 | Section 5.19: migration 0016 (API performance follow-up), rollout step 12, covering indexes on `article_mesh` (5.19.5), upkeep (`VACUUM (ANALYZE)`, `ANALYZE`); corrections from the 0015 rollout: EU label links 20, `not_downloaded` about 4,600, shared load markers need `--force --reason`, `ema` feeds first (5.10); sections 2.3 and 4.6 updated |
-| v9 | 2026-11-24 | Migration 0017 (API no timeouts): migration table row, rollout step 13, `ANALYZE` after each index swap (5.19.5), 17 limit families; sections 2.3 and 4.6 updated |
+| v9 | 2026-11-24 | Migration 0017 (API no timeouts): migration table row, rollout step 13, `ANALYZE` after each index swap (5.19.5), 17 limit families; sections 2.3 (table row and apply loop), 5.19.1 and 5.19.5 updated |

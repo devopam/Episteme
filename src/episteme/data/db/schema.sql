@@ -1673,12 +1673,15 @@ $$;
 -- rows kept so far, then one row (NULL, the newest year not checked, true), and stops.
 -- Every kept row has stopped = false. The check reads article_mesh heap rows per PMID
 -- (qualifiers is in no index), so the chunks keep its cost inside the time budget.
+-- plan_cache_mode = force_custom_plan: plpgsql may switch to a generic plan after five
+-- executions, and a generic plan has no size for the PMID arrays.
 CREATE OR REPLACE FUNCTION episteme_api_internal.literature_topic_keep(
     p_pmid text[], p_year int[], p_ok text[], p_topic text, p_chunk int,
     p_deadline timestamptz)
 RETURNS TABLE (pmid text, year int, stopped boolean)
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
     v_chunk  int := greatest(coalesce(p_chunk, 1), 1);
@@ -1743,7 +1746,7 @@ $$;
 --     qualifier name (the 0016 behaviour).
 --   - A topic that names no descriptor gives a note row and the qualifier match only.
 --   - Neither (mesh_qualifier filled): one note row 'topic <t> is not a MeSH descriptor
---     or qualifier name', no article rows and no hit scan.
+--     or qualifier name in the indexed records', no article rows and no hit scan.
 -- Year: the largest year of the PMID's 'pubmed' rows in articles (0 or a year below 1 =
 -- unknown); a year bound applies to that largest year. One 'pubmed' row per
 -- PMID is expected (articles.id = 'pubmed:<pmid>'), so in practice it is the PMID's
@@ -1786,8 +1789,9 @@ $$;
 --      limit_for('time_budget_ms'). It is checked at the top of each window after the
 --      first (the unknown-year step included) and before each qualifier chunk. When it
 --      is spent, the function stops, keeps the rows it holds and returns one note:
---      'partial: time budget of <n> ms spent; years from <y> down not searched' (<y> =
---      the newest year not fully searched) or '...; records with an unknown year not
+--      'partial: time budget of <n> ms spent; years from <y> down not fully searched' (<y> =
+--      the newest year not fully searched; rows of older years that the descriptor side
+--      already kept may still be returned) or '...; records with an unknown year not
 --      searched'.
 --   5. Sort, cut at p_limit, then descriptors and source_file for the kept rows only.
 -- Note rows come before the article rows.
@@ -1802,12 +1806,19 @@ $$;
 -- (group pubmed_graph); see the runbook for the production build.
 -- No substance: a note row and a missing row for 'article_mesh'; no article_mesh,
 -- articles or article_mesh row: the missing row only.
+-- The time budget counts from statement_timestamp(), so it is per SQL statement (one MCP
+-- call is one statement). The first window, the hit step and the fenced topic read run
+-- without a budget check.
+-- plan_cache_mode = force_custom_plan: plpgsql may switch to a generic plan after five
+-- executions, and the generic plan has no size for unnest(v_pmids), so the fenced topic
+-- read could lose its index-only scan and hash join shape.
 CREATE OR REPLACE FUNCTION episteme_api_internal.literature_by_mesh(
     p_substance_key bigint, p_topic text, p_from_year int DEFAULT NULL,
     p_to_year int DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
     v_keys     bigint[];
@@ -1898,7 +1909,7 @@ BEGIN
          LIMIT 1;
         IF v_ui IS NULL AND NOT v_qual THEN
             v_row.kind := 'note';
-            v_row.note := format('topic %s is not a MeSH descriptor or qualifier name',
+            v_row.note := format('topic %s is not a MeSH descriptor or qualifier name in the indexed records',
                                  btrim(p_topic));
             RETURN NEXT v_row;
             RETURN;
@@ -1987,7 +1998,7 @@ BEGIN
             IF w.lo IS NULL THEN
                 v_partial := 'records with an unknown year not searched';
             ELSE
-                v_partial := format('years from %s down not searched', w.hi);
+                v_partial := format('years from %s down not fully searched', w.hi);
             END IF;
             EXIT;
         END IF;
@@ -2066,7 +2077,7 @@ BEGIN
             IF w.lo IS NULL THEN
                 v_partial := 'records with an unknown year not searched';
             ELSE
-                v_partial := format('years from %s down not searched', v_stop_y);
+                v_partial := format('years from %s down not fully searched', v_stop_y);
             END IF;
             EXIT;
         END IF;

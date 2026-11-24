@@ -37,7 +37,7 @@ Topic set forms measured on aspirin (50,617 hits):
    - When `mesh_qualifier` is missing or empty, every topic counts as a possible qualifier
      (the 0016 behaviour).
    - **Neither** (and `mesh_qualifier` is filled): one note row
-     `topic <t> is not a MeSH descriptor or qualifier name` and no article rows. No scan.
+     `topic <t> is not a MeSH descriptor or qualifier name in the indexed records` and no article rows. No scan.
      (0016 scanned every hit and returned nothing.)
 2. **Descriptor side of a topic: one fenced set read.** Read the PMIDs of the descriptor set
    with an index-only scan of `(descriptor_ui, pmid)`, at most `literature_topic_scan + 1`
@@ -57,7 +57,7 @@ Topic set forms measured on aspirin (50,617 hits):
    checks `clock_timestamp()` against the call start between windows and between qualifier
    chunks; `search_text` checks it before each source. When the budget is spent, the function
    stops, returns what it has (sorted, cut, as usual) and adds one note:
-   - literature: `partial: time budget of <n> ms spent; years from <y> down not searched`
+   - literature: `partial: time budget of <n> ms spent; years from <y> down not fully searched`
      (`<y>` = the newest year not fully searched);
    - search: `partial: time budget of <n> ms spent; not searched: <sources>`.
    A count cap cannot give this guarantee: the same probe costs 1.25 s warm and 24 s cold.
