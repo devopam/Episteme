@@ -182,7 +182,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0015 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0016 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -203,11 +203,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0013_reference_codes.sql` | `episteme.code_system`, `episteme.code` and the view `episteme.code_current` (one current release per code system; a non-empty licence notice is required) | Required before `refmeta load` (section 5.18). Idempotent, one transaction, `lock_timeout = '60s'`. It does not lock `articles`. Apply it to `episteme_test` before the first test load |
 | `0014_article_text_virtual.sql` | `article_body.text` becomes the stored column `text_override`; a new VIRTUAL column `text` reads the override or the join of `title`, `abstract` and `body_text` | Metadata only: no table rewrite, it takes seconds. It holds ACCESS EXCLUSIVE on `article_body` for a short time: apply it with no load running. Run `precheck --all` first (section 2.3.1). Idempotent, one transaction, `lock_timeout = '60s'` |
 | `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
+| `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the helper function `episteme_api_internal.year_windows` and seeds the result limits `literature_window` and `search_rank_chars` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions no longer fail before it, because 0016 seeds the two new families (`literature_window` 5, `search_rank_chars` 10000). The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0015, apply those fourteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0016, apply those fifteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer 0016_api_perf; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t|t|t|t`; the fourth column is 0004's `articles_id_idx`, the fifth is 0005's table, the sixth is 0011's `label_section.ordinal` the seventh is 0012's `articles_openalex` and the eighth is 0014's virtual `article_body.text`):
@@ -240,7 +241,7 @@ Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULL
 
 After 0014, `precheck` is for information only.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0015 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0016 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -459,7 +460,7 @@ Index groups (`episteme.data.db.bulk_indexes.INDEX_GROUPS`):
 | `pubmed_graph` | `<source> graph --bulk` | the 15 secondary indexes of `article_mesh`, `article_cites`, `article_comments`, `article_chemicals`, `article_keywords`, `article_authors` and `article_facets` (two each: the pmid or src_pmid index plus one lookup index; `article_mesh` has a third, `article_mesh_lower_name_idx`, see below) |
 
 - **Never `openalex load --bulk`.** The `openalex` load skips works that `pubmed` or `pmc` hold by probing `articles_pmid_idx`, `articles_pmcid_idx` and the `lower(doi)` indexes of migration 0012. `run_pipeline.sh openalex load --bulk` exits 2 before any index drop, and the loader refuses a shard while any of these indexes is missing (section 5.2, OpenAlex load).
-- **`article_mesh_lower_name_idx` is built by hand, once.** No migration creates it (`article_mesh` is partitioned and holds about 345 million rows; a plain `CREATE INDEX` in a migration transaction blocks writes for hours). The literature lookup (`literature_by_mesh`, migration 0015) needs it, and `graph --bulk` needs it to exist (`drop` stops with `covered index(es) of group 'pubmed_graph' not found` otherwise). Build it once as `episteme_sys_admin`, with no graph load running: `CREATE INDEX article_mesh_lower_name_idx ON episteme.article_mesh USING btree (lower(descriptor_name));`. `rebuild` runs the same statement for this index (saved definition `CREATE INDEX ... ON ONLY ...` turned into `ON`); it has no `CONCURRENTLY`, so it blocks writes to `article_mesh` while it runs. After that, `--bulk` drops and re-creates it with the other `pubmed_graph` indexes.
+- **The two covering indexes of `article_mesh` are built by hand, once.** No migration creates them (`article_mesh` is partitioned and holds about 345 million rows; a plain `CREATE INDEX` in a migration transaction blocks writes for hours). The literature lookup (`literature_by_mesh`, migrations 0015 and 0016) and `graph_neighbours` need them as index-only scans. `graph --bulk` needs them to exist (`drop` stops with `covered index(es) of group 'pubmed_graph' not found` otherwise). The definitions are `article_mesh_lower_name_idx ON episteme.article_mesh (lower(descriptor_name)) INCLUDE (descriptor_name, pmid)` and `article_mesh_descriptor_ui_idx ON episteme.article_mesh (descriptor_ui, pmid)`. Build or swap them as section 5.19.5 says (no graph load running). `rebuild` runs the saved definition (`CREATE INDEX ... ON ONLY ...` turned into `ON`); it has no `CONCURRENTLY`, so it blocks writes to `article_mesh` while it runs. After that, `--bulk` drops and re-creates both with the other `pubmed_graph` indexes. After `graph --bulk`, run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).
 - **`graph --bulk` maps every source to `pubmed_graph`.** It is meant for `pubmed` (and `pmc`, which also writes `article_mesh` and `article_cites`). `mesh graph --bulk` would only waste an index rebuild.
 - **Kept:** every `<table>_source_file_idx` (the per-file deletes use them), `articles_id_idx` and `articles_retrieved_at_brin`.
 - **While the stage runs**, lookups on the affected tables are slow. Run nothing else against them.
@@ -1510,7 +1511,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 - **Held buckets.** A known document whose file is missing holds its bucket: it is not written again and its row is not dropped. So does a known document that had a row and changed, when its new file cannot be read: the bucket keeps its parts and its marker, is listed in `held_buckets`, and the next run tries again.
 - **Size cap at download.** A PDF over `EPISTEME_EPAR_MAX_BYTES` is stopped as soon as its declared length or the stream passes the cap. The partial file is deleted, the document gets a failed marker (`over_limit`), it is not retried, and the other documents go on.
 - **SmPC sections.** The extract reads the numbered headings of Annex I (the SmPC) of each `product-information` document, with the start of Annex II as the end of Annex I, and writes them to `label_section` through the label sidecar of the part. One row per section per product; a PDF with several SmPCs gives one row per section per product, with `ordinal` and `product` set. The code is the LOINC code of the DailyMed subject where one exists (for example 4.1 is `34067-9`), else `smpc:<number>`. A document where no heading is found gets no section rows and is counted. The section rule version is in the fingerprint of `product-information` documents only, so a rule change re-extracts them and no other type. See section 5.16 for the counts.
-- **Offline subset (no download).** `--offline-subset` extracts only the PDFs already on disk (35 of the 20,342 documents the feed lists on 2026-11-17: 23 product information, 9 assessment reports, 3 RMP summaries). No EMA request is made. The flag changes no guard: an absent PDF is counted as `not_downloaded`, as without the flag. It only records `"offline_subset": {"present": n, "listed": m}` in the run marker and the summary. The dispatcher does not forward the flag, so run the wrapper itself (`bash scripts/data/ema/extract_ema_epar.sh --offline-subset`, section 5.19). Expect about 20,300 `not_downloaded` failed markers and a `failed_inputs` count of the same size. The absent documents form no bucket, and the extract exits 0. The gate does not read this count: `max_failed_inputs` is checked on the `--sample` run, whose slice lists only documents with a PDF on disk, and a full run is gated by that valid pass.
+- **Offline subset (no download).** `--offline-subset` extracts only the PDFs already on disk (35 of the 20,342 documents the feed lists on 2026-11-17: 23 product information, 9 assessment reports, 3 RMP summaries). No EMA request is made. The flag changes no guard: an absent PDF is counted as `not_downloaded`, as without the flag. It only records `"offline_subset": {"present": n, "listed": m}` in the run marker and the summary. The dispatcher does not forward the flag, so run the wrapper itself (`bash scripts/data/ema/extract_ema_epar.sh --offline-subset`, section 5.19). Expect about 4,600 `not_downloaded` failed markers and a `failed_inputs` count of the same size (the extract of 2026-11-23 gave `failed_docs` 4636, all `not_downloaded`). The absent documents form no bucket, and the extract exits 0. The gate does not read this count: `max_failed_inputs` is checked on the `--sample` run, whose slice lists only documents with a PDF on disk, and a full run is gated by that valid pass.
 - **EU label links.** `load_ema_epar.sh` runs the load, then the retire step, then the link step `python -m episteme.data.ema.epar_links`. A shard load replaces the `label_substance` rows of its articles, so the links run after every load. A `product-information` document links when its `ema_medicines` record is `Human` and each `;` part of the active substance matches exactly one substance with a UNII (exact normalised match on `substance_xref` names, method `ema_name_exact`; no fuzzy match). Veterinary products are loaded as text and never linked. The link report is `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json` (`label_documents`, `linked_documents`, `unlinked_by_reason`). The method is in the report and in the `load_commit` audit row; `label_substance` has no method column. The step runs as `episteme_app` and needs EXECUTE on `episteme_api_internal.norm_name`: apply the roles file (section 5.19) before the first link step.
 - **Generated EU medicine records.** `bash scripts/data/ema/build_ema_medicine_records.sh` writes one `ema_epar` article per EU medicine (about 2,754) from the loaded `ema_medicines` and `ema_epar_documents` releases: name, active substance, INN, ATC, therapeutic area, indication, status and dates, and the list of its EPAR documents. Article id `ema_medicine:<product number>`. The parts are `ema_epar_medicines__partNNNNN` (one bucket); the run marker `<processed>/_ops/ema_epar/runs/medicine_records_<run_id>.json` names both feed releases. A re-run with the same releases writes nothing (`--force` writes again). Load the parts with `ema_epar load`. The EPAR extract does not touch these parts, and they do not retire the PDF articles. Same licence as the EPAR rows; not in the training corpus (`corpus_excluded_sources`).
 - **Gate.** `ema_epar` is gated for `extract` and `load` (section 4.9).
@@ -1869,7 +1870,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.reference.api_sett
 PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.reference.api_settings sync
 ```
 
-Expect `api_settings sync: <n> sources, 11 limits` and `episteme_api_reader statement_timeout = 30s`. A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
+Expect `api_settings sync: <n> sources, 13 limits` and `episteme_api_reader statement_timeout = 30s`. The limit count is 13 families from the 0016 change on (the first 0015 rollout printed 11). A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
 
 4. **Reader password.** The operator sets it by hand in psql as the superuser, with `\password episteme_api_reader`, and types the value of the `.env` key `EPISTEME_API_READER_PASSWORD`. The roles are cluster-wide, so do this once. The value never goes into a file, a command line or a log.
 5. **FAERS outcome table** (section 5.12). The forced load builds a whole new FAERS generation (every zip, the de-duplication, the indexes and the signals), not only the signal tables: it is the heaviest job of this rollout. Run it alone. Sample first, then the forced load on each database:
@@ -1889,7 +1890,8 @@ PGDATABASE=episteme_test bash scripts/data/ema/extract_ema_epar.sh --offline-sub
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 ```
 
-   The load wrapper runs the link step. Check the link report `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json`: expect `label_documents` 23 and `linked_documents` 21 (the spec sample of 2026-11-17; its two misses were vaccines). The extract writes about 20,300 `not_downloaded` failed markers; they do not stop the gated load (section 5.10).
+   Two things can stop this step. (a) The load markers (`load_success`) live in the processed directory, which `episteme_test` and `episteme` share. After a load on `episteme_test`, the load on `episteme` skips both parts. Add `--force --reason "<why>"` to the production `ema_epar load`. (b) The load fails with `ema_medicines has no latest release in reg_release` until the `ema` feeds are loaded in the target database: run `ema load --sample`, then `ema load` there first.
+   The load wrapper runs the link step. Check the link report `<processed>/_ops/ema_epar/runs/label_links_<run_id>.json`: expect `label_documents` 23 and `linked_documents` 20, with 21 `label_substance` rows (the run of 2026-11-23; `unlinked_by_reason`: `no_match` 1, `veterinary` 2). The extract writes about 4,600 `not_downloaded` failed markers; they do not stop the gated load (section 5.10).
 7. **Generated EU medicine records** (section 5.10). They need the `ema` feeds loaded in the same database:
 
 ```bash
@@ -1899,9 +1901,24 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 
    The second load goes through the gated stage on the step 6 pass (the code and rules are unchanged); if the gate reports no valid pass, run `ema_epar load --sample` again first. It also runs the link step again, with the same result.
 8. **AACT `study_references (pmid)` index, once.** Loads from now on build it. On the current release, as `episteme_sys_admin` with no `aact` load running: `CREATE INDEX ON aact_r<id>.study_references (pmid);` (`<id>` is the `release_id` of the `is_latest` `aact` row of `reg_release`).
-9. **`article_mesh_lower_name_idx`, once.** The literature lookup needs it. Build it as section 4.6 says (no graph load running; it blocks writes to `article_mesh`).
+9. **`article_mesh_lower_name_idx`, once.** The literature lookup needs it. Build it as the covering index of section 5.19.5 (no graph load running; it blocks writes to `article_mesh`). A database that gets 0016 needs both covering indexes (step 12).
 10. **Full-text indexes** (below), one partition at a time, smallest first. Build a partition's `_fts_idx` only after its 0014 null-out and REPACK (section 2.3.1); see the rule under "Order" below.
 11. **Reader MCPg instance** (below), set up by the owner. Before it goes live, do two checks and record the results in the drift log. (a) Run `EXPLAIN (ANALYZE, BUFFERS)` of `graph_neighbours(<pmid>, 'shared_mesh')` for 3 to 5 production PMIDs and record the timings. (b) Through the reader MCPg instance, try `SET statement_timeout = 0` and record whether restricted mode refuses it. Then smoke test: one call of every `episteme_api` function through it.
+12. **Migration 0016 (performance follow-up), then the covering indexes.** Do one action at a time, first on `episteme_test`, then on `episteme`. Run no graph load at the same time.
+    1. Apply 0016 as `episteme_sys_admin`, the same way as step 1, with `for f in 0016_api_perf`.
+    2. Apply the roles file again (step 2). 0016 adds the function `year_windows` (section 5.19.4).
+    3. Run `api_settings sync` (step 3). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions work before it, because 0016 seeds `literature_window` (5, 5) and `search_rank_chars` (10000, 10000) in `result_limit`.
+    4. Build the covering indexes on `episteme` (section 5.19.5), one after the other.
+    5. Run the acceptance check through the reader MCPg instance (`scripts/mcpg-episteme.sh episteme --reader`), on a fresh connection. Make these calls and record the time of each one:
+        - `literature_by_mesh` for acetaminophen (19464), ibuprofen (149266) and simvastatin (69503), with no filter.
+        - `literature_by_mesh` with a year filter (one call).
+        - `literature_by_mesh` with a topic (one call).
+        - `literature_by_mesh` with a rare topic on a large substance (one call; for example aspirin 127871 and a rare MeSH topic).
+        - `graph_neighbours('pmcid:<id>', 'shared_mesh')`.
+        - `search_text` with `p_sources` `'{dailymed,ema_epar}'`.
+
+       Pass: each call takes less than 10 s. Report every time. Report a miss with its time.
+    6. Run `VACUUM (ANALYZE) episteme.article_mesh`. Then run `EXPLAIN (ANALYZE, BUFFERS)` for one literature window probe and for the `shared_mesh` hit step. Confirm an Index Only Scan with Heap Fetches near 0.
 
 #### 5.19.2 Full-text index builds
 
@@ -1939,6 +1956,33 @@ The existing instances are unchanged. Through the reader, call `episteme_api.<fu
 - **After the pg tests on `episteme_test`:** the tests rebuild the schema and re-grant the owner's reads themselves; run `api_settings sync` before you use `episteme_test` through the reader.
 - **New functions for the pipeline:** the roles file revokes EXECUTE from PUBLIC on every function `episteme_sys_admin` creates (default privileges, all schemas). A future function for the pipeline needs an explicit `GRANT EXECUTE`.
 - **Never** apply the roles file during a load or while a FAERS generation is unfinished.
+- **After `graph --bulk`:** run `VACUUM (ANALYZE) episteme.article_mesh`. The index-only scans of the lookups need a set visibility map.
+- **After a bulk load into a large table:** run `ANALYZE` on it. Stale statistics made the planner walk the whole `articles_default_pmid_idx` for a `pmcid:` lookup (`articles_default`, 2026-11-24).
+- **Large tables never analyzed:** 98 large tables had no `ANALYZE` since the statistics reset (for example `article_cites_*`, `article_facets_*`, `id_map`). Run `ANALYZE` on them, one table at a time and with no load running. This step is not run yet.
+
+#### 5.19.5 Covering indexes on `article_mesh` (once)
+
+Migration 0016 and the design `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md` need two covering indexes. Build each one under a temporary name, drop the old index, then rename the new one, all three statements in one transaction (`BEGIN` ... `COMMIT`). If the session stops before `COMMIT`, nothing changes: the old index stays and the temporary name does not exist, so you can run the block again. Do not use `CREATE INDEX CONCURRENTLY` here: it cannot run in a transaction. Before the swap, run `bash scripts/data/db/bulk_load_indexes.sh status` (section 4.6). It must exit 0 with no pending rebuild for group `pubmed_graph`. Do the steps as `episteme_sys_admin`, with no graph load running, and one index at a time. A database that has no old index needs only the `CREATE INDEX` statement, under the final name (`article_mesh_lower_name_idx` or `article_mesh_descriptor_ui_idx`). Do not run the `DROP` and `RENAME` statements there. Each build reads about 345 million rows. It blocks writes to `article_mesh`, not reads. Expect tens of minutes and tens of GB of space on E:.
+
+```sql
+BEGIN;
+CREATE INDEX article_mesh_lower_name_cov_idx ON episteme.article_mesh (lower(descriptor_name)) INCLUDE (descriptor_name, pmid);
+DROP INDEX episteme.article_mesh_lower_name_idx;
+ALTER INDEX episteme.article_mesh_lower_name_cov_idx RENAME TO article_mesh_lower_name_idx;
+COMMIT;
+```
+
+Then the same for `article_mesh_descriptor_ui_idx` with the columns `(descriptor_ui, pmid)`:
+
+```sql
+BEGIN;
+CREATE INDEX article_mesh_descriptor_ui_cov_idx ON episteme.article_mesh (descriptor_ui, pmid);
+DROP INDEX episteme.article_mesh_descriptor_ui_idx;
+ALTER INDEX episteme.article_mesh_descriptor_ui_cov_idx RENAME TO article_mesh_descriptor_ui_idx;
+COMMIT;
+```
+
+The partition indexes keep their generated names. Only the name of the parent index matters to `bulk_indexes`. At the end run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).
 
 ---
 
@@ -1979,3 +2023,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v5 | 2026-11-15 | Section 5.18: reference code lists (`refmeta`); migration 0013 |
 | v6 | 2026-11-16 | Section 2.3.1: article text as a virtual column; migration 0014, precheck, null-out and REPACK |
 | v7 | 2026-11-19 | Section 5.19: SQL lookup API (migration 0015, grants files, `api_settings sync`, rollout order, full-text index builds, reader MCPg instance, upkeep); EPAR offline subset, EU label links and medicine records (5.10); FAERS outcome table (5.12); AACT `study_references (pmid)` index and API grants (5.16); DailyMed failure names and the 6 accepted failures (5.8); new keys in 1.2 |
+| v8 | 2026-11-24 | Section 5.19: migration 0016 (API performance follow-up), rollout step 12, covering indexes on `article_mesh` (5.19.5), upkeep (`VACUUM (ANALYZE)`, `ANALYZE`); corrections from the 0015 rollout: EU label links 20, `not_downloaded` about 4,600, shared load markers need `--force --reason`, `ema` feeds first (5.10); sections 2.3 and 4.6 updated |

@@ -9,6 +9,11 @@
       "command": "bash",
       "args": ["scripts/mcpg-episteme.sh", "episteme_test"],
       "env": {}
+    },
+    "mcpg-reader": {
+      "command": "bash",
+      "args": ["scripts/mcpg-episteme.sh", "episteme", "--reader"],
+      "env": {}
     }
   }
 }

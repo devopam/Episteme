@@ -1631,7 +1631,39 @@ AS $$
 $$;
 
 -- ---------------------------------------------------------------------------
--- Task 6: literature_by_mesh (family 'literature'). SQL form of the former
+-- Descending year windows for literature_by_mesh. Bounds: lo_min = coalesce(p_from, 1),
+-- hi_max = coalesce(p_to, 2147483647) (no year is above it); no row when lo_min > hi_max. The first window ends
+-- at hi_max and starts p_first_width years before least(hi_max, p_now + 1) (at least
+-- lo_min). Each next window ends one year below the previous lo, is twice as wide as
+-- the previous width, and stops at lo_min. n numbers the windows from 1, newest
+-- first. p_now is a parameter (the caller passes the current year), so the function
+-- is IMMUTABLE. A width below 1 counts as 1. The arithmetic is bigint, so an extreme
+-- bound cannot overflow.
+CREATE OR REPLACE FUNCTION episteme_api_internal.year_windows(
+    p_from int, p_to int, p_first_width int, p_now int)
+RETURNS TABLE (lo int, hi int, n int)
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    WITH RECURSIVE b AS (
+        SELECT coalesce(p_from, 1)::bigint AS lo_min,
+               coalesce(p_to, 2147483647)::bigint AS hi_max,
+               greatest(coalesce(p_first_width, 1), 1)::bigint AS width
+    ), w (lo, hi, width, n) AS (
+        SELECT greatest(b.lo_min, least(b.hi_max, p_now::bigint + 1) - b.width + 1),
+               b.hi_max, b.width, 1
+          FROM b
+         WHERE b.lo_min <= b.hi_max
+        UNION ALL
+        SELECT greatest(b.lo_min, w.lo - 2 * w.width), w.lo - 1, 2 * w.width, w.n + 1
+          FROM w CROSS JOIN b
+         WHERE w.lo > b.lo_min
+    )
+    SELECT w.lo::int, w.hi::int, w.n::int FROM w ORDER BY w.n
+$$;
+
+-- ---------------------------------------------------------------------------
+-- literature_by_mesh (family 'literature'). SQL form of the former
 -- literature.literature, with topic expansion.
 --
 -- Substance side (as before): a PubMed record matches when one of its MeSH
@@ -1646,18 +1678,43 @@ $$;
 -- is the descriptor alone.
 -- The descriptor_ui of a name is read from one article_mesh row (LIMIT 1): a name
 -- belongs to one descriptor.
--- Year: the largest articles.year of the PMID (0 = unknown); a year bound drops
--- records with an unknown year. Order: year descending (unknown last), then
--- article_id. article_id is 'pubmed:<pmid>'. release_id: the is_latest reg_release row
--- of dataset 'pubmed', NULL when there is none. relation: the matched descriptor
--- names, comma separated. score is 1.
+-- Year: the largest year of the PMID's 'pubmed' rows in articles (0 or a year below 1 =
+-- unknown); a year bound applies to that largest year. One 'pubmed' row per
+-- PMID is expected (articles.id = 'pubmed:<pmid>'), so in practice it is the PMID's
+-- year. The years of other sources are not used (0016: a europepmc_manuscript row
+-- carries the deposit year, not the publication year). A year bound drops records with an unknown
+-- year. Order: year descending (unknown last), then article_id. article_id is
+-- 'pubmed:<pmid>'. release_id: the is_latest reg_release row of dataset 'pubmed', NULL
+-- when there is none. relation: the matched descriptor names, comma separated. score
+-- is 1.
 -- source_file: the smallest source_file of the matched descriptor rows of the PMID.
 -- p_limit (NULL = no limit) keeps a caller from building every hit. The public
 -- wrapper passes limit_for('literature') + 1 and p_precapped true, so cap_articles
 -- still sees one record more than it keeps and writes the note 'truncated: <n> of
 -- more than <n>' (the true total is not built).
--- Index: lower(descriptor_name) on article_mesh serves the name match. It is NOT
--- created here (article_mesh has ~345M rows): it is in bulk_indexes INDEX_GROUPS
+--
+-- Method (0016): the result is the same as one sort of every hit, but the function
+-- reads years for few hits.
+--   1. Hits: the PMIDs of the matched descriptor rows (pmid only).
+--   2. Year windows (year_windows; the first window is limit_for('literature_window')
+--      years wide, each next window twice as wide), newest first. Each window reads
+--      the 'pubmed' rows of the hits not seen yet (v_rest) with a year in the window,
+--      and keeps max(year) per PMID. A PMID is seen in the newest window that holds
+--      one of its 'pubmed' rows, and only there: the window removes it from v_rest
+--      (a hash EXCEPT, so a large hit set costs no array scan per row). The topic
+--      check runs on the rows of the window.
+--      After a window, the function stops when it holds at least p_limit rows: a later
+--      window has only older years, and every tie of the window is present.
+--   3. Unknown years (no 'pubmed' row, or year 0): only without a year bound, and only
+--      when the windows gave fewer than p_limit rows.
+--   4. Sort, cut at p_limit, then descriptors and source_file for the kept rows only.
+-- Indexes: lower(descriptor_name) on article_mesh serves the name match; with the
+-- covering form (lower(descriptor_name)) INCLUDE (descriptor_name, pmid) the hit step
+-- is an index-only scan. Step 4 is a pmid lookup bounded by p_limit rows: it reads
+-- min(m.source_file), which neither covering index holds. articles_pmid_idx (partial, pmid IS NOT NULL;
+-- a.pmid = ANY (...) implies it) serves the window probes, and the year bounds prune
+-- the RANGE (year) partitions of articles_pubmed. The article_mesh indexes are NOT
+-- created here (article_mesh has ~345M rows): they are in bulk_indexes INDEX_GROUPS
 -- (group pubmed_graph); see the runbook for the production build.
 -- No substance: a note row and a missing row for 'article_mesh'; no article_mesh,
 -- articles or article_mesh row: the missing row only.
@@ -1678,6 +1735,15 @@ DECLARE
     v_licence text := episteme_api_internal.licence_for('pubmed');
     v_row     episteme_api_internal.article_row;
     v_has     boolean;
+    v_pmids   text[];
+    v_rest    text[];
+    v_pmid    text[] := ARRAY[]::text[];
+    v_year    int[] := ARRAY[]::int[];
+    v_new_s   text[];
+    v_new_p   text[];
+    v_new_y   int[];
+    v_above   text[];
+    w         record;
 BEGIN
     IF to_regclass('episteme.substance') IS NOT NULL
        AND to_regclass('episteme.substance_xref') IS NOT NULL THEN
@@ -1747,36 +1813,99 @@ BEGIN
          WHERE rr.dataset = 'pubmed' AND rr.is_latest;
     END IF;
 
-    RETURN QUERY
-    WITH hits AS (
-        SELECT DISTINCT m.pmid
-          FROM episteme.article_mesh m
-         WHERE lower(m.descriptor_name) = ANY (v_names)
-           AND (v_topic = ''
+    -- 1. Hits: pmid only (index-only scan on the covering name index).
+    v_pmids := ARRAY(SELECT DISTINCT m.pmid
+                       FROM episteme.article_mesh m
+                      WHERE lower(m.descriptor_name) = ANY (v_names));
+
+    -- 2. Year windows, newest first. v_rest: the hits no window gave yet (with or
+    -- without the topic), so no later window or the unknown step takes one again.
+    v_rest := v_pmids;
+    FOR w IN
+        SELECT y.lo, y.hi
+          FROM episteme_api_internal.year_windows(
+                   p_from_year, p_to_year,
+                   episteme_api_internal.limit_for('literature_window'),
+                   extract(year FROM current_date)::int) AS y
+         ORDER BY y.n
+    LOOP
+        EXIT WHEN cardinality(v_rest) = 0;
+        SELECT array_agg(c.pmid ORDER BY c.pmid),
+               array_agg(c.pmid ORDER BY c.pmid) FILTER (WHERE c.ok),
+               array_agg(c.year ORDER BY c.pmid) FILTER (WHERE c.ok)
+          INTO v_new_s, v_new_p, v_new_y
+          FROM (SELECT g.pmid, g.year,
+                       (v_topic = ''
+                        OR EXISTS (
+                            SELECT 1 FROM episteme.article_mesh t
+                             WHERE t.pmid = g.pmid
+                               AND (t.descriptor_ui = ANY (v_uis)
+                                    OR EXISTS (SELECT 1 FROM unnest(t.qualifiers) q
+                                                WHERE lower(q) = v_topic)))) AS ok
+                  FROM (SELECT a.pmid, max(a.year) AS year
+                          FROM episteme.articles a
+                         WHERE a.source = 'pubmed'
+                           AND a.year BETWEEN w.lo AND w.hi
+                           AND a.year > 0
+                           AND a.pmid = ANY (v_rest)
+                         GROUP BY a.pmid) g) c;
+        IF v_new_s IS NOT NULL THEN
+            v_rest := ARRAY(SELECT unnest(v_rest) EXCEPT SELECT unnest(v_new_s));
+        END IF;
+        -- An upper year bound applies to the largest 'pubmed' year of the PMID (as in
+        -- 0015): a PMID with a 'pubmed' row above p_to_year is not kept. One array
+        -- probe per window, on the partitions above the bound only.
+        IF p_to_year IS NOT NULL AND v_new_p IS NOT NULL THEN
+            v_above := ARRAY(SELECT DISTINCT a.pmid
+                               FROM episteme.articles a
+                              WHERE a.source = 'pubmed'
+                                AND a.year > p_to_year
+                                AND a.pmid = ANY (v_new_p));
+            IF cardinality(v_above) > 0 THEN
+                SELECT array_agg(u.p ORDER BY u.p), array_agg(u.y ORDER BY u.p)
+                  INTO v_new_p, v_new_y
+                  FROM unnest(v_new_p, v_new_y) AS u(p, y)
+                 WHERE u.p <> ALL (v_above);
+            END IF;
+        END IF;
+        v_pmid := v_pmid || coalesce(v_new_p, ARRAY[]::text[]);
+        v_year := v_year || coalesce(v_new_y, ARRAY[]::int[]);
+        EXIT WHEN p_limit IS NOT NULL AND cardinality(v_pmid) >= p_limit;
+    END LOOP;
+
+    -- 3. Unknown years: no year bound, and the windows gave fewer than p_limit rows.
+    IF p_from_year IS NULL AND p_to_year IS NULL
+       AND (p_limit IS NULL OR cardinality(v_pmid) < p_limit) THEN
+        SELECT array_agg(h.pmid ORDER BY h.pmid) INTO v_new_p
+          FROM unnest(v_rest) AS h(pmid)
+         WHERE (v_topic = ''
                 OR EXISTS (
                     SELECT 1 FROM episteme.article_mesh t
-                     WHERE t.pmid = m.pmid
+                     WHERE t.pmid = h.pmid
                        AND (t.descriptor_ui = ANY (v_uis)
                             OR EXISTS (SELECT 1 FROM unnest(t.qualifiers) q
-                                        WHERE lower(q) = v_topic))))
-    )
-    SELECT 'article'::text, 'pubmed:' || h.pmid, 'pubmed'::text, NULL::text, y.year,
+                                        WHERE lower(q) = v_topic))));
+        v_new_p := coalesce(v_new_p, ARRAY[]::text[]);
+        v_pmid := v_pmid || v_new_p;
+        v_year := v_year || array_fill(NULL::int, ARRAY[cardinality(v_new_p)]);
+    END IF;
+
+    -- 4. Sort and cut, then descriptors and source_file for the kept rows only.
+    RETURN QUERY
+    SELECT 'article'::text, 'pubmed:' || k.pmid, 'pubmed'::text, NULL::text, k.year,
            1.0::real, array_to_string(d.descriptors, ', '), v_release, v_licence,
            NULL::text, d.source_file
-      FROM hits h
-      LEFT JOIN LATERAL (
-           SELECT NULLIF(max(a.year), 0) AS year
-             FROM episteme.articles a WHERE a.pmid = h.pmid) y ON true
+      FROM (SELECT u.pmid, u.year
+              FROM unnest(v_pmid, v_year) AS u(pmid, year)
+             ORDER BY u.year DESC NULLS LAST, 'pubmed:' || u.pmid
+             LIMIT p_limit) k
       CROSS JOIN LATERAL (
-           SELECT array_agg(DISTINCT m2.descriptor_name ORDER BY m2.descriptor_name)
+           SELECT array_agg(DISTINCT m.descriptor_name ORDER BY m.descriptor_name)
                       AS descriptors,
-                  min(m2.source_file) AS source_file
-             FROM episteme.article_mesh m2
-            WHERE m2.pmid = h.pmid AND lower(m2.descriptor_name) = ANY (v_names)) d
-     WHERE (p_from_year IS NULL OR y.year >= p_from_year)
-       AND (p_to_year IS NULL OR y.year <= p_to_year)
-     ORDER BY y.year DESC NULLS LAST, 'pubmed:' || h.pmid
-     LIMIT p_limit;
+                  min(m.source_file) AS source_file
+             FROM episteme.article_mesh m
+            WHERE m.pmid = k.pmid AND lower(m.descriptor_name) = ANY (v_names)) d
+     ORDER BY k.year DESC NULLS LAST, 'pubmed:' || k.pmid;
 END
 $$;
 
@@ -1892,11 +2021,9 @@ BEGIN
     IF v_id ~* '^((pubmed|pmid):)?[0-9]+$' THEN
         v_pmid := regexp_replace(v_id, '^(pubmed|pmid):', '', 'i');
     ELSIF v_id <> '' AND to_regclass('episteme.articles') IS NOT NULL THEN
-        SELECT a.pmid INTO v_pmid
+        SELECT min(a.pmid COLLATE "C") INTO v_pmid
           FROM episteme.articles a
-         WHERE a.id = v_id AND a.pmid IS NOT NULL AND a.pmid <> ''
-         ORDER BY a.pmid COLLATE "C"
-         LIMIT 1;
+         WHERE a.id = v_id AND a.pmid <> '';
     END IF;
     IF v_pmid IS NULL THEN
         v_row.kind := 'note';
@@ -2098,13 +2225,13 @@ BEGIN
     WITH d AS (
         SELECT * FROM unnest(v_uis, v_dfs) AS d(ui, n)
     ), hit AS (
-        SELECT m.pmid, d.ui, d.n, min(m.source_file) AS sf
+        SELECT m.pmid, d.ui, d.n
           FROM d
           JOIN episteme.article_mesh m ON m.descriptor_ui = d.ui
          WHERE m.pmid <> v_pmid
          GROUP BY m.pmid, d.ui, d.n
     ), sc AS (
-        SELECT h.pmid, sum(1.0::double precision / h.n) AS score, min(h.sf) AS sf
+        SELECT h.pmid, sum(1.0::double precision / h.n) AS score
           FROM hit h
          GROUP BY h.pmid
     ), top AS (
@@ -2113,11 +2240,16 @@ BEGIN
          LIMIT p_limit
     )
     SELECT 'article'::text, 'pubmed:' || t.pmid, 'pubmed'::text, NULL::text, y.year,
-           t.score::real, 'shared_mesh'::text, v_release, v_licence, NULL::text, t.sf
+           t.score::real, 'shared_mesh'::text, v_release, v_licence, NULL::text, s.sf
       FROM top t
       LEFT JOIN LATERAL (
+           SELECT min(m.source_file) AS sf
+             FROM episteme.article_mesh m
+            WHERE m.pmid = t.pmid AND m.descriptor_ui = ANY (v_uis)) s ON true
+      LEFT JOIN LATERAL (
            SELECT NULLIF(max(a.year), 0) AS year
-             FROM episteme.articles a WHERE a.pmid = t.pmid) y ON true
+             FROM episteme.articles a
+            WHERE a.source = 'pubmed' AND a.pmid = t.pmid) y ON true
      ORDER BY t.score DESC, ('pubmed:' || t.pmid) COLLATE "C";
 END
 $$;
@@ -2249,8 +2381,13 @@ $$;
 --   * Bounded work: per source, only the first limit_for('search_scan') index matches
 --     (no ORDER BY: whichever the index returns first) are ranked. When a source
 --     gives that many, a note says 'ranked within the first <N> matches of <source>'.
--- The match and the rank use the index expression exactly (fts_index.fts_expression,
--- a test checks the text), so the planner uses the index of each partition.
+-- The match uses the index expression exactly (fts_index.fts_expression, a test checks
+-- the text), so the planner uses the index of each partition.
+-- Rank input (0016, spec decision 6): for the label sources (dailymed, ema_epar) the
+-- rank reads only the first limit_for('search_rank_chars') characters of body_text and
+-- of text_override, so a long label is not detoasted whole for each candidate. A label
+-- whose query word is only after that point still matches, with score 0. Every other
+-- source ranks on the full fts_doc, as in 0015.
 CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
     p_query text, p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
@@ -2270,6 +2407,7 @@ DECLARE
     v_src     text;
     v_other   text;
     v_scan    int := episteme_api_internal.limit_for('search_scan');
+    v_rank_chars int := episteme_api_internal.limit_for('search_rank_chars');
     v_n       int;
     v_part    episteme_api_internal.article_row[];
     v_cand    episteme_api_internal.article_row[] := ARRAY[]::episteme_api_internal.article_row[];
@@ -2354,7 +2492,12 @@ BEGIN
         SELECT pg_catalog.count(*)::int,
                pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
                    pg_catalog.ts_rank_cd(
-                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override),
+                       CASE WHEN v_src IN ('dailymed', 'ema_epar')
+                            THEN episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
+                                     pg_catalog.left(b.body_text, v_rank_chars),
+                                     pg_catalog.left(b.text_override, v_rank_chars))
+                            ELSE episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override)
+                       END,
                        v_q)::real,
                    'search', NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
           INTO v_n, v_part

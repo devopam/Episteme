@@ -16,6 +16,7 @@ from ._pbrer_db import MIGRATIONS, add_release
 pytestmark = pytest.mark.pg
 
 _MIGRATION = MIGRATIONS / "0015_api_layer.sql"
+_MIGRATION_0016 = MIGRATIONS / "0016_api_perf.sql"
 # Partitions of the test schema that get the index (schema.sql: pmc; 0010: dailymed).
 # bookshelf (0002) stays without one: search_text must skip it.
 _INDEXED = ("article_body_dailymed", "article_body_pmc")
@@ -30,11 +31,12 @@ def _drop_indexes(conn) -> None:
 
 @pytest.fixture(scope="module")
 def search_schema(ref_schema):
-    """Migration 0015 again (idempotent), then the expression indexes, CONCURRENTLY."""
+    """Migrations 0015 and 0016 again (idempotent), then the expression indexes, CONCURRENTLY."""
     conn = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=True)
     try:
         with conn.cursor() as cur:
             cur.execute(_MIGRATION.read_text(encoding="utf-8"))
+            cur.execute(_MIGRATION_0016.read_text(encoding="utf-8"))
             for part in _INDEXED:
                 cur.execute(fts_index.build_sql(part))
         yield
@@ -272,5 +274,62 @@ def test_scan_cap_ranks_within_the_first_matches(db):
         # Ordered by score, then article_id.
         ids = [r[1] for r in _articles(public)]
         assert ids == sorted(ids)
+    finally:
+        api_settings.sync(db)
+
+
+def _set_rank_chars(conn, chars: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = %s "
+            "WHERE family = 'search_rank_chars'",
+            (chars,),
+        )
+    conn.commit()
+
+
+def test_label_rank_uses_leading_text_match_uses_all(db):
+    """0016: a label ranks on its leading characters only; the match still reads all."""
+    early = "zymoquartz " + "filler " * 40
+    late = "filler " * 40 + "zymoquartz"  # word after character 100
+    _body(
+        db,
+        [
+            ("dailymed:early", "dailymed", "label", None, early, None),
+            ("dailymed:late", "dailymed", "label", None, late, None),
+        ],
+    )
+    _set_rank_chars(db, 100)
+    try:
+        internal = _api.call(db, "search_text", "zymoquartz", ["dailymed"], None)
+        db.rollback()
+        hits = [r for r in internal if r[0] == "article"]
+        assert [r[1] for r in hits] == ["dailymed:early", "dailymed:late"]
+        assert hits[0][5] > 0
+        assert hits[1][5] == 0
+    finally:
+        api_settings.sync(db)
+
+
+def test_non_label_rank_unchanged(db):
+    """A non-label source ranks on the full fts_doc, as in 0015."""
+    late = "filler " * 40 + "zymoquartz"
+    _body(db, [("pmc:PMC9", "pmc", "An article", late, "body text", None)])
+    _set_rank_chars(db, 100)
+    try:
+        internal = _api.call(db, "search_text", "zymoquartz", ["pmc"], None)
+        db.rollback()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT ts_rank_cd(episteme_api_internal.fts_doc(b.source, b.title, b.abstract, "
+                "b.body_text, b.text_override), "
+                "websearch_to_tsquery('english', 'zymoquartz'))::real "
+                "FROM episteme.article_body b WHERE b.article_id = 'pmc:PMC9'"
+            )
+            expected = cur.fetchone()[0]
+        db.rollback()
+        hits = [r for r in internal if r[0] == "article"]
+        assert [r[1] for r in hits] == ["pmc:PMC9"]
+        assert hits[0][5] == expected and expected > 0
     finally:
         api_settings.sync(db)

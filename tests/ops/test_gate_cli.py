@@ -344,7 +344,9 @@ def test_every_migration_file_has_markers():
     assert set(gate_migrations.MIGRATION_MARKERS) | deferred == files
     for markers in gate_migrations.MIGRATION_MARKERS.values():
         assert 1 <= len(markers) <= 3
-        assert all(m.split(":")[0] in ("table", "column", "index", "virtual") for m in markers)
+        assert all(
+            m.split(":")[0] in ("table", "column", "index", "virtual", "function") for m in markers
+        )
 
 
 class _MarkerCur:
@@ -366,6 +368,8 @@ class _MarkerCur:
             if "columns" in sql
             else "virtual"
             if "attgenerated = 'v'" in sql
+            else "function"
+            if "to_regprocedure" in sql
             else "index"
         )
         self._ans = f"{kind}:{'.'.join(params)}" in self.present
@@ -424,6 +428,40 @@ def test_virtual_marker_checks_attgenerated():
     }
     conn.present |= {"virtual:episteme.article_body.text"}
     assert gate_migrations.missing_markers(conn, ["0014_article_text_virtual.sql"]) == {}
+
+
+def test_function_marker_checks_pg_proc():
+    """0016: year_windows is a function, checked by its exact signature."""
+    marker = "function:episteme_api_internal.year_windows(int, int, int, int)"
+    assert gate_migrations.MIGRATION_MARKERS["0016_api_perf.sql"] == [marker]
+    conn = _MarkerConn(set())
+    assert gate_migrations.missing_markers(conn, ["0016_api_perf.sql"]) == {
+        "0016_api_perf.sql": [marker]
+    }
+    conn.present |= {marker}
+    assert gate_migrations.missing_markers(conn, ["0016_api_perf.sql"]) == {}
+
+
+def test_function_marker_query():
+    """The function marker resolves the exact signature with to_regprocedure, so an
+    overload with other argument types does not satisfy it."""
+    seen = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen.append((sql, params))
+
+        def fetchone(self):
+            return (True,)
+
+    assert gate_migrations._present(
+        _Cur(), "function:episteme_api_internal.year_windows(int, int, int, int)"
+    )
+    sql, params = seen[0]
+    assert "to_regprocedure" in sql
+    assert params == ("episteme_api_internal.year_windows(int, int, int, int)",)
+    with pytest.raises(ValueError):
+        gate_migrations._present(_Cur(), "function:episteme_api_internal.year_windows")
 
 
 @pytest.mark.pg

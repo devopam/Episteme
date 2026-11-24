@@ -349,3 +349,105 @@ def test_public_wrapper_caps_articles(db):
         cur.execute("SELECT * FROM episteme_api.literature_by_mesh(3, NULL)")
         rows = cur.fetchall()
     assert _ids(rows) == ["pubmed:300"] and _notes(rows) == []
+
+
+# ---------------------------------------------------------------------------
+# 0016: year windows, the PubMed year only
+# ---------------------------------------------------------------------------
+@pytest.mark.pg
+def test_year_from_pubmed_row_only(db):
+    # A manuscript row with a later year must not move the PubMed year.
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('europepmc_manuscript:M100', 'europepmc_manuscript', '100', 2025)"
+        )
+    db.commit()
+    rows = _call(db, 1, None)
+    assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:100"] == 2020
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("width", [1, 2, 5, 50])
+def test_window_width_does_not_change_results(db, width):
+    expected = _call(db, 1, None)
+    expected_f = _call(db, 1, None, 2020, 2022)
+    expected_t = _call(db, 1, "Liver Diseases")
+    expected_1 = _call(db, 1, None, limit=1)
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
+                "max_limit = greatest(max_limit, %s) WHERE family = 'literature_window'",
+                (width, width),
+            )
+        db.commit()
+        assert _call(db, 1, None) == expected
+        assert _call(db, 1, None, 2020, 2022) == expected_f
+        assert _call(db, 1, "Liver Diseases") == expected_t
+        assert _call(db, 1, None, limit=1) == expected_1
+    finally:
+        db.rollback()
+        api_settings.sync(db)
+
+
+@pytest.mark.pg
+def test_pmid_in_two_windows_appears_once(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pubmed:600v2', 'pubmed', '600', 2012)"
+        )
+    db.commit()
+    ids = _ids(_call(db, 1, None))
+    assert ids.count("pubmed:600") == 1
+
+
+@pytest.mark.pg
+def test_year_bound_applies_to_the_largest_pubmed_year(db):
+    """A PMID with 'pubmed' rows in 2022 and 2012 has year 2022 (as in 0015): a bound
+    of 2010-2015 drops it; a bound that holds 2022 keeps it with 2022."""
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pubmed:600v2', 'pubmed', '600', 2012)"
+        )
+    db.commit()
+    assert "pubmed:600" not in _ids(_call(db, 1, None, 2010, 2015))
+    rows = _call(db, 1, None, 2010, 2022)
+    assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:600"] == 2022
+
+
+@pytest.mark.pg
+def test_reversed_or_empty_year_range(db):
+    assert _ids(_call(db, 1, None, 2024, 2020)) == []
+    assert _ids(_call(db, 1, None, 1, 5)) == []
+
+
+@pytest.mark.pg
+def test_windows_cut_ties_and_year_zero(db):
+    """Narrow windows: the cut inside a tie (600 and 700, both 2022) is by article_id;
+    a PMID whose rows lie in two windows keeps the newer year; a 'pubmed' row with year
+    0 is an unknown year (last, and only without a year bound)."""
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pubmed:600v2', 'pubmed', '600', 2012), ('pubmed:400', 'pubmed', '400', 0)"
+        )
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 1, "
+            "max_limit = greatest(max_limit, 1) WHERE family = 'literature_window'"
+        )
+    db.commit()
+    try:
+        assert _ids(_call(db, 1, None, limit=2)) == ["pubmed:200", "pubmed:600"]
+        assert _ids(_call(db, 1, None, limit=3)) == ["pubmed:200", "pubmed:600", "pubmed:700"]
+        rows = _call(db, 1, None)
+        assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:600"] == 2022
+        assert _ids(rows)[-1] == "pubmed:400" and rows[-1][4] is None
+        assert "pubmed:400" not in _ids(_call(db, 1, None, None, 2030))
+        # An older topic match is found after empty newer windows.
+        assert _ids(_call(db, 1, "Liver Diseases", None, 2020)) == ["pubmed:150"]
+    finally:
+        db.rollback()
+        api_settings.sync(db)

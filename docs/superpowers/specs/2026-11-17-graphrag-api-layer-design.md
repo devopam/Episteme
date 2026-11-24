@@ -5,6 +5,8 @@ Owner decisions are marked **(owner)**. Calls made by the designer are marked **
 
 **As built (2026-11-19).** Built on branch `docs/graphrag-api-layer` (plan `docs/superpowers/plans/2026-11-17-graphrag-api-layer.md`, Tasks 1 to 13). Where the build differs from this text, an **As built** note under the point says so and names the ruling (R1 to R22, drift log entry 2026-11-17 in `docs/project-incubation-baseline.md`). The text above each note is the approved design and is not changed. Operator steps: `docs/10-data-sources-runbook.md` section 5.19.
 
+**Performance follow-up (2026-11-24).** Three lookups changed (`literature_by_mesh`, `graph_neighbours`, `search_text`): see `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md`.
+
 ## 1. Intent
 
 The model must not invent regulatory or literature facts. It reads them from the Episteme database through lookup tools (docs/13 section 1).
