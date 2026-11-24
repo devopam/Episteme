@@ -66,14 +66,43 @@ def test_0018_gate_marker():
     ]
 
 
-def test_schema_sql_carries_the_0018_term_norm_body():
+# Functions that take a pgvector type: schema.sql runs without pgvector, so they live in
+# 0018 only (as the mesh_term_vec table does).
+_VECTOR_ONLY = {"episteme_api_internal.suggest_terms", "episteme_api.suggest_terms"}
+
+
+def test_schema_sql_carries_the_0018_function_bodies():
     new = _functions(_MIGRATION)
-    assert "episteme_api_internal.term_norm" in new
+    assert {
+        "episteme_api_internal.term_norm",
+        "episteme_api_internal.cap_terms",
+        "episteme_api_internal.match_terms",
+        "episteme_api.match_terms",
+    } <= set(new)
+    assert _VECTOR_ONLY <= set(new)
     schema_text = (_DB_DIR / "schema.sql").read_text(encoding="utf-8")
     schema = _functions(_DB_DIR / "schema.sql")
     for name, text in new.items():
+        if name in _VECTOR_ONLY:
+            assert name not in schema, name
+            continue
         assert schema.get(name) == text, name
         assert schema_text.count(f"CREATE OR REPLACE FUNCTION {name}(") == 1, name
+    assert "episteme_api_internal.term_row AS (" in schema_text
+    assert "halfvec" not in schema_text
+
+
+def test_0018_api_functions_follow_the_0015_rules():
+    """Every function that reads a table is SECURITY DEFINER and STABLE; every one sets
+    search_path = pg_catalog, pg_temp; pgvector names are qualified with public."""
+    for name, text in _functions(_MIGRATION).items():
+        header = text.split("$$", 1)[0]
+        body = text.split("$$", 1)[1]
+        assert "SET search_path = pg_catalog, pg_temp" in header, name
+        if re.search(r"\bepisteme\.[a-z]", body):
+            assert "SECURITY DEFINER" in header and "STABLE" in header, name
+        assert not re.search(r"(?<!public\.)halfvec", text), name
+        assert "<#>" not in body or "OPERATOR(public.<#>)" in body, name
 
 
 def test_term_norm_function_is_a_pure_immutable_helper():

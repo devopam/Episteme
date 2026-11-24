@@ -2794,6 +2794,244 @@ AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
+-- Question to MeSH terms (migration 0018): term_row, cap_terms, match_terms. The
+-- tables and suggest_terms need pgvector and live in migration 0018 only.
+-- -----------------------------------------------------------------------------
+-- Row type of match_terms and suggest_terms (CREATE TYPE has no IF NOT EXISTS).
+-- kind 'term' (one MeSH descriptor) or 'note' (text in `note`). matched_text: the
+-- normalized question words; matched_term: the MeSH term (exact) or the vector text
+-- (medcpt); basis 'exact' or 'medcpt'; score: inner product (medcpt only).
+DO $$
+BEGIN
+    IF to_regtype('episteme_api_internal.term_row') IS NULL THEN
+        CREATE TYPE episteme_api_internal.term_row AS (
+            kind              text,
+            descriptor_ui     text,
+            descriptor_name   text,
+            matched_text      text,
+            matched_term      text,
+            term_kind         text,
+            concept_relation  text,
+            basis             text,
+            score             real,
+            mesh_release      text,
+            note              text
+        );
+    END IF;
+END
+$$;
+
+-- Public wrapper rule, term rows: the 0015 rule (cap_articles) for kind 'term'; the
+-- truncation note is in the `note` column.
+CREATE OR REPLACE FUNCTION episteme_api_internal.cap_terms(
+    p_rows episteme_api_internal.term_row[], p_family text, p_precapped boolean DEFAULT false)
+RETURNS SETOF episteme_api_internal.term_row
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    v_limit int := episteme_api_internal.limit_for(p_family);
+    v_total int := 0;
+    v_kept  int := 0;
+    r       episteme_api_internal.term_row;
+    v_note  episteme_api_internal.term_row;
+BEGIN
+    FOR i IN 1 .. coalesce(pg_catalog.array_length(p_rows, 1), 0) LOOP
+        r := p_rows[i];
+        IF r.kind = 'term' THEN
+            v_total := v_total + 1;
+            IF v_kept < v_limit THEN
+                v_kept := v_kept + 1;
+                RETURN NEXT r;
+            END IF;
+        ELSE
+            RETURN NEXT r;
+        END IF;
+    END LOOP;
+    IF v_total > v_kept THEN
+        v_note.kind := 'note';
+        v_note.note := CASE WHEN p_precapped
+                            THEN pg_catalog.format('truncated: %s of more than %s', v_kept, v_kept)
+                            ELSE pg_catalog.format('truncated: %s of %s', v_kept, v_total) END;
+        RETURN NEXT v_note;
+    END IF;
+END
+$$;
+
+-- Exact step: question words to MeSH descriptors.
+-- The question (its first 1000 characters) is normalized with term_norm and split into
+-- words. One query reads every mesh_term row whose term_norm is an n-gram of the words
+-- (n from 1 to limit_for('match_ngram_max')). Then, for n from the largest down to 1 and
+-- left to right, a run of n unused words equal to a term_norm is a match: its words
+-- become used. Each descriptor of that term_norm gets a match (two descriptors that
+-- share a term both appear). One row per descriptor: the first match gives
+-- matched_term, term_kind and concept_relation (name before entry, preferred first,
+-- then term); the other phrases of the descriptor are appended to matched_text with
+-- '; ', in question order. Rows in the order of their first word, then descriptor_ui.
+-- Last, one note 'unmatched: <words>' for the unused words that are not English stop
+-- words (to_tsvector('english', word) is empty). A question with no word, or with stop
+-- words only, gives the one note 'question has no searchable words'.
+CREATE OR REPLACE FUNCTION episteme_api_internal.match_terms(p_question text)
+RETURNS SETOF episteme_api_internal.term_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    v_max    int := episteme_api_internal.limit_for('match_ngram_max');
+    v_norm   text := episteme_api_internal.term_norm(pg_catalog.left(p_question, 1000));
+    v_words  text[];
+    v_nw     int;
+    v_top    int;
+    v_used   boolean[];
+    v_grams  text[] := '{}';
+    v_cands  episteme_api_internal.term_row[];
+    v_keys   text[];
+    v_gram   text;
+    v_free   boolean;
+    v_seen   text[];
+    v_uis    text[] := '{}';
+    v_rows   episteme_api_internal.term_row[] := '{}';
+    v_first  int[] := '{}';
+    v_m_ui   text[] := '{}';
+    v_m_pos  int[] := '{}';
+    v_m_text text[] := '{}';
+    v_left   text[] := '{}';
+    v_search boolean := false;
+    v_k      int;
+    c        episteme_api_internal.term_row;
+    r        episteme_api_internal.term_row;
+BEGIN
+    IF v_norm IS NOT NULL AND v_norm <> '' THEN
+        v_words := pg_catalog.string_to_array(v_norm, ' ');
+    END IF;
+    v_nw := coalesce(pg_catalog.cardinality(v_words), 0);
+    FOR i IN 1 .. v_nw LOOP
+        IF pg_catalog.length(pg_catalog.to_tsvector('english'::pg_catalog.regconfig,
+                                                     v_words[i])) > 0 THEN
+            v_search := true;
+            EXIT;
+        END IF;
+    END LOOP;
+    IF NOT v_search THEN
+        r.kind := 'note';
+        r.note := 'question has no searchable words';
+        RETURN NEXT r;
+        RETURN;
+    END IF;
+
+    v_top := LEAST(v_max, v_nw);
+    FOR n IN 1 .. v_top LOOP
+        FOR i IN 1 .. v_nw - n + 1 LOOP
+            v_grams := v_grams || pg_catalog.array_to_string(v_words[i:i + n - 1], ' ');
+        END LOOP;
+    END LOOP;
+
+    -- Candidates: matched_text holds the term_norm until the words are assigned.
+    SELECT pg_catalog.array_agg(ROW('term', t.descriptor_ui, nm.term, t.term_norm, t.term,
+               t.term_kind, t.concept_relation, 'exact', NULL, t.mesh_release, NULL)
+               ::episteme_api_internal.term_row
+               ORDER BY t.term_norm COLLATE "C", t.descriptor_ui COLLATE "C",
+                        (t.term_kind = 'name') DESC, t.is_preferred DESC,
+                        t.term COLLATE "C")
+      INTO v_cands
+      FROM episteme.mesh_term t
+      LEFT JOIN LATERAL (
+           SELECT d.term FROM episteme.mesh_term d
+            WHERE d.descriptor_ui = t.descriptor_ui AND d.term_kind = 'name'
+            ORDER BY d.term COLLATE "C"
+            LIMIT 1) nm ON true
+     WHERE t.term_norm = ANY (v_grams);
+    SELECT pg_catalog.array_agg(DISTINCT x.matched_text)
+      INTO v_keys
+      FROM pg_catalog.unnest(v_cands) AS x;
+
+    v_used := pg_catalog.array_fill(false, ARRAY[v_nw]);
+    IF v_keys IS NOT NULL THEN
+        FOR n IN REVERSE v_top .. 1 LOOP
+            FOR i IN 1 .. v_nw - n + 1 LOOP
+                v_free := true;
+                FOR j IN i .. i + n - 1 LOOP
+                    IF v_used[j] THEN
+                        v_free := false;
+                        EXIT;
+                    END IF;
+                END LOOP;
+                CONTINUE WHEN NOT v_free;
+                v_gram := pg_catalog.array_to_string(v_words[i:i + n - 1], ' ');
+                CONTINUE WHEN NOT (v_gram = ANY (v_keys));
+                FOR j IN i .. i + n - 1 LOOP
+                    v_used[j] := true;
+                END LOOP;
+                v_seen := '{}';
+                FOREACH c IN ARRAY v_cands LOOP
+                    CONTINUE WHEN c.matched_text <> v_gram OR c.descriptor_ui = ANY (v_seen);
+                    v_seen := v_seen || c.descriptor_ui;
+                    v_m_ui := v_m_ui || c.descriptor_ui;
+                    v_m_pos := v_m_pos || i;
+                    v_m_text := v_m_text || v_gram;
+                    v_k := pg_catalog.array_position(v_uis, c.descriptor_ui);
+                    IF v_k IS NULL THEN
+                        v_uis := v_uis || c.descriptor_ui;
+                        v_rows := v_rows || c;
+                        v_first := v_first || i;
+                    ELSIF i < v_first[v_k] THEN
+                        v_first[v_k] := i;
+                    END IF;
+                END LOOP;
+            END LOOP;
+        END LOOP;
+    END IF;
+
+    -- matched_text: the distinct phrases of each descriptor, in question order. unnest of
+    -- several arrays is unqualified: only that spelling is the multi-array form (it
+    -- resolves in pg_catalog, first on search_path).
+    FOR k IN 1 .. pg_catalog.cardinality(v_uis) LOOP
+        r := v_rows[k];
+        SELECT pg_catalog.string_agg(s.t, '; ' ORDER BY s.p)
+          INTO r.matched_text
+          FROM (SELECT m.t, pg_catalog.min(m.p) AS p
+                  FROM unnest(v_m_ui, v_m_pos, v_m_text) AS m(u, p, t)
+                 WHERE m.u = v_uis[k]
+                 GROUP BY m.t) s;
+        v_rows[k] := r;
+    END LOOP;
+
+    RETURN QUERY
+    SELECT x.kind, x.descriptor_ui, x.descriptor_name, x.matched_text, x.matched_term,
+           x.term_kind, x.concept_relation, x.basis, x.score, x.mesh_release, x.note
+      FROM pg_catalog.unnest(v_rows) WITH ORDINALITY
+           AS x(kind, descriptor_ui, descriptor_name, matched_text, matched_term, term_kind,
+                concept_relation, basis, score, mesh_release, note, ord)
+     ORDER BY v_first[x.ord::int], x.descriptor_ui COLLATE "C";
+
+    FOR i IN 1 .. v_nw LOOP
+        IF NOT v_used[i]
+           AND pg_catalog.length(pg_catalog.to_tsvector('english'::pg_catalog.regconfig,
+                                                        v_words[i])) > 0 THEN
+            v_left := v_left || v_words[i];
+        END IF;
+    END LOOP;
+    IF pg_catalog.cardinality(v_left) > 0 THEN
+        r := NULL;
+        r.kind := 'note';
+        r.note := 'unmatched: ' || pg_catalog.array_to_string(v_left, ' ');
+        RETURN NEXT r;
+    END IF;
+END
+$$;
+
+-- Public, capped function (family 'resolve').
+CREATE OR REPLACE FUNCTION episteme_api.match_terms(p_question text)
+RETURNS SETOF episteme_api_internal.term_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT * FROM episteme_api_internal.cap_terms(
+        ARRAY(SELECT r FROM episteme_api_internal.match_terms(p_question) AS r),
+        'resolve')
+$$;
+
+-- -----------------------------------------------------------------------------
 -- Ownership + grants
 --   Ownership follows from running this file as episteme_sys_admin. The runtime
 --   role episteme_app gets full DML on every table, then UPDATE/DELETE is

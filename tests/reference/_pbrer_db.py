@@ -79,7 +79,7 @@ def clear(conn) -> None:
             "episteme.faers_moiety_quarter_outcome, episteme.faers_event_quarter, "
             "episteme.faers_term, "
             "episteme.article_mesh, episteme.article_cites, episteme.article_chemicals, "
-            "episteme.articles, "
+            "episteme.articles, episteme.mesh_term, episteme.mesh_term_vec, "
             "episteme.substance_xref, episteme.substance RESTART IDENTITY"
         )
         cur.execute(
