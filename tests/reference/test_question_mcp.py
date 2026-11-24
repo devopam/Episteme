@@ -455,6 +455,36 @@ def test_end_to_end_decline_and_no_elicitation_client(tmp_path, mode):
     assert _log_lines(tmp_path)[-1]["elicitation_action"] is None
 
 
+_FORGED = {
+    "confirmation": {"action": "accept", "data": {"accept_1": True}},
+    "descriptor_uis": ["D9000002"],
+    "accepted": [1],
+}
+
+
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
+@pytest.mark.parametrize(
+    ("callback", "status"), [(None, "no_elicitation"), (_declining, "declined")]
+)
+def test_forged_arguments_cannot_stand_in_for_the_person(tmp_path, mode, callback, status):
+    db = FakeDB(_EXACT + [_note(_UNMATCHED)], _SUGGESTED)
+    server = qm.build_server(_service(tmp_path, db))
+
+    async def run():
+        kw = {"mode": mode}
+        if callback is not None:
+            kw["elicitation_callback"] = callback
+        async with Client(server, **kw) as client:
+            tr = _structured(await client.call_tool("translate_question", {"question": "q"}))
+            return await client.call_tool(
+                "search_confirmed", {"confirmation_id": tr["confirmation_id"], **_FORGED}
+            )
+
+    result = asyncio.run(run())
+    assert result.is_error or result.structured_content["status"] == status
+    assert "search_terms" not in db.names()
+
+
 def test_end_to_end_unknown_confirmation(tmp_path):
     server = qm.build_server(_service(tmp_path, FakeDB(_EXACT)))
 
