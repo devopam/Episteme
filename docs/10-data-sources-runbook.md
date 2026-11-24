@@ -22,7 +22,7 @@ Audit and integrity rules: `docs/11-gxp-data-integrity.md`. Row contract: `docs/
 ### 0.2 Ground rules
 
 1. **Agents and CI run against `episteme_test`, never `episteme`.** Prefix every pipeline command with `PGDATABASE=episteme_test`. A real environment variable beats `.env`, so the prefix always wins. Each Bash invocation is a fresh shell in most agent harnesses, so an earlier `export` does not persist: put the prefix on every command.
-2. **Confirm the server before any DB step** (section 2.2). This machine can have more than one PostgreSQL installed (a PG 17 client is first on `PATH`); the pipeline database is the native PG19beta3 on `localhost:5433`.
+2. **Confirm the server before any DB step** (section 2.2). This machine can have more than one PostgreSQL installed (a PG 17 client is first on `PATH`); the pipeline database is the native PG19 (19.0) on `localhost:5433`.
 3. **Shell:** Git Bash on Windows (or any bash). Run from the repository root; the default roots are relative paths (`./01_raw`, `./02_processed`, `./03_corpus`) and the `pmc` downloader writes to `<EPISTEME_RAW_ROOT>/pmc/oa_comm`.
 4. **Never print `.env`.** It holds credentials. Section 1.3 shows how to check that a key is set without showing its value.
 5. **Do not run a bulk download unbounded** unless that is the actual task. Use `--max-files N` (section 4.3) and read section 5 for which sources honour it.
@@ -37,7 +37,7 @@ Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reacha
 # 1. preflight: prints only "set" / "MISSING", never a value (expect all set)
 bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for k in EPISTEME_ACTOR PGHOST PGPORT PGUSER PGPASSWORD EPISTEME_SYS_ADMIN_PASSWORD; do if [ -n "${!k:-}" ]; then echo "$k=set"; else echo "$k=MISSING"; fi; done'
 
-# 2. confirm the server and database (expect: episteme_test|19beta3)
+# 2. confirm the server and database (expect: episteme_test|19.0, any 19.x)
 PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 
 # 3a. download one works_jsonl shard (the listing of the S3 prefix can take minutes)
@@ -78,7 +78,7 @@ Expected: `stage: download` then `europepmc_preprint: files=<N> fetched=1 skippe
 
 Exit codes of `run_pipeline.sh`: 0 success; 1 a stage failed (the message is `stage failed: <name>` and `resume with: ...`); 130 or 143 a stage was stopped (Ctrl-C, SIGTERM, or the parent watchdog; section 4.7); 2 usage error, missing `EPISTEME_ACTOR`, or `--force` without `--reason`; 3 unknown source, or a source and stage combination that is not wired (section 4.2). Failures that originate inside a stage wrapper (a missing endpoint key such as `OPENALEX_S3` or `COSMOS_API_BASE`, a bad `--max-files`, an unknown mode) exit 2 or 1 when the wrapper is run directly, but through `run_pipeline.sh` they surface as rc 1 (`stage failed: <name>`): every non-zero stage code other than 130 and 143 becomes 1. On Windows, Python stages may also print pool shutdown noise on stderr (`couldn't stop thread 'pool-1-...'` or a `hint: you can try to call 'close()'...` line; observed with `run_pipeline.sh`, `verify_audit_trail.sh` and `source_inventory.sh`, see section 0.3); they were not seen to affect the exit code.
 
-If step 2 does not print `episteme_test|19beta3`, stop: you are talking to a different server or database.
+If step 2 does not print `episteme_test|19.x` (19.0 now), stop: you are talking to a different server or database.
 
 ---
 
@@ -160,7 +160,7 @@ Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europ
 
 ### 2.1 Roles and databases
 
-Native PostgreSQL 19beta3, `localhost:5433`, databases `episteme` (primary, production name) and `episteme_test` (secondary; agents and CI). Roles: `postgres` (bootstrap only), `episteme_sys_admin` (DDL, migrations, developer), `episteme_app` (pipeline runtime; INSERT and SELECT only on `_audit`).
+Native PostgreSQL 19.0, `localhost:5433`, databases `episteme` (primary, production name) and `episteme_test` (secondary; agents and CI). Roles: `postgres` (bootstrap only), `episteme_sys_admin` (DDL, migrations, developer), `episteme_app` (pipeline runtime; INSERT and SELECT only on `_audit`).
 
 Bootstrapping is an operator task and is normally already done. **Agents do not run these**; `init_database.sh` creates and touches *both* databases including production, and the guard does not cover raw `psql` scripts (docs/11 section 7):
 
@@ -178,7 +178,7 @@ bash scripts/data/db/init_database.sh
 PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 ```
 
-Expected on the local build: `episteme_test|19beta3`. Any other database name or version means you are on the wrong server or the wrong database: stop and fix `PGPORT`/`PGDATABASE` before continuing. (The check uses `select current_setting('server_version')` written with `$$` quoting so it survives the shell.)
+Expected on the local build: `episteme_test|19.0` (any `19.x`). Upgraded from 19beta3 to 19.0 on 2026-11-24 (`pg_upgrade --copy`, data in `E:\pgdata19`). Any other database name or version means you are on the wrong server or the wrong database: stop and fix `PGPORT`/`PGDATABASE` before continuing. (The check uses `select current_setting('server_version')` written with `$$` quoting so it survives the shell.)
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
@@ -224,7 +224,7 @@ PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c 
 
 Before 0014, each literature row stores its title, abstract and body twice. Migration 0014 makes `text` a virtual column. After 0014, a tool removes the stored copies and returns the disk space. Design: `docs/superpowers/specs/2026-11-16-article-text-virtual-design.md`.
 
-The tool is `bash scripts/data/db/text_override.sh`. It connects as `episteme_sys_admin` and refuses any server except `19beta3`. The wrapper needs the env keys `EPISTEME_ACTOR` and `EPISTEME_SYS_ADMIN_PASSWORD` (names only). The wrapper writes no log. Pipe each run to a log: `... 2>&1 | tee D:/episteme/_runlogs/<name>.log`.
+The tool is `bash scripts/data/db/text_override.sh`. It connects as `episteme_sys_admin` and refuses any server except PostgreSQL 19. The wrapper needs the env keys `EPISTEME_ACTOR` and `EPISTEME_SYS_ADMIN_PASSWORD` (names only). The wrapper writes no log. Pipe each run to a log: `... 2>&1 | tee D:/episteme/_runlogs/<name>.log`.
 
 1. Run `bash scripts/data/db/text_override.sh precheck --all` on the database BEFORE 0014. The result must say `ok`: no row with `text IS NULL` and a non-blank part, and no row with `text = ''`. Stop if it does not say `ok`. `precheck --all` reads every row of every `article_body` partition (about 370 GB) in one sequential scan per partition. It takes only ACCESS SHARE and it is a heavy sequential read: run it alone.
 2. Apply `0014_article_text_virtual.sql` with no load running. Do steps 1 and 2 back to back. Once this branch is merged, the loader writes `text_override`, which exists only after 0014. Every production load into `article_body` then fails at COPY until 0014 is applied. Run no load between the precheck and 0014.
@@ -1819,7 +1819,7 @@ Without the `PGDATABASE=episteme_test` prefix both fall back to the production n
 
 Seven lookup lists: the E2B OID catalogue, the E2B code lists v2.11, LOINC, ISO 3166 code elements, ISO 639-2, UCUM and EDQM Standard Terms (every class the API lists). They load into `episteme.code_system` and `episteme.code`. The view `episteme.code_current` is the one current release of each list. They are not articles and they are not trained on. Design: `docs/superpowers/specs/2026-11-15-reference-metadata-design.md`. The source, licence and cadence of each list are in `docs/02` section 2.3.1.
 
-Apply migration `0013_reference_codes.sql` first (section 2.3). Confirm `server_version` is `19beta3`, then load into `episteme_test` before any production load.
+Apply migration `0013_reference_codes.sql` first (section 2.3). Confirm `server_version` is `19.x`, then load into `episteme_test` before any production load.
 
 ```bash
 PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh refmeta download --dry-run
@@ -1850,7 +1850,7 @@ The reference lookups are SQL functions in the schema `episteme_api` (migration 
 
 #### 5.19.1 Rollout (in this order; one heavy job at a time)
 
-Confirm `server_version` is `19beta3` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. **Every gated stage needs a new `--sample` pass after this merge:** `config.py` changed, so every code hash changed (section 4.9). Tee every long run to `D:/episteme/_runlogs/<name>.log`.
+Confirm `server_version` is `19.x` first (section 2.2). Do each step on `episteme_test`, then on `episteme`. **Every gated stage needs a new `--sample` pass after this merge:** `config.py` changed, so every code hash changed (section 4.9). Tee every long run to `D:/episteme/_runlogs/<name>.log`.
 
 1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
 
@@ -1925,7 +1925,7 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
     1. Apply 0017 as `episteme_sys_admin`, the same way as step 1, with `for f in 0017_api_no_timeouts`, on `episteme_test`, then on `episteme`.
     2. Run the roles file as superuser (the command of step 2 of this section) on `episteme_test`, then on `episteme`. Do it after step 1 and before the sync. No other step re-runs the roles file. Until it runs, the new helper `episteme_api_internal.literature_topic_keep` stays owned by `episteme_sys_admin`, and the roles file moves it to `episteme_api_owner`.
     3. Run `api_settings sync` (step 3 of this section) on `episteme_test`, then on `episteme`. Do this at once. Until it runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner, and the sync applies the grants. Expect `17 limits`.
-    4. Run `PGDATABASE=episteme bash scripts/data/run_pipeline.sh mesh graph`. It fills `episteme.mesh_qualifier` from the MeSH descriptor file (desc2026).
+    4. Run `PGDATABASE=episteme EPISTEME_RAW_ROOT=D:/episteme/01_raw bash scripts/data/run_pipeline.sh mesh graph`. It fills `episteme.mesh_qualifier` from the MeSH descriptor file (desc2026). Without `EPISTEME_RAW_ROOT` the phase looks in `./01_raw` and finds no file.
     5. Run `ANALYZE episteme.mesh_qualifier` right after the fill.
     6. Check the table: `SELECT count(*) FROM episteme.mesh_qualifier;` Expect 76 for desc2026. While the table is empty, every topic counts as a possible qualifier name (the 0016 behaviour).
     7. Check the plan of the fenced topic-set read. The reader has no `USAGE` on schema `episteme`, so do not use the reader MCPg instance. Run it as `episteme_sys_admin` on `episteme`, through the admin MCPg instance or the psycopg path of this runbook. The functions force custom plans (`SET plan_cache_mode = force_custom_plan`), so a custom plan run by hand is representative. This example uses warfarin (substance 37523, hits from the descriptor `warfarin`) and the topic `Neoplasms` (descriptor `D009369`). The descriptor set comes from `mesh_tree`, as in the function:

@@ -11,7 +11,7 @@
 # partition's pg_table_size, or when other statements run in the database (--force builds
 # anyway: CREATE INDEX CONCURRENTLY waits for them). One heavy job at a time; run on the database host; start
 # with a small partition (bookshelf or dailymed). Tee the output to D:/episteme/_runlogs/.
-# Refuses any server except 19beta3.
+# Refuses any server except PostgreSQL 19.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh

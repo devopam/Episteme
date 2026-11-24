@@ -729,3 +729,20 @@ def test_physical_start_block_past_end_logs_nothing_to_do():
     assert any("start_block 3 >= end_block 3: nothing to do" in m for m in logs)
     assert not any(q.startswith("UPDATE") for q in conn.executed)
     assert res["nulled"] == 0
+
+
+@pytest.mark.parametrize(
+    "v,ok",
+    [
+        ("19beta3", True),
+        ("19.0", True),
+        ("19.2", True),
+        ("19rc1", True),
+        ("18.3", False),
+        ("190.1", False),
+        ("20.0", False),
+        ("", False),
+    ],
+)
+def test_supported_server_version(v, ok):
+    assert tool.is_supported_server_version(v) is ok

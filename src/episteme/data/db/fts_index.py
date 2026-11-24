@@ -22,7 +22,7 @@ space on the disk of the index tablespace must be at least 2x the partition's
 ``shutil.disk_usage`` on the server's directory, so the tool runs on the database host.
 The directory comes from the server (``data_directory`` needs superuser or
 ``pg_read_all_settings``) or from ``--data-dir``. ``main()`` connects as the table owner
-and refuses any server except 19beta3. Before the build, other non-idle statements in
+and refuses any server except PostgreSQL 19. Before the build, other non-idle statements in
 the database (pg_stat_activity, client backends) refuse it (exit 1, listed) unless
 ``--force``: CREATE INDEX CONCURRENTLY waits for them in its last phase. The build runs
 in autocommit with ``lock_timeout`` = ``EPISTEME_FTS_LOCK_TIMEOUT_S`` (default 0 = no

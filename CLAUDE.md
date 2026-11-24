@@ -20,7 +20,7 @@ Medical-LLM data pipeline: acquire open biomedical sources, extract or serialize
 - **Cloud sandbox:** code and docs work; run only `pytest -m "not pg"`. Do not install or emulate the database here.
 - **Local machine only:** anything touching the database or real data — `pg`-marked tests, loads, graph builds, cold-read runs, `01_raw/` and `02_processed/`. Hand these back to a local session.
 - **CI (GitHub Actions):** every pull request runs `ruff format --check`, `ruff check` and `pytest -m "not pg"` (without the network dispatch smoke test) as the required `tests` check; changes reach `main` only through pull requests. Dependabot security pull requests (`security-fixes`, every commit Dependabot's own and signed) merge themselves once `tests` passes; version updates wait for a person.
-- Local DB commands: prefix `PGDATABASE=episteme_test` and first confirm `select current_setting('server_version')` is `19beta3`. `pg` tests need `.env` sourced into the shell (`set -a; . ./.env; set +a`) or they skip.
+- Local DB commands: prefix `PGDATABASE=episteme_test` and first confirm `select current_setting('server_version')` is `19.0` (any `19.x`). `pg` tests need `.env` sourced into the shell (`set -a; . ./.env; set +a`) or they skip.
 
 ## Hard rules
 

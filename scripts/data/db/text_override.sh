@@ -7,7 +7,7 @@
 #   text_override.sh nullout --partition NAME [--batch-rows N] [--start-after ID,SOURCE]
 #   text_override.sh nullout --partition NAME --order physical [--batch-blocks N] [--start-block B]
 #   text_override.sh repack --partition NAME --yes-repack
-# Tee the output to D:/episteme/_runlogs/. Refuses any server except 19beta3.
+# Tee the output to D:/episteme/_runlogs/. Refuses any server except PostgreSQL 19.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../_lib/common.sh
