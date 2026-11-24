@@ -66,10 +66,12 @@ Topic set forms measured on aspirin (50,617 hits):
 5. **`search_text` match memory.** The function sets `work_mem` to `search_work_mem_mb` MB
    (new config family, default 256) for the call (`set_config(..., true)`; the old value is
    set back before the final query). The bitmap stays exact for a common word.
-6. **`search_text` rank input for every source**: title, abstract, and the first
-   `search_rank_chars` characters of `body_text` and of `text_override` (0016: label sources
-   only). Default `search_rank_chars` goes from 10,000 to 2,000. **Contract change:** scores
-   and the order move for pmc, bookshelf and openalex long texts and again for labels. The
+6. **`search_text` rank input (label sources only)**: title, abstract, and the first
+   `search_rank_chars` characters of `body_text` and of `text_override`, for `dailymed` and
+   `ema_epar` only, as in 0016. `fts_doc` reads `body_text` and `text_override` only for these
+   two sources, so every other source ranks on the full `fts_doc` as before. Only the default
+   changes: `search_rank_chars` goes from 10,000 to 2,000. **Contract change:** label scores
+   and their order move again. Scores of `pmc`, `bookshelf` and `openalex` do not move. The
    match is unchanged (the exact index expression).
 7. **Acceptance** (as 0016 decision 7, reader instance, fresh connection, substances not used
    in prototyping; aspirin is now used): `literature_by_mesh` warfarin 37523 with a rare
@@ -88,3 +90,5 @@ Topic set forms measured on aspirin (50,617 hits):
 - The default values of the four new families and of `search_rank_chars`.
 - The time budget instead of a count cap for the per-PMID paths (decision 4).
 - `work_mem` set inside the function instead of in the server configuration.
+- Decision 6 was corrected during implementation: the first text said the rank input change
+  applies to every source. It applies to the label sources only.

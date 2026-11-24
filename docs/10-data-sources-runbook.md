@@ -182,7 +182,7 @@ Expected on the local build: `episteme_test|19beta3`. Any other database name or
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0016 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0017 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -204,11 +204,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0014_article_text_virtual.sql` | `article_body.text` becomes the stored column `text_override`; a new VIRTUAL column `text` reads the override or the join of `title`, `abstract` and `body_text` | Metadata only: no table rewrite, it takes seconds. It holds ACCESS EXCLUSIVE on `article_body` for a short time: apply it with no load running. Run `precheck --all` first (section 2.3.1). Idempotent, one transaction, `lock_timeout = '60s'` |
 | `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
 | `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the helper function `episteme_api_internal.year_windows` and seeds the result limits `literature_window` and `search_rank_chars` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions no longer fail before it, because 0016 seeds the two new families (`literature_window` 5, `search_rank_chars` 10000). The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
+| `0017_api_no_timeouts.sql` | Second performance follow-up of the SQL lookup API: no call may pass the reader timeout. Replaces `episteme_api_internal.literature_by_mesh` and `search_text`; adds the helper `literature_topic_keep`; creates the table `episteme.mesh_qualifier` (the MeSH qualifier names); seeds the result limits `literature_topic_scan`, `literature_topic_chunk`, `time_budget_ms` and `search_work_mem_mb`; sets `search_rank_chars` to 2000 where the row still holds the 0016 seed | Idempotent, one transaction. Light. Apply it to `episteme_test`, then to `episteme`. Run `python -m episteme.reference.api_settings sync` at once after it, on each database. Until the sync runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner. Then run `run_pipeline.sh mesh graph` on `episteme` to fill `mesh_qualifier` (section 5.19.1, step 13) |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0016, apply those fifteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0017, apply those sixteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer 0016_api_perf; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer 0016_api_perf 0017_api_no_timeouts; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t|t|t|t`; the fourth column is 0004's `articles_id_idx`, the fifth is 0005's table, the sixth is 0011's `label_section.ordinal` the seventh is 0012's `articles_openalex` and the eighth is 0014's virtual `article_body.text`):
@@ -241,7 +242,7 @@ Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULL
 
 After 0014, `precheck` is for information only.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0016 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0017 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -1870,7 +1871,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.reference.api_sett
 PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.reference.api_settings sync
 ```
 
-Expect `api_settings sync: <n> sources, 13 limits` and `episteme_api_reader statement_timeout = 30s`. The limit count is 13 families from the 0016 change on (the first 0015 rollout printed 11). A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
+Expect `api_settings sync: <n> sources, 17 limits` and `episteme_api_reader statement_timeout = 30s`. The limit count is 17 families from the 0017 change on (13 after 0016; the first 0015 rollout printed 11). A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
 
 4. **Reader password.** The operator sets it by hand in psql as the superuser, with `\password episteme_api_reader`, and types the value of the `.env` key `EPISTEME_API_READER_PASSWORD`. The roles are cluster-wide, so do this once. The value never goes into a file, a command line or a log.
 5. **FAERS outcome table** (section 5.12). The forced load builds a whole new FAERS generation (every zip, the de-duplication, the indexes and the signals), not only the signal tables: it is the heaviest job of this rollout. Run it alone. Sample first, then the forced load on each database:
@@ -1919,6 +1920,23 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 
        Pass: each call takes less than 10 s. Report every time. Report a miss with its time.
     6. Run `VACUUM (ANALYZE) episteme.article_mesh`. Then run `EXPLAIN (ANALYZE, BUFFERS)` for one literature window probe and for the `shared_mesh` hit step. Confirm an Index Only Scan with Heap Fetches near 0.
+
+13. **Migration 0017 (no timeouts).** Do one action at a time, first on `episteme_test`, then on `episteme`. Run no graph load at the same time. Spec: `docs/superpowers/specs/2026-11-24-api-no-timeouts-design.md`.
+    1. Apply 0017 as `episteme_sys_admin`, the same way as step 1, with `for f in 0017_api_no_timeouts`, on `episteme_test`, then on `episteme`.
+    2. Run `api_settings sync` (step 3) on `episteme_test`, then on `episteme`. Do this at once. Until it runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner, and the sync applies the grants. Expect `17 limits`.
+    3. Run `PGDATABASE=episteme bash scripts/data/run_pipeline.sh mesh graph`. It fills `episteme.mesh_qualifier` from the MeSH descriptor file (desc2026).
+    4. Check the table: `SELECT count(*) FROM episteme.mesh_qualifier;` Expect 76 for desc2026. While the table is empty, every topic counts as a possible qualifier name (the 0016 behaviour).
+    5. Run `EXPLAIN (ANALYZE, BUFFERS)` of the fenced topic-set read, through the reader MCPg instance. Expect an Index Only Scan on `article_mesh_descriptor_ui_idx` and a Hash Join with the hits.
+    6. Run the acceptance check through the reader MCPg instance (`scripts/mcpg-episteme.sh episteme --reader`), on a fresh connection. Use substances not used in prototyping. Make these calls and record the time of each one:
+        - `literature_by_mesh` for warfarin (37523) with a rare descriptor topic.
+        - `literature_by_mesh` for atorvastatin (67435) with the topic `Neoplasms`.
+        - `literature_by_mesh` for warfarin with the rare qualifier `supply & distribution`.
+        - `literature_by_mesh` with one topic that is neither a descriptor name nor a qualifier name. Expect one note row and no article rows.
+        - `search_text('liver')` and `search_text('patients')` with the default sources.
+        - The list of step 12, point 5.
+
+       Pass: each call takes less than 10 s. Hard limit: no timeout. A call that returns a `partial:` note is reported with its time.
+    7. Run `ANALYZE episteme.mesh_qualifier` after the fill.
 
 #### 5.19.2 Full-text index builds
 
@@ -1982,7 +2000,7 @@ ALTER INDEX episteme.article_mesh_descriptor_ui_cov_idx RENAME TO article_mesh_d
 COMMIT;
 ```
 
-The partition indexes keep their generated names. Only the name of the parent index matters to `bulk_indexes`. At the end run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).
+The partition indexes keep their generated names. Only the name of the parent index matters to `bulk_indexes`. After each index swap transaction, run `ANALYZE episteme.article_mesh` at once. A new expression index has no statistics until `ANALYZE` runs. In the 0016 rollout the planner had none for the new index, chose a parallel sequential scan, and one call took 227 s. At the end run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).
 
 ---
 
@@ -2024,3 +2042,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v6 | 2026-11-16 | Section 2.3.1: article text as a virtual column; migration 0014, precheck, null-out and REPACK |
 | v7 | 2026-11-19 | Section 5.19: SQL lookup API (migration 0015, grants files, `api_settings sync`, rollout order, full-text index builds, reader MCPg instance, upkeep); EPAR offline subset, EU label links and medicine records (5.10); FAERS outcome table (5.12); AACT `study_references (pmid)` index and API grants (5.16); DailyMed failure names and the 6 accepted failures (5.8); new keys in 1.2 |
 | v8 | 2026-11-24 | Section 5.19: migration 0016 (API performance follow-up), rollout step 12, covering indexes on `article_mesh` (5.19.5), upkeep (`VACUUM (ANALYZE)`, `ANALYZE`); corrections from the 0015 rollout: EU label links 20, `not_downloaded` about 4,600, shared load markers need `--force --reason`, `ema` feeds first (5.10); sections 2.3 and 4.6 updated |
+| v9 | 2026-11-24 | Migration 0017 (API no timeouts): migration table row, rollout step 13, `ANALYZE` after each index swap (5.19.5), 17 limit families; sections 2.3 and 4.6 updated |
