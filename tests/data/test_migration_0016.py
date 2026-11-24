@@ -137,8 +137,10 @@ def test_0016_seeds_the_new_limit_rows(pg_conn):
             )
             rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
         pg_conn.commit()
+        # 0017 lowers search_rank_chars to 2000; 0016 seeds the earlier value.
         assert rows == {
-            f: config.API_RESULT_LIMITS[f] for f in ("literature_window", "search_rank_chars")
+            "literature_window": config.API_RESULT_LIMITS["literature_window"],
+            "search_rank_chars": (10000, 10000),
         }
     finally:
         # Restore the seed rows (the same values api_settings.sync writes by default).
