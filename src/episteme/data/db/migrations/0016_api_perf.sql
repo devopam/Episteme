@@ -269,4 +269,280 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- graph_neighbours (0016). Same signature, kinds, rows, order, scores and source_file as
+-- 0015; two bodies change:
+--   * id lookup (an id that is not a PMID): the smallest articles.pmid (COLLATE "C") of
+--     the id, as one min(); no sort of the rows of the id.
+--   * shared_mesh: the descriptor count and the hit step read only descriptor_ui and pmid
+--     of article_mesh (an index-only scan of the (descriptor_ui, pmid) index). source_file
+--     is read only for the returned rows (the smallest of the shared descriptors), and
+--     the year only from the 'pubmed' articles row of the PMID (a europepmc_manuscript or
+--     pmc row of the same PMID no longer gives the year).
+CREATE OR REPLACE FUNCTION episteme_api_internal.graph_neighbours(
+    p_article_id text, p_kind text, p_limit int DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    v_kind    text := lower(btrim(coalesce(p_kind, '')));
+    v_id      text := btrim(coalesce(p_article_id, ''));
+    v_cap     int;
+    v_pmid    text;
+    v_release text;
+    v_licence text;
+    v_schema  text;
+    v_sf      text;
+    v_has     boolean;
+    v_uis     text[];
+    v_dfs     bigint[];
+    v_seed    int;
+    v_skipped int;
+    v_row     episteme_api_internal.article_row;
+BEGIN
+    IF v_kind NOT IN ('cites', 'cited_by', 'shared_mesh', 'trial', 'label') THEN
+        v_row.kind := 'note';
+        v_row.note := format('unknown kind %s; allowed kinds: cites, cited_by, shared_mesh, '
+                             'trial, label', coalesce(p_kind, '(none)'));
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+
+    IF v_id ~* '^((pubmed|pmid):)?[0-9]+$' THEN
+        v_pmid := regexp_replace(v_id, '^(pubmed|pmid):', '', 'i');
+    ELSIF v_id <> '' AND to_regclass('episteme.articles') IS NOT NULL THEN
+        SELECT min(a.pmid COLLATE "C") INTO v_pmid
+          FROM episteme.articles a
+         WHERE a.id = v_id AND a.pmid <> '';
+    END IF;
+    IF v_pmid IS NULL THEN
+        v_row.kind := 'note';
+        v_row.note := format('article %s has no PMID; kind %s needs one', v_id, v_kind);
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    IF coalesce(p_limit, 1) <= 0 THEN
+        RETURN;
+    END IF;
+
+    IF v_kind IN ('cites', 'cited_by', 'shared_mesh')
+       AND to_regclass('episteme.reg_release') IS NOT NULL THEN
+        SELECT rr.release_id INTO v_release
+          FROM episteme.reg_release rr
+         WHERE rr.dataset = 'pubmed' AND rr.is_latest;
+    END IF;
+    v_licence := episteme_api_internal.licence_for('pubmed');
+
+    IF v_kind IN ('cites', 'cited_by') THEN
+        IF to_regclass('episteme.article_cites') IS NOT NULL THEN
+            SELECT EXISTS (SELECT 1 FROM episteme.article_cites) INTO v_has;
+        END IF;
+        IF NOT coalesce(v_has, false) OR to_regclass('episteme.articles') IS NULL THEN
+            RETURN NEXT episteme_api_internal.missing_article('article_cites', 'pubmed');
+            RETURN;
+        END IF;
+        RETURN QUERY
+        WITH e AS (
+            SELECT c.dst_pmid AS pmid, min(c.source_file) AS sf
+              FROM episteme.article_cites c
+             WHERE v_kind = 'cites' AND c.src_pmid = v_pmid
+               AND c.dst_pmid IS NOT NULL AND c.dst_pmid <> v_pmid
+             GROUP BY c.dst_pmid
+            UNION ALL
+            SELECT c.src_pmid, min(c.source_file)
+              FROM episteme.article_cites c
+             WHERE v_kind = 'cited_by' AND c.dst_pmid = v_pmid
+               AND c.src_pmid IS NOT NULL AND c.src_pmid <> v_pmid
+             GROUP BY c.src_pmid
+        ), top AS (
+            SELECT e.pmid, e.sf FROM e
+             ORDER BY ('pubmed:' || e.pmid) COLLATE "C"
+             LIMIT p_limit
+        )
+        SELECT 'article'::text, 'pubmed:' || t.pmid, 'pubmed'::text, NULL::text, y.year,
+               1.0::real, v_kind, v_release, v_licence, NULL::text, t.sf
+          FROM top t
+          LEFT JOIN LATERAL (
+               SELECT NULLIF(max(a.year), 0) AS year
+                 FROM episteme.articles a WHERE a.pmid = t.pmid) y ON true
+         ORDER BY ('pubmed:' || t.pmid) COLLATE "C";
+        RETURN;
+    END IF;
+
+    IF v_kind = 'trial' THEN
+        IF to_regclass('episteme.reg_release') IS NOT NULL THEN
+            SELECT rr.release_id INTO v_release
+              FROM episteme.reg_release rr
+             WHERE rr.dataset = 'aact' AND rr.is_latest;
+        END IF;
+        IF v_release IS NULL OR v_release !~ '^[0-9]{8}$' THEN
+            RETURN NEXT episteme_api_internal.missing_article('aact', 'aact');
+            RETURN;
+        END IF;
+        v_schema := 'aact_r' || v_release;
+        IF to_regclass(format('%I.%I', v_schema, 'study_references')) IS NULL
+           OR to_regclass(format('%I.%I', v_schema, 'studies')) IS NULL THEN
+            RETURN NEXT episteme_api_internal.missing_article('aact', 'aact');
+            RETURN;
+        END IF;
+        IF to_regclass(format('%I.%I', v_schema, '_load_state')) IS NOT NULL THEN
+            EXECUTE format('SELECT st.source_file FROM %I._load_state st '
+                           'WHERE st.table_name = %L', v_schema, '_release')
+               INTO v_sf;
+        END IF;
+        RETURN QUERY EXECUTE format(
+            'SELECT ''article''::text, ''nct:'' || r.nct_id, ''aact''::text, '
+            '       nullif(st.brief_title, '''')::text, NULL::int, 1.0::real, '
+            '       ''trial''::text, $2, $3, NULL::text, $4 '
+            '  FROM (SELECT DISTINCT sr.nct_id FROM %I.study_references sr '
+            '         WHERE sr.pmid = $1 AND sr.nct_id IS NOT NULL) r '
+            '  LEFT JOIN %I.studies st ON st.nct_id = r.nct_id '
+            ' ORDER BY r.nct_id COLLATE "C" '
+            ' LIMIT $5',
+            v_schema, v_schema)
+            USING v_pmid, v_release, episteme_api_internal.licence_for('aact'), v_sf,
+                  p_limit;
+        RETURN;
+    END IF;
+
+    IF v_kind = 'label' THEN
+        IF to_regclass('episteme.article_chemicals') IS NULL THEN
+            RETURN NEXT episteme_api_internal.missing_article('article_chemicals', 'pubmed');
+            RETURN;
+        END IF;
+        IF to_regclass('episteme.substance') IS NULL
+           OR to_regclass('episteme.substance_xref') IS NULL
+           OR to_regclass('episteme.label_substance') IS NULL
+           OR to_regclass('episteme.articles') IS NULL THEN
+            RETURN NEXT episteme_api_internal.missing_article('dailymed', 'dailymed');
+            RETURN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM episteme.article_chemicals) THEN
+            RETURN NEXT episteme_api_internal.missing_article('article_chemicals', 'pubmed');
+            RETURN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM episteme.label_substance) THEN
+            RETURN NEXT episteme_api_internal.missing_article('dailymed', 'dailymed');
+            RETURN;
+        END IF;
+        RETURN QUERY
+        WITH names AS (
+            SELECT DISTINCT btrim(regexp_replace(
+                       episteme_api_internal.norm_name(c.name), '\s+', ' ', 'g')) AS k
+              FROM episteme.article_chemicals c
+             WHERE c.pmid = v_pmid AND c.name IS NOT NULL
+        ), k AS (
+            SELECT DISTINCT x.substance_key
+              FROM names n
+              JOIN episteme.substance_xref x
+                ON x.id_type = 'name' AND x.id_value = n.k
+             WHERE n.k <> ''
+        ), u AS (
+            SELECT DISTINCT f.unii
+              FROM k
+             CROSS JOIN LATERAL episteme_api_internal.substance_family(k.substance_key) f
+             WHERE coalesce(f.unii, '') <> ''
+        ), l AS (
+            SELECT DISTINCT ls.article_id
+              FROM episteme.label_substance ls
+              JOIN u ON u.unii = ls.unii
+        ), top AS (
+            SELECT l.article_id,
+                   coalesce(episteme_api_internal.label_source(l.article_id), 'dailymed')
+                       AS src
+              FROM l
+             ORDER BY l.article_id COLLATE "C"
+             LIMIT p_limit
+        )
+        SELECT 'article'::text, t.article_id, t.src, NULL::text,
+               nullif(coalesce(ad.year, ae.year), 0), 1.0::real, 'label'::text,
+               CASE WHEN t.src = 'ema_epar'
+                    THEN coalesce(ad.book_meta, ae.book_meta) ->> 'last_updated_date'
+                    ELSE coalesce(ad.book_meta, ae.book_meta) ->> 'version' END,
+               episteme_api_internal.licence_for(t.src), NULL::text,
+               coalesce(ad.source_file, ae.source_file)
+          FROM top t
+          LEFT JOIN episteme.articles ad
+                 ON ad.source = 'dailymed' AND ad.id = t.article_id
+          LEFT JOIN episteme.articles ae
+                 ON ae.source = 'ema_epar' AND ae.id = t.article_id
+         ORDER BY t.article_id COLLATE "C";
+        RETURN;
+    END IF;
+
+    -- shared_mesh
+    v_cap := greatest(episteme_api_internal.limit_for('graph_scan'), 1);
+    IF to_regclass('episteme.article_mesh') IS NOT NULL THEN
+        SELECT EXISTS (SELECT 1 FROM episteme.article_mesh) INTO v_has;
+    END IF;
+    IF NOT coalesce(v_has, false) OR to_regclass('episteme.articles') IS NULL THEN
+        RETURN NEXT episteme_api_internal.missing_article('article_mesh', 'pubmed');
+        RETURN;
+    END IF;
+    SELECT array_agg(df.ui ORDER BY df.ui) FILTER (WHERE df.n_rows <= v_cap),
+           array_agg(df.n_pmids ORDER BY df.ui) FILTER (WHERE df.n_rows <= v_cap),
+           count(*)::int,
+           (count(*) FILTER (WHERE df.n_rows > v_cap))::int
+      INTO v_uis, v_dfs, v_seed, v_skipped
+      FROM (SELECT s.ui, z.n_rows, z.n_pmids
+              FROM (SELECT DISTINCT m.descriptor_ui AS ui
+                      FROM episteme.article_mesh m
+                     WHERE m.pmid = v_pmid AND m.major_topic
+                       AND m.descriptor_ui IS NOT NULL) s
+             CROSS JOIN LATERAL (
+                   SELECT count(*) AS n_rows, count(DISTINCT b.pmid) AS n_pmids
+                     FROM (SELECT m.pmid FROM episteme.article_mesh m
+                            WHERE m.descriptor_ui = s.ui
+                            LIMIT v_cap + 1) b) z) df;
+    IF v_seed = 0 THEN
+        v_row.kind := 'note';
+        v_row.note := format('article %s has no major-topic MeSH descriptor', v_id);
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    IF v_skipped > 0 THEN
+        v_row.kind := 'note';
+        v_row.note := format(
+            '%s of %s major-topic descriptors not used: each is on more than %s '
+            'article_mesh rows', v_skipped, v_seed, v_cap);
+        RETURN NEXT v_row;
+        v_row := NULL;
+    END IF;
+    IF v_uis IS NULL THEN
+        RETURN;
+    END IF;
+    RETURN QUERY
+    WITH d AS (
+        SELECT * FROM unnest(v_uis, v_dfs) AS d(ui, n)
+    ), hit AS (
+        SELECT m.pmid, d.ui, d.n
+          FROM d
+          JOIN episteme.article_mesh m ON m.descriptor_ui = d.ui
+         WHERE m.pmid <> v_pmid
+         GROUP BY m.pmid, d.ui, d.n
+    ), sc AS (
+        SELECT h.pmid, sum(1.0::double precision / h.n) AS score
+          FROM hit h
+         GROUP BY h.pmid
+    ), top AS (
+        SELECT sc.* FROM sc
+         ORDER BY sc.score DESC, ('pubmed:' || sc.pmid) COLLATE "C"
+         LIMIT p_limit
+    )
+    SELECT 'article'::text, 'pubmed:' || t.pmid, 'pubmed'::text, NULL::text, y.year,
+           t.score::real, 'shared_mesh'::text, v_release, v_licence, NULL::text, s.sf
+      FROM top t
+      LEFT JOIN LATERAL (
+           SELECT min(m.source_file) AS sf
+             FROM episteme.article_mesh m
+            WHERE m.pmid = t.pmid AND m.descriptor_ui = ANY (v_uis)) s ON true
+      LEFT JOIN LATERAL (
+           SELECT NULLIF(max(a.year), 0) AS year
+             FROM episteme.articles a
+            WHERE a.source = 'pubmed' AND a.pmid = t.pmid) y ON true
+     ORDER BY t.score DESC, ('pubmed:' || t.pmid) COLLATE "C";
+END
+$$;
+
 COMMIT;

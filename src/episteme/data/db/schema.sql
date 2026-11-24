@@ -2001,11 +2001,9 @@ BEGIN
     IF v_id ~* '^((pubmed|pmid):)?[0-9]+$' THEN
         v_pmid := regexp_replace(v_id, '^(pubmed|pmid):', '', 'i');
     ELSIF v_id <> '' AND to_regclass('episteme.articles') IS NOT NULL THEN
-        SELECT a.pmid INTO v_pmid
+        SELECT min(a.pmid COLLATE "C") INTO v_pmid
           FROM episteme.articles a
-         WHERE a.id = v_id AND a.pmid IS NOT NULL AND a.pmid <> ''
-         ORDER BY a.pmid COLLATE "C"
-         LIMIT 1;
+         WHERE a.id = v_id AND a.pmid <> '';
     END IF;
     IF v_pmid IS NULL THEN
         v_row.kind := 'note';
@@ -2207,13 +2205,13 @@ BEGIN
     WITH d AS (
         SELECT * FROM unnest(v_uis, v_dfs) AS d(ui, n)
     ), hit AS (
-        SELECT m.pmid, d.ui, d.n, min(m.source_file) AS sf
+        SELECT m.pmid, d.ui, d.n
           FROM d
           JOIN episteme.article_mesh m ON m.descriptor_ui = d.ui
          WHERE m.pmid <> v_pmid
          GROUP BY m.pmid, d.ui, d.n
     ), sc AS (
-        SELECT h.pmid, sum(1.0::double precision / h.n) AS score, min(h.sf) AS sf
+        SELECT h.pmid, sum(1.0::double precision / h.n) AS score
           FROM hit h
          GROUP BY h.pmid
     ), top AS (
@@ -2222,11 +2220,16 @@ BEGIN
          LIMIT p_limit
     )
     SELECT 'article'::text, 'pubmed:' || t.pmid, 'pubmed'::text, NULL::text, y.year,
-           t.score::real, 'shared_mesh'::text, v_release, v_licence, NULL::text, t.sf
+           t.score::real, 'shared_mesh'::text, v_release, v_licence, NULL::text, s.sf
       FROM top t
       LEFT JOIN LATERAL (
+           SELECT min(m.source_file) AS sf
+             FROM episteme.article_mesh m
+            WHERE m.pmid = t.pmid AND m.descriptor_ui = ANY (v_uis)) s ON true
+      LEFT JOIN LATERAL (
            SELECT NULLIF(max(a.year), 0) AS year
-             FROM episteme.articles a WHERE a.pmid = t.pmid) y ON true
+             FROM episteme.articles a
+            WHERE a.source = 'pubmed' AND a.pmid = t.pmid) y ON true
      ORDER BY t.score DESC, ('pubmed:' || t.pmid) COLLATE "C";
 END
 $$;

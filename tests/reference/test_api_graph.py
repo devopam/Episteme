@@ -377,6 +377,45 @@ def test_shared_mesh_rare_first(db):
 
 
 @pytest.mark.pg
+def test_shared_mesh_year_from_pubmed_row_only(db):
+    _mesh(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('epmc:200', 'europepmc_manuscript', '200', 2030), "
+            "('epmc:500', 'europepmc_manuscript', '500', 2031)"
+        )
+    db.commit()
+    rows = {r[1]: r for r in _internal(db, "pubmed:100", "shared_mesh") if r[0] == "article"}
+    assert rows["pubmed:200"][4] == 2021  # the pubmed row, not the later manuscript row
+    assert rows["pubmed:500"][4] is None  # no pubmed row: unknown, not 2031
+    assert rows["pubmed:300"][4] is None  # pubmed year 0 is unknown
+    assert rows["pubmed:400"][4] == 2023
+    # source_file is still the smallest of the shared descriptors' rows.
+    assert rows["pubmed:300"][10] == "m/b"
+    assert rows["pubmed:600"][10] == "m/d"
+
+
+@pytest.mark.pg
+def test_id_lookup_takes_lowest_pmid(db):
+    _cites(db)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pmcid:PMCX', 'pmc', '20', 2000), "
+            "('pmcid:PMCX', 'europepmc_manuscript', '100', 2001), "
+            "('pmcid:PMCX', 'pmc', NULL, 2002), ('pmcid:PMCX', 'pmc', '', 2003)"
+        )
+    db.commit()
+    # COLLATE "C": '100' < '20', so the id resolves to '100' (which cites 200 and 300).
+    assert _ids(_internal(db, "pmcid:PMCX", "cites")) == ["pubmed:200", "pubmed:300"]
+    # An id whose rows have no PMID gives the note.
+    assert _notes(_internal(db, "pmc:PMC9", "cites")) == [
+        "article pmc:PMC9 has no PMID; kind cites needs one"
+    ]
+
+
+@pytest.mark.pg
 def test_unknown_kind_note(db):
     res = neighbours(db, "pubmed:100", "siblings", **KW)
     assert res.claims == ()
