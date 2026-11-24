@@ -31,6 +31,7 @@ _MIGRATION_FILES = (
     "0015_api_layer.sql",
     "0016_api_perf.sql",
     "0017_api_no_timeouts.sql",
+    "0018_question_terms.sql",
 )
 
 

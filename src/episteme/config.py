@@ -311,6 +311,12 @@ API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
     "time_budget_ms": (20000, 20000),
     # Not a row cap: work_mem (megabytes) that search_text sets for its own call.
     "search_work_mem_mb": (256, 256),
+    # Not a row cap: the longest word run (n-gram) of a question that is matched to MeSH terms.
+    "match_ngram_max": (8, 8),
+    # Matches returned by suggest (default, cap).
+    "suggest": (10, 50),
+    # Not a row cap: hnsw.ef_search that the vector arm of suggest sets for its own call.
+    "suggest_ef_search": (200, 200),
 }
 _API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
 

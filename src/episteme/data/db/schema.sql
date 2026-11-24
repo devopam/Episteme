@@ -429,6 +429,15 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $$ SELECT lower(normalize(p, NFKC)) $$;
 
+-- Term key used to match question words to MeSH terms (0018): lower case, every
+-- character that is not a letter or a digit becomes a space, runs of spaces collapse,
+-- trimmed. Python twin: episteme.reference.term_norm.term_norm.
+CREATE OR REPLACE FUNCTION episteme_api_internal.term_norm(p text)
+RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $$ SELECT btrim(regexp_replace(regexp_replace(lower(p), '[^[:alnum:]]+', ' ', 'g'), ' +', ' ', 'g')) $$;
+
 -- Licence class of a source, or 'unlisted'.
 CREATE OR REPLACE FUNCTION episteme_api_internal.licence_for(p_source text)
 RETURNS text

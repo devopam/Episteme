@@ -40,6 +40,9 @@ def test_api_limits_defaults(clean):
         "literature_topic_chunk": (500, 500),
         "time_budget_ms": (20000, 20000),
         "search_work_mem_mb": (256, 256),
+        "match_ngram_max": (8, 8),
+        "suggest": (10, 50),
+        "suggest_ef_search": (200, 200),
     }
 
 
