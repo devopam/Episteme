@@ -81,6 +81,7 @@ def test_schema_sql_carries_the_0017_bodies():
     assert set(new) >= {
         "episteme_api_internal.literature_by_mesh",
         "episteme_api_internal.literature_topic_keep",
+        "episteme_api_internal.search_text",
     }
     schema_text = (_DB_DIR / "schema.sql").read_text(encoding="utf-8")
     schema = _functions(_DB_DIR / "schema.sql")
@@ -106,6 +107,20 @@ def test_literature_by_mesh_0017_note_texts_and_deadline():
     assert "'records with an unknown year not searched'" in body
     assert "statement_timestamp() + make_interval(secs => v_budget / 1000.0)" in body
     assert "limit_for('time_budget_ms')" in body
+
+
+def test_search_text_0017_body():
+    body = _functions(_MIGRATION)["episteme_api_internal.search_text"]
+    assert "limit_for('search_work_mem_mb')" in body
+    assert "set_config('work_mem', v_old_wm, true)" in body
+    assert "CASE WHEN v_src IN" not in body  # the rank input is short for every source
+    assert "pg_catalog.left(b.body_text, v_rank_chars)" in body
+    assert "'partial: time budget of %s ms spent; not searched: %s'" in body
+    assert "statement_timestamp()" in body and "limit_for('time_budget_ms')" in body
+    # Every RETURN after the work_mem change comes after the restore.
+    changed = body.index("set_config('work_mem',\n")
+    restore = body.index("set_config('work_mem', v_old_wm, true)")
+    assert "RETURN;" not in body[changed:restore]
 
 
 def test_grants_read_list_has_mesh_qualifier():

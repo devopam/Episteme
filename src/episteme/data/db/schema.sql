@@ -2573,11 +2573,20 @@ $$;
 --     gives that many, a note says 'ranked within the first <N> matches of <source>'.
 -- The match uses the index expression exactly (fts_index.fts_expression, a test checks
 -- the text), so the planner uses the index of each partition.
--- Rank input (0016, spec decision 6): for the label sources (dailymed, ema_epar) the
--- rank reads only the first limit_for('search_rank_chars') characters of body_text and
--- of text_override, so a long label is not detoasted whole for each candidate. A label
--- whose query word is only after that point still matches, with score 0. Every other
--- source ranks on the full fts_doc, as in 0015.
+-- Rank input (0016, spec decision 6; 0017 for every source): the rank reads only the
+-- first limit_for('search_rank_chars') characters of body_text and of text_override,
+-- so a long text is not detoasted whole for each candidate. A row whose query word is
+-- only after that point still matches, with score 0. Contract change in 0017: scores
+-- of long texts move (the limit is 2000 characters, was 10000, and now applies to
+-- every source).
+-- Exact bitmap (0017): work_mem is raised to limit_for('search_work_mem_mb') MB for the
+-- candidate scans, so a bitmap heap scan for a common word stays exact (not lossy
+-- per page); the old value is set back before every return after the change.
+-- Time budget (0017): the deadline is statement_timestamp() + limit_for('time_budget_ms').
+-- It is checked before each source of the candidate loop. When it is spent, the sources
+-- not yet searched are named in one note 'partial: time budget of <n> ms spent; not
+-- searched: <sources>' (returned before the article rows), and the rows found so far
+-- are ranked and returned as usual.
 CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
     p_query text, p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
@@ -2598,6 +2607,12 @@ DECLARE
     v_other   text;
     v_scan    int := episteme_api_internal.limit_for('search_scan');
     v_rank_chars int := episteme_api_internal.limit_for('search_rank_chars');
+    v_budget  int := episteme_api_internal.limit_for('time_budget_ms');
+    v_deadline timestamptz :=
+        pg_catalog.statement_timestamp() + pg_catalog.make_interval(secs => v_budget / 1000.0);
+    v_old_wm  text;
+    v_i       int := 0;
+    v_skipped text[];
     v_n       int;
     v_part    episteme_api_internal.article_row[];
     v_cand    episteme_api_internal.article_row[] := ARRAY[]::episteme_api_internal.article_row[];
@@ -2677,17 +2692,24 @@ BEGIN
         RETURN;
     END IF;
 
+    -- work_mem for the candidate scans (transaction-local; set back before the final return).
+    v_old_wm := pg_catalog.current_setting('work_mem');
+    PERFORM pg_catalog.set_config('work_mem',
+        episteme_api_internal.limit_for('search_work_mem_mb') || 'MB', true);
+
     -- Candidates per source: at most v_scan index matches, then ranked.
     FOREACH v_src IN ARRAY v_ready LOOP
+        v_i := v_i + 1;
+        IF pg_catalog.clock_timestamp() >= v_deadline THEN
+            v_skipped := v_ready[v_i:pg_catalog.cardinality(v_ready)];
+            EXIT;
+        END IF;
         SELECT pg_catalog.count(*)::int,
                pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
                    pg_catalog.ts_rank_cd(
-                       CASE WHEN v_src IN ('dailymed', 'ema_epar')
-                            THEN episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
-                                     pg_catalog.left(b.body_text, v_rank_chars),
-                                     pg_catalog.left(b.text_override, v_rank_chars))
-                            ELSE episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override)
-                       END,
+                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
+                           pg_catalog.left(b.body_text, v_rank_chars),
+                           pg_catalog.left(b.text_override, v_rank_chars)),
                        v_q)::real,
                    'search', NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
           INTO v_n, v_part
@@ -2708,6 +2730,15 @@ BEGIN
         END IF;
     END LOOP;
 
+    IF v_skipped IS NOT NULL THEN
+        v_row := NULL;
+        v_row.kind := 'note';
+        v_row.note := pg_catalog.format('partial: time budget of %s ms spent; not searched: %s',
+                                        v_budget, pg_catalog.array_to_string(v_skipped, ', '));
+        RETURN NEXT v_row;
+    END IF;
+
+    PERFORM pg_catalog.set_config('work_mem', v_old_wm, true);
     RETURN QUERY
     SELECT 'article'::text, h.article_id, h.source, h.title, h.year, h.score,
            'search'::text, v_rels[pg_catalog.array_position(v_ready, h.source)],

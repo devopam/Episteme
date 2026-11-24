@@ -17,6 +17,7 @@ pytestmark = pytest.mark.pg
 
 _MIGRATION = MIGRATIONS / "0015_api_layer.sql"
 _MIGRATION_0016 = MIGRATIONS / "0016_api_perf.sql"
+_MIGRATION_0017 = MIGRATIONS / "0017_api_no_timeouts.sql"
 # Partitions of the test schema that get the index (schema.sql: pmc; 0010: dailymed).
 # bookshelf (0002) stays without one: search_text must skip it.
 _INDEXED = ("article_body_dailymed", "article_body_pmc")
@@ -31,12 +32,13 @@ def _drop_indexes(conn) -> None:
 
 @pytest.fixture(scope="module")
 def search_schema(ref_schema):
-    """Migrations 0015 and 0016 again (idempotent), then the expression indexes, CONCURRENTLY."""
+    """Migrations 0015 to 0017 again (idempotent), then the expression indexes, CONCURRENTLY."""
     conn = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=True)
     try:
         with conn.cursor() as cur:
             cur.execute(_MIGRATION.read_text(encoding="utf-8"))
             cur.execute(_MIGRATION_0016.read_text(encoding="utf-8"))
+            cur.execute(_MIGRATION_0017.read_text(encoding="utf-8"))
             for part in _INDEXED:
                 cur.execute(fts_index.build_sql(part))
         yield
@@ -309,6 +311,99 @@ def test_label_rank_uses_leading_text_match_uses_all(db):
         assert hits[1][5] == 0
     finally:
         api_settings.sync(db)
+
+
+def test_rank_uses_first_chars_for_every_source(db):
+    """0017: every source ranks on the first search_rank_chars characters of body_text and
+    text_override. A word after that point still matches (the index sees all), score 0.
+    pmc and bookshelf do not index body_text, so their title/abstract (not cut) decide."""
+    early = "zymoquartz " + "filler " * 40
+    late = "filler " * 40 + "zymoquartz"
+    _body(
+        db,
+        [
+            ("dailymed:early", "dailymed", "label", None, early, None),
+            ("dailymed:late", "dailymed", "label", None, late, None),
+            ("dailymed:ovearly", "dailymed", "label", None, "x", early),
+            ("dailymed:ovlate", "dailymed", "label", None, "x", late),
+        ],
+    )
+    _set_rank_chars(db, 50)
+    try:
+        internal = _api.call(db, "search_text", "zymoquartz", ["dailymed"], None)
+        db.rollback()
+        score = {r[1]: r[5] for r in internal if r[0] == "article"}
+        assert set(score) == {
+            "dailymed:early",
+            "dailymed:late",
+            "dailymed:ovearly",
+            "dailymed:ovlate",
+        }
+        assert score["dailymed:early"] > 0 and score["dailymed:ovearly"] > 0
+        assert score["dailymed:late"] == 0 and score["dailymed:ovlate"] == 0
+    finally:
+        api_settings.sync(db)
+
+
+def test_work_mem_restored(db):
+    _body(db, [("dailymed:w", "dailymed", "label", None, "zymoquartz", None)])
+    with db.cursor() as cur:
+        cur.execute("SET LOCAL work_mem = '5MB'")
+        cur.execute("SHOW work_mem")
+        before = cur.fetchone()[0]
+        cur.execute(
+            "SELECT count(*) FROM episteme_api_internal.search_text(%s, %s::text[], NULL)",
+            ("zymoquartz", ["dailymed"]),
+        )
+        assert cur.fetchone()[0] == 1
+        cur.execute("SHOW work_mem")
+        after = cur.fetchone()[0]
+    db.rollback()
+    assert before == after == "5MB"
+
+
+def test_budget_spent_names_unsearched_sources(db):
+    """A budget of 1 ms, spent before the first source (the sleep runs first in the same
+    statement; the lateral call reads its output, a boolean never NULL): one partial
+    note naming every ready source, no article rows, work_mem as before."""
+    _body(
+        db,
+        [
+            ("dailymed:b", "dailymed", "label", None, "zymoquartz", None),
+            ("pmc:PMC5", "pmc", "Zymoquartz in the title", None, None, None),
+        ],
+    )
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = 1, "
+            "max_limit = greatest(max_limit, 1) WHERE family = 'time_budget_ms'"
+        )
+    db.commit()
+    try:
+        with db.cursor() as cur:
+            cur.execute("SET LOCAL work_mem = '5MB'")
+            cur.execute(
+                "SELECT r.* FROM (SELECT pg_sleep(0.05) IS NULL) AS s(z) "
+                "CROSS JOIN LATERAL episteme_api_internal.search_text("
+                "CASE WHEN s.z IS NOT NULL THEN 'zymoquartz' END, "
+                "ARRAY['dailymed', 'pmc'], NULL) AS r"
+            )
+            rows = cur.fetchall()
+            cur.execute("SHOW work_mem")
+            assert cur.fetchone()[0] == "5MB"
+        db.rollback()
+        assert _articles(rows) == []
+        # Sources keep the order of the covered list: pmc before dailymed.
+        assert _notes(rows) == ["partial: time budget of 1 ms spent; not searched: pmc, dailymed"]
+    finally:
+        api_settings.sync(db)
+
+
+def test_budget_not_spent_gives_no_partial_note(db):
+    _body(db, [("dailymed:b", "dailymed", "label", None, "zymoquartz", None)])
+    rows = _api.call(db, "search_text", "zymoquartz", ["dailymed"], None)
+    db.rollback()
+    assert not [r for r in rows if r[0] == "note" and r[9].startswith("partial:")]
 
 
 def test_non_label_rank_unchanged(db):
