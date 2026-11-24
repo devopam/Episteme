@@ -2361,8 +2361,13 @@ $$;
 --   * Bounded work: per source, only the first limit_for('search_scan') index matches
 --     (no ORDER BY: whichever the index returns first) are ranked. When a source
 --     gives that many, a note says 'ranked within the first <N> matches of <source>'.
--- The match and the rank use the index expression exactly (fts_index.fts_expression,
--- a test checks the text), so the planner uses the index of each partition.
+-- The match uses the index expression exactly (fts_index.fts_expression, a test checks
+-- the text), so the planner uses the index of each partition.
+-- Rank input (0016, spec decision 6): for the label sources (dailymed, ema_epar) the
+-- rank reads only the first limit_for('search_rank_chars') characters of body_text and
+-- of text_override, so a long label is not detoasted whole for each candidate. A label
+-- whose query word is only after that point still matches, with score 0. Every other
+-- source ranks on the full fts_doc, as in 0015.
 CREATE OR REPLACE FUNCTION episteme_api_internal.search_text(
     p_query text, p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
 RETURNS SETOF episteme_api_internal.article_row
@@ -2382,6 +2387,7 @@ DECLARE
     v_src     text;
     v_other   text;
     v_scan    int := episteme_api_internal.limit_for('search_scan');
+    v_rank_chars int := episteme_api_internal.limit_for('search_rank_chars');
     v_n       int;
     v_part    episteme_api_internal.article_row[];
     v_cand    episteme_api_internal.article_row[] := ARRAY[]::episteme_api_internal.article_row[];
@@ -2466,7 +2472,12 @@ BEGIN
         SELECT pg_catalog.count(*)::int,
                pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
                    pg_catalog.ts_rank_cd(
-                       episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override),
+                       CASE WHEN v_src IN ('dailymed', 'ema_epar')
+                            THEN episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
+                                     pg_catalog.left(b.body_text, v_rank_chars),
+                                     pg_catalog.left(b.text_override, v_rank_chars))
+                            ELSE episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override)
+                       END,
                        v_q)::real,
                    'search', NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
           INTO v_n, v_part
