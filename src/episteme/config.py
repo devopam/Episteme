@@ -610,6 +610,9 @@ class Settings:
     # episteme_api_reader's password (EPISTEME_API_READER_PASSWORD); the operator sets the
     # role's password to it, and the --reader MCPg profile connects with it.
     api_reader_password: str = field(default="", repr=False)
+    # Directory of the question_mcp search log (EPISTEME_QUESTION_LOG_DIR); default
+    # <data root>/_question_log. None only when Settings is built by hand.
+    question_log_dir: Path | None = None
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -848,6 +851,9 @@ def get_settings() -> Settings:
             "EPISTEME_API_READER_STATEMENT_TIMEOUT_S", DEFAULT_API_READER_STATEMENT_TIMEOUT_S
         ),
         api_reader_password=_get("EPISTEME_API_READER_PASSWORD", "") or "",
+        question_log_dir=Path(
+            _get("EPISTEME_QUESTION_LOG_DIR") or (data_root / "_question_log")
+        ).expanduser(),
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
         ),
