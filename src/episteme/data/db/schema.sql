@@ -2868,6 +2868,7 @@ $$;
 -- matched_term, term_kind and concept_relation (name before entry, preferred first,
 -- then term); the other phrases of the descriptor are appended to matched_text with
 -- '; ', in question order. Rows in the order of their first word, then descriptor_ui.
+-- A one-word run that is an English stop word is never a candidate.
 -- Last, one note 'unmatched: <words>' for the unused words that are not English stop
 -- words (to_tsvector('english', word) is empty). A question with no word, or with stop
 -- words only, gives the one note 'question has no searchable words'.
@@ -2919,9 +2920,13 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A single stop word ("in", "as", "no") is never a candidate; a longer run may hold
+    -- stop words.
     v_top := LEAST(v_max, v_nw);
     FOR n IN 1 .. v_top LOOP
         FOR i IN 1 .. v_nw - n + 1 LOOP
+            CONTINUE WHEN n = 1 AND pg_catalog.length(pg_catalog.to_tsvector(
+                'english'::pg_catalog.regconfig, v_words[i])) = 0;
             v_grams := v_grams || pg_catalog.array_to_string(v_words[i:i + n - 1], ' ');
         END LOOP;
     END LOOP;

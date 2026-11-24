@@ -28,6 +28,9 @@ _TERMS = [
     ("D9000006", "MI", "entry", True, None),
     ("D9000007", "Anaphylaxis", "name", True, None),
     ("D9000007", "Anaphylactic Shock", "entry", False, "NRW"),
+    # An entry term equal to an English stop word ("as"): never matched from one word.
+    ("D9000008", "Ankylosing Spondylitis", "name", True, None),
+    ("D9000008", "AS", "entry", True, None),
 ]
 
 _NO_WORDS = "question has no searchable words"
@@ -180,6 +183,14 @@ def test_shared_term_gives_a_row_per_descriptor(db):
     assert {r["descriptor_name"] for r in rows} == {"Myocardial Infarction", "Mitral Insufficiency"}
 
 
+def test_single_stop_word_is_not_a_candidate(db):
+    rows = _match(db, "reaction as expected")
+    assert _terms(rows) == []
+    assert _notes(rows) == ["unmatched: reaction expected"]
+    # The descriptor still matches by its other terms.
+    assert _terms(_match(db, "ankylosing spondylitis")) == ["D9000008"]
+
+
 def test_narrower_concept_term_gives_its_relation(db):
     rows = _match(db, "anaphylactic shock")
     assert _terms(rows) == ["D9000007"]
@@ -323,3 +334,31 @@ def test_suggest_restores_ef_search(db):
         cur.execute("SELECT current_setting('hnsw.ef_search')")
         assert cur.fetchone()[0] == "41"
     db.rollback()
+
+
+def test_suggest_ef_search_covers_a_large_limit_and_is_restored(db):
+    """ef_search is greatest(suggest_ef_search, 4 * limit): a limit of 100 scans 400
+    candidates; the caller's value comes back after the call."""
+    with db.cursor() as cur:
+        cur.execute("SET LOCAL hnsw.ef_search = 41")
+        cur.execute(
+            "SELECT count(*) FROM episteme_api_internal.suggest_terms(%s::public.halfvec, %s, 100)",
+            (_Q, _REV),
+        )
+        assert cur.fetchone()[0] == 4
+        cur.execute("SELECT current_setting('hnsw.ef_search')")
+        assert cur.fetchone()[0] == "41"
+    db.rollback()
+
+
+@pytest.mark.parametrize("vector, revision", [(None, _REV), (_Q, None), (None, None)])
+def test_suggest_needs_vector_and_revision(db, vector, revision):
+    rows = _suggest(db, vector=vector, revision=revision)
+    assert _terms(rows) == []
+    assert _notes(rows) == ["vector and model revision are required"]
+
+
+def test_suggest_needs_768_dimensions(db):
+    rows = _suggest(db, vector="[1,0,0]")
+    assert _terms(rows) == []
+    assert _notes(rows) == ["vector must have 768 dimensions, got 3"]

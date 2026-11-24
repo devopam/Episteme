@@ -147,6 +147,7 @@ $$;
 -- matched_term, term_kind and concept_relation (name before entry, preferred first,
 -- then term); the other phrases of the descriptor are appended to matched_text with
 -- '; ', in question order. Rows in the order of their first word, then descriptor_ui.
+-- A one-word run that is an English stop word is never a candidate.
 -- Last, one note 'unmatched: <words>' for the unused words that are not English stop
 -- words (to_tsvector('english', word) is empty). A question with no word, or with stop
 -- words only, gives the one note 'question has no searchable words'.
@@ -198,9 +199,13 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A single stop word ("in", "as", "no") is never a candidate; a longer run may hold
+    -- stop words.
     v_top := LEAST(v_max, v_nw);
     FOR n IN 1 .. v_top LOOP
         FOR i IN 1 .. v_nw - n + 1 LOOP
+            CONTINUE WHEN n = 1 AND pg_catalog.length(pg_catalog.to_tsvector(
+                'english'::pg_catalog.regconfig, v_words[i])) = 0;
             v_grams := v_grams || pg_catalog.array_to_string(v_words[i:i + n - 1], ' ');
         END LOOP;
     END LOOP;
@@ -314,6 +319,8 @@ $$;
 -- descriptors. Not in schema.sql: it takes a pgvector type, and schema.sql runs without
 -- pgvector (as the mesh_term_vec table).
 -- Refusals (one note row, no term rows), in this order:
+--   * p_vector or p_model_revision is NULL: 'vector and model revision are required';
+--   * p_vector does not have 768 dimensions: 'vector must have 768 dimensions, got <n>';
 --   * no row in mesh_term_vec: 'no vocabulary vectors; run mesh embed';
 --   * the stored model_revision values are not exactly {p_model_revision}:
 --     'model revision <r> does not match the stored vectors (<stored, comma list>)';
@@ -321,8 +328,9 @@ $$;
 --     mesh_term: 'vocabulary vectors are from MeSH <a>, terms are from MeSH <b>; run
 --     mesh embed'.
 -- The checks read min and max through the btree indexes (no scan of the vectors).
--- Otherwise: hnsw.ef_search is limit_for('suggest_ef_search') for the scan (set back
--- before the return), the nearest 4 * limit vectors by inner product, the best score
+-- Otherwise: hnsw.ef_search is greatest(limit_for('suggest_ef_search'), 4 * limit) for
+-- the scan, so the scan LIMIT never exceeds it (set back before the return), the nearest
+-- 4 * limit vectors by inner product, the best score
 -- per descriptor (score = -(embedding <#> p_vector)), ordered by score descending, then
 -- descriptor_ui, at most p_limit rows (NULL: limit_for('suggest')). matched_term is the
 -- text of the best vector, term_kind its text_kind ('descriptor' or 'entry').
@@ -343,10 +351,21 @@ DECLARE
     v_old_ef   text;
     r          episteme_api_internal.term_row;
 BEGIN
+    r.kind := 'note';
+    IF p_vector IS NULL OR p_model_revision IS NULL THEN
+        r.note := 'vector and model revision are required';
+        RETURN NEXT r;
+        RETURN;
+    END IF;
+    IF public.vector_dims(p_vector) <> 768 THEN
+        r.note := pg_catalog.format('vector must have 768 dimensions, got %s',
+                                    public.vector_dims(p_vector));
+        RETURN NEXT r;
+        RETURN;
+    END IF;
     SELECT pg_catalog.min(v.model_revision), pg_catalog.max(v.model_revision)
       INTO v_rev_min, v_rev_max
       FROM episteme.mesh_term_vec v;
-    r.kind := 'note';
     IF v_rev_min IS NULL THEN
         r.note := 'no vocabulary vectors; run mesh embed';
         RETURN NEXT r;
@@ -384,7 +403,8 @@ BEGIN
 
     v_old_ef := pg_catalog.current_setting('hnsw.ef_search', true);
     PERFORM pg_catalog.set_config('hnsw.ef_search',
-        episteme_api_internal.limit_for('suggest_ef_search')::text, true);
+        GREATEST(episteme_api_internal.limit_for('suggest_ef_search'), 4 * v_limit)::text,
+        true);
     RETURN QUERY
     SELECT 'term'::text, b.descriptor_ui, nm.term, NULL::text, b.text, b.text_kind,
            NULL::text, 'medcpt'::text, b.score, b.mesh_release, NULL::text
