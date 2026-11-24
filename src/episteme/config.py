@@ -158,6 +158,15 @@ DEFAULT_TEACHER_REQUEST_TIMEOUT_S = 120
 DEFAULT_TEACHER_MAX_TOKENS = 2048
 DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
 DEFAULT_HARNESS_MAX_TOOL_CALLS = 24
+# MedCPT encoders (question-to-MeSH-terms). Pinned model revisions: a change here
+# needs a re-embed of the MeSH vocabulary vectors.
+MEDCPT_QUERY_MODEL = "ncbi/MedCPT-Query-Encoder"
+MEDCPT_QUERY_REVISION = "d83a36cc6b8e3a5c5e9d9d6ba156808c1643dcbc"
+MEDCPT_ARTICLE_MODEL = "ncbi/MedCPT-Article-Encoder"
+MEDCPT_ARTICLE_REVISION = "d05a736da4bb84ee4057b7f7999485be6ed85465"
+# Torch threads (EPISTEME_MEDCPT_THREADS) and texts per batch (EPISTEME_MEDCPT_BATCH).
+DEFAULT_MEDCPT_THREADS = 4
+DEFAULT_MEDCPT_BATCH = 32
 DEFAULT_HARNESS_MAX_CANDIDATES = 8
 DEFAULT_HARNESS_REQUEST_TIMEOUT_S = 300
 DEFAULT_BENCH_TENANT = "bench"
@@ -659,6 +668,8 @@ class Settings:
     sft_mix_weights: dict[str, float] = field(default_factory=dict)
     harness_base_url: str = DEFAULT_HARNESS_BASE_URL
     harness_max_tool_calls: int = DEFAULT_HARNESS_MAX_TOOL_CALLS
+    medcpt_threads: int = DEFAULT_MEDCPT_THREADS
+    medcpt_batch: int = DEFAULT_MEDCPT_BATCH
     harness_max_candidates: int = DEFAULT_HARNESS_MAX_CANDIDATES
     harness_request_timeout_s: int = DEFAULT_HARNESS_REQUEST_TIMEOUT_S
     bench_tenant: str = DEFAULT_BENCH_TENANT
@@ -939,6 +950,10 @@ def get_settings() -> Settings:
         ),
         sft_mix_weights=_parse_mix_weights(_get("EPISTEME_SFT_MIX_WEIGHTS")),
         harness_base_url=_get("EPISTEME_HARNESS_BASE_URL") or DEFAULT_HARNESS_BASE_URL,
+        medcpt_threads=_get_positive_int_or_default(
+            "EPISTEME_MEDCPT_THREADS", DEFAULT_MEDCPT_THREADS
+        ),
+        medcpt_batch=_get_positive_int_or_default("EPISTEME_MEDCPT_BATCH", DEFAULT_MEDCPT_BATCH),
         harness_max_tool_calls=_get_positive_int_or_default(
             "EPISTEME_HARNESS_MAX_TOOL_CALLS", DEFAULT_HARNESS_MAX_TOOL_CALLS
         ),
