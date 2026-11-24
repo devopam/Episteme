@@ -1870,7 +1870,7 @@ PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.reference.api_sett
 PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.reference.api_settings sync
 ```
 
-Expect `api_settings sync: <n> sources, 13 limits` and `episteme_api_reader statement_timeout = 30s`. The count is 13 for the code of the 0016 change (families `literature_window` and `search_rank_chars` added). The first rollout, with 0015 only, printed 11. After 0016, apply 0016 before the sync (step 12). A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
+Expect `api_settings sync: <n> sources, 13 limits` and `episteme_api_reader statement_timeout = 30s`. The limit count is 13 families from the 0016 change on (the first 0015 rollout printed 11). A line `role ... does not exist; apply the grants file` means step 2 did not run on that database.
 
 4. **Reader password.** The operator sets it by hand in psql as the superuser, with `\password episteme_api_reader`, and types the value of the `.env` key `EPISTEME_API_READER_PASSWORD`. The roles are cluster-wide, so do this once. The value never goes into a file, a command line or a log.
 5. **FAERS outcome table** (section 5.12). The forced load builds a whole new FAERS generation (every zip, the de-duplication, the indexes and the signals), not only the signal tables: it is the heaviest job of this rollout. Run it alone. Sample first, then the forced load on each database:
