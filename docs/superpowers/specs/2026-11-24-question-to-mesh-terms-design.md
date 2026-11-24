@@ -188,6 +188,12 @@ log keeps them for audit.
   hash) is pinned in `config.py` and stored with every vector and every suggestion.
 - The models are downloaded once into the Hugging Face cache by an explicit operator step
   (runbook), not on first use.
+- **Model choice by measurement (owner, 2026-11-24).** MedCPT is the default. A bake-off over
+  the acceptance list compares MedCPT, `BAAI/bge-base-en-v1.5` (MIT) and, if its licence check
+  passes, SapBERT (trained on UMLS synonyms). Criteria in order: top-10 hit rate on the
+  acceptance questions (by kind: acronym, lay, description), licence (no UMLS, SNOMED or
+  MedDRA terms), CPU time, a pinnable revision. The licence-clean model with the best top-10
+  hit rate wins; a switch is a config change plus a re-embed.
 
 ## 6. Acceptance
 

@@ -113,6 +113,8 @@ def test_supported_server_version(v, ok):
 - [ ] **Step 4: Run** — PASS.
 - [ ] **Step 5: Commit** `feat(reference): MedCPT encoder wrapper with pinned revisions`.
 
+**Model-neutral seam (for Task 10).** `medcpt.py` also defines `TermModelSpec` (frozen dataclass: `name`, `query_model`, `query_revision`, `doc_model`, `doc_revision`, `pooling` (`"cls"` or `"mean"`), `normalize: bool`, `query_prefix: str`, `query_max_length`, `doc_max_length`) and `TERM_MODELS: dict[str, TermModelSpec]` with the entry `"medcpt"` built from the constants above. `MedCPTEncoder.query()/.article()` take an optional `spec` (default `TERM_MODELS["medcpt"]`). Every vector and suggestion stores `spec.doc_model` / `spec.doc_revision` as `model` / `model_revision`, so a later switch is a config change plus a re-embed. Add tests: mean pooling averages over the attention mask; `normalize=True` gives unit vectors; `query_prefix` is prepended to queries only.
+
 ### Task 5: `mesh embed` stage
 
 **Files:**
@@ -202,6 +204,28 @@ def test_supported_server_version(v, ok):
 - [ ] **Step 2: Write the acceptance list, script and docs.**
 - [ ] **Step 3: Run** `pytest tests/docs/test_question_terms_docs.py -v` — PASS.
 - [ ] **Step 4: Commit** `docs: question-to-terms runbook, acceptance list, design 6.2 as built`.
+
+### Task 10: Term-model comparison (bake-off)
+
+Owner request 2026-11-24: choose the embedding model by measurement. MedCPT stays the default until the numbers are in.
+
+**Files:**
+- Create: `src/episteme/bench/term_model_bakeoff.py` (CLI `python -m episteme.bench.term_model_bakeoff --models medcpt,bge_base[,sapbert] --acceptance tests/reference/data/question_terms_acceptance.json --out <dir>`)
+- Modify: `src/episteme/reference/medcpt.py` (`TERM_MODELS` += `"bge_base"`: `BAAI/bge-base-en-v1.5`, CLS pooling, `normalize=True`, `query_prefix="Represent this sentence for searching relevant passages: "`, both sides the same model; and, **only after the controller's licence check passes**, `"sapbert"`: `cambridgeltl/SapBERT-from-PubMedBERT-fulltext`, CLS pooling, no prefix, both sides the same model). Revisions: the Hugging Face commit hash at the time of the task, looked up by the controller and given to the implementer verbatim.
+- Test: `tests/bench/test_term_model_bakeoff.py`
+
+**Interfaces:**
+- Consumes: `TermModelSpec`, `TERM_MODELS`, the encoder classes (Task 4); `mesh_term` and the descriptor texts exactly as Task 5 builds them (reuse its text builder, export it as `episteme.data.mesh.embed_mesh.vocabulary_texts(conn) -> list[tuple[str, str, str, str]]` = `(descriptor_ui, text_kind, title, text)`).
+- Produces: per model, a vector cache `<out>/<model>/<revision>.npy` + `<revision>.ids.json` (restart reuses it); the report `<out>/report.json` and `<out>/REPORT.md` with, per model: top-1, top-5 and top-10 hit rate over the acceptance list (a hit = every expected UI in the top k; also reported: any expected UI in the top k), split by `kind` (acronym, lay, description); mean and p95 query time on CPU; vocabulary embedding time and size; licence as recorded in `TERM_MODELS`.
+- Search is exact (numpy inner product over the full cache; cosine for normalized models), so the comparison measures the model, not the index. The exact step (`match_terms`) is not part of the comparison: every question is embedded.
+
+- [ ] **Step 1: Write the failing tests** (fake encoders, a 6-descriptor fake vocabulary, 3 acceptance entries): hit rates computed exactly for a scripted ranking; per-kind split; a second run reuses the cache (encoder not called); the report lists every metric above; an unknown model name exits 2 with the list of known names.
+- [ ] **Step 2: Run** `pytest tests/bench/test_term_model_bakeoff.py -v` — FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** — PASS.
+- [ ] **Step 5: Commit** `feat(bench): term-model bake-off over the acceptance list`.
+
+**Controller, before Task 10:** read the SapBERT model card and licence; include `sapbert` only if its terms allow use without a UMLS licence, and record the finding in the drift log either way. **Controller, after the rollout's `mesh graph`:** run the bake-off on `episteme` (one model at a time, one heavy job at a time), report the table to the owner; selection rule: the licence-clean model with the highest top-10 hit rate (all expected UIs), ties broken by query time. If it is not MedCPT, switching is: set the default spec in `config.py`, re-run `mesh embed` (it deletes the old model's rows), re-run acceptance.
 
 ## Rollout (controller, after merge; not a task)
 
