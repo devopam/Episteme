@@ -34,6 +34,8 @@ def test_api_limits_defaults(clean):
         "resolve": (10, 50),
         "graph_scan": (20000, 20000),
         "search_scan": (5000, 5000),
+        "literature_window": (5, 5),
+        "search_rank_chars": (10000, 10000),
     }
 
 

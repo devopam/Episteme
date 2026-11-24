@@ -29,6 +29,7 @@ _MIGRATION_FILES = (
     "0011_label_section_ordinal.sql",
     "0014_article_text_virtual.sql",
     "0015_api_layer.sql",
+    "0016_api_perf.sql",
 )
 
 
@@ -41,7 +42,8 @@ def build_schema(conn) -> None:
         # 0011: label_section.ordinal and product (current_label, label_section_text).
         # 0014 is a no-op on a schema.sql database (article_body already has
         # text_override and the virtual text). 0015 is in schema.sql too; applied again
-        # (idempotent) so the API functions match the migration file.
+        # (idempotent) so the API functions match the migration file; 0016 then
+        # replaces the bodies it changes (schema.sql carries those too).
         for name in _MIGRATION_FILES:
             cur.execute((MIGRATIONS / name).read_text("utf-8"))
     conn.commit()

@@ -292,6 +292,13 @@ API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
     # Not a row cap: search_text ranks only the first this-many index matches per
     # partition (a common word must not rank millions of rows).
     "search_scan": (5000, 5000),
+    # Not a row cap: literature_by_mesh reads the years of its hits in descending year
+    # windows; the first window is this many years wide, each next window twice as wide.
+    "literature_window": (5, 5),
+    # Not a row cap: search_text ranks a label (dailymed, ema_epar) on the title, the
+    # abstract and the first this-many characters of the label text (the match is the
+    # whole text).
+    "search_rank_chars": (10000, 10000),
 }
 _API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
 

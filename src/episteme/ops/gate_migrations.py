@@ -7,8 +7,10 @@ creates, read-only (``to_regclass``, ``information_schema.columns``,
 ``pg_indexes``).
 
 A marker is ``table:<schema>.<name>``, ``column:<schema>.<table>.<column>``,
-``index:<schema>.<name>`` or ``virtual:<schema>.<table>.<column>`` (the column is a
-VIRTUAL generated column, ``pg_attribute.attgenerated = 'v'``). Every migration
+``index:<schema>.<name>``, ``virtual:<schema>.<table>.<column>`` (the column is a
+VIRTUAL generated column, ``pg_attribute.attgenerated = 'v'``) or
+``function:<schema>.<name>`` (a function of that name exists in ``pg_proc``, any
+argument types). Every migration
 file needs an entry (a test enforces it). Note: the 0004 indexes are dropped on
 purpose during a bulk load, so 0004 can show as missing while a load is in
 progress.
@@ -90,6 +92,7 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
         "table:episteme_api_internal.result_limit",
         "table:episteme.faers_moiety_quarter_outcome",
     ],
+    "0016_api_perf.sql": ["function:episteme_api_internal.year_windows"],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {
@@ -126,6 +129,14 @@ def _present(cur: Any, marker: str) -> bool:
             "WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s "
             "AND a.attgenerated = 'v' AND NOT a.attisdropped)",
             (schema, table, column),
+        )
+    elif kind == "function":
+        schema, name = ref.split(".")
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = %s AND p.proname = %s)",
+            (schema, name),
         )
     else:
         raise ValueError(f"unknown migration marker: {marker}")
