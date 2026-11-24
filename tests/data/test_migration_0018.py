@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from episteme import config
+from episteme.data.db import fts_index
 from episteme.ops import gate_migrations
 from episteme.reference.term_norm import term_norm
 
@@ -78,6 +79,8 @@ def test_schema_sql_carries_the_0018_function_bodies():
         "episteme_api_internal.cap_terms",
         "episteme_api_internal.match_terms",
         "episteme_api.match_terms",
+        "episteme_api_internal.search_terms",
+        "episteme_api.search_terms",
     } <= set(new)
     assert _VECTOR_ONLY <= set(new)
     schema_text = (_DB_DIR / "schema.sql").read_text(encoding="utf-8")
@@ -103,6 +106,22 @@ def test_0018_api_functions_follow_the_0015_rules():
             assert "SECURITY DEFINER" in header and "STABLE" in header, name
         assert not re.search(r"(?<!public\.)halfvec", text), name
         assert "<#>" not in body or "OPERATOR(public.<#>)" in body, name
+
+
+@pytest.mark.parametrize("path", [_MIGRATION, _DB_DIR / "schema.sql"], ids=["0018", "schema"])
+def test_search_terms_uses_the_index_expression_and_the_fts_sources(path):
+    """search_terms matches with the index expression (b. alias), so the planner can use
+    the index of each partition, and searches the sources of the full-text allowlist."""
+    body = _functions(path)["episteme_api_internal.search_terms"]
+    expr = fts_index.fts_expression("b.")
+    assert body.count(expr) == 2  # the match and the rank
+    assert f"{expr} @@ v_q" in body
+    assert 'ORDER BY b.article_id COLLATE "C"' in body and "LIMIT v_scan" in body
+    m = re.search(r"c_covered\s+constant\s+text\[\]\s*:=\s*ARRAY\[([^\]]*)\]", body)
+    assert m, "search_terms must declare c_covered"
+    covered = tuple(s.strip().strip("'") for s in m.group(1).split(","))
+    assert covered == fts_index.FTS_SOURCES
+    assert "SET enable_seqscan = off" in body.split("$$", 1)[0]
 
 
 def test_term_norm_function_is_a_pure_immutable_helper():

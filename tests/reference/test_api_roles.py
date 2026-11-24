@@ -407,6 +407,13 @@ def _seed(conn) -> None:
             "('D008107', 'Liver Diseases', 'liver diseases', 'name', true, 'M0012591', NULL, "
             "'2026', 'mesh/desc2026.gz')"
         )
+        # An entry term that the dailymed label holds: search_terms finds the label.
+        cur.execute(
+            "INSERT INTO episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
+            "is_preferred, concept_ui, concept_relation, mesh_release, source_file) VALUES "
+            "('D008107', 'Zymoquartz', 'zymoquartz', 'entry', false, 'M0012591', NULL, "
+            "'2026', 'mesh/desc2026.gz')"
+        )
         cur.execute(
             "INSERT INTO episteme.mesh_term_vec (descriptor_ui, text_kind, text, embedding, "
             "model, model_revision, mesh_release) VALUES "
@@ -454,6 +461,12 @@ CALLS: dict[str, list[tuple[str, tuple]]] = {
     "match_terms": [("SELECT * FROM episteme_api.match_terms(%s)", ("liver diseases",))],
     "suggest_terms": [
         ("SELECT * FROM episteme_api.suggest_terms(%s::public.halfvec, %s)", (_VEC, _REV))
+    ],
+    "search_terms": [
+        (
+            "SELECT * FROM episteme_api.search_terms(%s::text[], %s::text[])",
+            (["D008107"], ["dailymed"]),
+        )
     ],
 }
 
@@ -590,6 +603,7 @@ def test_reader_cannot_execute_internal(api):
         "SELECT episteme_api_internal.limit_for('search')",
         "SELECT * FROM episteme_api_internal.match_terms('liver diseases')",
         f"SELECT * FROM episteme_api_internal.suggest_terms('{_VEC}'::public.halfvec, '{_REV}')",
+        "SELECT * FROM episteme_api_internal.search_terms(ARRAY['D008107'])",
     ):
         with pytest.raises(errors.InsufficientPrivilege):
             reader.execute(query)
@@ -775,8 +789,8 @@ def test_pipeline_role_calls_the_internal_functions_and_writes_indexed_bodies(ap
         if su.execute("SELECT to_regrole('episteme_app') IS NULL").fetchone()[0]:
             pytest.skip("role episteme_app does not exist")
         su.execute("SET ROLE episteme_app")
-        # match_terms and suggest_terms (0018) are for the reader (the question MCP), not
-        # for the pipeline role.
+        # match_terms, suggest_terms and search_terms (0018) are for the reader (the
+        # question MCP), not for the pipeline role.
         assert set(_api.INTERNAL_FUNCTIONS) <= set(CALLS)
         for name in sorted(_api.INTERNAL_FUNCTIONS):
             query, params = CALLS[name][0]

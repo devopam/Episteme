@@ -2794,7 +2794,8 @@ AS $$
 $$;
 
 -- -----------------------------------------------------------------------------
--- Question to MeSH terms (migration 0018): term_row, cap_terms, match_terms. The
+-- Question to MeSH terms (migration 0018): term_row, cap_terms, match_terms,
+-- search_terms. The
 -- tables and suggest_terms need pgvector and live in migration 0018 only.
 -- -----------------------------------------------------------------------------
 -- Row type of match_terms and suggest_terms (CREATE TYPE has no IF NOT EXISTS).
@@ -3034,6 +3035,289 @@ AS $$
     SELECT * FROM episteme_api_internal.cap_terms(
         ARRAY(SELECT r FROM episteme_api_internal.match_terms(p_question) AS r),
         'resolve')
+$$;
+
+-- search_terms: articles on confirmed MeSH descriptors. Repeatable, never partial (spec
+-- 5.2, owner decision 2a). search_text keeps its 0017 behaviour.
+--   * p_descriptor_uis NULL, or with no value that is not NULL or empty: one note 'no
+--     descriptors given'. More than 20 entries (counted on the raw array, repeats
+--     included): one note 'at most 20 descriptors per search'. Nothing else is returned.
+--   * Sources: as search_text (p_sources = '{}': one note 'no sources requested'; the
+--     sources that are not covered in one note; a covered source without a VALID
+--     '<partition>_fts_idx' is not searched: one note and a 'missing' row per source).
+--   * Per descriptor, in input order (repeats dropped): an unknown UI gives the note
+--     'unknown descriptor: <UI>'. Else the query is the OR of
+--     websearch_to_tsquery('english', term) over the name and the entry terms of every
+--     concept, in term_norm order; a term that gives a query already in the OR is
+--     dropped. One note 'terms used: <UI> <name>; query: <tsquery text>'. A descriptor
+--     whose terms are all stop words gives the note 'no searchable words in the terms of
+--     <UI>' and is not searched.
+--   * Per descriptor and searched source (descriptors outer, sources in c_covered
+--     order): the candidates are the first limit_for('search_scan') matches by
+--     article_id (COLLATE "C": the primary key cannot give that order, so the planner
+--     reads the full-text index), then ranked with ts_rank_cd as search_text (the label
+--     rank input rule of 0016). A full candidate set gives the note 'capped: first <n>
+--     matches by article_id of <source> for <UI>'.
+--   * One row per article: the first descriptor in input order that found it is the
+--     relation, and its rank is the score; the other descriptors are named in the note
+--     'also found by: <UI>, <UI>'. release_id, licence and source_file as search_text.
+--     Ordered by score descending, then article_id (COLLATE "C"); p_limit (NULL = no
+--     limit).
+--   * Time budget: the deadline is statement_timestamp() + limit_for('time_budget_ms'),
+--     checked before each descriptor and source step. When it is spent, no article row
+--     and no capped note is returned: only the source notes, the terms used notes and
+--     one note 'not run: time budget of <n> ms spent before <UI> / <source> finished;
+--     search with fewer terms'.
+--   * work_mem is raised as search_text for the candidate scans and set back before
+--     every return after the change.
+CREATE OR REPLACE FUNCTION episteme_api_internal.search_terms(
+    p_descriptor_uis text[], p_sources text[] DEFAULT NULL, p_limit int DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+-- Never a sequential scan of a partition: the match must go through its index.
+SET enable_seqscan = off
+AS $$
+DECLARE
+    c_covered constant text[] := ARRAY['pubmed', 'pmc', 'openalex', 'bookshelf', 'dailymed', 'ema_epar'];
+    c_max_uis constant int := 20;
+    v_uis     text[] := ARRAY[]::text[];
+    v_ui      text;
+    v_name    text;
+    v_term    text;
+    v_one     tsquery;
+    v_q       tsquery;
+    v_seen    text[];
+    v_q_uis   text[] := ARRAY[]::text[];
+    v_qs      tsquery[] := ARRAY[]::tsquery[];
+    v_want    text[];
+    v_ready   text[] := ARRAY[]::text[];
+    v_unbuilt text[] := ARRAY[]::text[];
+    v_rels    text[] := ARRAY[]::text[];
+    v_rel     text;
+    v_src     text;
+    v_other   text;
+    v_scan    int := episteme_api_internal.limit_for('search_scan');
+    v_rank_chars int := episteme_api_internal.limit_for('search_rank_chars');
+    v_budget  int := episteme_api_internal.limit_for('time_budget_ms');
+    v_deadline timestamptz :=
+        pg_catalog.statement_timestamp() + pg_catalog.make_interval(secs => v_budget / 1000.0);
+    v_old_wm  text;
+    v_capped  text[] := ARRAY[]::text[];
+    v_n       int;
+    v_part    episteme_api_internal.article_row[];
+    v_cand    episteme_api_internal.article_row[] := ARRAY[]::episteme_api_internal.article_row[];
+    v_row     episteme_api_internal.article_row;
+BEGIN
+    v_row.kind := 'note';
+    IF pg_catalog.cardinality(p_descriptor_uis) > c_max_uis THEN
+        v_row.note := pg_catalog.format('at most %s descriptors per search', c_max_uis);
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    IF p_descriptor_uis IS NOT NULL THEN
+        FOREACH v_ui IN ARRAY p_descriptor_uis LOOP
+            IF v_ui <> '' AND NOT (v_ui = ANY (v_uis)) THEN
+                v_uis := v_uis || v_ui;
+            END IF;
+        END LOOP;
+    END IF;
+    IF pg_catalog.cardinality(v_uis) = 0 THEN
+        v_row.note := 'no descriptors given';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+
+    IF p_sources IS NOT NULL AND pg_catalog.cardinality(p_sources) = 0 THEN
+        v_row.note := 'no sources requested';
+        RETURN NEXT v_row;
+        RETURN;
+    END IF;
+    v_row := NULL;
+
+    v_want := ARRAY(SELECT u.s FROM pg_catalog.unnest(c_covered) WITH ORDINALITY AS u(s, n)
+                     WHERE p_sources IS NULL OR u.s = ANY (p_sources)
+                     ORDER BY u.n);
+    IF p_sources IS NOT NULL THEN
+        SELECT pg_catalog.string_agg(d.s, ', ' ORDER BY d.s COLLATE "C") INTO v_other
+          FROM (SELECT DISTINCT x.s FROM pg_catalog.unnest(p_sources) AS x(s)
+                 WHERE x.s IS NOT NULL AND NOT (x.s = ANY (c_covered))) d;
+        IF v_other IS NOT NULL THEN
+            v_row.kind := 'note';
+            v_row.note := 'not covered by full-text search: ' || pg_catalog.left(v_other, 500);
+            RETURN NEXT v_row;
+            v_row := NULL;
+        END IF;
+    END IF;
+
+    FOREACH v_src IN ARRAY v_want LOOP
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_index i
+                    WHERE i.indexrelid = pg_catalog.to_regclass(
+                              'episteme.article_body_' || v_src || '_fts_idx')
+                      AND i.indrelid = pg_catalog.to_regclass('episteme.article_body_' || v_src)
+                      AND i.indisvalid) THEN
+            v_rel := NULL;
+            IF pg_catalog.to_regclass('episteme.reg_release') IS NOT NULL THEN
+                SELECT rr.release_id INTO v_rel
+                  FROM episteme.reg_release rr
+                 WHERE rr.dataset = v_src AND rr.is_latest
+                 LIMIT 1;
+            END IF;
+            v_ready := v_ready || v_src;
+            v_rels := v_rels || v_rel;
+        ELSE
+            v_unbuilt := v_unbuilt || v_src;
+        END IF;
+    END LOOP;
+    IF pg_catalog.cardinality(v_unbuilt) > 0 THEN
+        v_row.kind := 'note';
+        v_row.note := 'full-text index not built, not searched: '
+                      || pg_catalog.array_to_string(v_unbuilt, ', ');
+        RETURN NEXT v_row;
+        v_row := NULL;
+        FOREACH v_src IN ARRAY v_unbuilt LOOP
+            RETURN NEXT episteme_api_internal.missing_article(v_src, v_src);
+        END LOOP;
+    END IF;
+
+    -- One query per known descriptor: the OR of its terms, in term_norm order.
+    v_row.kind := 'note';
+    FOREACH v_ui IN ARRAY v_uis LOOP
+        IF NOT EXISTS (SELECT 1 FROM episteme.mesh_term t WHERE t.descriptor_ui = v_ui) THEN
+            v_row.note := 'unknown descriptor: ' || pg_catalog.left(v_ui, 500);
+            RETURN NEXT v_row;
+            CONTINUE;
+        END IF;
+        v_name := NULL;
+        SELECT t.term INTO v_name
+          FROM episteme.mesh_term t
+         WHERE t.descriptor_ui = v_ui AND t.term_kind = 'name'
+         ORDER BY t.term COLLATE "C"
+         LIMIT 1;
+        v_q := NULL;
+        v_seen := ARRAY[]::text[];
+        FOR v_term IN
+            SELECT t.term FROM episteme.mesh_term t
+             WHERE t.descriptor_ui = v_ui
+             ORDER BY t.term_norm COLLATE "C", t.term COLLATE "C"
+        LOOP
+            v_one := pg_catalog.websearch_to_tsquery(
+                'english'::pg_catalog.regconfig, pg_catalog.left(v_term, 1000));
+            CONTINUE WHEN pg_catalog.numnode(v_one) = 0
+                       OR pg_catalog.querytree(v_one) = 'T'
+                       OR v_one::text = ANY (v_seen);
+            v_seen := v_seen || v_one::text;
+            v_q := CASE WHEN v_q IS NULL THEN v_one ELSE v_q || v_one END;
+        END LOOP;
+        IF v_q IS NULL THEN
+            v_row.note := 'no searchable words in the terms of ' || v_ui;
+            RETURN NEXT v_row;
+            CONTINUE;
+        END IF;
+        v_row.note := pg_catalog.format('terms used: %s %s; query: %s',
+                                        v_ui, coalesce(v_name, ''), v_q::text);
+        RETURN NEXT v_row;
+        v_q_uis := v_q_uis || v_ui;
+        v_qs := v_qs || v_q;
+    END LOOP;
+    IF pg_catalog.cardinality(v_ready) = 0 OR pg_catalog.cardinality(v_qs) = 0
+       OR coalesce(p_limit, 1) <= 0 THEN
+        RETURN;
+    END IF;
+
+    -- work_mem for the candidate scans (transaction-local; set back before every return).
+    v_old_wm := pg_catalog.current_setting('work_mem');
+    PERFORM pg_catalog.set_config('work_mem',
+        episteme_api_internal.limit_for('search_work_mem_mb') || 'MB', true);
+
+    -- Candidates per descriptor and source: the first v_scan index matches by article_id,
+    -- then ranked. relation holds the descriptor UI.
+    FOR k IN 1 .. pg_catalog.cardinality(v_qs) LOOP
+        v_q := v_qs[k];
+        FOREACH v_src IN ARRAY v_ready LOOP
+            IF pg_catalog.clock_timestamp() >= v_deadline THEN
+                PERFORM pg_catalog.set_config('work_mem', v_old_wm, true);
+                v_row.note := pg_catalog.format(
+                    'not run: time budget of %s ms spent before %s / %s finished; '
+                    || 'search with fewer terms', v_budget, v_q_uis[k], v_src);
+                RETURN NEXT v_row;
+                RETURN;
+            END IF;
+            SELECT pg_catalog.count(*)::int,
+                   pg_catalog.array_agg(ROW('article', b.article_id, b.source, b.title, b.year,
+                       pg_catalog.ts_rank_cd(
+                           CASE WHEN v_src IN ('dailymed', 'ema_epar')
+                                THEN episteme_api_internal.fts_doc(b.source, b.title, b.abstract,
+                                         pg_catalog.left(b.body_text, v_rank_chars),
+                                         pg_catalog.left(b.text_override, v_rank_chars))
+                                ELSE episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override)
+                           END,
+                           v_q)::real,
+                       v_q_uis[k], NULL, NULL, NULL, NULL)::episteme_api_internal.article_row)
+              INTO v_n, v_part
+              FROM (SELECT b.article_id, b.source, b.title, b.year, b.abstract, b.body_text,
+                           b.text_override
+                      FROM episteme.article_body b
+                     WHERE b.source = v_src
+                       AND episteme_api_internal.fts_doc(b.source, b.title, b.abstract, b.body_text, b.text_override) @@ v_q
+                     ORDER BY b.article_id COLLATE "C"
+                     LIMIT v_scan) b;
+            IF v_n >= v_scan THEN
+                v_capped := v_capped || pg_catalog.format(
+                    'capped: first %s matches by article_id of %s for %s',
+                    v_scan, v_src, v_q_uis[k]);
+            END IF;
+            IF v_n > 0 THEN
+                v_cand := v_cand || v_part;
+            END IF;
+        END LOOP;
+    END LOOP;
+
+    PERFORM pg_catalog.set_config('work_mem', v_old_wm, true);
+    FOREACH v_other IN ARRAY v_capped LOOP
+        v_row.note := v_other;
+        RETURN NEXT v_row;
+    END LOOP;
+
+    -- One row per article: the first descriptor (input order) keeps the relation and the
+    -- score; the others are named in the note, in input order.
+    RETURN QUERY
+    SELECT 'article'::text, h.article_id, h.source, h.title, h.year, h.score, h.relation,
+           v_rels[pg_catalog.array_position(v_ready, h.source)],
+           episteme_api_internal.licence_for(h.source),
+           'also found by: ' || h.others, a.source_file
+      FROM (SELECT f.article_id, f.source, f.title, f.year, f.score, f.relation, f.others
+              FROM (SELECT c.article_id, c.source, c.title, c.year, c.score, c.relation,
+                           pg_catalog.row_number() OVER w AS rn,
+                           pg_catalog.string_agg(c.relation, ', ') OVER (w
+                               ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS others
+                      FROM pg_catalog.unnest(v_cand) AS c
+                    WINDOW w AS (PARTITION BY c.article_id, c.source
+                                 ORDER BY pg_catalog.array_position(v_q_uis, c.relation))) f
+             WHERE f.rn = 1
+             ORDER BY f.score DESC, f.article_id COLLATE "C"
+             LIMIT p_limit) h
+      LEFT JOIN LATERAL (
+           SELECT ar.source_file FROM episteme.articles ar
+            WHERE ar.id = h.article_id AND ar.source = h.source
+            ORDER BY ar.source_file COLLATE "C"
+            LIMIT 1) a ON true
+     ORDER BY h.score DESC, h.article_id COLLATE "C";
+END
+$$;
+
+-- Public, capped function (family 'search').
+CREATE OR REPLACE FUNCTION episteme_api.search_terms(
+    p_descriptor_uis text[], p_sources text[] DEFAULT NULL)
+RETURNS SETOF episteme_api_internal.article_row
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT * FROM episteme_api_internal.cap_articles(
+        ARRAY(SELECT r FROM episteme_api_internal.search_terms(
+                  p_descriptor_uis, p_sources,
+                  episteme_api_internal.limit_for('search') + 1) AS r),
+        'search', true)
 $$;
 
 -- -----------------------------------------------------------------------------
