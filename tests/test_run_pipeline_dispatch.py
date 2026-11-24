@@ -313,6 +313,30 @@ def test_mesh_graph_dispatches(tmp_path):
     assert "stage: graph" in proc.stderr
 
 
+def test_mesh_embed_dispatches_to_its_wrapper(tmp_path: Path) -> None:
+    # A stand-in python records its arguments: the stage reaches embed_mesh.sh, which runs
+    # `python -m episteme.data.mesh.embed_mesh` with the --limit given after the stage.
+    shim = tmp_path / "fakepython.sh"
+    shim.write_text('#!/bin/sh\necho "FAKEPY $*" >&2\nexit 0\n', encoding="utf-8", newline="\n")
+    shim.chmod(0o755)
+    proc = _run_env(["mesh", "embed", "--limit", "3"], tmp_path, FAST_TIMEOUT, PYTHON=str(shim))
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "stage: embed" in proc.stderr
+    assert "FAKEPY -m episteme.data.mesh.embed_mesh --limit 3" in proc.stderr
+
+
+def test_pubmed_embed_dies_3(tmp_path: Path) -> None:
+    proc = _run(["pubmed", "embed"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "embed is wired for mesh only" in proc.stderr
+
+
+def test_mesh_embed_dry_run_refused(tmp_path: Path) -> None:
+    proc = _run(["mesh", "embed", "--dry-run"], tmp_path, FAST_TIMEOUT)
+    assert proc.returncode == 3, proc.stderr[-2000:]
+    assert "writes the DB" in proc.stderr
+
+
 def test_pmc_serialize_dies_3(tmp_path: Path) -> None:
     # FIX 2 (whole-branch review): `serialize` is a valid top-level STAGE (SP4
     # added it to the general allow-list for the 8 structured sources), but

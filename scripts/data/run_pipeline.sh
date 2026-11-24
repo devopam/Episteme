@@ -16,7 +16,7 @@ fi
 [ -n "$PY" ] || die "python not found (set PYTHON=/path/to/python)"
 
 usage() {
-    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON] [--zip PATH]" >&2
+    echo "usage: $0 <source> <all|download|extract|load|graph|materialize|enrich|serialize|embed> [--dry-run] [--force] [--reason REASON] [--max-files N] [--bulk] [--no-wait] [--skip-unit NAME --reason REASON] [--sample] [--skip-gate --reason REASON] [--allow-partial --reason REASON] [--zip PATH]" >&2
     echo "       $0 corpus materialize   # alias: writes the same 03_corpus shard as 'pmc materialize'" >&2
     exit 2
 }
@@ -267,7 +267,7 @@ if [ "$SOURCE" != "corpus" ] && [ "$SOURCE" != "openfda_faers" ] && [ -z "${WRAP
 fi
 
 case "$STAGE" in
-    all|download|extract|load|graph|materialize|enrich|serialize) ;;
+    all|download|extract|load|graph|materialize|enrich|serialize|embed) ;;
     *) usage ;;
 esac
 
@@ -281,7 +281,7 @@ fi
 # `all` is in the list too: it runs a write stage, so the review wants the
 # combination refused outright, not run download-only and silently partial.
 case "$STAGE" in
-    extract|load|graph|enrich|materialize|serialize|all)
+    extract|load|graph|enrich|materialize|serialize|embed|all)
         [ "${EPISTEME_DRY_RUN:-0}" != "1" ] \
             || die "$SOURCE $STAGE writes the DB — --dry-run is supported on 'download' only" 3 ;;
 esac
@@ -320,6 +320,11 @@ if [ "$SOURCE" != "pmc" ] && [ "$SOURCE" != "corpus" ]; then
                 || die "$SOURCE graph is not wired" 3
             litw="$HERE/$SRC_DIR/graph_$SOURCE.sh"
             [ -f "$litw" ] || die "wrapper not found: $litw (not yet implemented?)" 3
+            ;;
+        embed)
+            [ "$SOURCE" = "mesh" ] || die "embed is wired for mesh only" 3
+            embedw="$HERE/$SRC_DIR/embed_$SOURCE.sh"
+            [ -f "$embedw" ] || die "wrapper not found: $embedw (not yet implemented?)" 3
             ;;
         serialize)
             _is_structured "$SOURCE" || die "$SOURCE $STAGE is not in SP4 — SP2 (literature) territory" 3
@@ -529,7 +534,7 @@ export EPISTEME_STOP_FILE
 _lock_kind() {
     case "$1" in
         download) echo download ;;
-        extract|serialize|load|graph|enrich|materialize) echo heavy ;;
+        extract|serialize|load|graph|enrich|materialize|embed) echo heavy ;;
     esac
 }
 LOCK_KIND=""     # the lock this run holds now (acquired or re-entered)
@@ -844,6 +849,7 @@ wpath="${wpath:-}"
 idmapw="${idmapw:-}"
 litw="${litw:-}"
 structw="${structw:-}"
+embedw="${embedw:-}"
 
 # Best-effort: a down/unreachable DB must not silently skip the run_start
 # bracket. extract's own audit already degrades to a file-only mirror when
@@ -1015,6 +1021,9 @@ else
             ;;
         graph)    run_stage graph bash "$HERE/$SRC_DIR/graph_$SOURCE.sh" "${graph_args[@]}" ;;
         serialize) run_stage serialize bash "$HERE/$SRC_DIR/serialize_$SOURCE.sh" "${struct_serialize_args[@]}" ;;
+        # mesh only (validated above); not part of `all`. The trial is --limit N, which
+        # reaches the wrapper through the passthrough list.
+        embed)    run_stage embed bash "$embedw" "${passthrough[@]+"${passthrough[@]}"}" ;;
         enrich)
             if [ "$SOURCE" = "europepmc_lite" ]; then
                 run_stage enrich bash "$HERE/europepmc/lite_metadata/enrich_europepmc_lite.sh" "${load_args[@]}"
