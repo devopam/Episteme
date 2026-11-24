@@ -1678,9 +1678,11 @@ $$;
 -- is the descriptor alone.
 -- The descriptor_ui of a name is read from one article_mesh row (LIMIT 1): a name
 -- belongs to one descriptor.
--- Year: the largest year of the PMID's 'pubmed' rows in articles (0 = unknown). The
--- years of other sources are not used (0016: a europepmc_manuscript row carries the
--- deposit year, not the publication year). A year bound drops records with an unknown
+-- Year: the largest year of the PMID's 'pubmed' rows in articles (0 = unknown; with a
+-- year bound, the largest year of those rows inside the bound). One 'pubmed' row per
+-- PMID is expected (articles.id = 'pubmed:<pmid>'), so in practice it is the PMID's
+-- year. The years of other sources are not used (0016: a europepmc_manuscript row
+-- carries the deposit year, not the publication year). A year bound drops records with an unknown
 -- year. Order: year descending (unknown last), then article_id. article_id is
 -- 'pubmed:<pmid>'. release_id: the is_latest reg_release row of dataset 'pubmed', NULL
 -- when there is none. relation: the matched descriptor names, comma separated. score
@@ -1708,7 +1710,8 @@ $$;
 --   4. Sort, cut at p_limit, then descriptors and source_file for the kept rows only.
 -- Indexes: lower(descriptor_name) on article_mesh serves the name match; with the
 -- covering form (lower(descriptor_name)) INCLUDE (descriptor_name, pmid) the hit step
--- and step 4 are index-only scans. articles_pmid_idx (partial, pmid IS NOT NULL;
+-- is an index-only scan. Step 4 is a pmid lookup bounded by p_limit rows: it reads
+-- min(m.source_file), which neither covering index holds. articles_pmid_idx (partial, pmid IS NOT NULL;
 -- a.pmid = ANY (...) implies it) serves the window probes, and the year bounds prune
 -- the RANGE (year) partitions of articles_pubmed. The article_mesh indexes are NOT
 -- created here (article_mesh has ~345M rows): they are in bulk_indexes INDEX_GROUPS

@@ -374,17 +374,21 @@ def test_window_width_does_not_change_results(db, width):
     expected_f = _call(db, 1, None, 2020, 2022)
     expected_t = _call(db, 1, "Liver Diseases")
     expected_1 = _call(db, 1, None, limit=1)
-    with db.cursor() as cur:
-        cur.execute(
-            "UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
-            "max_limit = greatest(max_limit, %s) WHERE family = 'literature_window'",
-            (width, width),
-        )
-    db.commit()
-    assert _call(db, 1, None) == expected
-    assert _call(db, 1, None, 2020, 2022) == expected_f
-    assert _call(db, 1, "Liver Diseases") == expected_t
-    assert _call(db, 1, None, limit=1) == expected_1
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
+                "max_limit = greatest(max_limit, %s) WHERE family = 'literature_window'",
+                (width, width),
+            )
+        db.commit()
+        assert _call(db, 1, None) == expected
+        assert _call(db, 1, None, 2020, 2022) == expected_f
+        assert _call(db, 1, "Liver Diseases") == expected_t
+        assert _call(db, 1, None, limit=1) == expected_1
+    finally:
+        db.rollback()
+        api_settings.sync(db)
 
 
 @pytest.mark.pg
@@ -420,11 +424,15 @@ def test_windows_cut_ties_and_year_zero(db):
             "max_limit = greatest(max_limit, 1) WHERE family = 'literature_window'"
         )
     db.commit()
-    assert _ids(_call(db, 1, None, limit=2)) == ["pubmed:200", "pubmed:600"]
-    assert _ids(_call(db, 1, None, limit=3)) == ["pubmed:200", "pubmed:600", "pubmed:700"]
-    rows = _call(db, 1, None)
-    assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:600"] == 2022
-    assert _ids(rows)[-1] == "pubmed:400" and rows[-1][4] is None
-    assert "pubmed:400" not in _ids(_call(db, 1, None, None, 2030))
-    # An older topic match is found after empty newer windows.
-    assert _ids(_call(db, 1, "Liver Diseases", None, 2020)) == ["pubmed:150"]
+    try:
+        assert _ids(_call(db, 1, None, limit=2)) == ["pubmed:200", "pubmed:600"]
+        assert _ids(_call(db, 1, None, limit=3)) == ["pubmed:200", "pubmed:600", "pubmed:700"]
+        rows = _call(db, 1, None)
+        assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:600"] == 2022
+        assert _ids(rows)[-1] == "pubmed:400" and rows[-1][4] is None
+        assert "pubmed:400" not in _ids(_call(db, 1, None, None, 2030))
+        # An older topic match is found after empty newer windows.
+        assert _ids(_call(db, 1, "Liver Diseases", None, 2020)) == ["pubmed:150"]
+    finally:
+        db.rollback()
+        api_settings.sync(db)

@@ -41,17 +41,21 @@ Three lookups fail or come near the timeout on production:
 4. **Descriptors and `source_file` are read only for the rows returned** (`literature_by_mesh`:
    the kept PMIDs; `shared_mesh`: the top rows), not for every hit.
 5. **`graph_neighbours` id lookup** without `ORDER BY ... LIMIT 1`: `min(pmid COLLATE "C")` over
-   the rows with `id = v_id`, so no plan can choose a full `pmid` index walk.
+   the rows with `id = v_id`. This removes the `ORDER BY ... LIMIT` form that led the planner to walk the `pmid` index. Fresh statistics (`ANALYZE`) are still needed.
 6. **`search_text` rank input for label sources** (`dailymed`, `ema_epar`): title, abstract and
    the first `search_rank_chars` characters (config family, default 10000) of the label text and
    of `text_override`. **The match is unchanged** (the exact index expression). This is a contract
    change: scores and the order of label results move (the top score for "lactic acidosis" went
    from 6.34 to 3.04). Other sources are unchanged.
-7. **Acceptance:** after the rollout, `reader_smoke.py` through the reader MCPg instance, fresh
-   connection, substances not used while prototyping (acetaminophen 19464, ibuprofen 149266,
-   simvastatin 69503), with one topic call, one year-filtered call, one `pmcid:` `shared_mesh`
-   call and the label search: every call under 10 s. A call that misses is reported with its time,
-   not hidden.
+7. **Acceptance:** after the rollout, run these calls through the reader MCPg instance
+   (`scripts/mcpg-episteme.sh episteme --reader`) on a fresh connection, for substances not used
+   while prototyping: `literature_by_mesh` for acetaminophen 19464, ibuprofen 149266 and
+   simvastatin 69503 without a filter; one year-filtered call; one topic call; one rare-topic
+   call on a large substance (for example aspirin 127871); `graph_neighbours('pmcid:<id>',
+   'shared_mesh')`; `search_text` with `p_sources` `'{dailymed,ema_epar}'`. Every call must take
+   less than 10 s. A call that misses is reported with its time, not hidden. After
+   `VACUUM (ANALYZE) episteme.article_mesh`, `EXPLAIN (ANALYZE, BUFFERS)` of one literature window
+   probe and of the `shared_mesh` hit step must show an Index Only Scan with Heap Fetches near 0.
 
 ## Not in this change (owner decisions, reported)
 

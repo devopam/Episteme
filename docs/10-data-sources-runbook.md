@@ -203,7 +203,7 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0013_reference_codes.sql` | `episteme.code_system`, `episteme.code` and the view `episteme.code_current` (one current release per code system; a non-empty licence notice is required) | Required before `refmeta load` (section 5.18). Idempotent, one transaction, `lock_timeout = '60s'`. It does not lock `articles`. Apply it to `episteme_test` before the first test load |
 | `0014_article_text_virtual.sql` | `article_body.text` becomes the stored column `text_override`; a new VIRTUAL column `text` reads the override or the join of `title`, `abstract` and `body_text` | Metadata only: no table rewrite, it takes seconds. It holds ACCESS EXCLUSIVE on `article_body` for a short time: apply it with no load running. Run `precheck --all` first (section 2.3.1). Idempotent, one transaction, `lock_timeout = '60s'` |
 | `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
-| `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the marker table `episteme_api_internal.year_windows` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). Until the sync runs, `literature_by_mesh` raises an error: the families `literature_window` and `search_rank_chars` have no row. The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
+| `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the helper function `episteme_api_internal.year_windows` and seeds the result limits `literature_window` and `search_rank_chars` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions no longer fail before it, because 0016 seeds the two new families (`literature_window` 5, `search_rank_chars` 10000). The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
 
 Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0016, apply those fifteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
@@ -1906,9 +1906,19 @@ PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh ema_epar load
 11. **Reader MCPg instance** (below), set up by the owner. Before it goes live, do two checks and record the results in the drift log. (a) Run `EXPLAIN (ANALYZE, BUFFERS)` of `graph_neighbours(<pmid>, 'shared_mesh')` for 3 to 5 production PMIDs and record the timings. (b) Through the reader MCPg instance, try `SET statement_timeout = 0` and record whether restricted mode refuses it. Then smoke test: one call of every `episteme_api` function through it.
 12. **Migration 0016 (performance follow-up), then the covering indexes.** Do one action at a time, first on `episteme_test`, then on `episteme`. Run no graph load at the same time.
     1. Apply 0016 as `episteme_sys_admin`, the same way as step 1, with `for f in 0016_api_perf`.
-    2. Run `api_settings sync` at once (step 3). It writes the new families `literature_window` (5, 5) and `search_rank_chars` (10000, 10000). Until it runs, `limit_for('literature_window')` raises an error and `literature_by_mesh` fails.
-    3. Build the covering indexes on `episteme` (section 5.19.5), one after the other.
-    4. Check with `reader_smoke.py` through the reader MCPg instance (a new connection). Every call must take less than 10 s.
+    2. Apply the roles file again (step 2). 0016 adds the function `year_windows` (section 5.19.4).
+    3. Run `api_settings sync` (step 3). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions work before it, because 0016 seeds `literature_window` (5, 5) and `search_rank_chars` (10000, 10000) in `result_limit`.
+    4. Build the covering indexes on `episteme` (section 5.19.5), one after the other.
+    5. Run the acceptance check through the reader MCPg instance (`scripts/mcpg-episteme.sh episteme --reader`), on a fresh connection. Make these calls and record the time of each one:
+        - `literature_by_mesh` for acetaminophen (19464), ibuprofen (149266) and simvastatin (69503), with no filter.
+        - `literature_by_mesh` with a year filter (one call).
+        - `literature_by_mesh` with a topic (one call).
+        - `literature_by_mesh` with a rare topic on a large substance (one call; for example aspirin 127871 and a rare MeSH topic).
+        - `graph_neighbours('pmcid:<id>', 'shared_mesh')`.
+        - `search_text` with `p_sources` `'{dailymed,ema_epar}'`.
+
+       Pass: each call takes less than 10 s. Report every time. Report a miss with its time.
+    6. Run `VACUUM (ANALYZE) episteme.article_mesh`. Then run `EXPLAIN (ANALYZE, BUFFERS)` for one literature window probe and for the `shared_mesh` hit step. Confirm an Index Only Scan with Heap Fetches near 0.
 
 #### 5.19.2 Full-text index builds
 
@@ -1952,7 +1962,7 @@ The existing instances are unchanged. Through the reader, call `episteme_api.<fu
 
 #### 5.19.5 Covering indexes on `article_mesh` (once)
 
-Migration 0016 and the design `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md` need two covering indexes. Build each one under a temporary name, drop the old index, then rename the new one. Do the steps as `episteme_sys_admin`, with no graph load running, and one index at a time. Each build reads about 345 million rows. It blocks writes to `article_mesh`, not reads. Expect tens of minutes and tens of GB of space on E:.
+Migration 0016 and the design `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md` need two covering indexes. Build each one under a temporary name, drop the old index, then rename the new one. Before the swap, run `bash scripts/data/db/bulk_load_indexes.sh status` (section 4.6). It must exit 0 with no pending rebuild for group `pubmed_graph`. Do the steps as `episteme_sys_admin`, with no graph load running, and one index at a time. A database that has no old index needs only the `CREATE INDEX` statement, under the final name (`article_mesh_lower_name_idx` or `article_mesh_descriptor_ui_idx`). Do not run the `DROP` and `RENAME` statements there. Each build reads about 345 million rows. It blocks writes to `article_mesh`, not reads. Expect tens of minutes and tens of GB of space on E:.
 
 ```sql
 CREATE INDEX article_mesh_lower_name_cov_idx ON episteme.article_mesh (lower(descriptor_name)) INCLUDE (descriptor_name, pmid);

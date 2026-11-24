@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from episteme import config
+
 _DB_DIR = Path(__file__).resolve().parents[2] / "src/episteme/data/db"
 _MIGRATION_0015 = _DB_DIR / "migrations/0015_api_layer.sql"
 _MIGRATION = _DB_DIR / "migrations/0016_api_perf.sql"
@@ -47,6 +49,21 @@ def test_schema_sql_carries_the_0016_bodies():
     schema = _functions(_DB_DIR / "schema.sql")
     for name, text in new.items():
         assert schema.get(name) == text, name
+
+
+def test_0016_seeded_limits_equal_config():
+    text = _MIGRATION.read_text(encoding="utf-8")
+    block = re.search(
+        r"INSERT INTO episteme_api_internal\.result_limit.*?VALUES(.*?)ON CONFLICT", text, re.S
+    )
+    assert block, "0016 must seed result_limit"
+    seeded = {
+        m.group(1): (int(m.group(2)), int(m.group(3)))
+        for m in re.finditer(r"\('(\w+)',\s*(\d+),\s*(\d+)\)", block.group(1))
+    }
+    assert set(seeded) == {"literature_window", "search_rank_chars"}
+    for family, values in seeded.items():
+        assert values == config.API_RESULT_LIMITS[family], family
 
 
 def test_0016_functions_set_search_path_and_definer():
@@ -98,3 +115,32 @@ def test_year_windows_with_bounds(pg_conn):
     ]
     # A width below 1 counts as 1 (no endless recursion).
     assert _windows(pg_conn, 2024, 2025, 0, 2026) == [(2025, 2025, 1), (2024, 2024, 2)]
+
+
+@pytest.mark.pg
+def test_0016_seeds_the_new_limit_rows(pg_conn):
+    _apply(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM episteme_api_internal.result_limit "
+            "WHERE family IN ('literature_window', 'search_rank_chars')"
+        )
+    pg_conn.commit()
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(_MIGRATION.read_text(encoding="utf-8"))
+            cur.execute(
+                "SELECT family, default_limit, max_limit FROM episteme_api_internal.result_limit "
+                "WHERE family IN ('literature_window', 'search_rank_chars')"
+            )
+            rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        pg_conn.commit()
+        assert rows == {
+            f: config.API_RESULT_LIMITS[f] for f in ("literature_window", "search_rank_chars")
+        }
+    finally:
+        # Restore the seed rows (the same values api_settings.sync writes by default).
+        pg_conn.rollback()
+        with pg_conn.cursor() as cur:
+            cur.execute(_MIGRATION.read_text(encoding="utf-8"))
+        pg_conn.commit()
