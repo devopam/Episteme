@@ -467,10 +467,13 @@ def test_function_marker_query():
 @pytest.mark.pg
 def test_migrations_check_against_episteme_test(capsys):
     from episteme.data.db.connection import connection
+    from episteme.data.db.text_override import is_supported_server_version
 
     with connection() as conn, conn.cursor() as cur:
         cur.execute("select current_database(), current_setting('server_version')")
-        assert cur.fetchone() == ("episteme_test", "19beta3")
+        db_name, version = cur.fetchone()
+        assert db_name == "episteme_test"
+        assert is_supported_server_version(version)
     rc = gate.main(["migrations-check"])
     out = capsys.readouterr().out
     print(out)

@@ -169,7 +169,7 @@ bash scripts/data/db/install_extensions.sh
 bash scripts/data/db/init_database.sh
 ```
 
-- `install_extensions.sh` tries `CREATE EXTENSION vector` and `pg_search` in both databases. On the local PG19beta3 build the extension files are absent: it prints the server error, defers to migration 0001, and still exits 0.
+- `install_extensions.sh` tries `CREATE EXTENSION vector` and `pg_search` in both databases. On the local PG 19.0 build, pgvector 0.8.7 is installed in both databases. The `pg_search` extension files are absent: the script prints the server error, defers to migration 0001, and still exits 0.
 - `init_database.sh` is idempotent: roles and databases only if absent, `extensions.sql`, then `schema.sql` per database. An existing `episteme` schema is left alone unless `EPISTEME_INIT_FORCE=1`, which drops and recreates it (data loss). It needs `PGHOST`, `PGPORT`, `EPISTEME_SYS_ADMIN_PASSWORD` and `EPISTEME_DB_PASSWORD` and never echoes a password.
 
 ### 2.2 Confirm the server before any DB step (mandatory for agents)
@@ -188,7 +188,7 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 
 | Migration | Adds | Status on the local build |
 |---|---|---|
-| `0001_add_chunk_vector_columns.sql` | `chunks.embedding` (pgvector) and `chunks.chunk_tsv` | **Cannot apply:** `vector` and `pg_search` are absent on PG19beta3. Needed only for Phase 1 retrieval. |
+| `0001_add_chunk_vector_columns.sql` | `chunks.embedding` (pgvector) and `chunks.chunk_tsv` | **Stays not applied:** the `vector` part can be applied (pgvector 0.8.7 is installed on PG 19.0), but `pg_search` is absent. Needed only for Phase 1 retrieval. |
 | `0002_container_and_book_parts.sql` | `articles.container_id` and `book_meta`, the `bookshelf` partitions, `article_parts` | Required before **any** load (the loader writes those columns) and before `graph`. |
 | `0003_mesh_hierarchy.sql` | `episteme.mesh_hierarchy` | Required before `mesh` graph. |
 | `0004_articles_load_indexes.sql` | `articles (source, source_file)` and `articles (id)` indexes (per partition) | Recommended before any large load: without them each per-file delete scans the whole `articles_default` partition. Apply it with **no load running**: `CREATE INDEX` on the partitioned parent blocks writes to every partition while it builds (`CONCURRENTLY` is not possible on a partitioned parent). |
