@@ -481,13 +481,15 @@ def _fill_qualifiers(conn) -> None:
 
 
 def _add_mortality(conn) -> None:
-    """'Mortality' as a descriptor on PMID 100 (2020); the qualifier 'mortality' on the
+    """'Mortality' as a descriptor on PMID 100 (2020) and on the aspirin record 300 (two
+    set rows: not exact at literature_topic_scan 1); the qualifier 'mortality' on the
     Metformin row of PMID 600 (2022)."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO episteme.article_mesh "
             "(pmid, descriptor_ui, descriptor_name, major_topic, qualifiers, source_file) "
-            "VALUES ('100', 'D009026', 'Mortality', false, NULL, 'pubmed/a.xml')"
+            "VALUES ('100', 'D009026', 'Mortality', false, NULL, 'pubmed/a.xml'), "
+            "('300', 'D009026', 'Mortality', false, NULL, 'pubmed/c.xml')"
         )
         cur.execute(
             "UPDATE episteme.article_mesh SET qualifiers = ARRAY['mortality'] "
@@ -543,7 +545,8 @@ def test_large_set_matches_exact_set(db, filled):
     """A descriptor set larger than literature_topic_scan is probed per window: the same
     rows as the exact set. With the list filled, 'Liver Diseases' (no qualifier name)
     takes the exact path (hits = the set, no window check) by default and the
-    per-window probe at scan 1; 'mortality' adds the qualifier side to both."""
+    per-window probe at scan 1; 'mortality' (descriptor and qualifier) adds the
+    qualifier side to both."""
     _add_mortality(db)
     if filled:
         _fill_qualifiers(db)
@@ -572,15 +575,15 @@ def test_large_set_matches_exact_set(db, filled):
 @pytest.mark.parametrize("topic", ["adverse effects", "Liver Diseases", None])
 def test_budget_spent_gives_partial_note(db, topic):
     """A budget of 1 ms, spent before the call starts (the sleep runs first in the same
-    statement: the lateral call reads its output, a void that casts to ''): one partial
+    statement: the lateral call reads its output, a boolean never NULL): one partial
     note, the rows already kept stay, no PMID twice, notes before articles."""
     _set_limit(db, "time_budget_ms", 1)
     try:
         with db.cursor() as cur:
             cur.execute(
-                "SELECT r.* FROM (SELECT pg_sleep(0.05)) AS s(z) "
+                "SELECT r.* FROM (SELECT pg_sleep(0.05) IS NULL) AS s(z) "
                 "CROSS JOIN LATERAL episteme_api_internal.literature_by_mesh("
-                "1, s.z::text || %s) AS r",
+                "1, CASE WHEN s.z IS NOT NULL THEN %s END) AS r",
                 (topic or "",),
             )
             rows = cur.fetchall()
