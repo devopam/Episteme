@@ -95,9 +95,9 @@ def _setup(pg_conn, monkeypatch, release: str = "2026") -> None:
             ("D003924", "Diabetes Mellitus, Type 2", NOTE),
         ):
             cur.execute(
-                "INSERT INTO episteme.articles (id, source, source_file, source_record_id, "
-                "title, text) VALUES (%s, 'mesh', 'desc2026.xml', %s, %s, %s)",
-                (f"mesh:{ui}", ui, name, _build_text(name, note)),
+                "INSERT INTO episteme.article_body (article_id, source, title, text_override) "
+                "VALUES (%s, 'mesh', %s, %s)",
+                (f"mesh:{ui}", name, _build_text(name, note)),
             )
         for ui, term, kind, pref in _TERMS:
             cur.execute(

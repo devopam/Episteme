@@ -1,12 +1,15 @@
 """MeSH embed stage: MedCPT article-encoder vectors of the MeSH vocabulary.
 
 Reads ``episteme.mesh_term`` (filled by the mesh graph phase) and the descriptor prose of
-``episteme.articles`` (source ``mesh``), encodes them and writes ``episteme.mesh_term_vec``.
+``episteme.article_body`` (source ``mesh``), encodes them and writes ``episteme.mesh_term_vec``.
 
 Rows per descriptor:
 
 * one ``descriptor`` row: the pair ``(name, scope note)``;
 * one ``entry`` row per entry term: the pair ``(term, '')``.
+
+The ``text`` column of ``mesh_term_vec`` keeps the title string (descriptor name or entry term),
+which is what a reviewer sees. The scope note is encoder input only.
 
 ``vocabulary_texts`` is the single builder of these texts. ``embed`` encodes exactly what it
 returns. Restart rule: a descriptor whose rows already exist for the same ``mesh_release`` and
@@ -33,7 +36,7 @@ _COLUMNS = "descriptor_ui, text_kind, text, embedding, model, model_revision, me
 
 
 def scope_note_of(name: str, text: str | None) -> str:
-    """The scope note inside ``episteme.articles.text`` of one MeSH descriptor.
+    """The scope note inside ``episteme.article_body.text`` of one MeSH descriptor.
 
     The serializer builds ``"<name>. <scope note> As defined in ... thesaurus."`` (the scope
     note and its leading space are omitted when absent). Strip the leading name and the
@@ -71,11 +74,13 @@ def vocabulary_texts(conn: Any) -> list[tuple[str, str, str, str]]:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT t.descriptor_ui, min(t.term) AS name, a.text "
-            "FROM episteme.mesh_term t "
-            "LEFT JOIN episteme.articles a ON a.id = 'mesh:' || t.descriptor_ui "
-            "WHERE t.term_kind = 'name' "
-            "GROUP BY t.descriptor_ui, a.text ORDER BY t.descriptor_ui"
+            "SELECT t.descriptor_ui, t.term, b.text "
+            "FROM (SELECT DISTINCT ON (descriptor_ui) descriptor_ui, term "
+            "      FROM episteme.mesh_term WHERE term_kind = 'name' "
+            "      ORDER BY descriptor_ui, is_preferred DESC, term) t "
+            "LEFT JOIN episteme.article_body b "
+            "  ON b.article_id = 'mesh:' || t.descriptor_ui AND b.source = 'mesh' "
+            "ORDER BY t.descriptor_ui"
         )
         names = cur.fetchall()
         cur.execute(
