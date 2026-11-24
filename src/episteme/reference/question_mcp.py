@@ -417,43 +417,54 @@ class QuestionService:
         accepted_n = {t["n"] for t in accepted}
         rejected = [t for t in proposal.terms if t["n"] not in accepted_n]
 
+        confirmed_by = CONFIRMED_BY if action == "accept" else None
+        accepted_short = [_short(t) for t in accepted]
+        rejected_short = [_short(t) for t in rejected]
+
+        def log(queries: list[str], release_ids: list[str], error: str | None = None) -> None:
+            self._log(
+                event="confirm",
+                question=proposal.question,
+                confirmation_id=cid,
+                terms=[_short(t) for t in proposal.terms],
+                elicitation_action=action,
+                confirmed_by=confirmed_by,
+                accepted=accepted_short,
+                rejected=rejected_short,
+                queries=queries,
+                release_ids=release_ids,
+                error=error,
+            )
+
         rows: list[dict[str, Any]] = []
         if status == "searched":
-            uis = [t["descriptor_ui"] for t in accepted]
-            for r in self._db.search_terms(uis, sources):
-                rows.append({**_plain(r, ARTICLE_FIELDS), "via": "search_terms"})
-            if substance_key is not None:
-                for t in accepted:
-                    for r in self._db.literature_by_mesh(
-                        substance_key, t["descriptor_name"], from_year, to_year
-                    ):
-                        rows.append(
-                            {
-                                **_plain(r, ARTICLE_FIELDS),
-                                "via": f"literature_by_mesh: {t['descriptor_name']}",
-                            }
-                        )
+            try:
+                uis = [t["descriptor_ui"] for t in accepted]
+                for r in self._db.search_terms(uis, sources):
+                    rows.append({**_plain(r, ARTICLE_FIELDS), "via": "search_terms"})
+                if substance_key is not None:
+                    for t in accepted:
+                        for r in self._db.literature_by_mesh(
+                            substance_key, t["descriptor_name"], from_year, to_year
+                        ):
+                            rows.append(
+                                {
+                                    **_plain(r, ARTICLE_FIELDS),
+                                    "via": f"literature_by_mesh: {t['descriptor_name']}",
+                                }
+                            )
+            except Exception as exc:
+                # The person's acceptance stays on record. Only the type name: the message
+                # can hold SQL or parameters.
+                log([], [], error=type(exc).__name__)
+                raise
         queries = [
             r["note"]
             for r in rows
             if r.get("kind") == "note" and (r.get("note") or "").startswith(QUERY_NOTE_PREFIX)
         ]
         release_ids = sorted({r["release_id"] for r in rows if r.get("release_id")})
-        confirmed_by = CONFIRMED_BY if action == "accept" else None
-        accepted_short = [_short(t) for t in accepted]
-        rejected_short = [_short(t) for t in rejected]
-        self._log(
-            event="confirm",
-            question=proposal.question,
-            confirmation_id=cid,
-            terms=[_short(t) for t in proposal.terms],
-            elicitation_action=action,
-            confirmed_by=confirmed_by,
-            accepted=accepted_short,
-            rejected=rejected_short,
-            queries=queries,
-            release_ids=release_ids,
-        )
+        log(queries, release_ids)
         return {
             "status": status,
             "accepted": accepted_short,
@@ -472,6 +483,10 @@ class QuestionService:
                 "queries": queries,
                 "release_ids": release_ids,
                 "notes": list(proposal.notes),
+                "sources": sources,
+                "substance_key": substance_key,
+                "from_year": from_year,
+                "to_year": to_year,
             },
         }
 
@@ -490,6 +505,7 @@ class QuestionService:
         rejected: list[dict[str, Any]] | None = None,
         queries: list[str] | None = None,
         release_ids: list[str] | None = None,
+        error: str | None = None,
     ) -> None:
         ts = self._now().astimezone(timezone.utc)
         record = {
@@ -505,6 +521,8 @@ class QuestionService:
             "queries": queries or [],
             "release_ids": release_ids or [],
         }
+        if error is not None:
+            record["error"] = error
         self._log_dir.mkdir(parents=True, exist_ok=True)
         path = self._log_dir / f"question-{ts:%Y-%m-%d}.jsonl"
         with path.open("a", encoding="utf-8", newline="\n") as fh:

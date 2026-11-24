@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import mcp_types
@@ -333,6 +333,50 @@ def test_accept_terms_1_and_3_searches_only_those(tmp_path):
     ]
 
 
+class FailingDB(FakeDB):
+    def search_terms(self, descriptor_uis, sources):
+        self.calls.append(("search_terms", list(descriptor_uis), sources))
+        raise RuntimeError("SELECT secret FROM somewhere -- params")
+
+
+def test_failed_search_still_logs_the_confirmation(tmp_path):
+    db = FailingDB(_EXACT + [_note(_UNMATCHED)], _SUGGESTED)
+    svc = _service(tmp_path, db)
+    tr = svc.translate_question("SJS after amoxicillin zzword")
+    with pytest.raises(RuntimeError):
+        _confirm(svc, tr["confirmation_id"], FakeCtx(ticks=(1, 3)))
+    lines = _log_lines(tmp_path)
+    assert [line["event"] for line in lines] == ["translate", "confirm"]
+    confirm = lines[-1]
+    assert set(confirm) == _LOG_KEYS | {"error"}
+    assert confirm["error"] == "RuntimeError"
+    assert "secret" not in json.dumps(confirm)
+    assert confirm["confirmed_by"] == "user via MCP elicitation"
+    assert [t["n"] for t in confirm["accepted"]] == [1, 3]
+    assert confirm["queries"] == [] and confirm["release_ids"] == []
+
+
+def test_provenance_carries_the_search_parameters(tmp_path):
+    svc, _, tr = _translate_three(tmp_path)
+    out = _confirm(
+        svc,
+        tr["confirmation_id"],
+        FakeCtx(ticks=(1,)),
+        sources=["pmc"],
+        substance_key=7,
+        from_year=2020,
+        to_year=2025,
+    )
+    prov = out["provenance"]
+    assert (prov["sources"], prov["substance_key"], prov["from_year"], prov["to_year"]) == (
+        ["pmc"],
+        7,
+        2020,
+        2025,
+    )
+    assert "error" not in _log_lines(tmp_path)[-1]
+
+
 def test_no_literature_call_without_substance_key(tmp_path):
     svc, db, tr = _translate_three(tmp_path)
     out = _confirm(svc, tr["confirmation_id"], FakeCtx(ticks=(2,)))
@@ -358,10 +402,13 @@ def test_log_lines_carry_the_exact_keys(tmp_path):
 
 
 def test_log_file_name_uses_the_utc_date(tmp_path):
-    local = datetime(2026, 11, 25, 1, 0, tzinfo=timezone.utc).astimezone()
+    # 03:00 on the 25th in UTC+05:30 is 21:30 on the 24th in UTC.
+    local = datetime(2026, 11, 25, 3, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
     svc = qm.QuestionService(FakeDB(_EXACT), tmp_path, now=lambda: local)
     svc.translate_question("SJS")
-    assert [p.name for p in tmp_path.iterdir()] == ["question-2026-11-25.jsonl"]
+    assert [p.name for p in tmp_path.iterdir()] == ["question-2026-11-24.jsonl"]
+    line = json.loads((tmp_path / "question-2026-11-24.jsonl").read_text(encoding="utf-8"))
+    assert line["ts"] == "2026-11-24T21:30:00+00:00"
 
 
 def test_confirm_schema_is_spec_valid_flat_bools(tmp_path):
@@ -481,7 +528,9 @@ def test_forged_arguments_cannot_stand_in_for_the_person(tmp_path, mode, callbac
             )
 
     result = asyncio.run(run())
-    assert result.is_error or result.structured_content["status"] == status
+    # The SDK drops unknown arguments: the call succeeds and the forged values have no effect.
+    assert not result.is_error, result
+    assert result.structured_content["status"] == status
     assert "search_terms" not in db.names()
 
 
