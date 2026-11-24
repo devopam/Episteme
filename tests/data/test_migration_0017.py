@@ -21,6 +21,13 @@ _NEW_FAMILIES = {
     "time_budget_ms",
     "search_work_mem_mb",
 }
+_FUNCTION = re.compile(
+    r"CREATE OR REPLACE FUNCTION (episteme_api(?:_internal)?\.\w+)\((.*?)\$\$(.*?)\$\$;", re.S
+)
+
+
+def _functions(path: Path) -> dict[str, str]:
+    return {m.group(1): m.group(0) for m in _FUNCTION.finditer(path.read_text(encoding="utf-8"))}
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +74,38 @@ def test_0017_gate_marker():
     assert gate_migrations.MIGRATION_MARKERS["0017_api_no_timeouts.sql"] == [
         "table:episteme.mesh_qualifier"
     ]
+
+
+def test_schema_sql_carries_the_0017_bodies():
+    new = _functions(_MIGRATION)
+    assert set(new) >= {
+        "episteme_api_internal.literature_by_mesh",
+        "episteme_api_internal.literature_topic_keep",
+    }
+    schema_text = (_DB_DIR / "schema.sql").read_text(encoding="utf-8")
+    schema = _functions(_DB_DIR / "schema.sql")
+    for name, text in new.items():
+        assert schema.get(name) == text, name
+        # The latest body only: no older copy of the function stays in schema.sql.
+        assert schema_text.count(f"CREATE OR REPLACE FUNCTION {name}(") == 1, name
+
+
+def test_0017_functions_set_search_path_and_definer():
+    for name, text in _functions(_MIGRATION).items():
+        header = text.split("$$", 1)[0]
+        assert "SET search_path = pg_catalog, pg_temp" in header, name
+        if re.search(r"\bepisteme\.[a-z]", text):
+            assert "SECURITY DEFINER" in header, name
+
+
+def test_literature_by_mesh_0017_note_texts_and_deadline():
+    body = _functions(_MIGRATION)["episteme_api_internal.literature_by_mesh"]
+    assert "'topic %s is not a MeSH descriptor or qualifier name'" in body
+    assert "'partial: time budget of %s ms spent; %s'" in body
+    assert "'years from %s down not searched'" in body
+    assert "'records with an unknown year not searched'" in body
+    assert "statement_timestamp() + make_interval(secs => v_budget / 1000.0)" in body
+    assert "limit_for('time_budget_ms')" in body
 
 
 def test_grants_read_list_has_mesh_qualifier():

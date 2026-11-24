@@ -47,7 +47,12 @@ def test_schema_sql_carries_the_0016_bodies():
         "episteme_api_internal.literature_by_mesh",
     }
     schema = _functions(_DB_DIR / "schema.sql")
+    # 0017 replaces some 0016 bodies; schema.sql carries the 0017 ones (checked there).
+    later = _functions(_DB_DIR / "migrations/0017_api_no_timeouts.sql")
+    assert "episteme_api_internal.literature_by_mesh" in later
     for name, text in new.items():
+        if name in later:
+            continue
         assert schema.get(name) == text, name
 
 

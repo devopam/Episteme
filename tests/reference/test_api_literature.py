@@ -94,6 +94,13 @@ def db(ref_db):
             "descriptor_ui text NOT NULL, tree_number text NOT NULL, source_file text)"
         )
         cur.execute("DELETE FROM episteme.mesh_tree")
+        # 0017 creates mesh_qualifier; the same DDL here. Empty by default: the 0016
+        # behaviour (every topic can be a qualifier name).
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS episteme.mesh_qualifier ("
+            "qualifier_ui text NOT NULL, qualifier_name text NOT NULL, source_file text)"
+        )
+        cur.execute("DELETE FROM episteme.mesh_qualifier")
         cur.executemany(
             "INSERT INTO episteme.mesh_tree (descriptor_ui, tree_number) VALUES (%s, %s)", _TREE
         )
@@ -128,6 +135,7 @@ def db(ref_db):
     ref_db.rollback()
     with ref_db.cursor() as cur:
         cur.execute("DELETE FROM episteme.mesh_tree")
+        cur.execute("DELETE FROM episteme.mesh_qualifier")
         cur.execute("DELETE FROM episteme.reg_release WHERE dataset = 'pubmed'")
     ref_db.commit()
 
@@ -451,3 +459,176 @@ def test_windows_cut_ties_and_year_zero(db):
     finally:
         db.rollback()
         api_settings.sync(db)
+
+
+# ---------------------------------------------------------------------------
+# 0017: topic kinds (descriptor, qualifier, both, neither), the descriptor set, the
+# time budget
+# ---------------------------------------------------------------------------
+_NEITHER = "topic No Such Thing is not a MeSH descriptor or qualifier name"
+_QUALIFIER_ONLY = (
+    "topic adverse effects is not a MeSH descriptor name in the indexed records; "
+    "matched on qualifier names only"
+)
+
+
+def _fill_qualifiers(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.mesh_qualifier (qualifier_ui, qualifier_name) VALUES "
+            "('Q000009', 'adverse effects'), ('Q000401', 'mortality')"
+        )
+
+
+def _add_mortality(conn) -> None:
+    """'Mortality' as a descriptor on PMID 100 (2020); the qualifier 'mortality' on the
+    Metformin row of PMID 600 (2022)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.article_mesh "
+            "(pmid, descriptor_ui, descriptor_name, major_topic, qualifiers, source_file) "
+            "VALUES ('100', 'D009026', 'Mortality', false, NULL, 'pubmed/a.xml')"
+        )
+        cur.execute(
+            "UPDATE episteme.article_mesh SET qualifiers = ARRAY['mortality'] "
+            "WHERE pmid = '600' AND descriptor_ui = 'D008687'"
+        )
+
+
+def _set_limit(conn, family: str, value: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
+            "max_limit = greatest(max_limit, %s) WHERE family = %s",
+            (value, value, family),
+        )
+
+
+@pytest.mark.pg
+def test_neither_topic_returns_note_only(db):
+    _fill_qualifiers(db)
+    rows = _call(db, 1, "No Such Thing")
+    db.rollback()
+    assert _ids(rows) == []
+    assert _notes(rows) == [_NEITHER]
+    assert [r[0] for r in rows] == ["note"]
+
+
+@pytest.mark.pg
+def test_qualifier_only_topic_with_list(db):
+    _fill_qualifiers(db)
+    rows = _call(db, 1, "adverse effects")
+    db.rollback()
+    assert _ids(rows) == ["pubmed:200"]
+    assert _notes(rows) == [_QUALIFIER_ONLY]
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("filled", [False, True])
+def test_topic_both_descriptor_and_qualifier(db, filled):
+    """'mortality' is a descriptor (on 100) and a qualifier (on 600): both records match;
+    the record matched by the qualifier only is not lost to the descriptor side."""
+    _add_mortality(db)
+    if filled:
+        _fill_qualifiers(db)
+    rows = _call(db, 1, "mortality")
+    db.rollback()
+    assert _ids(rows) == ["pubmed:600", "pubmed:100"]
+    assert _notes(rows) == []
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("filled", [False, True])
+def test_large_set_matches_exact_set(db, filled):
+    """A descriptor set larger than literature_topic_scan is probed per window: the same
+    rows as the exact set. With the list filled, 'Liver Diseases' (no qualifier name)
+    takes the exact path (hits = the set, no window check) by default and the
+    per-window probe at scan 1; 'mortality' adds the qualifier side to both."""
+    _add_mortality(db)
+    if filled:
+        _fill_qualifiers(db)
+    topics = ("Liver Diseases", "adverse effects", "mortality")
+    expected = {t: _call(db, 1, t) for t in topics}
+    expected_bound = _call(db, 1, "Liver Diseases", 2020, 2022)
+    expected_one = _call(db, 1, "Liver Diseases", limit=1)
+    _set_limit(db, "literature_topic_scan", 1)
+    try:
+        for topic in topics:
+            assert _call(db, 1, topic) == expected[topic], topic
+        assert _call(db, 1, "Liver Diseases", 2020, 2022) == expected_bound
+        assert _call(db, 1, "Liver Diseases", limit=1) == expected_one
+        # Narrow windows too: every window checks its own rows.
+        _set_limit(db, "literature_window", 1)
+        for topic in topics:
+            assert _call(db, 1, topic) == expected[topic], topic
+    finally:
+        db.rollback()
+    assert _ids(expected["Liver Diseases"]) == ["pubmed:200", "pubmed:500", "pubmed:150"]
+    assert _ids(expected["mortality"]) == ["pubmed:600", "pubmed:100"]
+    assert _ids(expected["adverse effects"]) == ["pubmed:200"]
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("topic", ["adverse effects", "Liver Diseases", None])
+def test_budget_spent_gives_partial_note(db, topic):
+    """A budget of 1 ms, spent before the call starts (the sleep runs first in the same
+    statement: the lateral call reads its output, a void that casts to ''): one partial
+    note, the rows already kept stay, no PMID twice, notes before articles."""
+    _set_limit(db, "time_budget_ms", 1)
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT r.* FROM (SELECT pg_sleep(0.05)) AS s(z) "
+                "CROSS JOIN LATERAL episteme_api_internal.literature_by_mesh("
+                "1, s.z::text || %s) AS r",
+                (topic or "",),
+            )
+            rows = cur.fetchall()
+    finally:
+        db.rollback()
+    partial = [n for n in _notes(rows) if n.startswith("partial:")]
+    assert len(partial) == 1, _notes(rows)
+    assert partial[0].startswith("partial: time budget of 1 ms spent; ")
+    assert partial[0].endswith(" not searched")
+    ids = _ids(rows)
+    assert len(ids) == len(set(ids))
+    kinds = [r[0] for r in rows]
+    assert kinds == sorted(kinds, key=lambda k: k != "note")
+    # The kept rows are a subset of the full result.
+    assert set(ids) <= set(_ids(_call(db, 1, topic)))
+
+
+@pytest.mark.pg
+def test_budget_not_spent_gives_no_partial_note(db):
+    rows = _call(db, 1, "adverse effects")
+    assert not [n for n in _notes(rows) if n.startswith("partial:")]
+
+
+def _keep(conn, pmids, years, ok, topic, chunk, deadline_sql):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM episteme_api_internal.literature_topic_keep("
+            f"%s::text[], %s::int[], %s::text[], %s, %s, {deadline_sql})",
+            (pmids, years, ok, topic, chunk),
+        )
+        return cur.fetchall()
+
+
+@pytest.mark.pg
+def test_topic_keep_stops_at_deadline(db):
+    past = "clock_timestamp() - interval '1 hour'"
+    future = "clock_timestamp() + interval '1 hour'"
+    pmids, years = ["100", "200", "150"], [2020, 2023, 2019]
+    # Deadline spent: no candidate is checked; one row with the newest year.
+    assert _keep(db, pmids, years, [], "adverse effects", 500, past) == [(None, 2023, True)]
+    # Unknown years only: the stopped row carries a NULL year.
+    assert _keep(db, ["400"], [None], [], "adverse effects", 500, past) == [(None, None, True)]
+    # Deadline spent, but the descriptor side kept 150: it stays, then the stop row.
+    rows = _keep(db, pmids, years, ["150"], "adverse effects", 1, past)
+    assert rows == [("150", 2019, False), (None, 2023, True)]
+    # In time, chunks of 1: 200 by its qualifier ('Adverse Effects', any case), 150 from
+    # p_ok without a qualifier; 100 ('therapeutic use') is not kept.
+    rows = _keep(db, pmids, years, ["150"], "adverse effects", 1, future)
+    assert sorted(rows) == [("150", 2019, False), ("200", 2023, False)]
+    # Nothing to check: no row.
+    assert _keep(db, [], [], [], "adverse effects", 500, past) == []

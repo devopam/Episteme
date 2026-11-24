@@ -1,16 +1,22 @@
 """Literature for a substance, from MeSH indexing. Read-only; no vectors, no text scan.
 
 The query runs in SQL: ``episteme_api_internal.literature_by_mesh`` (migration 0015;
-body 0016).
+body 0017).
 A PubMed record matches when one of its MeSH descriptors (``article_mesh``) has a name
 equal to a preferred name or synonym of a member of the substance's moiety family. The
 descriptor name is compared with SQL ``lower()``.
 
-``topic``, when given, names a MeSH descriptor (case-insensitive). The topic is
-expanded to that descriptor and every descriptor below it in the MeSH tree
-(``mesh_tree``); the record must carry one of them, or a qualifier with the topic's
-name (for example ``adverse effects``). A topic that is no descriptor name gives a
-note and the qualifier match only.
+``topic``, when given, is case-insensitive and is a MeSH descriptor name, a MeSH
+qualifier name (``mesh_qualifier``, for example ``adverse effects``), both (for
+example ``mortality``), or neither. A descriptor topic is expanded to that descriptor
+and every descriptor below it in the MeSH tree (``mesh_tree``); the record must carry
+one of them, or a qualifier with the topic's name. A topic that is no descriptor name
+gives a note and the qualifier match only. A topic that is neither gives only a note.
+When ``mesh_qualifier`` is missing or empty, every topic can be a qualifier name.
+
+The function has a time budget (result limit family ``time_budget_ms``). When it is
+spent, the function returns the records found so far and one note that starts with
+``partial: time budget of <n> ms spent;`` and names the years not searched.
 
 Newest first: by the publication year of the PMID's ``pubmed`` row in ``articles``
 (other sources, such as a Europe PMC manuscript with its deposit year, do not count),
