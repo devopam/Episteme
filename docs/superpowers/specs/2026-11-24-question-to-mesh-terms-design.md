@@ -94,8 +94,8 @@ Where the question encoder runs (owner discussion):
   - One row per entry term (`text_kind = 'entry'`), same encoder.
   - Filled by a new step `run_pipeline.sh mesh embed`: reads `mesh_term` and the descriptor
     XML, embeds in batches on CPU, writes with COPY. Restartable per batch (checkpoint keyed
-    on `input_key` of the descriptor file plus the model revision). `--sample` embeds 2,000
-    descriptors. Expected size: a few hundred thousand rows, under 2 GB with the index; a full
+    on `input_key` of the descriptor file plus the model revision). `--limit 2000` embeds 2,000
+    descriptors as a trial (not `--sample`: the sample gate has no rules for this stage). Expected size: a few hundred thousand rows, under 2 GB with the index; a full
     run of a few hours on the laptop CPU (the plan measures it on the sample first).
 - The graph phase warns (does not exit 0 silently) when it finds no raw MeSH file
   (ride-along item, section 8).
