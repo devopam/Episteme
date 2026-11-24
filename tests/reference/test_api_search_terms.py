@@ -5,6 +5,7 @@ The descriptor UIs D91xxxxx are fixture values."""
 from __future__ import annotations
 
 import os
+import threading
 
 import psycopg
 import pytest
@@ -236,26 +237,64 @@ def test_budget_spent_gives_no_article_rows(db):
     ]
 
 
-def test_capped_notes_dropped_when_budget_spent_later(db):
-    """A capped note of a finished step is not returned when the budget is spent: only
-    the terms used notes and the not run note."""
-    _body(db, [(f"pmc:PMC{i}", "pmc", "Zymoquartz syndrome", None, None, None) for i in range(3)])
-    _set_limit(db, "search_scan", 1)
-    _set_limit(db, "time_budget_ms", 1)
+def _run_with_pmc_locked(conn, uis, sources) -> list[tuple]:
+    """search_terms while a second connection holds an ACCESS EXCLUSIVE lock on the pmc
+    partition for 2 s. Nothing before the candidate loop locks that partition, so the
+    first pmc step starts before the deadline and finishes after it."""
+    locker = psycopg.connect(os.environ["TEST_PG_DSN"], autocommit=False)
+    timer = threading.Timer(2.0, locker.rollback)
     try:
-        with db.cursor() as cur:
-            cur.execute(
-                "SELECT r.kind, r.note FROM (SELECT pg_sleep(0.05) IS NULL) AS s(z) "
-                "CROSS JOIN LATERAL episteme_api_internal.search_terms("
-                "CASE WHEN s.z IS NOT NULL THEN ARRAY[%s] END, ARRAY['pmc'], NULL) AS r",
-                (_ZQ,),
-            )
-            rows = cur.fetchall()
-        db.rollback()
+        locker.execute("LOCK TABLE episteme.article_body_pmc IN ACCESS EXCLUSIVE MODE")
+        timer.start()
+        rows = _call(conn, uis, sources)
+    finally:
+        timer.cancel()
+        timer.join()
+        locker.close()
+    return rows
+
+
+def test_finished_capped_step_dropped_when_budget_spent_later(db):
+    """The pmc step finishes (capped, with a match) after the deadline; the dailymed step
+    is not run. Never partial: no article row and no capped note, only the terms used
+    note and the not run note naming the step not run."""
+    _body(
+        db,
+        [(f"pmc:PMC{i}", "pmc", "Zymoquartz syndrome", None, None, None) for i in range(2)]
+        + [("dailymed:z", "dailymed", "Label", "zymoquartz syndrome", None, None)],
+    )
+    _set_limit(db, "search_scan", 1)
+    _set_limit(db, "time_budget_ms", 500)
+    try:
+        rows = _run_with_pmc_locked(db, [_ZQ], ["dailymed", "pmc"])
     finally:
         api_settings.sync(db)
-    assert [n for _, n in rows if n.startswith("capped:")] == []
-    assert rows[-1][1].startswith("not run: ")
+    assert _articles(rows) == []
+    assert _notes(rows) == [
+        f"terms used: {_ZQ} Zymoquartz Syndrome; query: " + _tsq(db, "Zymoquartz Syndrome"),
+        f"not run: time budget of 500 ms spent before {_ZQ} / dailymed finished; "
+        "search with fewer terms",
+    ]
+
+
+def test_budget_spent_at_a_descriptor_boundary(db):
+    """The first descriptor finishes after the deadline: the second one is not run."""
+    _body(
+        db,
+        [
+            ("pmc:PMC1", "pmc", "Zymoquartz syndrome", None, None, None),
+            ("pmc:PMC2", "pmc", "Heart attack", None, None, None),
+        ],
+    )
+    _set_limit(db, "time_budget_ms", 500)
+    try:
+        rows = _run_with_pmc_locked(db, [_ZQ, _MI], ["pmc"])
+    finally:
+        api_settings.sync(db)
+    assert _articles(rows) == []
+    assert _notes(rows)[-1] == (
+        f"not run: time budget of 500 ms spent before {_MI} / pmc finished; search with fewer terms"
+    )
 
 
 def test_unknown_and_duplicate_descriptors(db):
