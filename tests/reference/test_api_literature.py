@@ -404,6 +404,21 @@ def test_pmid_in_two_windows_appears_once(db):
 
 
 @pytest.mark.pg
+def test_year_bound_applies_to_the_largest_pubmed_year(db):
+    """A PMID with 'pubmed' rows in 2022 and 2012 has year 2022 (as in 0015): a bound
+    of 2010-2015 drops it; a bound that holds 2022 keeps it with 2022."""
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pubmed:600v2', 'pubmed', '600', 2012)"
+        )
+    db.commit()
+    assert "pubmed:600" not in _ids(_call(db, 1, None, 2010, 2015))
+    rows = _call(db, 1, None, 2010, 2022)
+    assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:600"] == 2022
+
+
+@pytest.mark.pg
 def test_reversed_or_empty_year_range(db):
     assert _ids(_call(db, 1, None, 2024, 2020)) == []
     assert _ids(_call(db, 1, None, 1, 5)) == []

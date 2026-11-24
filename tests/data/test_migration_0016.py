@@ -91,7 +91,7 @@ def test_0016_is_idempotent_and_creates_year_windows(pg_conn):
 def test_year_windows_without_bounds(pg_conn):
     _apply(pg_conn)
     rows = _windows(pg_conn, None, None, 5, 2026)
-    assert rows[0] == (2023, 9999, 1)
+    assert rows[0] == (2023, 2147483647, 1)  # no year is above the open bound
     assert rows[1] == (2013, 2022, 2)
     assert [r[2] for r in rows] == list(range(1, len(rows) + 1))
     for prev, cur in pairwise(rows):

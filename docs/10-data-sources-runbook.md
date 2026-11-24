@@ -1962,20 +1962,24 @@ The existing instances are unchanged. Through the reader, call `episteme_api.<fu
 
 #### 5.19.5 Covering indexes on `article_mesh` (once)
 
-Migration 0016 and the design `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md` need two covering indexes. Build each one under a temporary name, drop the old index, then rename the new one. Before the swap, run `bash scripts/data/db/bulk_load_indexes.sh status` (section 4.6). It must exit 0 with no pending rebuild for group `pubmed_graph`. Do the steps as `episteme_sys_admin`, with no graph load running, and one index at a time. A database that has no old index needs only the `CREATE INDEX` statement, under the final name (`article_mesh_lower_name_idx` or `article_mesh_descriptor_ui_idx`). Do not run the `DROP` and `RENAME` statements there. Each build reads about 345 million rows. It blocks writes to `article_mesh`, not reads. Expect tens of minutes and tens of GB of space on E:.
+Migration 0016 and the design `docs/superpowers/specs/2026-11-24-api-layer-perf-design.md` need two covering indexes. Build each one under a temporary name, drop the old index, then rename the new one, all three statements in one transaction (`BEGIN` ... `COMMIT`). If the session stops before `COMMIT`, nothing changes: the old index stays and the temporary name does not exist, so you can run the block again. Do not use `CREATE INDEX CONCURRENTLY` here: it cannot run in a transaction. Before the swap, run `bash scripts/data/db/bulk_load_indexes.sh status` (section 4.6). It must exit 0 with no pending rebuild for group `pubmed_graph`. Do the steps as `episteme_sys_admin`, with no graph load running, and one index at a time. A database that has no old index needs only the `CREATE INDEX` statement, under the final name (`article_mesh_lower_name_idx` or `article_mesh_descriptor_ui_idx`). Do not run the `DROP` and `RENAME` statements there. Each build reads about 345 million rows. It blocks writes to `article_mesh`, not reads. Expect tens of minutes and tens of GB of space on E:.
 
 ```sql
+BEGIN;
 CREATE INDEX article_mesh_lower_name_cov_idx ON episteme.article_mesh (lower(descriptor_name)) INCLUDE (descriptor_name, pmid);
 DROP INDEX episteme.article_mesh_lower_name_idx;
 ALTER INDEX episteme.article_mesh_lower_name_cov_idx RENAME TO article_mesh_lower_name_idx;
+COMMIT;
 ```
 
 Then the same for `article_mesh_descriptor_ui_idx` with the columns `(descriptor_ui, pmid)`:
 
 ```sql
+BEGIN;
 CREATE INDEX article_mesh_descriptor_ui_cov_idx ON episteme.article_mesh (descriptor_ui, pmid);
 DROP INDEX episteme.article_mesh_descriptor_ui_idx;
 ALTER INDEX episteme.article_mesh_descriptor_ui_cov_idx RENAME TO article_mesh_descriptor_ui_idx;
+COMMIT;
 ```
 
 The partition indexes keep their generated names. Only the name of the parent index matters to `bulk_indexes`. At the end run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).

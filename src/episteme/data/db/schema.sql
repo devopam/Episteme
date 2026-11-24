@@ -1632,7 +1632,7 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- Descending year windows for literature_by_mesh. Bounds: lo_min = coalesce(p_from, 1),
--- hi_max = coalesce(p_to, 9999); no row when lo_min > hi_max. The first window ends
+-- hi_max = coalesce(p_to, 2147483647) (no year is above it); no row when lo_min > hi_max. The first window ends
 -- at hi_max and starts p_first_width years before least(hi_max, p_now + 1) (at least
 -- lo_min). Each next window ends one year below the previous lo, is twice as wide as
 -- the previous width, and stops at lo_min. n numbers the windows from 1, newest
@@ -1647,7 +1647,7 @@ SET search_path = pg_catalog, pg_temp
 AS $$
     WITH RECURSIVE b AS (
         SELECT coalesce(p_from, 1)::bigint AS lo_min,
-               coalesce(p_to, 9999)::bigint AS hi_max,
+               coalesce(p_to, 2147483647)::bigint AS hi_max,
                greatest(coalesce(p_first_width, 1), 1)::bigint AS width
     ), w (lo, hi, width, n) AS (
         SELECT greatest(b.lo_min, least(b.hi_max, p_now::bigint + 1) - b.width + 1),
@@ -1678,8 +1678,8 @@ $$;
 -- is the descriptor alone.
 -- The descriptor_ui of a name is read from one article_mesh row (LIMIT 1): a name
 -- belongs to one descriptor.
--- Year: the largest year of the PMID's 'pubmed' rows in articles (0 = unknown; with a
--- year bound, the largest year of those rows inside the bound). One 'pubmed' row per
+-- Year: the largest year of the PMID's 'pubmed' rows in articles (0 or a year below 1 =
+-- unknown); a year bound applies to that largest year. One 'pubmed' row per
 -- PMID is expected (articles.id = 'pubmed:<pmid>'), so in practice it is the PMID's
 -- year. The years of other sources are not used (0016: a europepmc_manuscript row
 -- carries the deposit year, not the publication year). A year bound drops records with an unknown
@@ -1742,6 +1742,7 @@ DECLARE
     v_new_s   text[];
     v_new_p   text[];
     v_new_y   int[];
+    v_above   text[];
     w         record;
 BEGIN
     IF to_regclass('episteme.substance') IS NOT NULL
@@ -1850,6 +1851,22 @@ BEGIN
                          GROUP BY a.pmid) g) c;
         IF v_new_s IS NOT NULL THEN
             v_rest := ARRAY(SELECT unnest(v_rest) EXCEPT SELECT unnest(v_new_s));
+        END IF;
+        -- An upper year bound applies to the largest 'pubmed' year of the PMID (as in
+        -- 0015): a PMID with a 'pubmed' row above p_to_year is not kept. One array
+        -- probe per window, on the partitions above the bound only.
+        IF p_to_year IS NOT NULL AND v_new_p IS NOT NULL THEN
+            v_above := ARRAY(SELECT DISTINCT a.pmid
+                               FROM episteme.articles a
+                              WHERE a.source = 'pubmed'
+                                AND a.year > p_to_year
+                                AND a.pmid = ANY (v_new_p));
+            IF cardinality(v_above) > 0 THEN
+                SELECT array_agg(u.p ORDER BY u.p), array_agg(u.y ORDER BY u.p)
+                  INTO v_new_p, v_new_y
+                  FROM unnest(v_new_p, v_new_y) AS u(p, y)
+                 WHERE u.p <> ALL (v_above);
+            END IF;
         END IF;
         v_pmid := v_pmid || coalesce(v_new_p, ARRAY[]::text[]);
         v_year := v_year || coalesce(v_new_y, ARRAY[]::int[]);

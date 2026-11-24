@@ -1,6 +1,7 @@
 """Literature for a substance, from MeSH indexing. Read-only; no vectors, no text scan.
 
-The query runs in SQL: ``episteme_api_internal.literature_by_mesh`` (migration 0015).
+The query runs in SQL: ``episteme_api_internal.literature_by_mesh`` (migration 0015;
+body 0016).
 A PubMed record matches when one of its MeSH descriptors (``article_mesh``) has a name
 equal to a preferred name or synonym of a member of the substance's moiety family. The
 descriptor name is compared with SQL ``lower()``.
@@ -11,8 +12,10 @@ expanded to that descriptor and every descriptor below it in the MeSH tree
 name (for example ``adverse effects``). A topic that is no descriptor name gives a
 note and the qualifier match only.
 
-Newest first: by the publication year in ``articles`` (any source that carries the
-PMID), then by id. Each claim cites ``pmid:<pmid>``; its release is the latest
+Newest first: by the publication year of the PMID's ``pubmed`` row in ``articles``
+(other sources, such as a Europe PMC manuscript with its deposit year, do not count),
+then by id. A year bound applies to that year; an unknown year is last and only
+without a bound. Each claim cites ``pmid:<pmid>``; its release is the latest
 ``pubmed`` release when ``reg_release`` has one; its ``source_file`` is the smallest
 file of the matched descriptor rows.
 """

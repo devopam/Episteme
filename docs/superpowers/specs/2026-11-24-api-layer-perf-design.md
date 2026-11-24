@@ -37,7 +37,10 @@ Three lookups fail or come near the timeout on production:
    the PMID. Measured on the metformin hits: 209 of 20,733 differ, every sampled one because a
    `europepmc_manuscript` row carries the later deposit year (for example PMID 18695610: pubmed
    2008, manuscript 2014). The PubMed year is the publication year; the old value was a small bug.
-   The same rule applies to the year of `shared_mesh` rows.
+   The same rule applies to the year of `shared_mesh` rows. A year bound applies to the largest
+   `pubmed` year of the PMID, as in 0015: a PMID with a `pubmed` row above the upper bound is
+   dropped (one array probe per window, on the partitions above the bound; PR #122 review).
+   Years below 1 count as unknown; the open upper bound is the largest `int`.
 4. **Descriptors and `source_file` are read only for the rows returned** (`literature_by_mesh`:
    the kept PMIDs; `shared_mesh`: the top rows), not for every hit.
 5. **`graph_neighbours` id lookup** without `ORDER BY ... LIMIT 1`: `min(pmid COLLATE "C")` over

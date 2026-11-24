@@ -53,11 +53,14 @@
 def test_year_from_pubmed_row_only(db):
     # A manuscript row with a later year must not move the PubMed year.
     with db.cursor() as cur:
-        cur.execute("INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
-                    "('europepmc_manuscript:M100', 'europepmc_manuscript', '100', 2025)")
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('europepmc_manuscript:M100', 'europepmc_manuscript', '100', 2025)"
+        )
     db.commit()
     rows = _call(db, 1, None)
     assert {r[1]: r[4] for r in rows if r[0] == "article"}["pubmed:100"] == 2020
+
 
 @pytest.mark.pg
 @pytest.mark.parametrize("width", [1, 2, 5, 50])
@@ -67,23 +70,29 @@ def test_window_width_does_not_change_results(db, width):
     expected_t = _call(db, 1, "Liver Diseases")
     expected_1 = _call(db, 1, None, limit=1)
     with db.cursor() as cur:
-        cur.execute("UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
-                    "max_limit = greatest(max_limit, %s) WHERE family = 'literature_window'",
-                    (width, width))
+        cur.execute(
+            "UPDATE episteme_api_internal.result_limit SET default_limit = %s, "
+            "max_limit = greatest(max_limit, %s) WHERE family = 'literature_window'",
+            (width, width),
+        )
     db.commit()
     assert _call(db, 1, None) == expected
     assert _call(db, 1, None, 2020, 2022) == expected_f
     assert _call(db, 1, "Liver Diseases") == expected_t
     assert _call(db, 1, None, limit=1) == expected_1
 
+
 @pytest.mark.pg
 def test_pmid_in_two_windows_appears_once(db):
     with db.cursor() as cur:
-        cur.execute("INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
-                    "('pubmed:600v2', 'pubmed', '600', 2012)")
+        cur.execute(
+            "INSERT INTO episteme.articles (id, source, pmid, year) VALUES "
+            "('pubmed:600v2', 'pubmed', '600', 2012)"
+        )
     db.commit()
     ids = _ids(_call(db, 1, None))
     assert ids.count("pubmed:600") == 1
+
 
 @pytest.mark.pg
 def test_reversed_or_empty_year_range(db):
