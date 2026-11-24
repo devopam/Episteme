@@ -3,6 +3,7 @@
 Status: owner approved the follow-up PR on 2026-11-24 ("Yes, please start on the PR"), after
 the step 11 report of the 0015 rollout. This addendum changes only what it names; every other
 rule of `2026-11-17-graphrag-api-layer-design.md` stays.
+Second addendum: 2026-11-24-api-no-timeouts-design.md (0017).
 
 ## Why
 

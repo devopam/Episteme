@@ -47,7 +47,12 @@ def test_schema_sql_carries_the_0016_bodies():
         "episteme_api_internal.literature_by_mesh",
     }
     schema = _functions(_DB_DIR / "schema.sql")
+    # 0017 replaces some 0016 bodies; schema.sql carries the 0017 ones (checked there).
+    later = _functions(_DB_DIR / "migrations/0017_api_no_timeouts.sql")
+    assert "episteme_api_internal.literature_by_mesh" in later
     for name, text in new.items():
+        if name in later:
+            continue
         assert schema.get(name) == text, name
 
 
@@ -62,8 +67,10 @@ def test_0016_seeded_limits_equal_config():
         for m in re.finditer(r"\('(\w+)',\s*(\d+),\s*(\d+)\)", block.group(1))
     }
     assert set(seeded) == {"literature_window", "search_rank_chars"}
+    # 0017 lowers search_rank_chars to 2000; 0016 seeds the earlier value.
+    expected = {**config.API_RESULT_LIMITS, "search_rank_chars": (10000, 10000)}
     for family, values in seeded.items():
-        assert values == config.API_RESULT_LIMITS[family], family
+        assert values == expected[family], family
 
 
 def test_0016_functions_set_search_path_and_definer():
@@ -135,8 +142,10 @@ def test_0016_seeds_the_new_limit_rows(pg_conn):
             )
             rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
         pg_conn.commit()
+        # 0017 lowers search_rank_chars to 2000; 0016 seeds the earlier value.
         assert rows == {
-            f: config.API_RESULT_LIMITS[f] for f in ("literature_window", "search_rank_chars")
+            "literature_window": config.API_RESULT_LIMITS["literature_window"],
+            "search_rank_chars": (10000, 10000),
         }
     finally:
         # Restore the seed rows (the same values api_settings.sync writes by default).

@@ -305,6 +305,40 @@ def _parse_mesh_descriptors(xml_path: Path) -> dict[str, list[str]]:
     return out
 
 
+def _parse_mesh_qualifiers(xml_path: Path) -> dict[str, str]:
+    """Return {QualifierUI: QualifierName} for the qualifiers (subheadings) named in the
+    ``AllowableQualifiersList`` of every <DescriptorRecord> of one MeSH descriptor
+    release file (bare or gzip, same streaming and failure rules as
+    ``_parse_mesh_descriptors``: a parse failure yields an empty dict). A qualifier that
+    many descriptors allow appears once."""
+    out: dict[str, str] = {}
+    try:
+        with _open_mesh_source(xml_path) as fh:
+            context = iter(ET.iterparse(fh, events=("start", "end")))
+            _, root = next(context)
+            for event, elem in context:
+                if event != "end" or _local(elem.tag) != "DescriptorRecord":
+                    continue
+                for ref in elem.iter():
+                    if _local(ref.tag) != "QualifierReferredTo":
+                        continue
+                    ui = None
+                    name = None
+                    for el in ref.iter():
+                        tag = _local(el.tag)
+                        if tag == "QualifierUI" and ui is None:
+                            ui = (el.text or "").strip()
+                        elif tag == "String" and name is None:
+                            name = (el.text or "").strip()
+                    if ui and name:
+                        out.setdefault(ui, name)
+                elem.clear()
+                root.clear()
+    except Exception:  # noqa: BLE001 -- a malformed file must not abort the build
+        return {}
+    return out
+
+
 def build(
     conn,
     *,
@@ -346,7 +380,7 @@ def build(
       existing (silently skipped, no warning).
 
     Returns ``{source_files, cites, mesh, missing_xml, skipped_no_pmid, parts,
-    mesh_hierarchy, mesh_tree, mesh_empty_parse}``.
+    mesh_hierarchy, mesh_tree, mesh_qualifier, mesh_empty_parse}``.
 
     ``source="pubmed"`` is different: it loads the extractor's per-relation graph
     files from ``processed_dir`` via :func:`graph_load.build_pubmed_graph` (one
@@ -481,8 +515,18 @@ def build(
     # pmc cites/mesh phase above -- no persisted "extra fields" column).
     total_mesh_hierarchy = 0
     total_mesh_tree = 0
+    total_mesh_qualifier = 0
     empty_parse = 0
     if source == "mesh":
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('episteme.mesh_qualifier') IS NOT NULL")
+            has_qualifier_table = bool(cur.fetchone()[0])
+        if not has_qualifier_table:
+            print(
+                "WARNING: graph_builder mesh phase: episteme.mesh_qualifier does not exist; "
+                "apply migration 0017 and run the mesh graph phase again to fill it",
+                file=sys.stderr,
+            )
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'")
             mesh_files = [r[0] for r in cur.fetchall()]
@@ -542,15 +586,32 @@ def build(
                     for r in tree_rows:
                         cp.write_row(r)
 
+            qualifier_rows: list[tuple[str, str, str]] = []
+            if has_qualifier_table:
+                qualifier_rows = [
+                    (ui, name, src_file) for ui, name in _parse_mesh_qualifiers(xml_path).items()
+                ]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM episteme.mesh_qualifier WHERE source_file = %s", (src_file,)
+                    )
+                    with cur.copy(
+                        "COPY episteme.mesh_qualifier (qualifier_ui, qualifier_name, "
+                        "source_file) FROM STDIN"
+                    ) as cp:
+                        for r in qualifier_rows:
+                            cp.write_row(r)
+
             audit_trail.record(
                 "graph_commit",
                 conn=conn,
                 object=f"mesh {src_file}",
-                rows_affected=len(edges) + len(tree_rows),
+                rows_affected=len(edges) + len(tree_rows) + len(qualifier_rows),
                 run_id=run_id,
             )
             total_mesh_hierarchy += len(edges)
             total_mesh_tree += len(tree_rows)
+            total_mesh_qualifier += len(qualifier_rows)
 
     return {
         "source_files": handled,
@@ -561,6 +622,7 @@ def build(
         "parts": total_parts,
         "mesh_hierarchy": total_mesh_hierarchy,
         "mesh_tree": total_mesh_tree,
+        "mesh_qualifier": total_mesh_qualifier,
         "mesh_empty_parse": empty_parse,
     }
 
@@ -1026,6 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
             f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
             f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
             f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
+            f"mesh_qualifier={res['mesh_qualifier']} "
             f"mesh_empty_parse={res['mesh_empty_parse']}"
         )
         return g.exit_code(0)
