@@ -110,7 +110,7 @@ _SAMPLES = [
     "naïve T cells",
     "Müller-Lyer; illusion",
     "ÉCOLE",
-    "x/y\z",
+    r"x/y\z",
     "line\nbreak",
     "---",
 ]
