@@ -90,6 +90,8 @@ def test_data_sources_lists_the_medcpt_models():
     assert row, "no MedCPT row in 02-data-sources.md"
     assert "public domain" in row[0].lower()
     assert "US government work" in row[0]
+    assert "LICENSE" in row[0] and "verified" in row[0]
+    assert "Jin et al." in row[0]
     assert config.MEDCPT_QUERY_REVISION in row[0]
     assert config.MEDCPT_ARTICLE_REVISION in row[0]
 

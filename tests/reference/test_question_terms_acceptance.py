@@ -228,3 +228,13 @@ def test_main_config_error_exits_2(tmp_path, monkeypatch, capsys):
     rc = acc.main(["--out", str(tmp_path / "r.json")])
     assert rc == 2
     assert "EPISTEME_API_READER_PASSWORD" in capsys.readouterr().err
+
+
+def test_main_missing_package_exits_2(tmp_path, monkeypatch, capsys):
+    def no_torch(log_dir, clock):
+        raise ImportError("No module named 'torch'")
+
+    monkeypatch.setattr(acc, "build", no_torch)
+    rc = acc.main(["--out", str(tmp_path / "r.json")])
+    assert rc == 2
+    assert "torch" in capsys.readouterr().err

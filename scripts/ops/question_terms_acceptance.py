@@ -239,12 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = args.log_dir or args.out.parent / "question_log"
     entries = json.loads(args.acceptance.read_text(encoding="utf-8"))
 
-    from episteme.reference.medcpt import TERM_MODELS
-
     clock = time.perf_counter
     try:
+        # torch and transformers load here: a missing package is a setup error (exit 2).
+        from episteme.reference.medcpt import TERM_MODELS
+
         service, timed, meta = build(log_dir, clock)
-    except config.ConfigError as exc:
+    except (config.ConfigError, ImportError) as exc:
         print(f"question_terms_acceptance: {exc}", file=sys.stderr)
         return 2
     try:
