@@ -226,15 +226,19 @@ def test_fallback_to_embedding_with_reason(tmp_path, reason):
     assert m["vocab_embed_seconds"] >= 0
 
 
-def test_check_stored_matches_model_revision_and_coverage():
+def test_check_stored_matches_model_revision_rows_and_descriptors():
     spec = TERM_MODELS["medcpt"]
     ok = (spec.doc_model, spec.doc_revision, 10, 6)
-    assert bake._check_stored(spec, 6, [ok]) == (10, None)
-    rows, reason = bake._check_stored(spec, 7, [ok])
-    assert rows == 0 and "6 of 7" in reason
-    rows, reason = bake._check_stored(spec, 6, [(spec.doc_model, "other", 10, 6)])
+    assert bake._check_stored(spec, 10, 6, [ok]) == (10, None)
+    rows, reason = bake._check_stored(spec, 11, 6, [ok])
+    assert rows == 0 and "10" in reason and "11" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [ok], missing=2)
+    assert rows == 0 and "2" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [ok], extra=1)
+    assert rows == 0 and "1" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [(spec.doc_model, "other", 10, 6)])
     assert rows == 0 and "other" in reason and spec.doc_revision in reason
-    assert bake._check_stored(spec, 6, [])[1] is not None
+    assert bake._check_stored(spec, 10, 6, [])[1] is not None
 
 
 def _part_files(tmp_path):
@@ -337,3 +341,62 @@ def test_part_size_option_is_validated(tmp_path, capsys):
     args = ["--models", "medcpt", "--acceptance", "x.json", "--out", str(tmp_path)]
     assert bake.main([*args, "--part-size", "0"]) == 2
     assert "--part-size" in capsys.readouterr().err
+
+
+def test_truncated_part_is_encoded_again(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(3), part_size=3)
+    rev = TERM_MODELS["medcpt"].doc_revision
+    part = tmp_path / "medcpt" / REL / f"{rev}.part-0000.npy"
+    part.write_bytes(part.read_bytes()[:40])
+    enc = FakeEncoder()
+    _run(tmp_path, enc, part_size=3)
+    assert enc.doc_calls == 2  # the broken part 0 and the missing part 2
+
+
+def test_changed_vocabulary_text_rebuilds(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(2), part_size=3)
+    changed = [(ui, kind, title, text + "x") for ui, kind, title, text in ROWS]
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: changed,
+        mesh_release=REL,
+        encoders=_factory(enc),
+        part_size=3,
+    )
+    assert enc.doc_calls == 3  # same row count, new text: all parts again
+
+
+def test_changed_part_size_rebuilds(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(2), part_size=3)
+    enc = FakeEncoder()
+    _run(tmp_path, enc, part_size=4)
+    assert enc.doc_calls == 2  # ceil(7 / 4)
+
+
+def test_load_stored_row_count_mismatch():
+    class Stored:
+        def __init__(self, n):
+            self.n = n
+
+        def chunks(self, spec, release):
+            yield ["D"] * self.n, np.zeros((self.n, 2), dtype=np.float32)
+
+    spec = TERM_MODELS["medcpt"]
+    vecs, ids = bake._load_stored(Stored(3), spec, REL, 3)
+    assert vecs.shape == (3, 2) and ids == ["D"] * 3
+    with pytest.raises(RuntimeError):
+        bake._load_stored(Stored(4), spec, REL, 3)
+    with pytest.raises(RuntimeError):
+        bake._load_stored(Stored(2), spec, REL, 3)
+
+
+def test_report_says_stored_vectors_are_fp16(tmp_path):
+    _run(tmp_path, FakeEncoder())
+    md = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    assert "fp16" in md and "mesh_term_vec" in md

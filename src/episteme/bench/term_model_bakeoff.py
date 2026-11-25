@@ -35,6 +35,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -51,7 +52,7 @@ from episteme.reference.medcpt import TERM_MODELS, MedCPTEncoder, TermModelSpec
 
 KS = (1, 5, 10)
 DEFAULT_PART_SIZE = 20000
-CHUNK_ROWS = 20000
+CHUNK_ROWS = 4000
 
 Row = tuple[str, str, str, str]
 
@@ -95,20 +96,43 @@ class DbStoredVectors:
     def check(self, spec: TermModelSpec, release: str) -> tuple[int, str | None]:
         from episteme.data.db.connection import connection
 
+        # Row definition of vocabulary_texts: one row per descriptor with a name row, plus
+        # one row per distinct (descriptor, entry term) of those descriptors.
+        names = (
+            "SELECT DISTINCT descriptor_ui FROM episteme.mesh_term "
+            "WHERE term_kind = 'name' AND mesh_release = %s"
+        )
+        vec_where = "mesh_release = %s AND model = %s AND model_revision = %s"
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT count(DISTINCT descriptor_ui) FROM episteme.mesh_term "
-                "WHERE mesh_release = %s",
-                (release,),
+                f"WITH n AS ({names}) SELECT "
+                "(SELECT count(*) FROM n) + (SELECT count(*) FROM (SELECT DISTINCT "
+                "descriptor_ui, term FROM episteme.mesh_term WHERE term_kind = 'entry' "
+                "AND mesh_release = %s AND descriptor_ui IN (SELECT descriptor_ui FROM n)) e), "
+                "(SELECT count(*) FROM n)",
+                (release, release),
             )
-            wanted = cur.fetchone()[0]
+            want_rows, want_desc = cur.fetchone()
             cur.execute(
                 "SELECT model, model_revision, count(*), count(DISTINCT descriptor_ui) "
                 "FROM episteme.mesh_term_vec WHERE mesh_release = %s GROUP BY 1, 2",
                 (release,),
             )
             groups = cur.fetchall()
-        return _check_stored(spec, wanted, groups)
+            params = (release, spec.doc_model, spec.doc_revision)
+            cur.execute(
+                f"WITH n AS ({names}) SELECT count(*) FROM n WHERE descriptor_ui NOT IN "
+                f"(SELECT descriptor_ui FROM episteme.mesh_term_vec WHERE {vec_where})",
+                (release, *params),
+            )
+            missing = cur.fetchone()[0]
+            cur.execute(
+                "SELECT count(DISTINCT descriptor_ui) FROM episteme.mesh_term_vec "
+                f"WHERE {vec_where} AND descriptor_ui NOT IN ({names})",
+                (*params, release),
+            )
+            extra = cur.fetchone()[0]
+        return _check_stored(spec, want_rows, want_desc, groups, missing=missing, extra=extra)
 
     def chunks(self, spec: TermModelSpec, release: str) -> Iterator[tuple[list[str], np.ndarray]]:
         from episteme.data.db.connection import connection
@@ -131,13 +155,28 @@ class DbStoredVectors:
 
 
 def _check_stored(
-    spec: TermModelSpec, wanted: int, groups: list[tuple[Any, ...]]
+    spec: TermModelSpec,
+    want_rows: int,
+    want_desc: int,
+    groups: list[tuple[Any, ...]],
+    *,
+    missing: int = 0,
+    extra: int = 0,
 ) -> tuple[int, str | None]:
-    """Decide from the stored ``(model, revision, rows, descriptors)`` groups."""
-    for model, revision, rows, descriptors in groups:
+    """Decide from the stored ``(model, revision, rows, descriptors)`` groups.
+
+    ``missing``: descriptors of ``mesh_term`` without a stored vector. ``extra``: stored
+    descriptors that ``mesh_term`` does not list.
+    """
+    for model, revision, rows, _descriptors in groups:
         if model == spec.doc_model and revision == spec.doc_revision:
-            if descriptors != wanted:
-                return 0, f"stored rows cover {descriptors} of {wanted} descriptors"
+            if missing or extra:
+                return 0, (
+                    f"descriptor sets differ: {missing} of {want_desc} descriptors "
+                    f"have no stored vector, {extra} stored descriptors are not in mesh_term"
+                )
+            if rows != want_rows:
+                return 0, f"stored rows are {rows}; the vocabulary has {want_rows} rows"
             return int(rows), None
     stored = ", ".join(f"{m}@{r}" for m, r, _n, _d in groups) or "no rows"
     return 0, f"stored vectors are {stored}; need {spec.doc_model}@{spec.doc_revision}"
@@ -193,6 +232,27 @@ def _clear_parts(folder: Path, revision: str) -> None:
     for path in folder.glob(f"{revision}.part-*"):
         path.unlink()
     (folder / f"{revision}.plan.json").unlink(missing_ok=True)
+    (folder / f"{revision}.plan.json.tmp").unlink(missing_ok=True)
+
+
+def _vocab_hash(rows: list[Row]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update("|".join(row).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _part_dim(npy_path: Path, want_rows: int) -> int | None:
+    """Column count of a whole float32 part with ``want_rows`` rows, else None."""
+    try:
+        part = np.load(npy_path, mmap_mode="r")
+        ok = part.ndim == 2 and part.shape[0] == want_rows and part.dtype == np.float32
+        dim = int(part.shape[1]) if ok else None
+        del part
+    except (OSError, ValueError, EOFError):
+        return None
+    return dim
 
 
 def _embed_in_parts(
@@ -209,19 +269,34 @@ def _embed_in_parts(
     folder.mkdir(parents=True, exist_ok=True)
     plan_path = folder / f"{revision}.plan.json"
     plan = _read_json(plan_path)
-    if not plan or plan.get("rows") != len(rows) or plan.get("part_size") != part_size:
+    vocab_hash = _vocab_hash(rows)
+    if (
+        not plan
+        or plan.get("rows") != len(rows)
+        or plan.get("part_size") != part_size
+        or plan.get("vocab_hash") != vocab_hash
+    ):
         _clear_parts(folder, revision)
-        plan = {"rows": len(rows), "part_size": part_size, "seconds": 0.0}
+        plan = {
+            "rows": len(rows),
+            "part_size": part_size,
+            "vocab_hash": vocab_hash,
+            "seconds": 0.0,
+        }
         _write_json(plan_path, plan)
     seconds = float(plan.get("seconds", 0.0))
     n_parts = math.ceil(len(rows) / part_size)
     encoder: Any = None
+    dim: int | None = None
     for index in range(n_parts):
         chunk = rows[index * part_size : (index + 1) * part_size]
         want_ids = [r[0] for r in chunk]
         npy_path, ids_path = _part_paths(folder, revision, index)
-        if npy_path.exists() and _read_json(ids_path) == want_ids:
-            continue
+        if _read_json(ids_path) == want_ids:
+            found = _part_dim(npy_path, len(want_ids))
+            if found is not None and (dim is None or found == dim):
+                dim = found
+                continue
         if encoder is None:
             encoder = doc_encoder_factory()
         start = time.perf_counter()
@@ -229,11 +304,12 @@ def _embed_in_parts(
         seconds += time.perf_counter() - start
         if len(vecs) != len(chunk):
             raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(chunk)} texts")
+        dim = int(vecs.shape[1])
+        plan["seconds"] = seconds
+        _write_json(plan_path, plan)
         _save_npy(npy_path, vecs)
         _write_json(ids_path, want_ids)
         del vecs
-        plan["seconds"] = seconds
-        _write_json(plan_path, plan)
     matrix: np.ndarray | None = None
     offset = 0
     for index in range(n_parts):
@@ -413,6 +489,8 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         f"Acceptance questions: {report['acceptance_n']}. Search is exact.",
         "Cells are all / any. All: every expected UI is in the top k.",
+        "Vectors read from mesh_term_vec are fp16 (halfvec); embedded vectors are fp32.",
+        "Check the vocab_source of each model before you compare small differences.",
         "Any: at least one expected UI is in the top k.",
         "",
         "SapBERT is not compared. Its model card states training on UMLS 2020AA.",
