@@ -115,15 +115,16 @@ def test_every_function_sets_search_path_with_pg_temp_last(path):
 
 def test_owner_read_list_matches_the_migration():
     """The owner's SELECT list is every episteme relation a function body reads (the
-    API migrations 0015 to 0018; 0017 reads mesh_qualifier; the mesh_term tables of 0018
-    are in the list from the start, so they are added to the read set)."""
+    API migrations 0015 to 0018; 0017 reads mesh_qualifier; the 0018 functions read
+    mesh_term and mesh_term_vec)."""
     code = _migration_code() + "".join(
         _code(MIGRATIONS / name)
         for name in ("0016_api_perf.sql", "0017_api_no_timeouts.sql", "0018_question_terms.sql")
     )
     read = set(re.findall(r"\b(?:FROM|JOIN)\s+episteme\.([a-z_0-9]+)", code))
     assert read, "no reads found in migration 0015"
-    assert _array("c_read") == read | {"mesh_term", "mesh_term_vec"}
+    assert {"mesh_term", "mesh_term_vec"} <= read
+    assert _array("c_read") == read
 
 
 def test_aact_list_matches_the_migration():
