@@ -2077,10 +2077,15 @@ The command downloads `ncbi/MedCPT-Query-Encoder` and `ncbi/MedCPT-Article-Encod
 .venv/Scripts/python.exe -m episteme.reference.medcpt download --model bge_base
 ```
 
-2. Run the bake-off. It reads the vocabulary from `mesh_term` and `article_body`, embeds it with each model (exact inner product, no index) and writes `REPORT.md` to `--out`. It caches the vectors in `<out>/<model>/<revision>.npy`. Delete that folder to rebuild them.
+2. Run the bake-off. It compares the models with an exact inner product (no index) and writes `REPORT.md` to `--out`. It gets the vocabulary vectors of each model in one of two ways:
+
+   - **Stored vectors.** When `episteme.mesh_term_vec` holds vectors of the same model and revision for the current MeSH release, and they cover every descriptor of `mesh_term`, the bake-off reads them from the table in chunks. It does not embed. The report shows `vocab_source: mesh_term_vec` and `vocab_embed_seconds: null`. This is the normal case for MedCPT.
+   - **Embedding.** In all other cases the bake-off embeds the vocabulary. The report shows `vocab_source: embedded` and, when the reason is a mismatch, `reuse_skipped_reason`.
+
+   Embedding runs in parts of `--part-size` rows (default 20000). Each part is saved at once as `<out>/<model>/<mesh_release>/<revision>.part-<NNNN>.npy` with `.ids.json`. When the run stops, start the same command again. It skips the parts that are on disk and encodes the others. If the vocabulary row count or `--part-size` changed, it deletes the parts and starts again. After the last part, the bake-off joins the parts into `<revision>.npy`, `<revision>.ids.json` and `<revision>.meta.json` and deletes the part files. The folder name holds the MeSH release, so a new release never reuses old vectors. Delete the folder to rebuild the vectors. A cache without `.meta.json` shows `vocab_embed_seconds: null`. The time of the first query encode is not counted (warm-up).
 
 ```bash
-PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.bench.term_model_bakeoff --models medcpt,bge_base --acceptance tests/reference/data/question_terms_acceptance.json --out D:/episteme/_runlogs/term_model_bakeoff
+PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.bench.term_model_bakeoff --models medcpt,bge_base --acceptance tests/reference/data/question_terms_acceptance.json --out D:/episteme/_runlogs/term_model_bakeoff --part-size 20000
 ```
 
    Record the top-10 hit rates by kind and the times in the drift log. A model switch is not only a config change: see the drift log (model name in `question_mcp`, `embed_mesh` and the acceptance script).

@@ -10,9 +10,17 @@ Hit definitions, per top-k (k = 1, 5, 10):
 - ``all``: every expected descriptor UI is in the top k.
 - ``any``: at least one expected descriptor UI is in the top k.
 
-Vocabulary vectors are cached at ``<out>/<model>/<revision>.npy`` with
-``<revision>.ids.json`` (descriptor UI per row) and ``<revision>.meta.json``
-(embedding time). A second run reuses the cache.
+Vocabulary vectors come from one of two places:
+
+- ``mesh_term_vec``: when the stored model, revision and release equal the model under test
+  and the stored rows cover every descriptor of ``mesh_term``, the stored vectors are read in
+  chunks and nothing is embedded (``vocab_source`` = ``mesh_term_vec``).
+- Embedding, in parts of ``--part-size`` rows. A part is saved at
+  ``<out>/<model>/<mesh_release>/<revision>.part-<NNNN>.npy`` with ``.ids.json``. A restart
+  skips the parts on disk. After the last part the parts are joined into
+  ``<revision>.npy``, ``<revision>.ids.json`` and ``<revision>.meta.json`` (embedding time)
+  and the part files are deleted. A second run reuses the joined cache. The release is in the
+  path, so a new MeSH release never reuses old vectors.
 
 Licence posture: SapBERT (cambridgeltl/SapBERT-from-PubMedBERT-fulltext) is excluded.
 Its model card states training on UMLS 2020AA, and the project rule forbids
@@ -28,18 +36,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
 from episteme.reference.medcpt import TERM_MODELS, MedCPTEncoder, TermModelSpec
 
 KS = (1, 5, 10)
+DEFAULT_PART_SIZE = 20000
+CHUNK_ROWS = 20000
 
 Row = tuple[str, str, str, str]
 
@@ -62,13 +74,195 @@ def _default_encoders(spec: TermModelSpec) -> tuple[Any, Any]:
     return MedCPTEncoder.query(spec), MedCPTEncoder.article(spec)
 
 
+class StoredVectors(Protocol):
+    """Source of the vectors already stored in ``episteme.mesh_term_vec``."""
+
+    def check(self, spec: TermModelSpec, release: str) -> tuple[int, str | None]:
+        """Return ``(row count, None)`` when the stored rows can be reused, else ``(0, reason)``."""
+        ...
+
+    def chunks(self, spec: TermModelSpec, release: str) -> Iterator[tuple[list[str], np.ndarray]]:
+        """Yield ``(descriptor_ui list, float32 matrix)`` in a stable order."""
+        ...
+
+
+class DbStoredVectors:
+    """``StoredVectors`` on the database; the connection comes from ``connection()``."""
+
+    def __init__(self, chunk_rows: int = CHUNK_ROWS) -> None:
+        self.chunk_rows = chunk_rows
+
+    def check(self, spec: TermModelSpec, release: str) -> tuple[int, str | None]:
+        from episteme.data.db.connection import connection
+
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(DISTINCT descriptor_ui) FROM episteme.mesh_term "
+                "WHERE mesh_release = %s",
+                (release,),
+            )
+            wanted = cur.fetchone()[0]
+            cur.execute(
+                "SELECT model, model_revision, count(*), count(DISTINCT descriptor_ui) "
+                "FROM episteme.mesh_term_vec WHERE mesh_release = %s GROUP BY 1, 2",
+                (release,),
+            )
+            groups = cur.fetchall()
+        return _check_stored(spec, wanted, groups)
+
+    def chunks(self, spec: TermModelSpec, release: str) -> Iterator[tuple[list[str], np.ndarray]]:
+        from episteme.data.db.connection import connection
+
+        with connection() as conn, conn.transaction(), conn.cursor(name="bakeoff_vec") as cur:
+            cur.execute(
+                "SELECT descriptor_ui, embedding::real[] FROM episteme.mesh_term_vec "
+                "WHERE mesh_release = %s AND model = %s AND model_revision = %s "
+                "ORDER BY descriptor_ui, text_kind, text",
+                (release, spec.doc_model, spec.doc_revision),
+            )
+            while True:
+                batch = cur.fetchmany(self.chunk_rows)
+                if not batch:
+                    return
+                yield (
+                    [r[0] for r in batch],
+                    np.asarray([r[1] for r in batch], dtype=np.float32),
+                )
+
+
+def _check_stored(
+    spec: TermModelSpec, wanted: int, groups: list[tuple[Any, ...]]
+) -> tuple[int, str | None]:
+    """Decide from the stored ``(model, revision, rows, descriptors)`` groups."""
+    for model, revision, rows, descriptors in groups:
+        if model == spec.doc_model and revision == spec.doc_revision:
+            if descriptors != wanted:
+                return 0, f"stored rows cover {descriptors} of {wanted} descriptors"
+            return int(rows), None
+    stored = ", ".join(f"{m}@{r}" for m, r, _n, _d in groups) or "no rows"
+    return 0, f"stored vectors are {stored}; need {spec.doc_model}@{spec.doc_revision}"
+
+
+def _load_stored(
+    stored: StoredVectors, spec: TermModelSpec, release: str, rows: int
+) -> tuple[np.ndarray, list[str]]:
+    """Fill one float32 matrix from the stored chunks."""
+    matrix: np.ndarray | None = None
+    ids: list[str] = []
+    for chunk_ids, chunk in stored.chunks(spec, release):
+        if matrix is None:
+            matrix = np.empty((rows, chunk.shape[1]), dtype=np.float32)
+        end = len(ids) + len(chunk_ids)
+        if end > rows:
+            raise RuntimeError(f"stored rows exceed the {rows} counted rows")
+        matrix[len(ids) : end] = chunk
+        ids.extend(chunk_ids)
+    if matrix is None or len(ids) != rows:
+        raise RuntimeError(f"read {len(ids)} stored vectors, expected {rows}")
+    return matrix, ids
+
+
+def _write_json(path: Path, data: Any) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _save_npy(path: Path, array: np.ndarray) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as handle:
+        np.save(handle, array)
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _part_paths(folder: Path, revision: str, index: int) -> tuple[Path, Path]:
+    return (
+        folder / f"{revision}.part-{index:04d}.npy",
+        folder / f"{revision}.part-{index:04d}.ids.json",
+    )
+
+
+def _clear_parts(folder: Path, revision: str) -> None:
+    for path in folder.glob(f"{revision}.part-*"):
+        path.unlink()
+    (folder / f"{revision}.plan.json").unlink(missing_ok=True)
+
+
+def _embed_in_parts(
+    spec: TermModelSpec,
+    folder: Path,
+    rows: list[Row],
+    part_size: int,
+    doc_encoder_factory: Callable[[], Any],
+) -> tuple[np.ndarray, list[str], float]:
+    """Encode in parts, skip parts on disk, join them, delete the parts."""
+    if part_size < 1:
+        raise ValueError("part_size must be at least 1")
+    revision = spec.doc_revision
+    folder.mkdir(parents=True, exist_ok=True)
+    plan_path = folder / f"{revision}.plan.json"
+    plan = _read_json(plan_path)
+    if not plan or plan.get("rows") != len(rows) or plan.get("part_size") != part_size:
+        _clear_parts(folder, revision)
+        plan = {"rows": len(rows), "part_size": part_size, "seconds": 0.0}
+        _write_json(plan_path, plan)
+    seconds = float(plan.get("seconds", 0.0))
+    n_parts = math.ceil(len(rows) / part_size)
+    encoder: Any = None
+    for index in range(n_parts):
+        chunk = rows[index * part_size : (index + 1) * part_size]
+        want_ids = [r[0] for r in chunk]
+        npy_path, ids_path = _part_paths(folder, revision, index)
+        if npy_path.exists() and _read_json(ids_path) == want_ids:
+            continue
+        if encoder is None:
+            encoder = doc_encoder_factory()
+        start = time.perf_counter()
+        vecs = np.asarray(_encode_documents(spec, encoder, chunk), dtype=np.float32)
+        seconds += time.perf_counter() - start
+        if len(vecs) != len(chunk):
+            raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(chunk)} texts")
+        _save_npy(npy_path, vecs)
+        _write_json(ids_path, want_ids)
+        del vecs
+        plan["seconds"] = seconds
+        _write_json(plan_path, plan)
+    matrix: np.ndarray | None = None
+    offset = 0
+    for index in range(n_parts):
+        npy_path, _ids_path = _part_paths(folder, revision, index)
+        part = np.load(npy_path)
+        if matrix is None:
+            matrix = np.empty((len(rows), part.shape[1]), dtype=np.float32)
+        matrix[offset : offset + len(part)] = part
+        offset += len(part)
+        del part
+    if matrix is None:
+        matrix = np.empty((0, 0), dtype=np.float32)
+    ids = [r[0] for r in rows]
+    _save_npy(folder / f"{revision}.npy", matrix)
+    _write_json(folder / f"{revision}.ids.json", ids)
+    _write_json(folder / f"{revision}.meta.json", {"embed_seconds": seconds})
+    _clear_parts(folder, revision)
+    return matrix, ids, seconds
+
+
 def _load_or_build_cache(
     spec: TermModelSpec,
     out: Path,
+    mesh_release: str,
     vocabulary: Callable[[], list[Row]],
     doc_encoder_factory: Callable[[], Any],
-) -> tuple[np.ndarray, list[str], float]:
-    folder = out / spec.name
+    part_size: int = DEFAULT_PART_SIZE,
+) -> tuple[np.ndarray, list[str], float | None]:
+    folder = out / spec.name / mesh_release
     npy = folder / f"{spec.doc_revision}.npy"
     ids_path = folder / f"{spec.doc_revision}.ids.json"
     meta = folder / f"{spec.doc_revision}.meta.json"
@@ -76,23 +270,12 @@ def _load_or_build_cache(
         vecs = np.load(npy)
         ids = json.loads(ids_path.read_text(encoding="utf-8"))
         if len(ids) == len(vecs):
-            seconds = 0.0
-            if meta.exists():
-                seconds = float(json.loads(meta.read_text(encoding="utf-8"))["embed_seconds"])
+            seconds: float | None = None
+            data = _read_json(meta) if meta.exists() else None
+            if isinstance(data, dict) and "embed_seconds" in data:
+                seconds = float(data["embed_seconds"])
             return vecs, ids, seconds
-    rows = vocabulary()
-    encoder = doc_encoder_factory()
-    start = time.perf_counter()
-    vecs = np.asarray(_encode_documents(spec, encoder, rows), dtype=np.float32)
-    seconds = time.perf_counter() - start
-    if len(vecs) != len(rows):
-        raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(rows)} texts")
-    ids = [r[0] for r in rows]
-    folder.mkdir(parents=True, exist_ok=True)
-    np.save(npy, vecs)
-    ids_path.write_text(json.dumps(ids), encoding="utf-8")
-    meta.write_text(json.dumps({"embed_seconds": seconds}), encoding="utf-8")
-    return vecs, ids, seconds
+    return _embed_in_parts(spec, folder, vocabulary(), part_size, doc_encoder_factory)
 
 
 def _rank_descriptors(scores: np.ndarray, inverse: np.ndarray, n_desc: int) -> np.ndarray:
@@ -127,6 +310,9 @@ def _evaluate(
     ui_list = [str(u) for u in uis]
     results: list[dict[str, Any]] = []
     times_ms: list[float] = []
+    if acceptance:
+        # One encode that is not timed: the first call pays one-time start-up cost.
+        query_encoder.encode_queries([acceptance[0]["question"]])
     for entry in acceptance:
         start = time.perf_counter()
         q = np.asarray(query_encoder.encode_queries([entry["question"]]), dtype=np.float32)[0]
@@ -148,7 +334,10 @@ def run(
     out: Path,
     *,
     vocabulary: Callable[[], list[Row]],
+    mesh_release: str,
     encoders: Callable[[TermModelSpec], tuple[Any, Any]] = _default_encoders,
+    stored: StoredVectors | None = None,
+    part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -162,9 +351,25 @@ def run(
                 pair.extend(encoders(spec))
             return pair[0], pair[1]
 
-        vecs, ids, seconds = _load_or_build_cache(
-            spec, out, vocabulary, lambda get_pair=get_pair: get_pair()[1]
-        )
+        vecs: np.ndarray | None = None
+        ids: list[str] = []
+        seconds: float | None = None
+        reason: str | None = None
+        source = "embedded"
+        if stored is not None:
+            rows, reason = stored.check(spec, mesh_release)
+            if reason is None:
+                vecs, ids = _load_stored(stored, spec, mesh_release, rows)
+                source = "mesh_term_vec"
+        if vecs is None:
+            vecs, ids, seconds = _load_or_build_cache(
+                spec,
+                out,
+                mesh_release,
+                vocabulary,
+                lambda get_pair=get_pair: get_pair()[1],
+                part_size,
+            )
         results, times_ms = _evaluate(acceptance, vecs, ids, get_pair()[0])
         by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for r in results:
@@ -177,6 +382,8 @@ def run(
             "by_kind": {k: _summarise(by_kind[k]) for k in sorted(by_kind)},
             "query_ms_mean": float(np.mean(times_ms)) if times_ms else 0.0,
             "query_ms_p95": float(np.percentile(times_ms, 95)) if times_ms else 0.0,
+            "vocab_source": source,
+            "reuse_skipped_reason": reason,
             "vocab_embed_seconds": seconds,
             "vocab_vectors": int(len(vecs)),
             "vocab_bytes": int(vecs.nbytes),
@@ -188,6 +395,10 @@ def run(
 
 def _pct(x: float) -> str:
     return f"{100 * x:.1f}%"
+
+
+def _seconds(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f}"
 
 
 def _cells(summary: dict[str, Any]) -> str:
@@ -214,7 +425,8 @@ def _markdown(report: dict[str, Any]) -> str:
     for name, m in report["models"].items():
         lines.append(
             f"| {name} | {m['licence']} | {_cells(m['overall'])} | {m['query_ms_mean']:.1f} | "
-            f"{m['query_ms_p95']:.1f} | {m['vocab_embed_seconds']:.1f} | {m['vocab_vectors']} | "
+            f"{m['query_ms_p95']:.1f} | {_seconds(m['vocab_embed_seconds'])} | "
+            f"{m['vocab_vectors']} | "
             f"{m['vocab_bytes'] / 1e6:.1f} |"
         )
     for name, m in report["models"].items():
@@ -236,6 +448,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models", required=True, help="comma separated model names")
     parser.add_argument("--acceptance", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--part-size",
+        type=int,
+        default=DEFAULT_PART_SIZE,
+        help="rows encoded and saved per part (default %(default)s)",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     names = [n.strip() for n in args.models.split(",") if n.strip()]
     unknown = [n for n in names if n not in TERM_MODELS]
@@ -244,6 +462,9 @@ def main(argv: list[str] | None = None) -> int:
             f"unknown model(s): {', '.join(unknown)}; known: {', '.join(sorted(TERM_MODELS))}",
             file=sys.stderr,
         )
+        return 2
+    if args.part_size < 1:
+        print("--part-size must be at least 1", file=sys.stderr)
         return 2
     acceptance = json.loads(Path(args.acceptance).read_text(encoding="utf-8"))
 
@@ -254,7 +475,23 @@ def main(argv: list[str] | None = None) -> int:
         with connection() as conn:
             return vocabulary_texts(conn)
 
-    report = run(names, acceptance, Path(args.out), vocabulary=vocabulary)
+    from episteme.data.db.connection import connection
+
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT mesh_release FROM episteme.mesh_term")
+        releases = [r[0] for r in cur.fetchall()]
+    if len(releases) != 1:
+        print(f"mesh_term must hold one release, found {releases}", file=sys.stderr)
+        return 2
+    report = run(
+        names,
+        acceptance,
+        Path(args.out),
+        vocabulary=vocabulary,
+        mesh_release=releases[0],
+        stored=DbStoredVectors(),
+        part_size=args.part_size,
+    )
     print(f"wrote {Path(args.out) / 'REPORT.md'} ({len(report['models'])} model(s))")
     return 0
 
