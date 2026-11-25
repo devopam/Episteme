@@ -47,8 +47,19 @@
 - [ ] **Step 1: Write the failing test**
 
 ```python
-@pytest.mark.parametrize("v,ok", [("19beta3", True), ("19.0", True), ("19.2", True),
-    ("19rc1", True), ("18.3", False), ("190.1", False), ("20.0", False), ("", False)])
+@pytest.mark.parametrize(
+    "v,ok",
+    [
+        ("19beta3", True),
+        ("19.0", True),
+        ("19.2", True),
+        ("19rc1", True),
+        ("18.3", False),
+        ("190.1", False),
+        ("20.0", False),
+        ("", False),
+    ],
+)
 def test_supported_server_version(v, ok):
     assert text_override.is_supported_server_version(v) is ok
 ```
