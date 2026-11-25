@@ -11,7 +11,7 @@ Migration 0014 turns ``article_body.text`` into a VIRTUAL column; the stored col
 Every batch walks the primary key (article_id, source), so no statement scans a whole
 partition. ``nullout --order physical`` walks heap block ranges instead
 (``nullout_physical``). ``main()`` connects as the table owner and refuses any server
-except 19beta3.
+except PostgreSQL 19.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from episteme.data.article_schema import _BLANK_A, _BLANK_B, _BLANK_T, TEXT_JOIN
 from episteme.data.db import connection as db_connection
 from episteme.data.db.guard import ProductionDatabaseGuardError, pool_kwargs
 
-REQUIRED_SERVER_VERSION = "19beta3"
+_SERVER_VERSION_RE = re.compile(r"19(\.\d+|beta\d+|rc\d+)?")
 PARTITION_RE = re.compile(r"^article_body_[a-z0-9_]+$")
 DEFAULT_TABLE = "episteme.article_body"
 # The table is injectable for tests only; the CLI never exposes it.
@@ -48,15 +48,20 @@ def _log_stdout(msg: str) -> None:
     print(msg, flush=True)
 
 
+def is_supported_server_version(version: str) -> bool:
+    """True for PostgreSQL 19 (``19.x``, ``19betaN``, ``19rcN``)."""
+    return bool(_SERVER_VERSION_RE.fullmatch(version or ""))
+
+
 def check_server_version(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
         cur.execute("SHOW server_version")
         row = cur.fetchone()
     conn.rollback()
     version = row[0] if row else None
-    if version != REQUIRED_SERVER_VERSION:
+    if not isinstance(version, str) or not is_supported_server_version(version):
         raise TextOverrideError(
-            f"server_version is {version!r}; this tool runs only on {REQUIRED_SERVER_VERSION}"
+            f"server_version is {version!r}; this tool runs only on PostgreSQL 19"
         )
 
 

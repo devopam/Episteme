@@ -158,6 +158,18 @@ DEFAULT_TEACHER_REQUEST_TIMEOUT_S = 120
 DEFAULT_TEACHER_MAX_TOKENS = 2048
 DEFAULT_HARNESS_BASE_URL = "http://127.0.0.1:8080/v1"
 DEFAULT_HARNESS_MAX_TOOL_CALLS = 24
+# MedCPT encoders (question-to-MeSH-terms). Pinned model revisions: a change here
+# needs a re-embed of the MeSH vocabulary vectors.
+MEDCPT_QUERY_MODEL = "ncbi/MedCPT-Query-Encoder"
+MEDCPT_QUERY_REVISION = "d83a36cc6b8e3a5c5e9d9d6ba156808c1643dcbc"
+MEDCPT_ARTICLE_MODEL = "ncbi/MedCPT-Article-Encoder"
+MEDCPT_ARTICLE_REVISION = "d05a736da4bb84ee4057b7f7999485be6ed85465"
+# Bake-off candidate (MIT licence). Symmetric model: one id and revision for both sides.
+BGE_BASE_MODEL = "BAAI/bge-base-en-v1.5"
+BGE_BASE_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
+# Torch threads (EPISTEME_MEDCPT_THREADS) and texts per batch (EPISTEME_MEDCPT_BATCH).
+DEFAULT_MEDCPT_THREADS = 4
+DEFAULT_MEDCPT_BATCH = 32
 DEFAULT_HARNESS_MAX_CANDIDATES = 8
 DEFAULT_HARNESS_REQUEST_TIMEOUT_S = 300
 DEFAULT_BENCH_TENANT = "bench"
@@ -311,6 +323,12 @@ API_RESULT_LIMITS: dict[str, tuple[int, int]] = {
     "time_budget_ms": (20000, 20000),
     # Not a row cap: work_mem (megabytes) that search_text sets for its own call.
     "search_work_mem_mb": (256, 256),
+    # Not a row cap: the longest word run (n-gram) of a question that is matched to MeSH terms.
+    "match_ngram_max": (8, 8),
+    # Matches returned by suggest (default, cap).
+    "suggest": (10, 50),
+    # Not a row cap: hnsw.ef_search that the vector arm of suggest sets for its own call.
+    "suggest_ef_search": (200, 200),
 }
 _API_LIMIT_PREFIX = "EPISTEME_API_LIMIT_"
 
@@ -595,6 +613,9 @@ class Settings:
     # episteme_api_reader's password (EPISTEME_API_READER_PASSWORD); the operator sets the
     # role's password to it, and the --reader MCPg profile connects with it.
     api_reader_password: str = field(default="", repr=False)
+    # Directory of the question_mcp search log (EPISTEME_QUESTION_LOG_DIR); default
+    # <data root>/_question_log. None only when Settings is built by hand.
+    question_log_dir: Path | None = None
     pmc_submit_batch: int = DEFAULT_PMC_SUBMIT_BATCH
     sft_slice_batch_rows: int = DEFAULT_SFT_SLICE_BATCH_ROWS
     sft_slice_rows_per_part: int = DEFAULT_SFT_SLICE_ROWS_PER_PART
@@ -653,6 +674,8 @@ class Settings:
     sft_mix_weights: dict[str, float] = field(default_factory=dict)
     harness_base_url: str = DEFAULT_HARNESS_BASE_URL
     harness_max_tool_calls: int = DEFAULT_HARNESS_MAX_TOOL_CALLS
+    medcpt_threads: int = DEFAULT_MEDCPT_THREADS
+    medcpt_batch: int = DEFAULT_MEDCPT_BATCH
     harness_max_candidates: int = DEFAULT_HARNESS_MAX_CANDIDATES
     harness_request_timeout_s: int = DEFAULT_HARNESS_REQUEST_TIMEOUT_S
     bench_tenant: str = DEFAULT_BENCH_TENANT
@@ -831,6 +854,9 @@ def get_settings() -> Settings:
             "EPISTEME_API_READER_STATEMENT_TIMEOUT_S", DEFAULT_API_READER_STATEMENT_TIMEOUT_S
         ),
         api_reader_password=_get("EPISTEME_API_READER_PASSWORD", "") or "",
+        question_log_dir=Path(
+            _get("EPISTEME_QUESTION_LOG_DIR") or (data_root / "_question_log")
+        ).expanduser(),
         text_nullout_batch_rows=_get_positive_int_or_default(
             "EPISTEME_TEXT_NULLOUT_BATCH_ROWS", DEFAULT_TEXT_NULLOUT_BATCH_ROWS
         ),
@@ -933,6 +959,10 @@ def get_settings() -> Settings:
         ),
         sft_mix_weights=_parse_mix_weights(_get("EPISTEME_SFT_MIX_WEIGHTS")),
         harness_base_url=_get("EPISTEME_HARNESS_BASE_URL") or DEFAULT_HARNESS_BASE_URL,
+        medcpt_threads=_get_positive_int_or_default(
+            "EPISTEME_MEDCPT_THREADS", DEFAULT_MEDCPT_THREADS
+        ),
+        medcpt_batch=_get_positive_int_or_default("EPISTEME_MEDCPT_BATCH", DEFAULT_MEDCPT_BATCH),
         harness_max_tool_calls=_get_positive_int_or_default(
             "EPISTEME_HARNESS_MAX_TOOL_CALLS", DEFAULT_HARNESS_MAX_TOOL_CALLS
         ),

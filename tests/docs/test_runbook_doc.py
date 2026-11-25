@@ -17,7 +17,17 @@ from ._repo import (
 )
 
 RUNBOOK = "10-data-sources-runbook.md"
-STAGES = {"all", "download", "extract", "load", "graph", "materialize", "enrich", "serialize"}
+STAGES = {
+    "all",
+    "download",
+    "extract",
+    "load",
+    "graph",
+    "materialize",
+    "enrich",
+    "serialize",
+    "embed",
+}
 DISPATCHER_FLAGS = {
     "--dry-run",
     "--force",
@@ -121,12 +131,18 @@ def _allowed(src: str, stage: str) -> bool:
         )
     if stage == "enrich":
         return src == "europepmc_lite"
+    if stage == "embed":
+        return src == "mesh"
     return False
 
 
 def _wrapper_text(src: str) -> str:
     rel = wrapper_table()[src]
     return (REPO / "scripts" / "data" / rel).read_text(encoding="utf-8")
+
+
+def _embed_wrapper_text() -> str:
+    return (REPO / "scripts" / "data" / "mesh" / "embed_mesh.sh").read_text(encoding="utf-8")
 
 
 def test_the_runbook_shows_commands():
@@ -170,6 +186,10 @@ def test_flags_are_real_and_used_sensibly():
             i += 1
         for f in flags:
             if f in DISPATCHER_FLAGS:
+                continue
+            if stage == "embed":  # mesh only: the embed wrapper passes its flags to embed_mesh
+                assert f in ("--limit", "--batch"), f"{f} is not a flag of mesh embed: {rest}"
+                assert f in _embed_wrapper_text(), rest
                 continue
             # a passthrough flag must be understood by the source's own download wrapper
             assert stage in ("download", "all"), f"{f} passes through on download only: {rest}"

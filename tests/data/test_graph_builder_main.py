@@ -54,6 +54,8 @@ def stub(monkeypatch):
             "mesh_hierarchy": 0,
             "mesh_tree": 0,
             "mesh_qualifier": 0,
+            "mesh_term": 0,
+            "mesh_missing_raw": 0,
             "mesh_empty_parse": 0,
         }
 

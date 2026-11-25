@@ -94,6 +94,7 @@ MIGRATION_MARKERS: dict[str, list[str]] = {
     ],
     "0016_api_perf.sql": ["function:episteme_api_internal.year_windows(int, int, int, int)"],
     "0017_api_no_timeouts.sql": ["table:episteme.mesh_qualifier"],
+    "0018_question_terms.sql": ["table:episteme.mesh_term", "table:episteme.mesh_term_vec"],
 }
 
 DEFERRED_MIGRATIONS: dict[str, str] = {

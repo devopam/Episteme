@@ -42,6 +42,9 @@ MIGRATION = MIGRATIONS / "0015_api_layer.sql"
 SCHEMAS = ("episteme_api", "episteme_api_internal")
 _SYSTEM = "zz_apirole"
 _FTS_PART = "article_body_dailymed"
+# A 768-dimension vector and a model revision for suggest_terms (migration 0018).
+_VEC = "[" + ",".join(["0.5"] + ["0"] * 767) + "]"
+_REV = "rev-test"
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +115,15 @@ def test_every_function_sets_search_path_with_pg_temp_last(path):
 
 def test_owner_read_list_matches_the_migration():
     """The owner's SELECT list is every episteme relation a function body reads (the
-    API migrations 0015, 0016 and 0017; 0017 reads mesh_qualifier)."""
+    API migrations 0015 to 0018; 0017 reads mesh_qualifier; the 0018 functions read
+    mesh_term and mesh_term_vec)."""
     code = _migration_code() + "".join(
-        _code(MIGRATIONS / name) for name in ("0016_api_perf.sql", "0017_api_no_timeouts.sql")
+        _code(MIGRATIONS / name)
+        for name in ("0016_api_perf.sql", "0017_api_no_timeouts.sql", "0018_question_terms.sql")
     )
     read = set(re.findall(r"\b(?:FROM|JOIN)\s+episteme\.([a-z_0-9]+)", code))
     assert read, "no reads found in migration 0015"
+    assert {"mesh_term", "mesh_term_vec"} <= read
     assert _array("c_read") == read
 
 
@@ -395,6 +401,27 @@ def _seed(conn) -> None:
             "VALUES ('aact', %s, 1, 'loaded', true)",
             (TEST_AACT_RELEASE,),
         )
+        # MeSH terms and one vector (migration 0018): match_terms and suggest_terms.
+        cur.execute(
+            "INSERT INTO episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
+            "is_preferred, concept_ui, concept_relation, mesh_release, source_file) VALUES "
+            "('D008107', 'Liver Diseases', 'liver diseases', 'name', true, 'M0012591', NULL, "
+            "'2026', 'mesh/desc2026.gz')"
+        )
+        # An entry term that the dailymed label holds: search_terms finds the label.
+        cur.execute(
+            "INSERT INTO episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
+            "is_preferred, concept_ui, concept_relation, mesh_release, source_file) VALUES "
+            "('D008107', 'Zymoquartz', 'zymoquartz', 'entry', false, 'M0012591', NULL, "
+            "'2026', 'mesh/desc2026.gz')"
+        )
+        cur.execute(
+            "INSERT INTO episteme.mesh_term_vec (descriptor_ui, text_kind, text, embedding, "
+            "model, model_revision, mesh_release) VALUES "
+            "('D008107', 'descriptor', 'Liver Diseases', %s::public.halfvec, 'medcpt', "
+            "%s, '2026')",
+            (_VEC, _REV),
+        )
     conn.commit()
 
 
@@ -431,6 +458,16 @@ CALLS: dict[str, list[tuple[str, tuple]]] = {
     "lookup_code": [("SELECT * FROM episteme_api.lookup_code(%s, %s)", (_SYSTEM, "JP"))],
     "search_text": [
         ("SELECT * FROM episteme_api.search_text(%s, %s::text[])", ("zymoquartz", ["dailymed"]))
+    ],
+    "match_terms": [("SELECT * FROM episteme_api.match_terms(%s)", ("liver diseases",))],
+    "suggest_terms": [
+        ("SELECT * FROM episteme_api.suggest_terms(%s::public.halfvec, %s)", (_VEC, _REV))
+    ],
+    "search_terms": [
+        (
+            "SELECT * FROM episteme_api.search_terms(%s::text[], %s::text[])",
+            (["D008107"], ["dailymed"]),
+        )
     ],
 }
 
@@ -565,6 +602,9 @@ def test_reader_cannot_execute_internal(api):
     for query in (
         "SELECT * FROM episteme_api_internal.resolve_entity('metformin')",
         "SELECT episteme_api_internal.limit_for('search')",
+        "SELECT * FROM episteme_api_internal.match_terms('liver diseases')",
+        f"SELECT * FROM episteme_api_internal.suggest_terms('{_VEC}'::public.halfvec, '{_REV}')",
+        "SELECT * FROM episteme_api_internal.search_terms(ARRAY['D008107'])",
     ):
         with pytest.raises(errors.InsufficientPrivilege):
             reader.execute(query)
@@ -613,8 +653,13 @@ def test_reader_can_call_each_public_function(api):
             assert as_reader, (name, params)
             if name == "substance_family":
                 continue
-            # A claim or article row: the call read its tables, not only a 'missing' path.
-            assert {r[0] for r in as_reader} & {"claim", "article"}, (name, params, as_reader)
+            # A claim, article or term row: the call read its tables, not only a 'missing'
+            # path or a note.
+            assert {r[0] for r in as_reader} & {"claim", "article", "term"}, (
+                name,
+                params,
+                as_reader,
+            )
 
 
 @pytest.mark.pg
@@ -745,9 +790,11 @@ def test_pipeline_role_calls_the_internal_functions_and_writes_indexed_bodies(ap
         if su.execute("SELECT to_regrole('episteme_app') IS NULL").fetchone()[0]:
             pytest.skip("role episteme_app does not exist")
         su.execute("SET ROLE episteme_app")
-        assert set(CALLS) == set(_api.INTERNAL_FUNCTIONS)
-        for name, calls in CALLS.items():
-            query, params = calls[0]
+        # match_terms, suggest_terms and search_terms (0018) are for the reader (the
+        # question MCP), not for the pipeline role.
+        assert set(_api.INTERNAL_FUNCTIONS) <= set(CALLS)
+        for name in sorted(_api.INTERNAL_FUNCTIONS):
+            query, params = CALLS[name][0]
             rows = su.execute(
                 query.replace("episteme_api.", "episteme_api_internal."), params
             ).fetchall()

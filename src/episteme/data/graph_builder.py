@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -84,6 +85,7 @@ from episteme.ops import status as ops_status
 from episteme.ops.failure import record_failure
 from episteme.ops.retry import RETRY_WAITS, with_retries
 from episteme.ops.stop import stage_guard
+from episteme.reference.term_norm import term_norm
 
 _SLEEP = time.sleep  # seam: tests patch this so retry waits cost nothing
 
@@ -339,6 +341,91 @@ def _parse_mesh_qualifiers(xml_path: Path) -> dict[str, str]:
     return out
 
 
+def _child(elem, tag: str):
+    for c in elem:
+        if _local(c.tag) == tag:
+            return c
+    return None
+
+
+def _child_text(elem, tag: str) -> str:
+    c = _child(elem, tag) if elem is not None else None
+    return (c.text or "").strip() if c is not None else ""
+
+
+def mesh_release_of(source_file: str) -> str | None:
+    """The 4-digit year after ``desc`` in a MeSH descriptor file name, else None."""
+    m = re.search(r"desc(\d{4})", source_file)
+    return m.group(1) if m else None
+
+
+def _parse_mesh_terms(
+    xml_path: Path,
+) -> list[tuple[str, str, str, bool, str | None, str | None]]:
+    """Return ``(descriptor_ui, term, term_kind, is_preferred, concept_ui,
+    concept_relation)`` rows for one MeSH descriptor release file (bare or gzip, same
+    streaming and failure rules as ``_parse_mesh_qualifiers``: a parse failure yields
+    ``[]``).
+
+    One ``'name'`` row per descriptor (its name, preferred, ``concept_ui`` of the
+    preferred concept, no relation); one ``'entry'`` row per distinct ``Term/String`` of
+    every ``Concept`` (permuted terms included; a string equal to the descriptor name
+    is skipped; ``is_preferred`` False). ``concept_relation`` is the ``RelationName``
+    of the ``ConceptRelation`` in the record whose ``Concept2UI`` is that concept
+    (None for the preferred concept or when no relation names it)."""
+    out: list[tuple[str, str, str, bool, str | None, str | None]] = []
+    try:
+        with _open_mesh_source(xml_path) as fh:
+            context = iter(ET.iterparse(fh, events=("start", "end")))
+            _, root = next(context)
+            for event, elem in context:
+                if event != "end" or _local(elem.tag) != "DescriptorRecord":
+                    continue
+                ui = _child_text(elem, "DescriptorUI")
+                name = _child_text(_child(elem, "DescriptorName"), "String")
+                if ui and name:
+                    concepts = [
+                        c
+                        for c in elem.iter()
+                        if _local(c.tag) == "Concept" and c.get("PreferredConceptYN") is not None
+                    ]
+                    relation_of: dict[str, str] = {}
+                    for rel in elem.iter():
+                        if _local(rel.tag) != "ConceptRelation":
+                            continue
+                        c2 = _child_text(rel, "Concept2UI")
+                        rname = rel.get("RelationName")
+                        if c2 and rname in ("NRW", "BRD", "REL"):
+                            relation_of.setdefault(c2, rname)
+                    preferred_ui = next(
+                        (
+                            _child_text(c, "ConceptUI")
+                            for c in concepts
+                            if c.get("PreferredConceptYN") == "Y"
+                        ),
+                        "",
+                    )
+                    out.append((ui, name, "name", True, preferred_ui or None, None))
+                    seen = {name}
+                    for c in concepts:
+                        cui = _child_text(c, "ConceptUI") or None
+                        is_pref = c.get("PreferredConceptYN") == "Y"
+                        rel_name = None if is_pref else relation_of.get(cui or "")
+                        for term in c.iter():
+                            if _local(term.tag) != "Term":
+                                continue
+                            text = _child_text(term, "String")
+                            if not text or text in seen:
+                                continue
+                            seen.add(text)
+                            out.append((ui, text, "entry", False, cui, rel_name))
+                elem.clear()
+                root.clear()
+    except Exception:  # noqa: BLE001 -- a malformed file must not abort the build
+        return []
+    return out
+
+
 def build(
     conn,
     *,
@@ -516,6 +603,8 @@ def build(
     total_mesh_hierarchy = 0
     total_mesh_tree = 0
     total_mesh_qualifier = 0
+    total_mesh_term = 0
+    missing_raw = 0
     empty_parse = 0
     if source == "mesh":
         with conn.cursor() as cur:
@@ -528,12 +617,30 @@ def build(
                 file=sys.stderr,
             )
         with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('episteme.mesh_term') IS NOT NULL")
+            has_term_table = bool(cur.fetchone()[0])
+        if not has_term_table:
+            print(
+                "WARNING: graph_builder mesh phase: episteme.mesh_term does not exist; "
+                "apply migration 0018 and run the mesh graph phase again to fill it",
+                file=sys.stderr,
+            )
+        with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT source_file FROM episteme.articles WHERE source = 'mesh'")
             mesh_files = [r[0] for r in cur.fetchall()]
+        # mesh_term is written for the newest release only.
+        released = [f for f in mesh_files if mesh_release_of(f)]
+        newest_file = max(released, key=lambda f: (mesh_release_of(f), f), default=None)
 
         for src_file in sorted(mesh_files):
             xml_path = find_input_by_key(Path(raw_dir), src_file)
             if xml_path is None:
+                missing_raw += 1
+                print(
+                    f"WARNING: graph_builder mesh phase: raw file for {src_file} "
+                    f"not found under {raw_dir}; set EPISTEME_RAW_ROOT",
+                    file=sys.stderr,
+                )
                 continue
 
             descriptors = _parse_mesh_descriptors(xml_path)
@@ -602,16 +709,41 @@ def build(
                         for r in qualifier_rows:
                             cp.write_row(r)
 
+            term_rows: list[tuple] = []
+            if has_term_table and src_file == newest_file:
+                release = mesh_release_of(src_file)
+                term_rows = [
+                    (ui, term, term_norm(term), kind, pref, cui, rel, release, src_file)
+                    for ui, term, kind, pref, cui, rel in _parse_mesh_terms(xml_path)
+                ]
+                if not term_rows:
+                    print(
+                        f"WARNING: graph_builder mesh phase: {xml_path} gave no MeSH terms; "
+                        "mesh_term left unchanged",
+                        file=sys.stderr,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM episteme.mesh_term")
+                        with cur.copy(
+                            "COPY episteme.mesh_term (descriptor_ui, term, term_norm, term_kind, "
+                            "is_preferred, concept_ui, concept_relation, mesh_release, "
+                            "source_file) FROM STDIN"
+                        ) as cp:
+                            for r in term_rows:
+                                cp.write_row(r)
+
             audit_trail.record(
                 "graph_commit",
                 conn=conn,
                 object=f"mesh {src_file}",
-                rows_affected=len(edges) + len(tree_rows) + len(qualifier_rows),
+                rows_affected=len(edges) + len(tree_rows) + len(qualifier_rows) + len(term_rows),
                 run_id=run_id,
             )
             total_mesh_hierarchy += len(edges)
             total_mesh_tree += len(tree_rows)
             total_mesh_qualifier += len(qualifier_rows)
+            total_mesh_term += len(term_rows)
 
     return {
         "source_files": handled,
@@ -623,6 +755,8 @@ def build(
         "mesh_hierarchy": total_mesh_hierarchy,
         "mesh_tree": total_mesh_tree,
         "mesh_qualifier": total_mesh_qualifier,
+        "mesh_term": total_mesh_term,
+        "mesh_missing_raw": missing_raw,
         "mesh_empty_parse": empty_parse,
     }
 
@@ -1088,7 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
             f"mesh={res['mesh']} missing_xml={res['missing_xml']} "
             f"skipped_no_pmid={res['skipped_no_pmid']} parts={res['parts']} "
             f"mesh_hierarchy={res['mesh_hierarchy']} mesh_tree={res['mesh_tree']} "
-            f"mesh_qualifier={res['mesh_qualifier']} "
+            f"mesh_qualifier={res['mesh_qualifier']} mesh_term={res['mesh_term']} "
+            f"mesh_missing_raw={res['mesh_missing_raw']} "
             f"mesh_empty_parse={res['mesh_empty_parse']}"
         )
         return g.exit_code(0)
