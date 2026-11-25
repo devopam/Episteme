@@ -115,6 +115,8 @@ Values are never shown in this document. Put them in `.env` (gitignored) or the 
 | `POSTGRES_SUPERUSER`, `POSTGRES_SUPERUSER_PASSWORD` | Bootstrap role for `install_extensions.sh` and `init_database.sh`, for `tune_postgres.sh apply`, and for the MCPg admin server (operator only; see section 2). |
 | `EPISTEME_API_READER_PASSWORD` | Password of `episteme_api_reader`, the login role of the read-only MCPg instance (section 5.19). The operator sets the role's password to this value; no file holds it. |
 | `EPISTEME_API_READER_STATEMENT_TIMEOUT_S`, `EPISTEME_API_LIMIT_<FAMILY>`, `EPISTEME_FTS_LOCK_TIMEOUT_S` | Optional tunables of the SQL lookup API (section 5.19): the reader's `statement_timeout` (default 30 s, 0 = none), the row cap per function family (`<default>,<max>`), and the lock timeout of a full-text index build (default 0 = none). `api_settings sync` copies the first two into the database. |
+| `EPISTEME_QUESTION_LOG_DIR` | Optional. Directory of the search log of the `question_mcp` server (section 5.20.4). Default `<data root>/_question_log`. |
+| `EPISTEME_MEDCPT_THREADS`, `EPISTEME_MEDCPT_BATCH` | Optional tunables of the MedCPT encoders (section 5.20.3): torch threads (default 4) and texts per encoder batch (default 32). |
 | `MCPG_ALTER_SYSTEM_ALLOWLIST` | Optional. Comma-separated settings the MCPg admin server may change (default: the section 2.4 settings plus `max_parallel_maintenance_workers`). `scripts/mcpg-episteme.sh` sets `MCPG_ALLOW_ALTER_SYSTEM` itself: on for `--admin`, off otherwise. |
 | `EPISTEME_DATA_ROOT` | Base of the three roots below (default `.`). |
 | `EPISTEME_RAW_ROOT`, `EPISTEME_PROCESSED_ROOT`, `EPISTEME_CORPUS_ROOT` | Default `<data root>/01_raw`, `<data root>/02_processed`, `<data root>/03_corpus`. |
@@ -182,7 +184,7 @@ Expected on the local build: `episteme_test|19.0` (any `19.x`). Upgraded from 19
 
 Since SP6, running the automated test suite's `-m pg` tests (e.g. `PGDATABASE=episteme_test .venv/Scripts/python.exe -m pytest -m pg`) needs `TEST_PG_DSN`/`EPISTEME_SYS_ADMIN_PASSWORD` present as real shell environment variables *before pytest starts* — source `.env` into the shell first with `set -a; . ./.env; set +a` (never `cat`/print it), or `tests/data/conftest.py`'s `pg_conn` fixture finds `TEST_PG_DSN` unset and every pg-marked test silently skips rather than failing loudly.
 
-### 2.3 Migrations: 0001 blocked, 0002-0017 applied by hand
+### 2.3 Migrations: 0001 blocked, 0002-0018 applied by hand
 
 Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_database.sh [target_db]` applies them in order and records each in `episteme._migrations`, but it stops at the first failure:
 
@@ -205,11 +207,12 @@ Migrations live in `src/episteme/data/db/migrations/`. `scripts/data/db/migrate_
 | `0015_api_layer.sql` | The SQL lookup API: schemas `episteme_api` (public, capped functions) and `episteme_api_internal` (settings tables, helpers, complete functions), and the FAERS table `faers_moiety_quarter_outcome` | Idempotent, one transaction. It builds no large index (the full-text and `article_mesh` indexes are operator steps, section 5.19). Apply it with no FAERS load running: it creates a FAERS table. After the roles file has run (section 5.19), re-apply it as `episteme_sys_admin` only through the membership that file grants. The roles file and `api_settings sync` follow it (section 5.19) |
 | `0016_api_perf.sql` | Performance follow-up of the SQL lookup API: replaces `episteme_api_internal.literature_by_mesh`, `graph_neighbours` and `search_text`; adds the helper function `episteme_api_internal.year_windows` and seeds the result limits `literature_window` and `search_rank_chars` | Idempotent, one transaction. No table change. Light. Apply it to `episteme_test`, run `api_settings sync` at once, then do the same on `episteme` (section 5.19.1, step 12). The sync is still required: it applies the `EPISTEME_API_LIMIT_<FAMILY>` overrides. The functions no longer fail before it, because 0016 seeds the two new families (`literature_window` 5, `search_rank_chars` 10000). The covering indexes on `article_mesh` are operator steps (section 5.19.5) |
 | `0017_api_no_timeouts.sql` | Second performance follow-up of the SQL lookup API: no call may pass the reader timeout. Replaces `episteme_api_internal.literature_by_mesh` and `search_text`; adds the helper `literature_topic_keep`; creates the table `episteme.mesh_qualifier` (the MeSH qualifier names); seeds the result limits `literature_topic_scan`, `literature_topic_chunk`, `time_budget_ms` and `search_work_mem_mb`; sets `search_rank_chars` to 2000 where the row still holds the 0016 seed | Idempotent, one transaction. Light. Apply it to `episteme_test`, then to `episteme`. Run the roles file as superuser after it (section 5.19.1, step 13.2): no other step re-runs it, and the new helper `literature_topic_keep` stays owned by `episteme_sys_admin` until it runs. Then run `python -m episteme.reference.api_settings sync` at once, on each database. Until the sync runs, topic calls fail with `permission denied for table mesh_qualifier`: the grants file adds `mesh_qualifier` to the read list of the API owner. Then run `run_pipeline.sh mesh graph` on `episteme` to fill `mesh_qualifier` (section 5.19.1, step 13.4) |
+| `0018_question_terms.sql` | Question to MeSH terms: the tables `episteme.mesh_term` (MeSH descriptor names and entry terms) and `episteme.mesh_term_vec` (MedCPT vectors, `halfvec(768)`, HNSW index `mesh_term_vec_hnsw_idx`); the helper `term_norm`; the functions `match_terms`, `suggest_terms` and `search_terms`; seeds the result limits `match_ngram_max`, `suggest` and `suggest_ef_search` | Needs the `vector` extension (pgvector 0.8.7) in the database: the file stops with `0018 needs the vector extension` otherwise. Idempotent, one transaction. Light: the tables are empty until `mesh graph` and `mesh embed` fill them. Apply it to `episteme_test`, then to `episteme`. Then run the roles file as superuser, then `api_settings sync` (section 5.20.1) |
 
-Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0017, apply those sixteen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
+Because `migrate_database.sh` dies at 0001 and never reaches 0002 to 0018, apply those seventeen directly (0004 with no load running, see the table). All are idempotent (safe to re-run); applied this way they are **not tracked** in `episteme._migrations` (see the header of each file and docs/08 section 9). Use `episteme_sys_admin`, never `episteme_app`:
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer 0016_api_perf 0017_api_no_timeouts; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0002_container_and_book_parts 0003_mesh_hierarchy 0004_articles_load_indexes 0005_bulk_index_state 0006_pubmed_graph 0007_pubmed_partition 0008_pmc_bookshelf_default_partition 0009_apollo_pubchem_partitions 0010_regulatory_sources 0011_label_section_ordinal 0012_openalex_partitions 0013_reference_codes 0014_article_text_virtual 0015_api_layer 0016_api_perf 0017_api_no_timeouts 0018_question_terms; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 Expect `migrations-applied` and exit 0. Check the result (expect `t|t|t|t|t|t|t|t`; the fourth column is 0004's `articles_id_idx`, the fifth is 0005's table, the sixth is 0011's `label_section.ordinal` the seventh is 0012's `articles_openalex` and the eighth is 0014's virtual `article_body.text`):
@@ -242,7 +245,7 @@ Tunables (names only; defaults in `src/episteme/config.py`): `EPISTEME_TEXT_NULL
 
 After 0014, `precheck` is for information only.
 
-On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0017 and tracks them. Do not run it on the local build.
+On a server where pgvector is installed, `bash scripts/data/db/migrate_database.sh episteme_test` applies 0001 through 0018 and tracks them. Do not run it on the local build.
 
 ### 2.4 Server settings for bulk loads
 
@@ -2025,6 +2028,121 @@ COMMIT;
 
 The partition indexes keep their generated names. Only the name of the parent index matters to `bulk_indexes`. After each index swap transaction, run `ANALYZE episteme.article_mesh` at once. A new expression index has no statistics until `ANALYZE` runs. In the 0016 rollout the planner had none for the new index, chose a parallel sequential scan, and one call took 227 s. At the end run `VACUUM (ANALYZE) episteme.article_mesh` (section 5.19.4).
 
+### 5.20 Question to standard terms (migration 0018, `question_mcp`)
+
+A reviewer asks a question in their own words: an acronym (`SJS`), a lay phrase (`heart attack`) or a description (`skin peeling after an antibiotic`). The feature translates the question into MeSH descriptors. The person confirms the terms. The search runs on the confirmed terms only. Every search result states the terms and the exact query text that it used. Design: `docs/superpowers/specs/2026-11-24-question-to-mesh-terms-design.md`; summary in `docs/13-graphrag-design.md` section 6.2.
+
+Parts:
+
+- **Tables** (migration 0018): `episteme.mesh_term` (the descriptor names and the entry terms of every concept, filled by the `mesh` graph phase) and `episteme.mesh_term_vec` (MedCPT vectors of the vocabulary, filled by `run_pipeline.sh mesh embed`).
+- **Functions** (migration 0018, schema `episteme_api`): `match_terms(p_question)` (exact step), `suggest_terms(p_vector, p_model_revision)` (MedCPT suggestions), `search_terms(p_descriptor_uis, p_sources)` (search on confirmed descriptors; repeatable, never partial).
+- **Models:** MedCPT, two encoders, revisions pinned in `config.py` (docs/02 section 2.8).
+- **MCP server:** `scripts/question-mcp.sh` starts `python -m episteme.reference.question_mcp` as `episteme_api_reader`. Tools: `translate_question` and `search_confirmed`.
+
+#### 5.20.1 Rollout (in this order; one heavy job at a time)
+
+Confirm `server_version` is `19.x` first (section 2.2). Do steps 1 to 3 on `episteme_test`, then on `episteme`. Run no graph load at the same time.
+
+1. **Migration 0018, alone.** Do not run the whole section 2.3 loop on a loaded database. Apply only `0018_question_terms`, as `episteme_sys_admin`, the same way as section 5.19.1 step 1:
+
+```bash
+PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0018_question_terms; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+```
+
+   Expect `migrations-applied`. The message `0018 needs the vector extension` means that pgvector is not in that database: run `scripts/data/db/install_extensions.sh` (section 2.1) first.
+2. **Roles file, as superuser.** Run `src/episteme/data/db/grants/0015_api_roles.sql` with the command of section 5.19.1 step 2. Do it after step 1 and before step 3. The roles file moves the new functions to `episteme_api_owner` and gives the reader EXECUTE on `match_terms`, `suggest_terms` and `search_terms`.
+3. **Settings sync.** Run it at once after step 2:
+
+```bash
+PGDATABASE=episteme_test .venv/Scripts/python.exe -m episteme.reference.api_settings sync
+```
+
+   Expect `api_settings sync: <n> sources, 20 limits`. 0018 adds the families `match_ngram_max` (8, 8), `suggest` (10, 50) and `suggest_ef_search` (200, 200). The sync also applies the reads of the owner role: the grants file adds `mesh_term` and `mesh_term_vec`.
+
+#### 5.20.2 Model download (once)
+
+```bash
+.venv/Scripts/python.exe -m episteme.reference.medcpt download
+```
+
+The command downloads `ncbi/MedCPT-Query-Encoder` and `ncbi/MedCPT-Article-Encoder` at the revisions pinned in `config.py` into the Hugging Face cache (about 0.9 GB). Expect one line `downloaded <model>@<revision>` for each model. Do it once on each machine. No other step downloads a model: the encoders load from the cache only. When the model is not in the cache, they stop with a message that names this section.
+
+#### 5.20.3 Fill the vocabulary tables
+
+1. **MeSH terms.** Run the `mesh` graph phase. It fills `episteme.mesh_term` from the descriptor file (desc2026), together with `mesh_tree`, `mesh_hierarchy` and `mesh_qualifier`. Set `EPISTEME_RAW_ROOT`: without it, the phase looks in `./01_raw` and finds no file.
+
+```bash
+PGDATABASE=episteme_test EPISTEME_RAW_ROOT=D:/episteme/01_raw bash scripts/data/run_pipeline.sh mesh graph
+```
+
+   Check: `SELECT count(*), min(mesh_release), max(mesh_release) FROM episteme.mesh_term;` Expect more than 200,000 rows and one release (`2026`).
+2. **Trial embed on `episteme_test`.** Embed 2,000 descriptors. Record the time. The sample gate has no rule for `embed`: use `--limit`, not `--sample`. `run_pipeline.sh mesh all` does not run `embed`.
+
+```bash
+time PGDATABASE=episteme_test bash scripts/data/run_pipeline.sh mesh embed --limit 2000 2>&1 | tee D:/episteme/_runlogs/mesh_embed_trial.log
+```
+
+   Expect `done: release=2026 embedded=2000 ...`. The embed reads the scope note of each descriptor from `article_body` (source `mesh`). When `episteme_test` has no `mesh` rows there, the texts are shorter and the trial is faster than the full run. Use the time for each descriptor to estimate the full run (about 31,000 descriptors).
+3. **Full embed.** Run it alone, first on `episteme_test`, then on `episteme`. A stopped run continues when you start it again: it skips the descriptors that already have vectors of the same release and model revision.
+
+```bash
+PGDATABASE=episteme bash scripts/data/run_pipeline.sh mesh embed 2>&1 | tee D:/episteme/_runlogs/mesh_embed.log
+```
+
+   Before the `episteme` run, do step 1 on `episteme` (`PGDATABASE=episteme`). The embed does not start while `mesh_term` holds more than one release.
+4. **Statistics.** Run `ANALYZE episteme.mesh_term, episteme.mesh_term_vec;` as `episteme_sys_admin` right after the fill, on each database.
+
+Tunables (names only): `EPISTEME_MEDCPT_THREADS` (torch threads) and `EPISTEME_MEDCPT_BATCH` (texts per encoder batch). `--batch N` sets the descriptors per transaction for one run.
+
+A new MeSH release: do step 1, then steps 3 and 4. The embed first deletes the vectors of the old release or of another model revision. Until the new embed is done, `suggest_terms` returns the note `vocabulary vectors are from MeSH <a>, terms are from MeSH <b>; run mesh embed` and no suggestions.
+
+#### 5.20.4 MCP client configuration
+
+`scripts/question-mcp.sh [episteme|episteme_test]` (default `episteme`) reads `.env`, needs `EPISTEME_API_READER_PASSWORD`, and starts the server on stdio as `episteme_api_reader`. Example entry (in `.mcp.json`, or in the user config):
+
+```json
+"episteme-question": { "command": "bash", "args": ["scripts/question-mcp.sh", "episteme"], "env": {} }
+```
+
+- **Search log.** Each `translate_question` call and each `search_confirmed` call adds one JSON line to `<EPISTEME_QUESTION_LOG_DIR>/question-<YYYY-MM-DD>.jsonl` (UTC date; default directory `<data root>/_question_log`). The log is the record that the person accepted the terms. Keep it.
+- **Confirm first.** `search_confirmed` asks the person through an MCP elicitation form: the person ticks the terms to accept. The agent cannot give a term list. This control works only when the MCP host shows the form to the person. Use a host that shows elicitation forms to the person and does not answer them itself.
+- **No elicitation.** When the client does not support elicitation, `search_confirmed` runs no search and returns the status `no_elicitation`. The other statuses are `searched`, `declined`, `cancelled`, `nothing_accepted` and `unknown_confirmation`.
+- **Restart.** The proposals stay in memory only. After a restart, an old `confirmation_id` gives `unknown_confirmation`: call `translate_question` again.
+- **Reader MCPg instance.** The reader MCPg instance (section 5.19.3) can also call `match_terms` and `search_terms`. It cannot embed a question, so it cannot give `suggest_terms` a useful vector.
+
+#### 5.20.5 Acceptance
+
+Do this on `episteme` after the full embed and the `ANALYZE`. Run it alone.
+
+1. **Index check.** The reader has no USAGE on schema `episteme`, so run this as `episteme_sys_admin` (admin MCPg instance or psql). The probe is a stored vector. The limit is 40 (4 times the `suggest` default), as in `suggest_terms`:
+
+```sql
+SET hnsw.ef_search = 200;
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT v.descriptor_ui
+  FROM episteme.mesh_term_vec v
+ ORDER BY v.embedding <#> (SELECT w.embedding FROM episteme.mesh_term_vec w LIMIT 1)
+ LIMIT 40;
+```
+
+   Pass: the plan shows `Index Scan using mesh_term_vec_hnsw_idx`. A `Seq Scan` with a `Sort` is a miss: report it.
+2. **Acceptance script.** `scripts/ops/question_terms_acceptance.py` runs `translate_question` for each question of `tests/reference/data/question_terms_acceptance.json`, through the reader, with the same code as the MCP server: `match_terms`, then the MedCPT query encoder and `suggest_terms` only when words stay unmatched. It runs no search. It needs `EPISTEME_API_READER_PASSWORD` and the models of section 5.20.2.
+
+```bash
+PGDATABASE=episteme .venv/Scripts/python.exe scripts/ops/question_terms_acceptance.py --out D:/episteme/_runlogs/question_terms_acceptance.json
+```
+
+   It prints one line for each question (`exact=Y|N top10=Y|N <seconds>`), the hit counts by kind (acronym, lay, description) and the times. It writes the JSON report to `--out`, and its own search log to `<out dir>/question_log` (not to the log of the server). Exit 0 when the report is written; exit 2 when the reader password is not set.
+   - Exact hit: every expected descriptor is among the exact terms.
+   - Top-10 hit: every expected descriptor is among the exact terms and the first 10 suggestions.
+   - Time: one `translate_question` call after one warm-up call. Target: less than 5 s warm. The report gives the cold call and the model load separately.
+   - A line `note: model revision ... does not match the stored vectors` means that the vectors come from another model revision: run `mesh embed` again.
+3. **Confirmed search.** Use the MCP server in a client that shows elicitation forms. Do these checks and record the time of each `search_confirmed` call:
+   - Accept the terms of 3 questions (one of each kind). Each result gives `status: searched` and one note `terms used: <UI> <name>; query: <tsquery>` for each accepted descriptor. Pass: no timeout (the 0017 time budget applies).
+   - Do one of these searches again with the same terms. Pass: the same rows and the same query text. Do the same for one broad descriptor that gives a `capped:` note (for example `D009369`, Neoplasms).
+   - Decline once and cancel once. Pass: `declined` and `cancelled`, no rows, and one `confirm` line in the search log for each.
+4. Record the hit counts, the times and every miss in the drift log (`docs/project-incubation-baseline.md`).
+
 ---
 
 ## 8. Ops cadence
@@ -2066,3 +2184,4 @@ Upstream cadence per source is in `docs/12-source-inventory.md`. Suggested rhyth
 | v7 | 2026-11-19 | Section 5.19: SQL lookup API (migration 0015, grants files, `api_settings sync`, rollout order, full-text index builds, reader MCPg instance, upkeep); EPAR offline subset, EU label links and medicine records (5.10); FAERS outcome table (5.12); AACT `study_references (pmid)` index and API grants (5.16); DailyMed failure names and the 6 accepted failures (5.8); new keys in 1.2 |
 | v8 | 2026-11-24 | Section 5.19: migration 0016 (API performance follow-up), rollout step 12, covering indexes on `article_mesh` (5.19.5), upkeep (`VACUUM (ANALYZE)`, `ANALYZE`); corrections from the 0015 rollout: EU label links 20, `not_downloaded` about 4,600, shared load markers need `--force --reason`, `ema` feeds first (5.10); sections 2.3 and 4.6 updated |
 | v9 | 2026-11-24 | Migration 0017 (API no timeouts): migration table row, rollout step 13, `ANALYZE` after each index swap (5.19.5), 17 limit families; sections 2.3 (table row and apply loop), 5.19.1 and 5.19.5 updated |
+| v10 | 2026-11-25 | Section 5.20: question to standard terms (migration 0018, model download, `mesh graph` and `mesh embed`, MCP client configuration, acceptance); section 2.3 table row and apply loop to 0018; new keys in 1.2 |

@@ -48,7 +48,7 @@ def _stages(src: str) -> list[str]:
 
 def test_stage_column_matches_the_dispatcher_rules():
     """Stages per source follow run_pipeline.sh: lit = download/extract/load/graph,
-    structured = download/serialize/load (+graph for mesh), the rest as wired there."""
+    structured = download/serialize/load (+graph and embed for mesh), the rest as wired there."""
     lit, structured = lit_sources(), structured_sources()
     no_graph, reg = no_graph_sources(), reg_sources()
     for src in _wired():
@@ -64,7 +64,7 @@ def test_stage_column_matches_the_dispatcher_rules():
         elif src in lit:
             assert got == ["download", "extract", "load", "graph"], (src, got)
         elif src in structured:
-            want = ["download", "serialize", "load"] + (["graph"] if src == "mesh" else [])
+            want = ["download", "serialize", "load"] + (["graph", "embed"] if src == "mesh" else [])
             assert got == want, (src, got)
         elif src == "europepmc_id_mappings":
             assert got == ["download", "load"], got

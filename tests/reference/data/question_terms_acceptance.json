@@ -1,0 +1,444 @@
+[
+  {
+    "question": "SJS",
+    "kind": "acronym",
+    "expected": [
+      "D013262"
+    ],
+    "expected_names": [
+      "Stevens-Johnson Syndrome"
+    ]
+  },
+  {
+    "question": "TEN after allopurinol",
+    "kind": "acronym",
+    "expected": [
+      "D013262",
+      "D000493"
+    ],
+    "expected_names": [
+      "Stevens-Johnson Syndrome",
+      "Allopurinol"
+    ]
+  },
+  {
+    "question": "DILI",
+    "kind": "acronym",
+    "expected": [
+      "D056486"
+    ],
+    "expected_names": [
+      "Chemical and Drug Induced Liver Injury"
+    ]
+  },
+  {
+    "question": "MI with ibuprofen",
+    "kind": "acronym",
+    "expected": [
+      "D009203",
+      "D007052"
+    ],
+    "expected_names": [
+      "Myocardial Infarction",
+      "Ibuprofen"
+    ]
+  },
+  {
+    "question": "QT prolongation with ondansetron",
+    "kind": "acronym",
+    "expected": [
+      "D008133",
+      "D017294"
+    ],
+    "expected_names": [
+      "Long QT Syndrome",
+      "Ondansetron"
+    ]
+  },
+  {
+    "question": "AKI with vancomycin",
+    "kind": "acronym",
+    "expected": [
+      "D058186",
+      "D014640"
+    ],
+    "expected_names": [
+      "Acute Kidney Injury",
+      "Vancomycin"
+    ]
+  },
+  {
+    "question": "DRESS",
+    "kind": "acronym",
+    "expected": [
+      "D063926"
+    ],
+    "expected_names": [
+      "Drug Hypersensitivity Syndrome"
+    ]
+  },
+  {
+    "question": "NMS",
+    "kind": "acronym",
+    "expected": [
+      "D009459"
+    ],
+    "expected_names": [
+      "Neuroleptic Malignant Syndrome"
+    ]
+  },
+  {
+    "question": "PML with natalizumab",
+    "kind": "acronym",
+    "expected": [
+      "D007968",
+      "D000069442"
+    ],
+    "expected_names": [
+      "Leukoencephalopathy, Progressive Multifocal",
+      "Natalizumab"
+    ]
+  },
+  {
+    "question": "PRES",
+    "kind": "acronym",
+    "expected": [
+      "D054038"
+    ],
+    "expected_names": [
+      "Posterior Leukoencephalopathy Syndrome"
+    ]
+  },
+  {
+    "question": "DVT",
+    "kind": "acronym",
+    "expected": [
+      "D020246"
+    ],
+    "expected_names": [
+      "Venous Thrombosis"
+    ]
+  },
+  {
+    "question": "AGEP",
+    "kind": "acronym",
+    "expected": [
+      "D056150"
+    ],
+    "expected_names": [
+      "Acute Generalized Exanthematous Pustulosis"
+    ]
+  },
+  {
+    "question": "ILD with amiodarone",
+    "kind": "acronym",
+    "expected": [
+      "D017563",
+      "D000638"
+    ],
+    "expected_names": [
+      "Lung Diseases, Interstitial",
+      "Amiodarone"
+    ]
+  },
+  {
+    "question": "kidney failure",
+    "kind": "lay",
+    "expected": [
+      "D051437"
+    ],
+    "expected_names": [
+      "Renal Insufficiency"
+    ]
+  },
+  {
+    "question": "low platelets",
+    "kind": "lay",
+    "expected": [
+      "D013921"
+    ],
+    "expected_names": [
+      "Thrombocytopenia"
+    ]
+  },
+  {
+    "question": "heart attack",
+    "kind": "lay",
+    "expected": [
+      "D009203"
+    ],
+    "expected_names": [
+      "Myocardial Infarction"
+    ]
+  },
+  {
+    "question": "fits",
+    "kind": "lay",
+    "expected": [
+      "D012640"
+    ],
+    "expected_names": [
+      "Seizures"
+    ]
+  },
+  {
+    "question": "seizures on tramadol",
+    "kind": "lay",
+    "expected": [
+      "D012640",
+      "D014147"
+    ],
+    "expected_names": [
+      "Seizures",
+      "Tramadol"
+    ]
+  },
+  {
+    "question": "low blood sugar",
+    "kind": "lay",
+    "expected": [
+      "D007003"
+    ],
+    "expected_names": [
+      "Hypoglycemia"
+    ]
+  },
+  {
+    "question": "irregular heartbeat",
+    "kind": "lay",
+    "expected": [
+      "D001145"
+    ],
+    "expected_names": [
+      "Arrhythmias, Cardiac"
+    ]
+  },
+  {
+    "question": "blood clot in the lung",
+    "kind": "lay",
+    "expected": [
+      "D011655"
+    ],
+    "expected_names": [
+      "Pulmonary Embolism"
+    ]
+  },
+  {
+    "question": "hives",
+    "kind": "lay",
+    "expected": [
+      "D014581"
+    ],
+    "expected_names": [
+      "Urticaria"
+    ]
+  },
+  {
+    "question": "hair loss",
+    "kind": "lay",
+    "expected": [
+      "D000505"
+    ],
+    "expected_names": [
+      "Alopecia"
+    ]
+  },
+  {
+    "question": "low white blood cell count",
+    "kind": "lay",
+    "expected": [
+      "D007970"
+    ],
+    "expected_names": [
+      "Leukopenia"
+    ]
+  },
+  {
+    "question": "ringing in the ears",
+    "kind": "lay",
+    "expected": [
+      "D014012"
+    ],
+    "expected_names": [
+      "Tinnitus"
+    ]
+  },
+  {
+    "question": "fainting",
+    "kind": "lay",
+    "expected": [
+      "D013575"
+    ],
+    "expected_names": [
+      "Syncope"
+    ]
+  },
+  {
+    "question": "skin peeling after an antibiotic",
+    "kind": "description",
+    "expected": [
+      "D013262",
+      "D000900"
+    ],
+    "expected_names": [
+      "Stevens-Johnson Syndrome",
+      "Anti-Bacterial Agents"
+    ]
+  },
+  {
+    "question": "liver damage from a painkiller",
+    "kind": "description",
+    "expected": [
+      "D056486",
+      "D000700"
+    ],
+    "expected_names": [
+      "Chemical and Drug Induced Liver Injury",
+      "Analgesics"
+    ]
+  },
+  {
+    "question": "liver damage from paracetamol",
+    "kind": "description",
+    "expected": [
+      "D056486",
+      "D000082"
+    ],
+    "expected_names": [
+      "Chemical and Drug Induced Liver Injury",
+      "Acetaminophen"
+    ]
+  },
+  {
+    "question": "sudden severe allergic reaction with swelling and trouble breathing",
+    "kind": "description",
+    "expected": [
+      "D000707"
+    ],
+    "expected_names": [
+      "Anaphylaxis"
+    ]
+  },
+  {
+    "question": "swelling of the lips and tongue",
+    "kind": "description",
+    "expected": [
+      "D000799"
+    ],
+    "expected_names": [
+      "Angioedema"
+    ]
+  },
+  {
+    "question": "kidneys stopped working after contrast dye",
+    "kind": "description",
+    "expected": [
+      "D058186",
+      "D003287"
+    ],
+    "expected_names": [
+      "Acute Kidney Injury",
+      "Contrast Media"
+    ]
+  },
+  {
+    "question": "muscle pain and weakness on a cholesterol lowering drug",
+    "kind": "description",
+    "expected": [
+      "D063806",
+      "D019161"
+    ],
+    "expected_names": [
+      "Myalgia",
+      "Hydroxymethylglutaryl-CoA Reductase Inhibitors"
+    ]
+  },
+  {
+    "question": "bleeding in the brain on a blood thinner",
+    "kind": "description",
+    "expected": [
+      "D020300",
+      "D000925"
+    ],
+    "expected_names": [
+      "Intracranial Hemorrhages",
+      "Anticoagulants"
+    ]
+  },
+  {
+    "question": "fever, rash and swollen glands weeks after starting a seizure medicine",
+    "kind": "description",
+    "expected": [
+      "D063926",
+      "D000927"
+    ],
+    "expected_names": [
+      "Drug Hypersensitivity Syndrome",
+      "Anticonvulsants"
+    ]
+  },
+  {
+    "question": "very high fever and stiff muscles after an antipsychotic",
+    "kind": "description",
+    "expected": [
+      "D009459",
+      "D014150"
+    ],
+    "expected_names": [
+      "Neuroleptic Malignant Syndrome",
+      "Antipsychotic Agents"
+    ]
+  },
+  {
+    "question": "agitation, shaking and fever after taking two antidepressants together",
+    "kind": "description",
+    "expected": [
+      "D020230"
+    ],
+    "expected_names": [
+      "Serotonin Syndrome"
+    ]
+  },
+  {
+    "question": "jaw bone dying after a bone strengthening drug",
+    "kind": "description",
+    "expected": [
+      "D059266"
+    ],
+    "expected_names": [
+      "Bisphosphonate-Associated Osteonecrosis of the Jaw"
+    ]
+  },
+  {
+    "question": "birth defects after the mother took a drug in pregnancy",
+    "kind": "description",
+    "expected": [
+      "D000014"
+    ],
+    "expected_names": [
+      "Abnormalities, Drug-Induced"
+    ]
+  },
+  {
+    "question": "severe watery diarrhea after antibiotics from a gut infection",
+    "kind": "description",
+    "expected": [
+      "D004761"
+    ],
+    "expected_names": [
+      "Enterocolitis, Pseudomembranous"
+    ]
+  },
+  {
+    "question": "tendon rupture after a quinolone antibiotic",
+    "kind": "description",
+    "expected": [
+      "D013708",
+      "D024841"
+    ],
+    "expected_names": [
+      "Tendon Injuries",
+      "Fluoroquinolones"
+    ]
+  }
+]
