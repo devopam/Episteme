@@ -14,7 +14,14 @@ which is what a reviewer sees. The scope note is encoder input only.
 ``vocabulary_texts`` is the single builder of these texts. ``embed`` encodes exactly what it
 returns. Restart rule: a descriptor whose rows already exist for the same ``mesh_release`` and
 ``model_revision`` is skipped. Rows of another release or revision are deleted first. Each batch
-of descriptors is one transaction, so a kill leaves whole descriptors only.
+of descriptors is one transaction, so a kill leaves whole descriptors only. The restart does
+not use an ``input_key`` checkpoint: the input is a database table, and the rows already in
+``mesh_term_vec`` are the checkpoint.
+
+Audit (GxP): the stale delete and each batch write one ``episteme._audit`` row in the same
+transaction as their change (``new_value.step`` = ``delete_stale`` or ``batch``), so a run that
+stops midway leaves a record of every committed change. A summary row (``step`` = ``summary``)
+closes a run that finished. All rows have the object ``mesh embed``.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from typing import Any
 from episteme import audit_trail
 
 DEFAULT_BATCH = 32
+AUDIT_OBJECT = "mesh embed"
 
 # The sentence serialize_mesh._build_text appends to every descriptor text.
 _BOILERPLATE = " As defined in the NLM Medical Subject Headings (MeSH) thesaurus."
@@ -121,16 +129,32 @@ def embed(
     release = _release(conn)
     model, revision = encoder.model_id, encoder.revision
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM episteme.mesh_term_vec "
-            "WHERE mesh_release IS DISTINCT FROM %s OR model_revision IS DISTINCT FROM %s",
-            (release, revision),
+    basis = {"release": release, "model": model, "model_revision": revision}
+
+    def audit(step: str, rows: int, **extra: Any) -> None:
+        audit_trail.record(
+            "graph_commit",
+            conn=conn,
+            object=AUDIT_OBJECT,
+            rows_affected=rows,
+            new_value={"step": step, **basis, **extra},
+            run_id=run_id,
         )
-        deleted_stale = cur.rowcount
-        cur.execute("SELECT DISTINCT descriptor_ui FROM episteme.mesh_term_vec")
-        done = {r[0] for r in cur.fetchall()}
-    conn.commit()
+
+    # deferred_mirror: a JSONL mirror line is written only after its row commits.
+    with audit_trail.deferred_mirror(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM episteme.mesh_term_vec "
+                "WHERE mesh_release IS DISTINCT FROM %s OR model_revision IS DISTINCT FROM %s",
+                (release, revision),
+            )
+            deleted_stale = cur.rowcount
+            cur.execute("SELECT DISTINCT descriptor_ui FROM episteme.mesh_term_vec")
+            done = {r[0] for r in cur.fetchall()}
+        # The delete and its audit row commit together.
+        audit("delete_stale", deleted_stale, deleted_stale=deleted_stale)
+        audit_trail.commit(conn)
 
     rows = vocabulary_texts(conn)
     groups = [(ui, list(g)) for ui, g in groupby(rows, key=lambda r: r[0])]
@@ -140,35 +164,36 @@ def embed(
         todo = todo[: max(limit, 0)]
 
     embedded = 0
-    for start in range(0, len(todo), batch):
-        chunk = todo[start : start + batch]
-        flat = [r for _, grp in chunk for r in grp]
-        vecs = encoder.encode_articles([(r[2], r[3]) for r in flat])
-        if len(vecs) != len(flat):
-            raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(flat)} texts")
-        with conn.cursor() as cur:
-            with cur.copy(f"COPY episteme.mesh_term_vec ({_COLUMNS}) FROM STDIN") as cp:
-                for (ui, kind, title, _text), vec in zip(flat, vecs, strict=True):
-                    cp.write_row((ui, kind, title, _vec_text(vec), model, revision, release))
-        conn.commit()
-        embedded += len(chunk)
+    with audit_trail.deferred_mirror(conn):
+        for start in range(0, len(todo), batch):
+            chunk = todo[start : start + batch]
+            flat = [r for _, grp in chunk for r in grp]
+            vecs = encoder.encode_articles([(r[2], r[3]) for r in flat])
+            if len(vecs) != len(flat):
+                raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(flat)} texts")
+            with conn.cursor() as cur:
+                with cur.copy(f"COPY episteme.mesh_term_vec ({_COLUMNS}) FROM STDIN") as cp:
+                    for (ui, kind, title, _text), vec in zip(flat, vecs, strict=True):
+                        cp.write_row((ui, kind, title, _vec_text(vec), model, revision, release))
+            # The batch rows and their audit row commit together.
+            audit(
+                "batch",
+                len(flat),
+                descriptors=len(chunk),
+                first_descriptor=chunk[0][0],
+                last_descriptor=chunk[-1][0],
+            )
+            audit_trail.commit(conn)
+            embedded += len(chunk)
 
-    audit_trail.record(
-        "graph_commit",
-        conn=conn,
-        object="mesh embed",
-        rows_affected=embedded,
-        new_value={
-            "release": release,
-            "model": model,
-            "model_revision": revision,
-            "embedded": embedded,
-            "skipped_done": skipped_done,
-            "deleted_stale": deleted_stale,
-        },
-        run_id=run_id,
-    )
-    conn.commit()
+        audit(
+            "summary",
+            embedded,
+            embedded=embedded,
+            skipped_done=skipped_done,
+            deleted_stale=deleted_stale,
+        )
+        audit_trail.commit(conn)
     return {
         "release": release,
         "deleted_stale": deleted_stale,

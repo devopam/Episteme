@@ -197,19 +197,54 @@ def test_each_batch_commits_on_its_own(pg_conn, monkeypatch):
     assert res["embedded"] == 1 and res["skipped_done"] == 1
 
 
+def _audit_steps(pg_conn, run_id: str) -> list[tuple]:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT new_value->>'step', rows_affected, new_value FROM episteme._audit "
+            "WHERE object = 'mesh embed' AND run_id = %s ORDER BY seq",
+            (run_id,),
+        )
+        return cur.fetchall()
+
+
 @pytest.mark.pg
-def test_one_audit_row_per_run(pg_conn, monkeypatch):
+def test_audit_rows_delete_each_batch_and_summary(pg_conn, monkeypatch):
     _setup(pg_conn, monkeypatch)
+    embed(pg_conn, FakeEncoder(), batch=1, run_id="embed-audit-1")
+    rows = _audit_steps(pg_conn, "embed-audit-1")
+    assert [(s, n) for s, n, _ in rows] == [
+        ("delete_stale", 0),
+        ("batch", 2),  # D003920: name + 1 entry
+        ("batch", 3),  # D003924: name + 2 entries
+        ("summary", 2),
+    ]
+    assert rows[1][2]["first_descriptor"] == "D003920"
+    assert rows[-1][2]["model_revision"] == "rev-a"
+    embed(pg_conn, FakeEncoder(), run_id="embed-audit-2")
+    assert [s for s, _, _ in _audit_steps(pg_conn, "embed-audit-2")] == [
+        "delete_stale",
+        "summary",
+    ]
 
-    def audit_rows() -> int:
-        with pg_conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM episteme._audit WHERE object = 'mesh embed'")
-            return cur.fetchone()[0]
 
-    embed(pg_conn, FakeEncoder(), batch=1)
-    assert audit_rows() == 1
-    embed(pg_conn, FakeEncoder())
-    assert audit_rows() == 2
+@pytest.mark.pg
+def test_encoder_dying_on_batch_2_leaves_delete_and_batch_1_audit_rows(pg_conn, monkeypatch):
+    _setup(pg_conn, monkeypatch)
+    embed(pg_conn, FakeEncoder("rev-old"), run_id="embed-die-0")
+
+    class Dies(FakeEncoder):
+        def encode_articles(self, pairs):
+            if self.calls:
+                raise RuntimeError("killed on batch 2")
+            return super().encode_articles(pairs)
+
+    with pytest.raises(RuntimeError, match="killed"):
+        embed(pg_conn, Dies("rev-new"), batch=1, run_id="embed-die-1")
+    pg_conn.rollback()
+    rows = _audit_steps(pg_conn, "embed-die-1")
+    assert [(s, n) for s, n, _ in rows] == [("delete_stale", 5), ("batch", 2)]
+    assert rows[0][2]["deleted_stale"] == 5
+    assert _count(pg_conn, "model_revision = 'rev-new'") == 2
 
 
 @pytest.mark.pg
