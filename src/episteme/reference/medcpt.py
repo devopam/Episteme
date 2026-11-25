@@ -37,6 +37,7 @@ class TermModelSpec:
     query_prefix: str
     query_max_length: int
     doc_max_length: int
+    licence: str = ""
 
 
 TERM_MODELS: dict[str, TermModelSpec] = {
@@ -51,7 +52,21 @@ TERM_MODELS: dict[str, TermModelSpec] = {
         query_prefix="",
         query_max_length=QUERY_MAX_LENGTH,
         doc_max_length=ARTICLE_MAX_LENGTH,
-    )
+        licence="public domain (NCBI)",
+    ),
+    "bge_base": TermModelSpec(
+        name="bge_base",
+        query_model=config.BGE_BASE_MODEL,
+        query_revision=config.BGE_BASE_REVISION,
+        doc_model=config.BGE_BASE_MODEL,
+        doc_revision=config.BGE_BASE_REVISION,
+        pooling="cls",
+        normalize=True,
+        query_prefix="Represent this sentence for searching relevant passages: ",
+        query_max_length=QUERY_MAX_LENGTH,
+        doc_max_length=ARTICLE_MAX_LENGTH,
+        licence="MIT",
+    ),
 }
 
 
@@ -157,6 +172,10 @@ class MedCPTEncoder:
 
     def encode_queries(self, texts: list[str]) -> np.ndarray:
         return self._encode([self.prefix + t for t in texts])
+
+    def encode_texts(self, texts: list[str]) -> np.ndarray:
+        """Single strings, no prefix: the document side of a symmetric model."""
+        return self._encode(list(texts))
 
     def encode_articles(self, pairs: list[tuple[str, str]]) -> np.ndarray:
         return self._encode([[title, text] for title, text in pairs])

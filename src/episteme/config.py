@@ -164,6 +164,9 @@ MEDCPT_QUERY_MODEL = "ncbi/MedCPT-Query-Encoder"
 MEDCPT_QUERY_REVISION = "d83a36cc6b8e3a5c5e9d9d6ba156808c1643dcbc"
 MEDCPT_ARTICLE_MODEL = "ncbi/MedCPT-Article-Encoder"
 MEDCPT_ARTICLE_REVISION = "d05a736da4bb84ee4057b7f7999485be6ed85465"
+# Bake-off candidate (MIT licence). Symmetric model: one id and revision for both sides.
+BGE_BASE_MODEL = "BAAI/bge-base-en-v1.5"
+BGE_BASE_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
 # Torch threads (EPISTEME_MEDCPT_THREADS) and texts per batch (EPISTEME_MEDCPT_BATCH).
 DEFAULT_MEDCPT_THREADS = 4
 DEFAULT_MEDCPT_BATCH = 32
