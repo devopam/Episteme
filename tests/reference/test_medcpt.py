@@ -93,9 +93,49 @@ def test_missing_cache_raises_exact_message(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         MedCPTEncoder.query()
     assert str(exc.value) == (
-        f"MedCPT model {spec.query_model}@{spec.query_revision} is not in the Hugging Face "
-        "cache; run the model download step (runbook 5.20.2)"
+        f"model {spec.query_model}@{spec.query_revision} is not in the Hugging Face cache; "
+        "run `python -m episteme.reference.medcpt download --model medcpt` (runbook 5.20.2)"
     )
+
+
+def test_missing_cache_message_names_the_bge_model(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("not cached")
+
+    monkeypatch.setattr(medcpt.AutoTokenizer, "from_pretrained", boom)
+    spec = TERM_MODELS["bge_base"]
+    with pytest.raises(RuntimeError) as exc:
+        MedCPTEncoder.query(spec)
+    assert f"model {spec.query_model}@{spec.query_revision} " in str(exc.value)
+    assert "download --model bge_base" in str(exc.value)
+
+
+def test_download_cli_takes_a_model_name(monkeypatch, capsys):
+    got: list[str] = []
+    monkeypatch.setattr(medcpt, "download_models", got.append)
+    assert medcpt.main(["download"]) == 0
+    assert medcpt.main(["download", "--model", "bge_base"]) == 0
+    assert got == ["medcpt", "bge_base"]
+    assert medcpt.main(["download", "--model", "nope"]) == 2
+    assert "unknown model 'nope'" in capsys.readouterr().err
+    assert medcpt.main(["fetch"]) == 2
+
+
+def test_download_models_fetches_a_shared_model_once(monkeypatch):
+    import huggingface_hub
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda repo_id, revision: seen.append((repo_id, revision)),
+    )
+    medcpt.download_models("bge_base")
+    spec = TERM_MODELS["bge_base"]
+    assert seen == [(spec.query_model, spec.query_revision)]
+    seen.clear()
+    medcpt.download_models("medcpt")
+    assert len(seen) == 2
 
 
 def test_loads_with_local_files_only_and_pinned_revision(monkeypatch):

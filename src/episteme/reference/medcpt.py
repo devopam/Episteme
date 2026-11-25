@@ -114,9 +114,11 @@ class MedCPTEncoder:
             )
             model = AutoModel.from_pretrained(model_id, revision=revision, local_files_only=True)
         except OSError as exc:
+            name = _spec_name(model_id)
             raise RuntimeError(
-                f"MedCPT model {model_id}@{revision} is not in the Hugging Face cache; "
-                "run the model download step (runbook 5.20.2)"
+                f"model {model_id}@{revision} is not in the Hugging Face cache; run "
+                f"`python -m episteme.reference.medcpt download --model {name}` "
+                "(runbook 5.20.2)"
             ) from exc
         return tokenizer, model
 
@@ -181,25 +183,44 @@ class MedCPTEncoder:
         return self._encode([[title, text] for title, text in pairs])
 
 
-def download_models() -> None:
-    """Fetch both encoders at the pinned revisions into the Hugging Face cache."""
+def _spec_name(model_id: str) -> str:
+    """The ``TERM_MODELS`` key whose query or document model is ``model_id``."""
+    for name, spec in TERM_MODELS.items():
+        if model_id in (spec.query_model, spec.doc_model):
+            return name
+    return "<name>"
+
+
+def download_models(name: str = "medcpt") -> None:
+    """Fetch the encoders of ``TERM_MODELS[name]`` at the pinned revisions into the
+    Hugging Face cache (one download when query and document model are the same)."""
     from huggingface_hub import snapshot_download
 
-    spec = TERM_MODELS["medcpt"]
-    for model_id, revision in (
-        (spec.query_model, spec.query_revision),
-        (spec.doc_model, spec.doc_revision),
-    ):
+    spec = TERM_MODELS[name]
+    pairs = [(spec.query_model, spec.query_revision), (spec.doc_model, spec.doc_revision)]
+    for model_id, revision in dict.fromkeys(pairs):
         snapshot_download(repo_id=model_id, revision=revision)
         print(f"downloaded {model_id}@{revision}")
 
 
+_USAGE = "usage: python -m episteme.reference.medcpt download [--model <name>]"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if args != ["download"]:
-        print("usage: python -m episteme.reference.medcpt download", file=sys.stderr)
+    name = "medcpt"
+    if len(args) == 3 and args[:2] == ["download", "--model"]:
+        name = args[2]
+    elif args != ["download"]:
+        print(_USAGE, file=sys.stderr)
         return 2
-    download_models()
+    if name not in TERM_MODELS:
+        print(
+            f"unknown model {name!r}; known: {', '.join(sorted(TERM_MODELS))}",
+            file=sys.stderr,
+        )
+        return 2
+    download_models(name)
     return 0
 
 
