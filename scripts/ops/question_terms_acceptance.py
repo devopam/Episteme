@@ -198,6 +198,7 @@ def build(log_dir: Path, clock: Callable[[], float]) -> tuple[Any, TimedDB, dict
         log_dir,
         encoder_factory=lambda: encoder,
         model_revision=lambda: spec.doc_revision,
+        model_name=lambda: spec.doc_model,
     )
     return service, timed, {"database": settings.pg_database, "model_load_s": model_load_s}
 

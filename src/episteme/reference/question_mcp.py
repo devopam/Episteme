@@ -11,6 +11,14 @@ Tools (stdio):
   list: the tool has no such parameter. Only accepted terms go to ``search_terms`` (and to
   ``literature_by_mesh`` when a substance key is given).
 
+Every MedCPT suggestion carries its basis: ``model`` and ``model_revision`` (the
+document-side revision stored with the vectors), ``score`` and ``mesh_release``. Exact terms
+have ``model`` and ``model_revision`` null.
+
+Never partial (owner decision 2a): a search call whose notes say ``not run:``
+(``search_terms``) or ``partial:`` (``literature_by_mesh``) gives no article rows; its notes
+stay in the result and the status is ``not_run``.
+
 The server connects as ``episteme_api_reader``, so it can do nothing the reader cannot do.
 It does not apply the production-database guard: the reader role is read-only by its
 grants, and its target is the production database (as ``mcpg-episteme.sh --reader``).
@@ -50,6 +58,9 @@ READER_ROLE = "episteme_api_reader"
 CONFIRMED_BY = "user via MCP elicitation"
 UNMATCHED_PREFIX = "unmatched:"
 QUERY_NOTE_PREFIX = "terms used:"
+# Notes that mean "this call did not finish": its rows are not used (decision 2a).
+NOT_RUN_PREFIXES = ("not run:", "partial:")
+YEARS_APPLY_TO = "literature_by_mesh"
 
 TERM_FIELDS = (
     "kind",
@@ -189,6 +200,12 @@ def _default_encoder() -> Any:
     return MedCPTEncoder.query(TERM_MODELS["medcpt"])
 
 
+def _default_doc_model() -> str:
+    from episteme.reference.medcpt import TERM_MODELS
+
+    return TERM_MODELS["medcpt"].doc_model
+
+
 def _default_doc_revision() -> str:
     # suggest_terms compares this with the stored vectors, which the DOCUMENT-side encoder
     # made: the doc revision of the active spec, not the query encoder's own revision.
@@ -201,6 +218,7 @@ def _default_doc_revision() -> str:
 class Proposal:
     question: str
     mesh_release: str | None
+    model: str | None
     model_revision: str | None
     terms: tuple[dict[str, Any], ...]
     notes: tuple[str, ...]
@@ -229,6 +247,8 @@ def term_title(term: dict[str, Any]) -> str:
         title += f", score {float(term['score']):.3f}"
     if term.get("concept_relation"):
         title += f", {term['concept_relation']}"
+    if term.get("model"):
+        title += f", {term['model']}@{str(term.get('model_revision') or '')[:12]}"
     return title
 
 
@@ -241,11 +261,17 @@ def confirm_schema(terms: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> 
 
 
 def _confirm_message(proposal: Proposal) -> str:
-    return (
+    message = (
         f"Question: {proposal.question}\n"
         f"Tick each MeSH term (MeSH {proposal.mesh_release or 'unknown'}) to search with. "
         "Terms you do not tick are not used."
     )
+    if any(t.get("model") for t in proposal.terms):
+        message += (
+            f"\nSuggestions (with a score) are from the model {proposal.model}, "
+            f"revision {proposal.model_revision}."
+        )
+    return message
 
 
 def _short(term: dict[str, Any]) -> dict[str, Any]:
@@ -256,6 +282,9 @@ def _short(term: dict[str, Any]) -> dict[str, Any]:
         "basis": term["basis"],
         "score": term["score"],
         "concept_relation": term["concept_relation"],
+        "model": term.get("model"),
+        "model_revision": term.get("model_revision"),
+        "mesh_release": term.get("mesh_release"),
     }
 
 
@@ -279,12 +308,14 @@ class QuestionService:
         *,
         encoder_factory: Callable[[], Any] = _default_encoder,
         model_revision: Callable[[], str] = _default_doc_revision,
+        model_name: Callable[[], str] = _default_doc_model,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._db = db
         self._log_dir = Path(log_dir)
         self._encoder_factory = encoder_factory
         self._model_revision = model_revision
+        self._model_name = model_name
         self._encoder: Any = None
         self._now = now
         self._proposals: dict[str, Proposal] = {}
@@ -299,18 +330,27 @@ class QuestionService:
 
     def translate_question(self, question: str) -> dict[str, Any]:
         rows = self._db.match_terms(question)
-        terms = [_plain(r, TERM_FIELDS) for r in rows if r.get("kind") == "term"]
+        terms = [
+            {**_plain(r, TERM_FIELDS), "model": None, "model_revision": None}
+            for r in rows
+            if r.get("kind") == "term"
+        ]
         notes = [r["note"] for r in rows if r.get("kind") == "note" and r.get("note")]
+        model: str | None = None
         revision: str | None = None
         if any(n.startswith(UNMATCHED_PREFIX) for n in notes):
-            revision = self._model_revision()
+            model, revision = self._model_name(), self._model_revision()
             srows = self._db.suggest_terms(self._encode(question), revision)
             exact = {t["descriptor_ui"] for t in terms}
             for r in srows:
                 if r.get("kind") == "term":
                     if r["descriptor_ui"] not in exact:
                         exact.add(r["descriptor_ui"])
-                        terms.append(_plain(r, TERM_FIELDS))
+                        # The basis of a suggestion: model, document-side revision, score,
+                        # MeSH release.
+                        terms.append(
+                            {**_plain(r, TERM_FIELDS), "model": model, "model_revision": revision}
+                        )
                 elif r.get("note"):
                     notes.append(r["note"])
         for i, t in enumerate(terms, start=1):
@@ -318,13 +358,16 @@ class QuestionService:
         mesh_release = next((t["mesh_release"] for t in terms if t.get("mesh_release")), None)
         cid = confirmation_id(question, mesh_release, terms)
         self._proposals[cid] = Proposal(
-            question, mesh_release, revision, tuple(terms), tuple(notes)
+            question, mesh_release, model, revision, tuple(terms), tuple(notes)
         )
         self._log(
             event="translate",
             question=question,
             confirmation_id=cid,
             terms=[_short(t) for t in terms],
+            status="proposed",
+            model=model,
+            model_revision=revision,
         )
         return {
             "confirmation_id": cid,
@@ -358,18 +401,38 @@ class QuestionService:
         from_year: int | None = None,
         to_year: int | None = None,
     ) -> dict[str, Any]:
-        """Ask through ``ctx.elicit`` directly, then ``complete``. An exception from the
-        elicitation (a client without elicitation support) gives ``no_elicitation``."""
+        """TEST SEAM only: the MCP server does not call this. It asks through
+        ``ctx.elicit`` directly, then calls ``complete``, as the server's ``Resolve`` path
+        does. An exception from the elicitation propagates, as on the server path: no
+        confirmation took place, so no confirm line is written."""
         request = self.elicit_request(confirmation_id, check=False)
         if isinstance(request, Elicit):
-            try:
-                outcome: Any = await ctx.elicit(request.message, request.schema)
-            except Exception as exc:  # any failure means: nobody confirmed
-                _LOG.warning("elicitation failed: %s", type(exc).__name__)
-                outcome = _Skip("no_elicitation")
+            outcome: Any = await ctx.elicit(request.message, request.schema)
         else:
             outcome = request
         return self.complete(confirmation_id, outcome, sources, substance_key, from_year, to_year)
+
+    def _current_release(self, accepted: list[dict[str, Any]]) -> str | None:
+        """The MeSH release in ``mesh_term`` now. Rule: ``match_terms`` on the name of the
+        first accepted descriptor; the ``mesh_release`` of its first term row. No term row
+        (the descriptor is gone from the vocabulary) gives None, which counts as stale."""
+        rows = self._db.match_terms(accepted[0]["descriptor_name"])
+        return next((r.get("mesh_release") for r in rows if r.get("kind") == "term"), None)
+
+    @staticmethod
+    def _run_part(via: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """One search call. A ``not run:`` or ``partial:`` note drops the call's other rows
+        (decision 2a: never partial) and marks the part ``not_run``."""
+        plain = [{**_plain(r, ARTICLE_FIELDS), "via": via} for r in rows]
+        notes = [r["note"] for r in plain if r.get("kind") == "note" and r.get("note")]
+        not_run = any(n.startswith(NOT_RUN_PREFIXES) for n in notes)
+        kept = [r for r in plain if r.get("kind") == "note"] if not_run else plain
+        return {
+            "via": via,
+            "status": "not_run" if not_run else "searched",
+            "notes": notes,
+            "rows": kept,
+        }
 
     def complete(
         self,
@@ -381,9 +444,17 @@ class QuestionService:
         to_year: int | None = None,
     ) -> dict[str, Any]:
         """Act on the elicitation outcome. Only an ``accept`` with at least one ticked term
-        runs a search."""
+        runs a search, and only when the MeSH release of the proposal is still the current
+        one (else ``stale_confirmation``). Every call writes one confirm log line."""
         proposal = self._proposals.get(cid)
         if proposal is None:
+            self._log(
+                event="confirm",
+                question=None,
+                confirmation_id=cid,
+                terms=[],
+                status="unknown_confirmation",
+            )
             return {
                 "status": "unknown_confirmation",
                 "accepted": [],
@@ -420,74 +491,102 @@ class QuestionService:
         confirmed_by = CONFIRMED_BY if action == "accept" else None
         accepted_short = [_short(t) for t in accepted]
         rejected_short = [_short(t) for t in rejected]
+        current_release: str | None = proposal.mesh_release
 
-        def log(queries: list[str], release_ids: list[str], error: str | None = None) -> None:
+        def log(
+            queries: list[str],
+            release_ids: list[str],
+            search_notes: list[dict[str, str]],
+            error: str | None = None,
+        ) -> None:
             self._log(
                 event="confirm",
                 question=proposal.question,
                 confirmation_id=cid,
                 terms=[_short(t) for t in proposal.terms],
+                status=status if error is None else "error",
+                model=proposal.model,
+                model_revision=proposal.model_revision,
                 elicitation_action=action,
                 confirmed_by=confirmed_by,
                 accepted=accepted_short,
                 rejected=rejected_short,
                 queries=queries,
                 release_ids=release_ids,
+                search_notes=search_notes,
+                current_mesh_release=current_release,
                 error=error,
             )
 
-        rows: list[dict[str, Any]] = []
+        parts: list[dict[str, Any]] = []
         if status == "searched":
             try:
-                uis = [t["descriptor_ui"] for t in accepted]
-                for r in self._db.search_terms(uis, sources):
-                    rows.append({**_plain(r, ARTICLE_FIELDS), "via": "search_terms"})
-                if substance_key is not None:
-                    for t in accepted:
-                        for r in self._db.literature_by_mesh(
-                            substance_key, t["descriptor_name"], from_year, to_year
-                        ):
-                            rows.append(
-                                {
-                                    **_plain(r, ARTICLE_FIELDS),
-                                    "via": f"literature_by_mesh: {t['descriptor_name']}",
-                                }
+                current_release = self._current_release(accepted)
+                if current_release != proposal.mesh_release:
+                    status = "stale_confirmation"
+                else:
+                    uis = [t["descriptor_ui"] for t in accepted]
+                    parts.append(
+                        self._run_part("search_terms", self._db.search_terms(uis, sources))
+                    )
+                    if substance_key is not None:
+                        for t in accepted:
+                            name = t["descriptor_name"]
+                            parts.append(
+                                self._run_part(
+                                    f"literature_by_mesh: {name}",
+                                    self._db.literature_by_mesh(
+                                        substance_key, name, from_year, to_year
+                                    ),
+                                )
                             )
             except Exception as exc:
                 # The person's acceptance stays on record. Only the type name: the message
                 # can hold SQL or parameters.
-                log([], [], error=type(exc).__name__)
+                log([], [], [], error=type(exc).__name__)
                 raise
-        queries = [
-            r["note"]
-            for r in rows
-            if r.get("kind") == "note" and (r.get("note") or "").startswith(QUERY_NOTE_PREFIX)
-        ]
+            if any(p["status"] == "not_run" for p in parts):
+                status = "not_run"
+        rows = [r for p in parts for r in p["rows"]]
+        search_notes = [{"via": p["via"], "note": n} for p in parts for n in p["notes"]]
+        queries = [n["note"] for n in search_notes if n["note"].startswith(QUERY_NOTE_PREFIX)]
+        # After the drop: only the release ids of rows that are returned.
         release_ids = sorted({r["release_id"] for r in rows if r.get("release_id")})
-        log(queries, release_ids)
+        log(queries, release_ids, search_notes)
+        provenance: dict[str, Any] = {
+            "question": proposal.question,
+            "confirmation_id": cid,
+            "mesh_release": proposal.mesh_release,
+            "model": proposal.model,
+            "model_revision": proposal.model_revision,
+            "proposed": [_short(t) for t in proposal.terms],
+            "accepted": accepted_short,
+            "rejected": rejected_short,
+            "elicitation_action": action,
+            "confirmed_by": confirmed_by,
+            "queries": queries,
+            "release_ids": release_ids,
+            "notes": list(proposal.notes),
+            "search_notes": search_notes,
+            "parts": [{"via": p["via"], "status": p["status"]} for p in parts],
+            "sources": sources,
+            "substance_key": substance_key,
+            "from_year": from_year,
+            "to_year": to_year,
+            "years_apply_to": YEARS_APPLY_TO,
+        }
+        if status == "stale_confirmation":
+            provenance["current_mesh_release"] = current_release
+            provenance["note"] = (
+                f"the terms were proposed on MeSH {proposal.mesh_release}; the vocabulary is "
+                f"now MeSH {current_release}; call translate_question again"
+            )
         return {
             "status": status,
             "accepted": accepted_short,
             "rejected": rejected_short,
             "rows": rows,
-            "provenance": {
-                "question": proposal.question,
-                "confirmation_id": cid,
-                "mesh_release": proposal.mesh_release,
-                "model_revision": proposal.model_revision,
-                "proposed": [_short(t) for t in proposal.terms],
-                "accepted": accepted_short,
-                "rejected": rejected_short,
-                "elicitation_action": action,
-                "confirmed_by": confirmed_by,
-                "queries": queries,
-                "release_ids": release_ids,
-                "notes": list(proposal.notes),
-                "sources": sources,
-                "substance_key": substance_key,
-                "from_year": from_year,
-                "to_year": to_year,
-            },
+            "provenance": provenance,
         }
 
     # -- log -------------------------------------------------------------------------
@@ -496,15 +595,20 @@ class QuestionService:
         self,
         *,
         event: str,
-        question: str,
+        question: str | None,
         confirmation_id: str,
         terms: list[dict[str, Any]],
+        status: str | None = None,
+        model: str | None = None,
+        model_revision: str | None = None,
         elicitation_action: str | None = None,
         confirmed_by: str | None = None,
         accepted: list[dict[str, Any]] | None = None,
         rejected: list[dict[str, Any]] | None = None,
         queries: list[str] | None = None,
         release_ids: list[str] | None = None,
+        search_notes: list[dict[str, str]] | None = None,
+        current_mesh_release: str | None = None,
         error: str | None = None,
     ) -> None:
         ts = self._now().astimezone(timezone.utc)
@@ -513,13 +617,18 @@ class QuestionService:
             "ts": ts.isoformat(),
             "question": question,
             "confirmation_id": confirmation_id,
+            "status": status,
             "terms": terms,
+            "model": model,
+            "model_revision": model_revision,
             "elicitation_action": elicitation_action,
             "confirmed_by": confirmed_by,
             "accepted": accepted or [],
             "rejected": rejected or [],
             "queries": queries or [],
             "release_ids": release_ids or [],
+            "search_notes": search_notes or [],
+            "current_mesh_release": current_mesh_release,
         }
         if error is not None:
             record["error"] = error
@@ -558,8 +667,12 @@ def build_server(service: QuestionService) -> MCPServer:
         to_year: int | None = None,
     ) -> dict[str, Any]:
         """Ask the person to accept proposed terms, then search with the accepted terms
-        only. status: searched, declined, cancelled, no_elicitation, unknown_confirmation
-        or nothing_accepted."""
+        only. sources applies to search_terms. substance_key, from_year and to_year apply
+        to literature_by_mesh only (one call per accepted descriptor); search_terms has no
+        year filter. status: searched, not_run (a search call did not finish: its rows are
+        dropped, its notes are in provenance.search_notes), declined, cancelled,
+        no_elicitation, unknown_confirmation, nothing_accepted or stale_confirmation (the
+        MeSH release changed since translate_question)."""
         return await anyio.to_thread.run_sync(
             lambda: service.complete(
                 confirmation_id, confirmation, sources, substance_key, from_year, to_year
