@@ -491,7 +491,7 @@ class QuestionService:
         confirmed_by = CONFIRMED_BY if action == "accept" else None
         accepted_short = [_short(t) for t in accepted]
         rejected_short = [_short(t) for t in rejected]
-        current_release: str | None = proposal.mesh_release
+        current_release: str | None = None  # set only by the re-check before a search
 
         def log(
             queries: list[str],
