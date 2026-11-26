@@ -305,10 +305,10 @@ def _embed_in_parts(
         if len(vecs) != len(chunk):
             raise RuntimeError(f"encoder returned {len(vecs)} vectors for {len(chunk)} texts")
         dim = int(vecs.shape[1])
-        plan["seconds"] = seconds
-        _write_json(plan_path, plan)
         _save_npy(npy_path, vecs)
         _write_json(ids_path, want_ids)
+        plan["seconds"] = seconds
+        _write_json(plan_path, plan)
         del vecs
     matrix: np.ndarray | None = None
     offset = 0
@@ -323,6 +323,8 @@ def _embed_in_parts(
     if matrix is None:
         matrix = np.empty((0, 0), dtype=np.float32)
     ids = [r[0] for r in rows]
+    for suffix in ("npy", "ids.json", "meta.json"):
+        (folder / f"{revision}.{suffix}").unlink(missing_ok=True)
     _save_npy(folder / f"{revision}.npy", matrix)
     _write_json(folder / f"{revision}.ids.json", ids)
     _write_json(folder / f"{revision}.meta.json", {"embed_seconds": seconds})
@@ -350,6 +352,7 @@ def _load_or_build_cache(
             data = _read_json(meta) if meta.exists() else None
             if isinstance(data, dict) and "embed_seconds" in data:
                 seconds = float(data["embed_seconds"])
+            _clear_parts(folder, spec.doc_revision)
             return vecs, ids, seconds
     return _embed_in_parts(spec, folder, vocabulary(), part_size, doc_encoder_factory)
 
@@ -497,16 +500,24 @@ def _markdown(report: dict[str, Any]) -> str:
         "The project rule forbids UMLS, SNOMED and MedDRA bound material.",
         "",
         "| model | licence | top-1 | top-5 | top-10 | query ms mean | query ms p95 "
-        "| vocab seconds | vocab vectors | vocab MB |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| vocab source | vocab seconds | vocab vectors | vocab MB |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, m in report["models"].items():
         lines.append(
             f"| {name} | {m['licence']} | {_cells(m['overall'])} | {m['query_ms_mean']:.1f} | "
-            f"{m['query_ms_p95']:.1f} | {_seconds(m['vocab_embed_seconds'])} | "
+            f"{m['query_ms_p95']:.1f} | {m['vocab_source']} | "
+            f"{_seconds(m['vocab_embed_seconds'])} | "
             f"{m['vocab_vectors']} | "
             f"{m['vocab_bytes'] / 1e6:.1f} |"
         )
+    skipped = [
+        f"- {name}: reuse skipped: {m['reuse_skipped_reason']}"
+        for name, m in report["models"].items()
+        if m.get("reuse_skipped_reason")
+    ]
+    if skipped:
+        lines += ["", *skipped]
     for name, m in report["models"].items():
         lines += [
             "",

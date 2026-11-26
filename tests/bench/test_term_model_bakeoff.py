@@ -322,19 +322,43 @@ def test_missing_meta_gives_none_seconds(tmp_path):
     assert report["models"]["medcpt"]["vocab_embed_seconds"] is None
 
 
-def test_warmup_query_is_not_timed(tmp_path):
-    import time
+class FakeClock:
+    """perf_counter stand-in: each call advances 1 ms; jump() adds a large step."""
+
+    def __init__(self, step: float = 0.001) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+    def jump(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _patch_clock(monkeypatch, clock):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bake, "time", SimpleNamespace(perf_counter=clock))
+
+
+def test_warmup_query_is_not_timed(tmp_path, monkeypatch):
+    clock = FakeClock()
+    _patch_clock(monkeypatch, clock)
 
     class SlowFirst(FakeEncoder):
         def encode_queries(self, texts):
             if self.query_calls == 0:
-                time.sleep(0.3)
+                clock.jump(1000.0)
             return super().encode_queries(texts)
 
     enc = SlowFirst()
     report = _run(tmp_path, enc)
     assert enc.query_calls == 4
-    assert report["models"]["medcpt"]["query_ms_p95"] < 100
+    m = report["models"]["medcpt"]
+    assert m["query_ms_mean"] == pytest.approx(1.0)
+    assert m["query_ms_p95"] == pytest.approx(1.0)
 
 
 def test_part_size_option_is_validated(tmp_path, capsys):
@@ -400,3 +424,86 @@ def test_report_says_stored_vectors_are_fp16(tmp_path):
     _run(tmp_path, FakeEncoder())
     md = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
     assert "fp16" in md and "mesh_term_vec" in md
+
+
+def test_report_shows_vocab_source_and_skip_reason(tmp_path):
+    out = tmp_path / "stored"
+    _run(out, FakeEncoder(), stored=FakeStored())
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    header = next(line for line in md.splitlines() if line.startswith("| model |"))
+    assert "vocab source" in header
+    row = next(line for line in md.splitlines() if line.startswith("| medcpt |"))
+    assert "mesh_term_vec" in row
+    assert "reuse skipped" not in md
+
+    out = tmp_path / "mismatch"
+    _run(out, FakeEncoder(), stored=FakeStored(reason="covers 3 of 6"))
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    row = next(line for line in md.splitlines() if line.startswith("| medcpt |"))
+    assert "embedded" in row
+    assert "- medcpt: reuse skipped: covers 3 of 6" in md.splitlines()
+
+
+def test_embed_seconds_not_double_counted_after_restart(tmp_path, monkeypatch):
+    _patch_clock(monkeypatch, FakeClock(step=1.0))  # one encode = 1 second
+    real_save = bake._save_npy
+    state = {"calls": 0}
+
+    def flaky(path, array):
+        state["calls"] += 1
+        if state["calls"] == 2:  # the save of part 1
+            raise KeyboardInterrupt
+        real_save(path, array)
+
+    monkeypatch.setattr(bake, "_save_npy", flaky)
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, FakeEncoder(), part_size=3)
+    monkeypatch.setattr(bake, "_save_npy", real_save)
+    report = _run(tmp_path, FakeEncoder(), part_size=3)
+    # part 0 once, then parts 1 and 2 on the restart; the lost encode is not counted
+    assert report["models"]["medcpt"]["vocab_embed_seconds"] == pytest.approx(3.0)
+
+
+def test_interrupted_join_leaves_no_stale_pair(tmp_path, monkeypatch):
+    folder = tmp_path / "medcpt" / REL
+    folder.mkdir(parents=True)
+    rev = TERM_MODELS["medcpt"].doc_revision
+    stale = ["X"] * len(ROWS)
+    (folder / f"{rev}.ids.json").write_text(json.dumps(stale), encoding="utf-8")
+    real_write = bake._write_json
+    state = {"failed": False}
+
+    def flaky(path, data):
+        if path.name == f"{rev}.ids.json" and not state["failed"]:
+            state["failed"] = True
+            raise OSError("disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(bake, "_write_json", flaky)
+    with pytest.raises(OSError):
+        _run(tmp_path, FakeEncoder(), part_size=3)
+    monkeypatch.setattr(bake, "_write_json", real_write)
+    _run(tmp_path, FakeEncoder(), part_size=3)
+    assert json.loads((folder / f"{rev}.ids.json").read_text()) == [r[0] for r in ROWS]
+
+
+def test_cache_hit_removes_orphan_parts(tmp_path):
+    _run(tmp_path, FakeEncoder(), part_size=3)
+    folder = tmp_path / "medcpt" / REL
+    rev = TERM_MODELS["medcpt"].doc_revision
+    (folder / f"{rev}.part-0000.npy").write_bytes(b"x")
+    (folder / f"{rev}.part-0000.ids.json").write_text("[]")
+    (folder / f"{rev}.plan.json").write_text("{}")
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: pytest.fail("cache must be used"),
+        mesh_release=REL,
+        encoders=_factory(enc),
+        part_size=3,
+    )
+    assert enc.doc_calls == 0
+    assert _part_files(tmp_path) == []
+    assert not (folder / f"{rev}.plan.json").exists()
