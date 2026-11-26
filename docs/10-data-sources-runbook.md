@@ -38,7 +38,7 @@ Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reacha
 bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for k in EPISTEME_ACTOR PGHOST PGPORT PGUSER PGPASSWORD EPISTEME_SYS_ADMIN_PASSWORD; do if [ -n "${!k:-}" ]; then echo "$k=set"; else echo "$k=MISSING"; fi; done'
 
 # 2. confirm the server and database (expect: episteme_test|19.0, any 19.x)
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 
 # 3a. download one works_jsonl shard (the listing of the S3 prefix can take minutes)
 PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh openalex download --max-files 1
@@ -92,7 +92,7 @@ Configuration is read from three places. Shell scripts load them in this order, 
 |---|---|---|
 | Git Bash (or bash) | every `scripts/data/*.sh` | `bash --version` |
 | Python venv `.venv` with `pip install -e ".[data]"` | all Python stages; scripts look for `.venv/Scripts/python.exe`, then `.venv/bin/python`, then `python`. Override with `PYTHON=/path/to/python`. | `.venv/Scripts/python.exe -c "import episteme"` |
-| PostgreSQL 19 client (`psql`) | section 2 and the migration commands. Scripts prefer `/c/Program Files/PostgreSQL/19/bin/psql`; override with `PSQL=...`. | `"/c/Program Files/PostgreSQL/19/bin/psql" --version` |
+| PostgreSQL 19 client (`psql`) | section 2 and the migration commands. Scripts prefer `/c/PostgreSQL/19.0/pgsql/bin/psql`; override with `PSQL=...`. | `"/c/PostgreSQL/19.0/pgsql/bin/psql" --version` |
 | `curl` | every listing-based download, size checks | `curl --version` |
 | `aria2c` | fast segmented downloads; without it downloads fall back to sequential `curl` (slow, warned) | `aria2c --version` |
 | `aws` CLI (or `s5cmd`) | `openalex` only | `aws --version` |
@@ -153,7 +153,7 @@ Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europ
 
 ### 1.4 Windows notes
 
-- `psql` on `PATH` may be an older version; pass `PSQL="/c/Program Files/PostgreSQL/19/bin/psql"` as shown.
+- `psql` on `PATH` may be an older version; pass `PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql"` as shown.
 - The field-shape `--report` mode (section 6.3) crashes with a `cp1252` encoding error on Windows consoles when a record contains non-ASCII text. Run it with `PYTHONIOENCODING=utf-8`.
 
 ---
@@ -180,7 +180,7 @@ bash scripts/data/db/init_database.sh
 PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 ```
 
-The `PSQL` path is the PostgreSQL 19.0 client (`C:\PostgreSQL\19.0\pgsql\bin`). The old path `/c/Program Files/PostgreSQL/19/bin/psql` is the 19beta3 install. The commands still use `psql` as before; only the client path changes.
+The `PSQL` path is the PostgreSQL 19.0 client (`C:\PostgreSQL\19.0\pgsql\bin`). The scripts in `scripts/data/db/` prefer this path. Do not use the old 19beta3 client (`/c/Program Files/PostgreSQL/19/bin/psql`).
 
 Expected on the local build: `episteme_test|19.0` (any `19.x`). Upgraded from 19beta3 to 19.0 on 2026-11-24 (`pg_upgrade --copy`, data in `E:\pgdata19`). Any other database name or version means you are on the wrong server or the wrong database: stop and fix `PGPORT`/`PGDATABASE` before continuing. (The check uses `select current_setting('server_version')` written with `$$` quoting so it survives the shell.)
 
@@ -1860,13 +1860,13 @@ Confirm `server_version` is `19.x` first (section 2.2). Do each step on `epistem
 1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 2. **Roles file, as superuser.** It needs `POSTGRES_SUPERUSER` and `POSTGRES_SUPERUSER_PASSWORD` (names only). Run it while no load runs and no FAERS generation is unfinished: it rewrites catalog ACL rows, and the tables of an unfinished generation would miss the new grant.
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U "${POSTGRES_SUPERUSER:-postgres}" -d "$PGDATABASE" -f src/episteme/data/db/grants/0015_api_roles.sql && echo roles-applied'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U "${POSTGRES_SUPERUSER:-postgres}" -d "$PGDATABASE" -f src/episteme/data/db/grants/0015_api_roles.sql && echo roles-applied'
 ```
 
 3. **Settings sync.** It writes `source_subset` (from `LOOKUP_SOURCE_SUBSETS`) and `result_limit` (from `EPISTEME_API_LIMIT_<FAMILY>` or the defaults), applies the owner role's reads (tables file, then AACT file) and sets the reader's `statement_timeout`. It connects as `episteme_sys_admin`.
