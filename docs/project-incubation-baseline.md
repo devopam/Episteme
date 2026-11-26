@@ -704,3 +704,18 @@
     - **Model switch (Minor 2).** A switch is not only a config change. The model name `medcpt` is fixed in `question_mcp`, `embed_mesh` and the acceptance script; make it a configuration value first. Also, `embed_mesh` encodes `(title, text)` pairs, but the bake-off gives a symmetric model (`bge_base`) the single string `title. text`. A switch to a symmetric model needs the same text form in `embed_mesh`.
     - **Embed restart (Minor 11), deliberate.** The embed skips the descriptors that already have vectors of the same release and revision. It has no `input_key` checkpoint marker: its input is a database table, not a raw file, and the rows in `mesh_term_vec` are the checkpoint.
     - **Runbook `psql` path.** Sections 0.3, 1.4, the tools table of section 1.1 and section 5.19.1 still name the 19beta3 client path. The scripts in `scripts/data/db/` also prefer it. Change them in one later docs pass.
+- 2026-11-26: Rollout of 0018, database upkeep and the term-model decision (PR #124, merge `ff5275d0`; branch `feat/bakeoff-reuse`). Operator facts and one tool change.
+  - **0018 rollout on `episteme` (PostgreSQL 19.0):** `mesh graph` filled `mesh_term` with 267,012 terms of 31,110 descriptors (MeSH 2026); the `term_norm` parity check found 0 misses. The full `mesh embed` took 6 h 18 min and wrote 267,012 vectors (1.0 GB); coverage 31,110 / 31,110 descriptors. The plan check of `suggest_terms` uses the HNSW index (6 ms).
+  - **Acceptance (41 PV questions):** top-10 all-hit 26/41 (acronym 9/13, lay 12/13, description 5/15), any-hit 35/41, exact match 6/41 (no acronym is a MeSH entry term); 0.05 s warm.
+  - **Database upkeep:** ANALYZE on the tables that had never been analyzed. `article_body_default`: 91,591 of 31.24 M rows set to NULL text (the `europepmc_preprint` copies; the structured sources keep their own text), then REPACK: 58.08 GB to 56.13 GB. The null-out took 8 min (physical order), the REPACK 22 min, then ANALYZE.
+  - **Bake-off tool change:** the bake-off reads the MedCPT vectors from `mesh_term_vec` when model, revision, release, row count and descriptor set match (no re-embed). Embedding runs in parts of `--part-size` rows, saved one by one, so a stop loses one part, not the run. The cache folder holds the MeSH release; a plan file holds a hash of the vocabulary texts; a part with a wrong size or type is encoded again. Runbook section 5.20.2.
+  - **Term-model comparison (2026-11-26, exit 0, 7.4 h; `D:/episteme/_runlogs/term_model_bakeoff/REPORT.md`).** Exact search over 267,012 vectors; cells are all / any.
+
+    | model | top-1 | top-5 | top-10 | query ms |
+    |---|---|---|---|---|
+    | MedCPT (stored, fp16) | 26.8% / 48.8% | 56.1% / 80.5% | 68.3% / 85.4% | 89 |
+    | bge-base-en-v1.5 (fp32) | 31.7% / 61.0% | 56.1% / 80.5% | 63.4% / 82.9% | 85 |
+
+    Top-10 by kind: acronym MedCPT 69.2% / 92.3%, bge-base 38.5% / 69.2%; description MedCPT 40.0% / 66.7%, bge-base 60.0% / 86.7%; lay MedCPT 100% / 100%, bge-base 92.3% / 92.3%. The bge-base embed took 26,518 s.
+  - **Decision (owner, 2026-11-26): keep MedCPT.** It is in place, it is stronger on acronyms, and the person confirms the terms, so the top-10 shortlist counts most. Not done: a union of both models' suggestions (each is strong where the other is weak); it would cost a second 1 GB vector set and a second model at query time. The model-name configuration key (follow-up of 2026-11-25) is not needed now.
+  - **`psql` path:** the scripts in `scripts/data/db/` and the runbook (sections 0.3, 1.1, 1.4, 5.19.1) now use the 19.0 client `C:\PostgreSQL\19.0\pgsql\bin\psql`. This closes the follow-up of 2026-11-25.

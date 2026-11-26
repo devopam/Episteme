@@ -38,7 +38,7 @@ Prerequisites: section 1.1 tools (including `aws`), `.env` (section 1), a reacha
 bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for k in EPISTEME_ACTOR PGHOST PGPORT PGUSER PGPASSWORD EPISTEME_SYS_ADMIN_PASSWORD; do if [ -n "${!k:-}" ]; then echo "$k=set"; else echo "$k=MISSING"; fi; done'
 
 # 2. confirm the server and database (expect: episteme_test|19.0, any 19.x)
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 
 # 3a. download one works_jsonl shard (the listing of the S3 prefix can take minutes)
 PGDATABASE=episteme_test EPISTEME_ACTOR=episteme_sys_admin bash scripts/data/run_pipeline.sh openalex download --max-files 1
@@ -92,7 +92,7 @@ Configuration is read from three places. Shell scripts load them in this order, 
 |---|---|---|
 | Git Bash (or bash) | every `scripts/data/*.sh` | `bash --version` |
 | Python venv `.venv` with `pip install -e ".[data]"` | all Python stages; scripts look for `.venv/Scripts/python.exe`, then `.venv/bin/python`, then `python`. Override with `PYTHON=/path/to/python`. | `.venv/Scripts/python.exe -c "import episteme"` |
-| PostgreSQL 19 client (`psql`) | section 2 and the migration commands. Scripts prefer `/c/Program Files/PostgreSQL/19/bin/psql`; override with `PSQL=...`. | `"/c/Program Files/PostgreSQL/19/bin/psql" --version` |
+| PostgreSQL 19 client (`psql`) | section 2 and the migration commands. Scripts prefer `/c/PostgreSQL/19.0/pgsql/bin/psql`; override with `PSQL=...`. | `"/c/PostgreSQL/19.0/pgsql/bin/psql" --version` |
 | `curl` | every listing-based download, size checks | `curl --version` |
 | `aria2c` | fast segmented downloads; without it downloads fall back to sequential `curl` (slow, warned) | `aria2c --version` |
 | `aws` CLI (or `s5cmd`) | `openalex` only | `aws --version` |
@@ -153,7 +153,7 @@ Layout under the roots: raw downloads in `<raw>/<source>/` (nested for the Europ
 
 ### 1.4 Windows notes
 
-- `psql` on `PATH` may be an older version; pass `PSQL="/c/Program Files/PostgreSQL/19/bin/psql"` as shown.
+- `psql` on `PATH` may be an older version; pass `PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql"` as shown.
 - The field-shape `--report` mode (section 6.3) crashes with a `cp1252` encoding error on Windows consoles when a record contains non-ASCII text. Run it with `PYTHONIOENCODING=utf-8`.
 
 ---
@@ -180,7 +180,7 @@ bash scripts/data/db/init_database.sh
 PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -At -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -c "select current_database(), current_setting(\$\$server_version\$\$)"'
 ```
 
-The `PSQL` path is the PostgreSQL 19.0 client (`C:\PostgreSQL\19.0\pgsql\bin`). The old path `/c/Program Files/PostgreSQL/19/bin/psql` is the 19beta3 install. The commands still use `psql` as before; only the client path changes.
+The `PSQL` path is the PostgreSQL 19.0 client (`C:\PostgreSQL\19.0\pgsql\bin`). The scripts in `scripts/data/db/` prefer this path. Do not use the old 19beta3 client (`/c/Program Files/PostgreSQL/19/bin/psql`).
 
 Expected on the local build: `episteme_test|19.0` (any `19.x`). Upgraded from 19beta3 to 19.0 on 2026-11-24 (`pg_upgrade --copy`, data in `E:\pgdata19`). Any other database name or version means you are on the wrong server or the wrong database: stop and fix `PGPORT`/`PGDATABASE` before continuing. (The check uses `select current_setting('server_version')` written with `$$` quoting so it survives the shell.)
 
@@ -1860,13 +1860,13 @@ Confirm `server_version` is `19.x` first (section 2.2). Do each step on `epistem
 1. **Migration 0015, alone.** Do not run the whole section 2.3 loop on a loaded database: it applies 0002 to 0014 again, and 0010 and 0012 scan the default partitions under an exclusive lock. The whole loop is for a fresh database. Apply only 0015, first with `PGDATABASE=episteme_test`, then with `PGDATABASE=episteme`. Run no FAERS load at the same time.
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; for f in 0015_api_layer; do PGPASSWORD="$EPISTEME_SYS_ADMIN_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U episteme_sys_admin -d "$PGDATABASE" -f "src/episteme/data/db/migrations/$f.sql" || exit 1; done; echo migrations-applied'
 ```
 
 2. **Roles file, as superuser.** It needs `POSTGRES_SUPERUSER` and `POSTGRES_SUPERUSER_PASSWORD` (names only). Run it while no load runs and no FAERS generation is unfinished: it rewrites catalog ACL rows, and the tables of an unfinished generation would miss the new grant.
 
 ```bash
-PGDATABASE=episteme_test PSQL="/c/Program Files/PostgreSQL/19/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U "${POSTGRES_SUPERUSER:-postgres}" -d "$PGDATABASE" -f src/episteme/data/db/grants/0015_api_roles.sql && echo roles-applied'
+PGDATABASE=episteme_test PSQL="/c/PostgreSQL/19.0/pgsql/bin/psql" bash -c '. scripts/data/_lib/common.sh; load_dotenv 2>/dev/null; PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" "${PSQL:-psql}" -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -U "${POSTGRES_SUPERUSER:-postgres}" -d "$PGDATABASE" -f src/episteme/data/db/grants/0015_api_roles.sql && echo roles-applied'
 ```
 
 3. **Settings sync.** It writes `source_subset` (from `LOOKUP_SOURCE_SUBSETS`) and `result_limit` (from `EPISTEME_API_LIMIT_<FAMILY>` or the defaults), applies the owner role's reads (tables file, then AACT file) and sets the reader's `statement_timeout`. It connects as `episteme_sys_admin`.
@@ -2077,10 +2077,15 @@ The command downloads `ncbi/MedCPT-Query-Encoder` and `ncbi/MedCPT-Article-Encod
 .venv/Scripts/python.exe -m episteme.reference.medcpt download --model bge_base
 ```
 
-2. Run the bake-off. It reads the vocabulary from `mesh_term` and `article_body`, embeds it with each model (exact inner product, no index) and writes `REPORT.md` to `--out`. It caches the vectors in `<out>/<model>/<revision>.npy`. Delete that folder to rebuild them.
+2. Run the bake-off. It compares the models with an exact inner product (no index) and writes `REPORT.md` to `--out`. It gets the vocabulary vectors of each model in one of two ways:
+
+   - **Stored vectors.** When `episteme.mesh_term_vec` holds vectors of the same model and revision for the current MeSH release, and they match `mesh_term` (the same number of rows and the same set of descriptors), the bake-off reads them from the table in chunks. It does not embed. The report shows `vocab_source: mesh_term_vec` and `vocab_embed_seconds: null`. This is the normal case for MedCPT. These vectors are fp16 (`halfvec`). Embedded vectors are fp32. The report says so. Keep this in mind when two models differ by a small margin.
+   - **Embedding.** In all other cases the bake-off embeds the vocabulary. The report shows `vocab_source: embedded` and, when the reason is a mismatch, `reuse_skipped_reason`. `REPORT.md` has a `vocab source` column for each model and a line `- <model>: reuse skipped: <reason>` under the table.
+
+   Embedding runs in parts of `--part-size` rows (default 20000). The bake-off saves each part when it finishes, as `<out>/<model>/<mesh_release>/<revision>.part-<NNNN>.npy` with `.ids.json`. When the run stops, start the same command again. It skips the parts that are on disk and encodes the others. If the vocabulary (row count or a hash of its texts) or `--part-size` changed, it deletes the parts and starts again. A part with a wrong size or type (for example, cut by a crash) is encoded again. After the last part, the bake-off joins the parts into `<revision>.npy`, `<revision>.ids.json` and `<revision>.meta.json` and deletes the part files. The folder name holds the MeSH release, so a new release never reuses old vectors. A run that finds the joined files does not read the vocabulary again, and it deletes any part files and plan file that remain in the folder. To force a rebuild, delete the folder `<out>/<model>/<mesh_release>`. A cache without `.meta.json` shows `vocab_embed_seconds: null`. The time of the first query encode is not counted (warm-up).
 
 ```bash
-PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.bench.term_model_bakeoff --models medcpt,bge_base --acceptance tests/reference/data/question_terms_acceptance.json --out D:/episteme/_runlogs/term_model_bakeoff
+PGDATABASE=episteme .venv/Scripts/python.exe -m episteme.bench.term_model_bakeoff --models medcpt,bge_base --acceptance tests/reference/data/question_terms_acceptance.json --out D:/episteme/_runlogs/term_model_bakeoff --part-size 20000
 ```
 
    Record the top-10 hit rates by kind and the times in the drift log. A model switch is not only a config change: see the drift log (model name in `question_mcp`, `embed_mesh` and the acceptance script).

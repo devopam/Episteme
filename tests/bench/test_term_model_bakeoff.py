@@ -8,6 +8,8 @@ import pytest
 from episteme.bench import term_model_bakeoff as bake
 from episteme.reference.medcpt import TERM_MODELS
 
+REL = "2026"
+
 # 6 descriptors, one axis each. D6 has an extra entry row near D1.
 ROWS = [
     ("D1", "descriptor", "alpha", "scope one"),
@@ -72,13 +74,15 @@ def _factory(enc):
     return lambda spec: (enc, enc)
 
 
-def _run(tmp_path, enc, models=("medcpt",)):
+def _run(tmp_path, enc, models=("medcpt",), **kw):
     return bake.run(
         list(models),
         ACCEPT,
         tmp_path,
         vocabulary=lambda: ROWS,
+        mesh_release=REL,
         encoders=_factory(enc),
+        **kw,
     )
 
 
@@ -118,8 +122,8 @@ def test_report_lists_metrics_and_files(tmp_path):
     assert "medcpt" in md and "bge_base" in md and "MIT" in md
     assert "top-10" in md and "SapBERT" in md and "UMLS" in md
     rev = TERM_MODELS["medcpt"].doc_revision
-    assert (tmp_path / "medcpt" / f"{rev}.npy").exists()
-    assert (tmp_path / "medcpt" / f"{rev}.ids.json").exists()
+    assert (tmp_path / "medcpt" / REL / f"{rev}.npy").exists()
+    assert (tmp_path / "medcpt" / REL / f"{rev}.ids.json").exists()
 
 
 def test_second_run_reuses_cache(tmp_path):
@@ -131,9 +135,16 @@ def test_second_run_reuses_cache(tmp_path):
     def no_vocab():
         raise AssertionError("vocabulary must not be read when the cache exists")
 
-    bake.run(["medcpt"], ACCEPT, tmp_path, vocabulary=no_vocab, encoders=_factory(second))
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=no_vocab,
+        mesh_release=REL,
+        encoders=_factory(second),
+    )
     assert second.doc_calls == 0
-    assert second.query_calls == 3
+    assert second.query_calls == 4  # three questions + warm-up
 
 
 def test_document_text_symmetric_vs_pair():
@@ -154,3 +165,345 @@ def test_unknown_model_exits_2(tmp_path, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "nope" in err and "medcpt" in err and "bge_base" in err
+
+
+class FakeStored:
+    """Stand-in for the mesh_term_vec reader."""
+
+    def __init__(self, reason=None, rows=ROWS):
+        self.reason = reason
+        self.rows = rows
+
+    def check(self, spec, release):
+        assert release == REL
+        return (0, self.reason) if self.reason else (len(self.rows), None)
+
+    def chunks(self, spec, release):
+        enc = FakeEncoder()
+        for lo, hi in ((0, 4), (4, len(self.rows))):  # two chunks
+            part = self.rows[lo:hi]
+            yield [r[0] for r in part], enc._doc_vecs([r[2] for r in part])
+
+
+def _no_embed_encoders(spec):
+    enc = FakeEncoder()
+
+    def boom(*a, **k):
+        raise AssertionError("must not embed")
+
+    enc.encode_articles = boom
+    enc.encode_texts = boom
+    return enc, enc
+
+
+def test_reuse_stored_vectors_skips_embedding(tmp_path):
+    report = bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: pytest.fail("vocabulary must not be read"),
+        mesh_release=REL,
+        encoders=_no_embed_encoders,
+        stored=FakeStored(),
+    )
+    m = report["models"]["medcpt"]
+    assert m["vocab_source"] == "mesh_term_vec"
+    assert m["vocab_embed_seconds"] is None
+    assert m["reuse_skipped_reason"] is None
+    assert m["vocab_vectors"] == 7
+    assert m["overall"]["top1"]["all"] == pytest.approx(1 / 3)
+    assert "n/a" in (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("reason", ["stored vectors are x@y; need a@b", "covers 3 of 6"])
+def test_fallback_to_embedding_with_reason(tmp_path, reason):
+    enc = FakeEncoder()
+    report = _run(tmp_path, enc, stored=FakeStored(reason=reason))
+    m = report["models"]["medcpt"]
+    assert m["vocab_source"] == "embedded"
+    assert m["reuse_skipped_reason"] == reason
+    assert enc.doc_calls == 1
+    assert m["vocab_embed_seconds"] >= 0
+
+
+def test_check_stored_matches_model_revision_rows_and_descriptors():
+    spec = TERM_MODELS["medcpt"]
+    ok = (spec.doc_model, spec.doc_revision, 10, 6)
+    assert bake._check_stored(spec, 10, 6, [ok]) == (10, None)
+    rows, reason = bake._check_stored(spec, 11, 6, [ok])
+    assert rows == 0 and "10" in reason and "11" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [ok], missing=2)
+    assert rows == 0 and "2" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [ok], extra=1)
+    assert rows == 0 and "1" in reason
+    rows, reason = bake._check_stored(spec, 10, 6, [(spec.doc_model, "other", 10, 6)])
+    assert rows == 0 and "other" in reason and spec.doc_revision in reason
+    assert bake._check_stored(spec, 10, 6, [])[1] is not None
+
+
+def _part_files(tmp_path):
+    return sorted(p.name for p in (tmp_path / "medcpt" / REL).glob("*.part-*"))
+
+
+def test_parts_written_joined_and_cleaned(tmp_path):
+    enc = FakeEncoder()
+    report = _run(tmp_path, enc, part_size=3)
+    assert enc.doc_calls == 3  # ceil(7 / 3)
+    folder = tmp_path / "medcpt" / REL
+    rev = TERM_MODELS["medcpt"].doc_revision
+    assert _part_files(tmp_path) == []
+    assert not (folder / f"{rev}.plan.json").exists()
+    vecs = np.load(folder / f"{rev}.npy")
+    assert vecs.shape == (7, 6) and vecs.dtype == np.float32
+    assert json.loads((folder / f"{rev}.ids.json").read_text()) == [r[0] for r in ROWS]
+    assert "embed_seconds" in json.loads((folder / f"{rev}.meta.json").read_text())
+    assert report["models"]["medcpt"]["vocab_vectors"] == 7
+
+
+class _DiesOn(FakeEncoder):
+    def __init__(self, call: int) -> None:
+        super().__init__()
+        self.die_on = call
+
+    def encode_articles(self, pairs):
+        if self.doc_calls + 1 == self.die_on:
+            raise KeyboardInterrupt
+        return super().encode_articles(pairs)
+
+
+def test_resume_encodes_only_missing_parts(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(3), part_size=3)
+    names = _part_files(tmp_path)
+    assert any("part-0000.npy" in n for n in names) and any("part-0001.npy" in n for n in names)
+    assert not any("part-0002" in n for n in names)
+    enc = FakeEncoder()
+    _run(tmp_path, enc, part_size=3)
+    assert enc.doc_calls == 1  # only part 2 is missing
+    assert _part_files(tmp_path) == []
+
+
+def test_plan_mismatch_rebuilds(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(2), part_size=3)
+    assert _part_files(tmp_path)
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: ROWS[:6],  # row count changed
+        mesh_release=REL,
+        encoders=_factory(enc),
+        part_size=3,
+    )
+    assert enc.doc_calls == 2  # all parts again: ceil(6 / 3)
+
+
+def test_cache_folder_includes_release(tmp_path):
+    _run(tmp_path, FakeEncoder())
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: ROWS,
+        mesh_release="2027",
+        encoders=_factory(enc),
+    )
+    assert enc.doc_calls == 1  # a new release does not reuse the old cache
+
+
+def test_missing_meta_gives_none_seconds(tmp_path):
+    _run(tmp_path, FakeEncoder())
+    rev = TERM_MODELS["medcpt"].doc_revision
+    (tmp_path / "medcpt" / REL / f"{rev}.meta.json").unlink()
+    report = _run(tmp_path, FakeEncoder())
+    assert report["models"]["medcpt"]["vocab_embed_seconds"] is None
+
+
+class FakeClock:
+    """perf_counter stand-in: each call advances 1 ms; jump() adds a large step."""
+
+    def __init__(self, step: float = 0.001) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+    def jump(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _patch_clock(monkeypatch, clock):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bake, "time", SimpleNamespace(perf_counter=clock))
+
+
+def test_warmup_query_is_not_timed(tmp_path, monkeypatch):
+    clock = FakeClock()
+    _patch_clock(monkeypatch, clock)
+
+    class SlowFirst(FakeEncoder):
+        def encode_queries(self, texts):
+            if self.query_calls == 0:
+                clock.jump(1000.0)
+            return super().encode_queries(texts)
+
+    enc = SlowFirst()
+    report = _run(tmp_path, enc)
+    assert enc.query_calls == 4
+    m = report["models"]["medcpt"]
+    assert m["query_ms_mean"] == pytest.approx(1.0)
+    assert m["query_ms_p95"] == pytest.approx(1.0)
+
+
+def test_part_size_option_is_validated(tmp_path, capsys):
+    args = ["--models", "medcpt", "--acceptance", "x.json", "--out", str(tmp_path)]
+    assert bake.main([*args, "--part-size", "0"]) == 2
+    assert "--part-size" in capsys.readouterr().err
+
+
+def test_truncated_part_is_encoded_again(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(3), part_size=3)
+    rev = TERM_MODELS["medcpt"].doc_revision
+    part = tmp_path / "medcpt" / REL / f"{rev}.part-0000.npy"
+    part.write_bytes(part.read_bytes()[:40])
+    enc = FakeEncoder()
+    _run(tmp_path, enc, part_size=3)
+    assert enc.doc_calls == 2  # the broken part 0 and the missing part 2
+
+
+def test_changed_vocabulary_text_rebuilds(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(2), part_size=3)
+    changed = [(ui, kind, title, text + "x") for ui, kind, title, text in ROWS]
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: changed,
+        mesh_release=REL,
+        encoders=_factory(enc),
+        part_size=3,
+    )
+    assert enc.doc_calls == 3  # same row count, new text: all parts again
+
+
+def test_changed_part_size_rebuilds(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, _DiesOn(2), part_size=3)
+    enc = FakeEncoder()
+    _run(tmp_path, enc, part_size=4)
+    assert enc.doc_calls == 2  # ceil(7 / 4)
+
+
+def test_load_stored_row_count_mismatch():
+    class Stored:
+        def __init__(self, n):
+            self.n = n
+
+        def chunks(self, spec, release):
+            yield ["D"] * self.n, np.zeros((self.n, 2), dtype=np.float32)
+
+    spec = TERM_MODELS["medcpt"]
+    vecs, ids = bake._load_stored(Stored(3), spec, REL, 3)
+    assert vecs.shape == (3, 2) and ids == ["D"] * 3
+    with pytest.raises(RuntimeError):
+        bake._load_stored(Stored(4), spec, REL, 3)
+    with pytest.raises(RuntimeError):
+        bake._load_stored(Stored(2), spec, REL, 3)
+
+
+def test_report_says_stored_vectors_are_fp16(tmp_path):
+    _run(tmp_path, FakeEncoder())
+    md = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    assert "fp16" in md and "mesh_term_vec" in md
+
+
+def test_report_shows_vocab_source_and_skip_reason(tmp_path):
+    out = tmp_path / "stored"
+    _run(out, FakeEncoder(), stored=FakeStored())
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    header = next(line for line in md.splitlines() if line.startswith("| model |"))
+    assert "vocab source" in header
+    row = next(line for line in md.splitlines() if line.startswith("| medcpt |"))
+    assert "mesh_term_vec" in row
+    assert "reuse skipped" not in md
+
+    out = tmp_path / "mismatch"
+    _run(out, FakeEncoder(), stored=FakeStored(reason="covers 3 of 6"))
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    row = next(line for line in md.splitlines() if line.startswith("| medcpt |"))
+    assert "embedded" in row
+    assert "- medcpt: reuse skipped: covers 3 of 6" in md.splitlines()
+
+
+def test_embed_seconds_not_double_counted_after_restart(tmp_path, monkeypatch):
+    _patch_clock(monkeypatch, FakeClock(step=1.0))  # one encode = 1 second
+    real_save = bake._save_npy
+    state = {"calls": 0}
+
+    def flaky(path, array):
+        state["calls"] += 1
+        if state["calls"] == 2:  # the save of part 1
+            raise KeyboardInterrupt
+        real_save(path, array)
+
+    monkeypatch.setattr(bake, "_save_npy", flaky)
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, FakeEncoder(), part_size=3)
+    monkeypatch.setattr(bake, "_save_npy", real_save)
+    report = _run(tmp_path, FakeEncoder(), part_size=3)
+    # part 0 once, then parts 1 and 2 on the restart; the lost encode is not counted
+    assert report["models"]["medcpt"]["vocab_embed_seconds"] == pytest.approx(3.0)
+
+
+def test_interrupted_join_leaves_no_stale_pair(tmp_path, monkeypatch):
+    folder = tmp_path / "medcpt" / REL
+    folder.mkdir(parents=True)
+    rev = TERM_MODELS["medcpt"].doc_revision
+    stale = ["X"] * len(ROWS)
+    (folder / f"{rev}.ids.json").write_text(json.dumps(stale), encoding="utf-8")
+    real_write = bake._write_json
+    state = {"failed": False}
+
+    def flaky(path, data):
+        if path.name == f"{rev}.ids.json" and not state["failed"]:
+            state["failed"] = True
+            raise OSError("disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(bake, "_write_json", flaky)
+    with pytest.raises(OSError):
+        _run(tmp_path, FakeEncoder(), part_size=3)
+    monkeypatch.setattr(bake, "_write_json", real_write)
+    _run(tmp_path, FakeEncoder(), part_size=3)
+    assert json.loads((folder / f"{rev}.ids.json").read_text()) == [r[0] for r in ROWS]
+
+
+def test_cache_hit_removes_orphan_parts(tmp_path):
+    _run(tmp_path, FakeEncoder(), part_size=3)
+    folder = tmp_path / "medcpt" / REL
+    rev = TERM_MODELS["medcpt"].doc_revision
+    (folder / f"{rev}.part-0000.npy").write_bytes(b"x")
+    (folder / f"{rev}.part-0000.ids.json").write_text("[]")
+    (folder / f"{rev}.plan.json").write_text("{}")
+    enc = FakeEncoder()
+    bake.run(
+        ["medcpt"],
+        ACCEPT,
+        tmp_path,
+        vocabulary=lambda: pytest.fail("cache must be used"),
+        mesh_release=REL,
+        encoders=_factory(enc),
+        part_size=3,
+    )
+    assert enc.doc_calls == 0
+    assert _part_files(tmp_path) == []
+    assert not (folder / f"{rev}.plan.json").exists()

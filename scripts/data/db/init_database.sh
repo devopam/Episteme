@@ -26,7 +26,7 @@ SCHEMA_SQL="$DB_DIR/schema.sql"
 
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
-    for c in "/c/Program Files/PostgreSQL/19/bin/psql" "/c/Program Files/PostgreSQL/19/bin/psql.exe" psql; do
+    for c in "/c/PostgreSQL/19.0/pgsql/bin/psql" "/c/PostgreSQL/19.0/pgsql/bin/psql.exe" psql; do
         command -v "$c" >/dev/null 2>&1 && { PSQL="$c"; break; }
     done
 fi
